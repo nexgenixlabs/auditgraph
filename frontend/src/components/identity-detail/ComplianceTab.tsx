@@ -86,8 +86,8 @@ export function IdentityComplianceTab({ roleIntel, data }: IdentityComplianceTab
           {roleIntel.map((ri, idx) => (
             <div key={idx} className="border rounded-xl overflow-hidden">
               {/* Role header */}
-              <div className="bg-gray-50 px-4 py-3 border-b flex items-center justify-between">
-                <div className="font-semibold text-gray-900 text-sm">{ri.role_name}</div>
+              <div className="bg-[#15306A] px-4 py-3 border-b flex items-center justify-between">
+                <div className="font-semibold text-white text-sm">{ri.role_name}</div>
                 <div className="flex items-center gap-2">
                   {ri.attack_patterns.length > 0 && (
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">
@@ -114,11 +114,11 @@ export function IdentityComplianceTab({ roleIntel, data }: IdentityComplianceTab
                     </div>
                     <div className="space-y-2">
                       {ri.attack_patterns.map((ap, apIdx) => (
-                        <div key={apIdx} className="bg-red-50 border border-red-100 rounded-lg p-3">
+                        <div key={apIdx} className="border-l-4 border-l-[#FF7216] bg-[rgba(255,114,22,0.04)] rounded-lg p-3">
                           <div className="flex items-start justify-between gap-2">
                             <div className="font-medium text-sm text-gray-900">{ap.attack_scenario}</div>
                             {ap.estimated_cost_usd > 0 && (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-200 text-red-900 whitespace-nowrap">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#FF7216] text-white whitespace-nowrap">
                                 {formatUsd(ap.estimated_cost_usd)}
                               </span>
                             )}
@@ -143,7 +143,7 @@ export function IdentityComplianceTab({ roleIntel, data }: IdentityComplianceTab
                 {ri.hipaa_violations.length > 0 && (
                   <div>
                     <div className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1">
-                      <svg className="w-3.5 h-3.5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-3.5 h-3.5 text-[#24A2A1]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                       </svg>
                       HIPAA Violation Mappings

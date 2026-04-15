@@ -73,7 +73,7 @@ export default function ActionItemCard({
         )}
         {riskReduction != null && (
           <span style={{ color: 'var(--accent-success)' }}>
-            +{riskReduction} pts risk reduction
+            +{riskReduction} risk improvement
           </span>
         )}
         {automationReady && (

@@ -32,7 +32,7 @@ const GEI_TOOLTIPS: Record<string, string> = {
   'Ownership Coverage': 'Percentage of service principals and app registrations with a designated owner. Unowned identities lack accountability for access reviews and credential rotation.',
   'PIM Adoption': 'Percentage of privileged roles using Privileged Identity Management (just-in-time activation). Standing privilege without PIM is a primary attack vector.',
   'Access Reviews': 'Completion rate of periodic access reviews for privileged identities. Regular reviews catch over-provisioned access and orphaned assignments.',
-  'Monitoring (P2)': 'Coverage of P2-level workload identity telemetry. Without sign-in monitoring, dormant and compromised identities remain invisible.',
+  'Monitoring': 'Coverage of workload identity activity monitoring. Without monitoring, dormant and compromised identities remain invisible.',
 };
 
 export function GovernanceEffectivenessTable({ gei, maturity }: GovernanceEffectivenessTableProps) {

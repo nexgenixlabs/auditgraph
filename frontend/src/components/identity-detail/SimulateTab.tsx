@@ -5,6 +5,8 @@ import {
   DataSource,
 } from './types';
 import { safeLower } from '../../constants/metrics';
+import { normalizeScore } from '../../utils/identityRiskScore';
+import { getSeverityFromScore, SEVERITY_BANDS } from '../../constants/riskScoring';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -89,21 +91,48 @@ export function SimulateTab({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-gray-50 rounded-xl p-4 border">
           <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Current</div>
-          <div className="text-3xl font-bold text-gray-900">{simResult?.current?.risk_score ?? identity?.risk_score ?? '—'}</div>
+          {(() => {
+            const raw = simResult?.current?.risk_score ?? identity?.risk_score;
+            if (raw == null) return <div className="text-3xl font-bold text-gray-300">—</div>;
+            const norm = normalizeScore(raw, 10);
+            const sev = getSeverityFromScore(norm);
+            const band = SEVERITY_BANDS[sev];
+            return (
+              <>
+                <div className="text-3xl font-bold text-gray-900">{norm.toFixed(1)}/10</div>
+                {band && <div className="text-xs font-semibold mt-1" style={{ color: band.color }}>{band.label}</div>}
+              </>
+            );
+          })()}
           <div className="mt-1">{riskBadge(simResult?.current?.risk_level ?? identity?.risk_level)}</div>
         </div>
         <div className={`rounded-xl p-4 border ${simResult ? 'bg-blue-50 border-blue-200' : 'bg-gray-50'}`}>
           <div className="text-xs font-semibold text-blue-600 uppercase mb-1">Simulated</div>
-          <div className="text-3xl font-bold text-gray-900">{simResult?.simulated?.risk_score ?? '—'}</div>
-          {simResult && <div className="mt-1">{riskBadge(simResult.simulated.risk_level)}</div>}
-          {!simResult && <div className="text-xs text-gray-400 mt-2">Click "Simulate" to compute</div>}
+          {(() => {
+            if (!simResult) return (
+              <>
+                <div className="text-3xl font-bold text-gray-300">—</div>
+                <div className="text-xs text-gray-400 mt-2">Click "Simulate" to compute</div>
+              </>
+            );
+            const norm = normalizeScore(simResult.simulated.risk_score, 10);
+            const sev = getSeverityFromScore(norm);
+            const band = SEVERITY_BANDS[sev];
+            return (
+              <>
+                <div className="text-3xl font-bold text-gray-900">{norm.toFixed(1)}/10</div>
+                {band && <div className="text-xs font-semibold mt-1" style={{ color: band.color }}>{band.label}</div>}
+                <div className="mt-1">{riskBadge(simResult.simulated.risk_level)}</div>
+              </>
+            );
+          })()}
         </div>
         <div className={`rounded-xl p-4 border ${simResult ? (simResult.delta < 0 ? 'bg-green-50 border-green-200' : simResult.delta > 0 ? 'bg-red-50 border-red-200' : 'bg-gray-50') : 'bg-gray-50'}`}>
           <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Delta</div>
           {simResult ? (
             <>
               <div className={`text-3xl font-bold ${simResult.delta < 0 ? 'text-green-700' : simResult.delta > 0 ? 'text-red-700' : 'text-gray-500'}`}>
-                {simResult.delta > 0 ? '+' : ''}{simResult.delta}
+                {simResult.delta > 0 ? '+' : ''}{normalizeScore(simResult.delta, 10).toFixed(1)}
               </div>
               <div className="text-xs text-gray-500 mt-1">{simResult.level_change}</div>
             </>

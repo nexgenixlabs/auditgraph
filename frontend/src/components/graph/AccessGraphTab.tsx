@@ -35,7 +35,6 @@ interface GraphDataResponse {
       scope: string;
       scope_type: string;
       risk_level: string;
-      usage_status: string;
     }>;
   };
   effective_scope?: {

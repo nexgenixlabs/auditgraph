@@ -22,14 +22,6 @@ interface AttackPath {
   target_resource_type: string;
 }
 
-interface SurfaceSummary {
-  total_paths: number;
-  critical_paths: number;
-  high_paths: number;
-  subscription_scope_paths: number;
-  keyvault_exposure_paths: number;
-}
-
 const SEV_BADGE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-400 border border-red-500/30',
   high: 'bg-orange-500/15 text-orange-400 border border-orange-500/30',
@@ -55,7 +47,6 @@ export default function AttackPaths() {
   const { withConnection } = useConnection();
 
   const [paths, setPaths] = useState<AttackPath[]>([]);
-  const [summary, setSummary] = useState<SurfaceSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [sevFilter, setSevFilter] = useState(searchParams.get('severity') || '');
@@ -72,13 +63,10 @@ export default function AttackPaths() {
 
     const qs = withConnection(params.toString());
 
-    Promise.all([
-      fetch(`/api/attack-paths?${qs}`).then(r => r.ok ? r.json() : { paths: [] }),
-      fetch(`/api/dashboard/attack-surface?${withConnection('')}`).then(r => r.ok ? r.json() : null),
-    ]).then(([listData, surfaceData]) => {
-      setPaths(listData.paths || []);
-      setSummary(surfaceData);
-    }).finally(() => setLoading(false));
+    fetch(`/api/attack-paths?${qs}`).then(r => r.ok ? r.json() : { paths: [] })
+      .then(listData => {
+        setPaths(listData.paths || []);
+      }).finally(() => setLoading(false));
   }, [sevFilter, typeFilter, withConnection]);
 
   useEffect(() => {
@@ -87,6 +75,14 @@ export default function AttackPaths() {
     if (typeFilter) p.set('path_type', typeFilter);
     setSearchParams(p, { replace: true });
   }, [sevFilter, typeFilter, setSearchParams]);
+
+  const summary = useMemo(() => ({
+    total_paths: paths.length,
+    critical_paths: paths.filter(p => p.severity === 'critical').length,
+    high_paths: paths.filter(p => p.severity === 'high').length,
+    lateral_paths: paths.filter(p => p.path_type === 'lateral_movement').length,
+    data_exposure_paths: paths.filter(p => p.path_type === 'sensitive_data_exposure' || p.path_type === 'KEYVAULT_SECRET_ACCESS').length,
+  }), [paths]);
 
   const sorted = useMemo(() => {
     const copy = [...paths];
@@ -124,15 +120,13 @@ export default function AttackPaths() {
       </div>
 
       {/* Summary Chips */}
-      {summary && (
-        <div className="flex flex-wrap gap-3 mb-5">
-          <Chip label="Total Paths" value={summary.total_paths} color="#64748b" />
-          <Chip label="Critical" value={summary.critical_paths} color="#ef4444" />
-          <Chip label="High" value={summary.high_paths} color="#f97316" />
-          <Chip label="Lateral Movement" value={summary.subscription_scope_paths} color="#8b5cf6" />
-          <Chip label="Data Exposure" value={summary.keyvault_exposure_paths} color="#0891b2" />
-        </div>
-      )}
+      <div className="flex flex-wrap gap-3 mb-5">
+        <Chip label="Total Paths" value={summary.total_paths} color="#64748b" />
+        <Chip label="Critical" value={summary.critical_paths} color="#ef4444" />
+        <Chip label="High" value={summary.high_paths} color="#f97316" />
+        <Chip label="Lateral Movement" value={summary.lateral_paths} color="#8b5cf6" />
+        <Chip label="Data Exposure" value={summary.data_exposure_paths} color="#0891b2" />
+      </div>
 
       {/* Filter Bar */}
       <div className="flex flex-wrap gap-3 mb-4">

@@ -38,7 +38,7 @@ export function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openCompl
                 <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, marginBottom: 4 }}>vs 30 days</div>
                 {d.riskScore.delta30d != null ? (
                   <span style={{ fontFamily: F.data, fontSize: 13, color: d.riskScore.delta30d >= 0 ? '#22c55e' : '#ff4444' }}>
-                    {formatDelta(d.riskScore.delta30d)} pts
+                    {formatDelta(d.riskScore.delta30d)}
                   </span>
                 ) : (
                   <span style={{ fontFamily: F.data, fontSize: 13, color: P.textDim }}>No previous scan</span>
@@ -102,7 +102,7 @@ export function ExecutiveSummaryTab({ d, nav, openDrill, setActiveTab, openCompl
             ));
           })()}
           <div style={{ marginTop: 8 }}>
-            <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, marginBottom: 4 }}>Total potential gain: +{d.riskScore.potentialGain} pts</div>
+            <div style={{ fontFamily: F.data, fontSize: 10, color: P.textDim, marginBottom: 4 }}>Total potential gain: +{d.riskScore.potentialGain}</div>
             <MiniProgressBar value={d.riskScore.potentialGain} max={30} color={P.accentStrong} height={6} />
           </div>
         </Card>

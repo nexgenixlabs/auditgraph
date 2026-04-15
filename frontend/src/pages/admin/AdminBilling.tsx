@@ -8,6 +8,7 @@ import {
 } from '../../constants/pricing';
 import { generateInvoicePdf, type Invoice } from '../../utils/invoicePdfGenerator';
 import { api } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface BillingSummary {
   total_mrr_cents: number;
@@ -73,7 +74,7 @@ function formatDate(iso: string | null): string {
 function licenseLabel(t: TenantRow): { text: string; color: string } {
   if (!t.license_activated_at) return { text: 'Not Activated', color: 'text-gray-400' };
   if (t.license_expires_at) {
-    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
+    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / TIME_MS.DAY);
     if (days < 0) return { text: 'Expired', color: 'text-red-600' };
     if (days < 30) return { text: `${days}d left`, color: 'text-yellow-600' };
   }

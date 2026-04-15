@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { toPermissionPlane, PERMISSION_PLANE_CONFIG } from '../constants/metrics';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -435,7 +436,7 @@ export default function RoleMining() {
                           <p className="text-sm text-blue-800">{t.recommendation}</p>
                         </div>
                         <div className="flex items-center gap-4 text-xs text-gray-500">
-                          <span>Score: <span className="font-semibold text-gray-700">{t.risk_score}/100</span></span>
+                          <span>Score: <span className="font-semibold text-gray-700">{normalizeScore(t.risk_score, 10).toFixed(1)}/10</span></span>
                           <span>Assignment: {t.assignment_methods.join(', ')}</span>
                           <span>Scope: {t.scope_type}</span>
                         </div>

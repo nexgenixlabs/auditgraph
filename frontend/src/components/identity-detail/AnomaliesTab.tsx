@@ -26,7 +26,8 @@ export function AnomaliesTab({ anomalyData, anomalyLoading, data }: AnomaliesTab
           <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
           </svg>
-          <p className="text-gray-500">No anomalies detected for this identity</p>
+          <p className="text-sm text-gray-500">No anomalies detected for this identity in the current snapshot.</p>
+          <p className="text-xs text-gray-400 mt-2">Source: AuditGraph anomaly engine</p>
         </div>
       ) : (
         anomalyData.anomalies.map((a: any) => {

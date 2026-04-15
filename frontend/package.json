@@ -2,7 +2,7 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
-  "proxy": "http://localhost:5001",
+  "proxy": "http://localhost:5000",
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -36,7 +36,8 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "lint": "echo \"(optional) add eslint later\"",
-    "audit:fix": "npm audit fix"
+    "audit:fix": "npm audit fix",
+    "check:contract": "node scripts/check-contract.js"
   },
   "eslintConfig": {
     "extends": [

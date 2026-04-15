@@ -97,7 +97,7 @@ export function RemediationPriorities({ pillars, kpis, ghostAccounts, currentSco
     const ghostCount = ghostAccounts.total;
     if (ghostCount > 0) {
       items.push({
-        icon: '\uD83D\uDC7B', label: 'Ghost Accounts', count: ghostCount,
+        icon: '\uD83D\uDC7B', label: 'Ghost Identities', count: ghostCount,
         severity: ghostCount >= 5 ? 'critical' : 'high',
         agirsDelta: Math.round(Math.min((ghostCount / ti) * 10, 10) * 10) / 10,
         navigateTo: '/identity-exposures?exposure_type=disabled_with_access&status=open',
@@ -152,7 +152,7 @@ export function RemediationPriorities({ pillars, kpis, ghostAccounts, currentSco
             Total potential improvement:
           </span>
           <DN navigateTo="/remediation">
-            <span style={{ fontSize: 13, fontWeight: 700, fontFamily: FONT.mono, color: totalDelta > 0 ? COLORS.success : COLORS.textDim }}>+{totalDelta} pts</span>
+            <span style={{ fontSize: 13, fontWeight: 700, fontFamily: FONT.mono, color: totalDelta > 0 ? COLORS.success : COLORS.textDim }}>+{totalDelta}</span>
           </DN>
         </div>
       </div>
@@ -205,11 +205,11 @@ export function RemediationPriorities({ pillars, kpis, ghostAccounts, currentSco
                   {item.severity}
                 </span>
 
-                {/* AGIRS improvement */}
+                {/* Score improvement */}
                 {item.agirsDelta > 0 && (
                   <div style={{ textAlign: 'right' as const, flexShrink: 0 }}>
-                    <div style={{ fontSize: compact ? 11 : 13, fontWeight: 700, fontFamily: FONT.mono, color: COLORS.success }}>+{item.agirsDelta} pts</div>
-                    <div style={{ fontSize: compact ? 7 : 8, color: COLORS.textMuted, fontFamily: FONT.ui }}>AGIRS</div>
+                    <div style={{ fontSize: compact ? 11 : 13, fontWeight: 700, fontFamily: FONT.mono, color: COLORS.success }}>+{item.agirsDelta}</div>
+                    <div style={{ fontSize: compact ? 7 : 8, color: COLORS.textMuted, fontFamily: FONT.ui }}>improvement</div>
                   </div>
                 )}
               </div>

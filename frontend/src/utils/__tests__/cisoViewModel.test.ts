@@ -552,7 +552,7 @@ describe('buildActionStatements', () => {
       { rule_type: 'expired_credential', severity: 'high' },
     ];
     const result = buildActionStatements(findings);
-    expect(result[0]).toBe('Remove roles from 1 ghost account');
+    expect(result[0]).toBe('Remove roles from 1 ghost identity');
     expect(result[1]).toBe('Rotate 2 expired credentials');
     expect(result[2]).toBe('Review 3 dormant identities');
   });

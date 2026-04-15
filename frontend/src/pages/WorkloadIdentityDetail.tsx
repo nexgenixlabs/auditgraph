@@ -7,7 +7,10 @@ import {
   LIFECYCLE_STATE_CONFIG,
   OWNER_STATUS_CONFIG,
   SCOPE_FLAG_CONFIG,
+  TIME_MS,
 } from '../constants/metrics';
+import { computeIdentityRisk } from '../utils/identityRiskScore';
+import { getSeverityColor, getSeverityFromScore } from '../constants/riskScoring';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -216,7 +219,7 @@ function daysUntil(dateStr?: string | null): number | null {
   if (!dateStr) return null;
   try {
     const d = new Date(dateStr);
-    return Math.ceil((d.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    return Math.ceil((d.getTime() - Date.now()) / TIME_MS.DAY);
   } catch { return null; }
 }
 
@@ -604,8 +607,8 @@ function ActivityTab({ data }: { data: WorkloadDetailData }) {
         <div className="bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg p-4">
           <p className="text-xs text-gray-500 dark:text-slate-400">
             {!p2
-              ? 'Enable Entra ID P2 telemetry in Settings to get detailed sign-in activity for workload identities.'
-              : 'No sign-in data available for this identity yet.'}
+              ? 'Enable enhanced telemetry in Settings for detailed sign-in activity (optional — core analysis is log-independent).'
+              : 'Provisioned — sign-in telemetry will appear after first authentication.'}
           </p>
         </div>
       )}
@@ -898,14 +901,31 @@ const WorkloadIdentityDetail: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
-            <ExposureRing score={exp.total} size={64} />
-            <div className="text-right">
-              <p className="text-xs text-gray-400 dark:text-slate-500">Exposure</p>
-              <p className={`text-xl font-bold ${exposureColor(exp.total)}`}>{exp.total}/100</p>
-              {exp.critical_overrides.length > 0 && (
-                <span className="text-[9px] font-bold text-red-600 dark:text-red-400">OVERRIDE</span>
-              )}
-            </div>
+            {(() => {
+              const rr = computeIdentityRisk(data.detail || data);
+              const sev = (data.detail?.risk_level || rr.overall_severity).toLowerCase();
+              const sevColor = getSeverityColor(sev);
+              return (
+                <div className="text-right">
+                  <p className="text-xs text-gray-400 dark:text-slate-500 mb-1">Severity</p>
+                  <span style={{
+                    fontSize: 12, fontWeight: 700, fontFamily: 'var(--mono, monospace)',
+                    padding: '4px 10px', borderRadius: 6, letterSpacing: '0.5px',
+                    textTransform: 'uppercase',
+                    background: sevColor + '22', color: sevColor,
+                    border: `1px solid ${sevColor}66`,
+                  }}>
+                    {sev === 'info' ? 'INFO' : sev.toUpperCase()}
+                  </span>
+                  <p className="text-xs font-mono mt-1" style={{ color: sevColor }}>
+                    {rr.overall_score.toFixed(1)}/10
+                  </p>
+                  {exp.critical_overrides.length > 0 && (
+                    <span className="text-[9px] font-bold text-red-600 dark:text-red-400">OVERRIDE</span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -942,21 +962,64 @@ const WorkloadIdentityDetail: React.FC = () => {
         </div>
       </div>
 
-      {/* Risk Breakdown Panel */}
+      {/* Risk Score Breakdown (CVSS-aligned) */}
       <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl p-5">
-        <h2 className="text-sm font-semibold text-gray-700 dark:text-slate-300 mb-3">Risk Breakdown</h2>
-        <div className="space-y-2">
-          <ComponentBar label="Privilege" score={exp.privilege} max={40} signals={data.signals?.privilege} />
-          <ComponentBar label="Cred Risk" score={exp.credential_risk} max={25} signals={data.signals?.credential} />
-          <ComponentBar label="Exposure" score={exp.exposure} max={20} signals={data.signals?.exposure} />
-          <ComponentBar label="Lifecycle" score={exp.lifecycle} max={10} signals={data.signals?.lifecycle} />
-          <ComponentBar label="Visibility" score={exp.visibility} max={5} signals={data.signals?.visibility} />
-        </div>
+        {(() => {
+          const rr = computeIdentityRisk(data.detail || data);
+          const sev = (data.detail?.risk_level || rr.overall_severity).toLowerCase();
+          const sevColor = getSeverityColor(sev);
+          return (
+            <>
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="text-sm font-semibold text-gray-700 dark:text-slate-300">Risk Score Breakdown</h2>
+                <span style={{
+                  fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                  background: sevColor + '22', color: sevColor,
+                  fontFamily: 'var(--mono, monospace)', textTransform: 'uppercase',
+                }}>
+                  {sev}
+                </span>
+              </div>
+              <p className="text-[9px] font-mono text-gray-400 dark:text-slate-500 mb-3" style={{ letterSpacing: '0.5px' }}>
+                CVSS v3.1 · NIST SP 800-63B · SP 800-207 · CIS Controls v8
+              </p>
+              <div className="space-y-1.5">
+                {rr.dimensions.map(dim => {
+                  const barPct = (dim.score / 10) * 100;
+                  const dSevColor = getSeverityColor(dim.severity);
+                  const primaryMitre = dim.score > 0 && dim.mitre.length > 0 ? dim.mitre[0] : null;
+                  return (
+                    <div key={dim.dimension} className="flex items-center gap-2 text-xs">
+                      <span className="w-6 text-center flex-shrink-0">{dim.icon}</span>
+                      <span className="w-28 text-gray-500 dark:text-slate-400 text-right flex-shrink-0">{dim.name}</span>
+                      <div className="flex-1 h-2 bg-gray-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                        <div className="h-full rounded-full transition-all" style={{ width: `${barPct}%`, background: dim.score > 0 ? dim.color : '#6b7280' }} />
+                      </div>
+                      <span className="w-10 text-right font-mono font-bold flex-shrink-0" style={{ color: dim.score > 0 ? dSevColor : '#9ca3af' }}>
+                        {dim.score.toFixed(1)}
+                      </span>
+                      {primaryMitre && (
+                        <span className="text-[7px] px-1 py-0.5 rounded font-mono font-semibold flex-shrink-0"
+                          style={{ background: '#6366f118', color: '#6366f1' }}>
+                          {primaryMitre}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex items-center justify-between mt-3 pt-2 border-t border-gray-100 dark:border-slate-800">
+                <span className="text-xs font-bold text-gray-700 dark:text-slate-300">Peak Dimension</span>
+                <span className="text-sm font-bold font-mono" style={{ color: sevColor }}>{rr.overall_score.toFixed(1)}/10</span>
+              </div>
+            </>
+          );
+        })()}
 
         {/* Critical overrides */}
         {exp.critical_overrides.length > 0 && (
           <div className="mt-3 pt-3 border-t border-gray-100 dark:border-slate-800 bg-red-50 dark:bg-red-900/10 rounded-lg p-3">
-            <h4 className="text-xs font-semibold text-red-700 dark:text-red-300 mb-1">Critical Overrides (Score Forced to 100)</h4>
+            <h4 className="text-xs font-semibold text-red-700 dark:text-red-300 mb-1">Critical Override</h4>
             {exp.critical_overrides.map((ov, i) => (
               <p key={i} className="text-xs text-red-600 dark:text-red-400">{ov.description}</p>
             ))}

@@ -3,6 +3,7 @@ import {
   type IdentityCategory, type RiskLevel,
   RISK_BADGE, DATA_EXPLANATIONS, DORMANT_LABELS,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getDormantStatus,
+  TIME_MS,
 } from '../../constants/metrics';
 
 // Re-export metrics imports used by sibling modules
@@ -146,7 +147,6 @@ export interface EffectiveAccessEntry {
   resource_type: string | null;
   risk_level: string;
   assigned_on: string | null;
-  usage_status: string;
   permissions: string[];
   why_critical: string | null;
 }
@@ -208,6 +208,41 @@ export interface RemediationAction {
 
 export type RemediationActionsMap = Record<number, RemediationAction>;
 
+export interface CvssFix {
+  fix_type: string;
+  verb: string;
+  title: string;
+  description: string;
+  risk_reduction_pct: number;
+  risk_reduction_pts: number;
+  current_score: number;
+  simulated_score: number;
+  simulated_band: string;
+  effort_minutes: number;
+  execution_safety: string;
+  safety_color: string;
+  safety_reason: string | null;
+  framework_badges: string[];
+  impacted_paths: number;
+  scope: string;
+  priority_score: number;
+}
+
+export interface CvssFixResponse {
+  identity_id: string;
+  organization_id: number;
+  fixes: CvssFix[];
+  fix_count: number;
+  projected_impact: {
+    after_all_fixes: {
+      simulated_score: number;
+      simulated_band: string;
+      risk_reduction_pct: number;
+      posture_score_delta: number;
+    };
+  } | null;
+}
+
 export interface PimEligible {
   role_name: string;
   role_definition_id?: string;
@@ -257,7 +292,7 @@ export function daysUntil(iso?: string | null): number | null {
   if (!iso) return null;
   try {
     const diff = new Date(iso).getTime() - Date.now();
-    return Math.ceil(diff / 86400000);
+    return Math.ceil(diff / TIME_MS.DAY);
   } catch { return null; }
 }
 
@@ -288,74 +323,6 @@ export function riskBadge(level?: string) {
   const v = safeLower(level);
   const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
   return <span className={`${base} ${RISK_BADGE[v] || 'bg-gray-100 text-gray-700'}`}>{(v || 'unknown').toUpperCase()}</span>;
-}
-
-export function usageStatusBadge(status?: string, redundantWith?: string, identityHasActivity?: boolean) {
-  const v = safeLower(status);
-  const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
-
-  if (v === 'orphaned') return <span className={`${base} bg-red-100 text-red-700`} title="This specific role has never been exercised by this identity. The identity itself may be active.">Role Unused</span>;
-  if (v === 'never_used' || v === 'definitely_unused') {
-    // When the identity itself authenticated recently but this specific
-    // role has no role-scoped activity, show amber "No Role Activity"
-    // instead of the misleading red "Never Used".
-    if (identityHasActivity) {
-      return <span className={`${base} bg-amber-100 text-amber-700`}>No Role Activity</span>;
-    }
-    return <span className={`${base} bg-red-100 text-red-700`}>Never Used</span>;
-  }
-  if (v === 'dormant' || v === 'likely_unused') return <span className={`${base} bg-orange-100 text-orange-700`}>Dormant</span>;
-  if (v === 'stale') return <span className={`${base} bg-yellow-100 text-yellow-700`}>Stale</span>;
-  if (v === 'possibly_overprivileged') {
-    return (
-      <span className={`${base} bg-yellow-100 text-yellow-700`} title={redundantWith ? `Redundant with: ${redundantWith}` : ''}>
-        Over-Privileged
-      </span>
-    );
-  }
-  if (v === 'active' || v === 'assumed_active') return <span className={`${base} bg-green-100 text-green-700`}>Active</span>;
-  return <span className={`${base} bg-gray-100 text-gray-500`}>Unknown</span>;
-}
-
-export function lastUsedBadge(lastUsedDisplay?: string, usageStatus?: string, lastUsedSource?: string) {
-  if (!lastUsedDisplay) return null;
-  const v = safeLower(usageStatus);
-  const isNoActivity = lastUsedDisplay === 'No activity on record';
-  let color = 'text-gray-500';
-  let dotColor = 'bg-gray-400';
-  if (v === 'active' || v === 'assumed_active') {
-    color = 'text-green-700';
-    dotColor = 'bg-green-500';
-  } else if (v === 'stale') {
-    color = 'text-yellow-700';
-    dotColor = 'bg-yellow-500';
-  } else if (v === 'dormant' || v === 'likely_unused') {
-    color = 'text-orange-700';
-    dotColor = 'bg-orange-500';
-  } else if (v === 'never_used' || v === 'definitely_unused') {
-    // Amber when "No activity on record" (identity was active but this
-    // role wasn't), red only when the identity itself never signed in.
-    if (isNoActivity) {
-      color = 'text-amber-700';
-      dotColor = 'bg-amber-500';
-    } else {
-      color = 'text-red-700';
-      dotColor = 'bg-red-500';
-    }
-  }
-  return (
-    <span className="inline-flex flex-col gap-0.5">
-      <span className={`inline-flex items-center gap-1 text-xs ${color}`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-        {lastUsedDisplay}
-      </span>
-      {!!lastUsedSource && (
-        <span className="text-[10px] text-gray-400 pl-3">
-          source: {lastUsedSource}
-        </span>
-      )}
-    </span>
-  );
 }
 
 export function categoryLabel(catRaw?: any, typeRaw?: any) {

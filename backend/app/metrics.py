@@ -12,6 +12,7 @@ from collections import deque, defaultdict
 class MetricsCollector:
     """Thread-safe in-memory metrics for API performance tracking."""
     _instance = None
+    _init_lock = threading.Lock()
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -26,7 +27,9 @@ class MetricsCollector:
     @classmethod
     def get(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._init_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def record_request(self, method, path, status_code, duration_ms):
@@ -50,8 +53,8 @@ class MetricsCollector:
                 'total_errors': self.error_count,
                 'error_rate': round(self.error_count / max(self.request_count, 1) * 100, 2),
                 'avg_latency_ms': round(sum(lats) / len(lats), 1) if lats else 0,
-                'p95_latency_ms': round(lats[int(len(lats) * 0.95)] if lats else 0, 1),
-                'p99_latency_ms': round(lats[int(len(lats) * 0.99)] if lats else 0, 1),
+                'p95_latency_ms': round(lats[min(int(len(lats) * 0.95), len(lats) - 1)] if lats else 0, 1),
+                'p99_latency_ms': round(lats[min(int(len(lats) * 0.99), len(lats) - 1)] if lats else 0, 1),
                 'status_codes': dict(self.status_counts),
             }
 

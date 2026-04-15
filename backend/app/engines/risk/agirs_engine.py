@@ -261,7 +261,7 @@ class AGIRSEngine:
             SELECT COUNT(*) FROM identities i
             WHERE i.discovery_run_id IN %s
               AND i.identity_category IN ('human_user', 'guest')
-              AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL OR i.status IN ('disabled', 'deleted'))
+              AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL)
               AND (
                   EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                   OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
@@ -777,6 +777,7 @@ class AGIRSEngine:
             WHERE i.discovery_run_id IN %s
               AND COALESCE(i.deleted_at, '9999-01-01') > NOW()
               AND COALESCE(i.blast_radius_score, 0) > 0
+              AND NOT COALESCE(i.is_microsoft_system, false)
               {cat_filter}
             ORDER BY i.blast_radius_score DESC
             LIMIT %s

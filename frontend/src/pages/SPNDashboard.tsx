@@ -5,6 +5,7 @@ import {
   SPN_EXPOSURE_COMPONENTS, EXPOSURE_THRESHOLDS,
   getExposureLevel, EXPOSURE_LEVEL_CONFIG,
   LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG,
+  TIME_MS,
 } from '../constants/metrics';
 import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { generateSPNReport } from '../utils/spnPdfGenerator';
@@ -223,7 +224,7 @@ function SortHeader({ label, field, currentField, currentDir, onSort }: {
 
 function daysUntil(iso: string | null): string {
   if (!iso) return '—';
-  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / TIME_MS.DAY);
   if (d < 0) return `${Math.abs(d)}d ago`;
   if (d === 0) return 'Today';
   return `${d}d`;
@@ -310,7 +311,7 @@ function RiskBreakdownModal({ detail, onClose }: { detail: SPNDetail; onClose: (
               </div>
               <div className="flex items-center gap-2 mt-1">
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${levelConfig.badgeClass}`}>
-                  Exposure: {exp.total}/100
+                  {(identity as any).risk_level?.toUpperCase() || (exp.total >= 70 ? 'CRITICAL' : exp.total >= 50 ? 'HIGH' : exp.total >= 25 ? 'MEDIUM' : 'LOW')}
                 </span>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${lcConfig.badgeClass}`}>
                   Activity: {lcConfig.label}
@@ -734,8 +735,8 @@ export default function SPNDashboard() {
   const SPN_CSV_COLS = useMemo(() => [
     { key: 'display_name', header: 'Name' },
     { key: 'exposure_score', header: 'Exposure Score' },
-    { key: 'privilege_score', header: 'Privilege (/40)' },
-    { key: 'credential_risk_score', header: 'Credential Risk (/25)' },
+    { key: 'privilege_score', header: 'Privilege' },
+    { key: 'credential_risk_score', header: 'Credential Risk' },
     { key: 'lifecycle_state', header: 'Lifecycle State' },
     { key: 'owner_status', header: 'Owner Status' },
     { key: 'effective_scope_flag', header: 'Scope' },
@@ -962,8 +963,8 @@ export default function SPNDashboard() {
               <tr>
                 <SortHeader label="Name" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Exposure" field="exposure_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Privilege (/40)" field="privilege_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Cred Risk (/25)" field="credential_risk_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Privilege" field="privilege_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Cred Risk" field="credential_risk_score" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <th className="px-3 py-2.5 text-xs">Lifecycle</th>
                 <th className="px-3 py-2.5 text-xs">Owner</th>
                 <th className="px-3 py-2.5 text-xs">Scope</th>
@@ -980,8 +981,10 @@ export default function SPNDashboard() {
                 const lcCfg = LIFECYCLE_STATE_CONFIG[spn.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
                 const owCfg = OWNER_STATUS_CONFIG[spn.owner_status] || OWNER_STATUS_CONFIG.unknown;
                 const scCfg = SCOPE_FLAG_CONFIG[spn.effective_scope_flag] || SCOPE_FLAG_CONFIG.resource;
-                const privPct = spn.privilege_score > 0 ? Math.min((spn.privilege_score / 40) * 100, 100) : 0;
-                const credPct = spn.credential_risk_score > 0 ? Math.min((spn.credential_risk_score / 25) * 100, 100) : 0;
+                const privNorm = Math.min(10, (spn.privilege_score || 0) / 4);
+                const credNorm = Math.min(10, (spn.credential_risk_score || 0) / 2.5);
+                const privPct = (privNorm / 10) * 100;
+                const credPct = (credNorm / 10) * 100;
 
                 return (
                   <tr
@@ -1005,16 +1008,16 @@ export default function SPNDashboard() {
                       <ExposureRing score={spn.exposure_score || 0} />
                     </td>
                     <td className="px-3 py-2">
-                      <div className="w-20 h-2 bg-gray-100 rounded-full overflow-hidden" title={`${spn.privilege_score}/40`}>
+                      <div className="w-20 h-2 bg-gray-100 rounded-full overflow-hidden" title={`Privilege: ${privNorm.toFixed(1)}/10`}>
                         <div className="h-full rounded-full bg-red-400" style={{ width: `${privPct}%` }} />
                       </div>
-                      <span className="text-[10px] text-gray-400 font-mono">{spn.privilege_score}/40</span>
+                      <span className="text-[10px] text-gray-400 font-mono">{privNorm.toFixed(1)}/10</span>
                     </td>
                     <td className="px-3 py-2">
-                      <div className="w-16 h-2 bg-gray-100 rounded-full overflow-hidden" title={`${spn.credential_risk_score}/25`}>
+                      <div className="w-16 h-2 bg-gray-100 rounded-full overflow-hidden" title={`Cred Risk: ${credNorm.toFixed(1)}/10`}>
                         <div className="h-full rounded-full bg-orange-400" style={{ width: `${credPct}%` }} />
                       </div>
-                      <span className="text-[10px] text-gray-400 font-mono">{spn.credential_risk_score}/25</span>
+                      <span className="text-[10px] text-gray-400 font-mono">{credNorm.toFixed(1)}/10</span>
                     </td>
                     <td className="px-3 py-2">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${lcCfg.badgeClass}`} title={lcCfg.tooltip}>

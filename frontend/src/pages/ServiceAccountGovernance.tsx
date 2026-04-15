@@ -506,17 +506,13 @@ export default function ServiceAccountGovernance() {
                               background: G.bandBg[item.risk_band] || G.surface,
                               color: G.band[item.risk_band] || G.textSecondary,
                               fontFamily: G.mono,
-                            }} className="px-1.5 py-0.5 rounded text-[10px] font-bold">
-                              {item.risk_score}
-                            </span>
-                            <span style={{ color: G.band[item.risk_band] || G.textMuted }}
-                                  className="text-[9px] font-medium">
+                            }} className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase">
                               {item.risk_band}
                             </span>
                           </div>
                           {item.expected_reduction > 0 && (
                             <div style={{ color: '#4ADE80' }} className="text-[9px] mt-0.5">
-                              -{item.expected_reduction}pts possible
+                              Remediable
                             </div>
                           )}
                         </td>
@@ -570,7 +566,7 @@ export default function ServiceAccountGovernance() {
                         {canDecide && (
                           <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
                             <button
-                              onClick={() => { setDecisionTarget(item); setDecisionType(item.recommended_action === 'Approve' ? 'approve' : item.recommended_action === 'Revoke' ? 'revoke' : item.recommended_action === 'Downgrade' ? 'downgrade' : item.recommended_action === 'Rotate' ? 'rotate' : 'approve'); setDecisionReason(''); }}
+                              onClick={() => { setDecisionTarget(item); setDecisionType((item.recommended_action || '').toLowerCase() as typeof decisionType || 'approve'); setDecisionReason(''); }}
                               style={{ background: 'rgba(139,92,246,0.12)', color: G.accent }}
                               className="px-2 py-1 rounded text-[10px] font-medium hover:opacity-80 transition">
                               Decide
@@ -654,13 +650,13 @@ export default function ServiceAccountGovernance() {
                 <div style={{ background: G.bandBg[detail.risk_band], border: `1px solid ${G.band[detail.risk_band]}20` }}
                      className="rounded-xl p-4 text-center">
                   <div style={{ color: G.band[detail.risk_band], fontFamily: G.mono }}
-                       className="text-4xl font-bold">{detail.risk_score}</div>
+                       className="text-2xl font-bold uppercase">{detail.risk_band}</div>
                   <div style={{ color: G.band[detail.risk_band] }} className="text-xs font-semibold mt-1">
-                    {detail.risk_band} Risk
+                    Severity
                   </div>
                   {detail.expected_reduction > 0 && (
                     <div style={{ color: '#4ADE80' }} className="text-[10px] mt-2">
-                      {detail.recommended_action}: -{detail.expected_reduction}pts
+                      {detail.recommended_action}: remediable
                     </div>
                   )}
                 </div>
@@ -903,7 +899,7 @@ export default function ServiceAccountGovernance() {
                       const item = items.find(i => i.identity_id === detail.identity_id);
                       if (item) {
                         setDecisionTarget(item);
-                        setDecisionType(detail.recommended_action === 'Approve' ? 'approve' : detail.recommended_action === 'Revoke' ? 'revoke' : detail.recommended_action === 'Downgrade' ? 'downgrade' : detail.recommended_action === 'Rotate' ? 'rotate' : 'approve');
+                        setDecisionType((detail.recommended_action || '').toLowerCase() as typeof decisionType || 'approve');
                         setDecisionReason('');
                       }
                     }}

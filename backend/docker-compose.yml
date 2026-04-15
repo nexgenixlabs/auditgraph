@@ -42,6 +42,14 @@ services:
       # "auditgraph-postgres" resolves to the postgres service via Docker DNS.
       APP_ENV: local
       DATABASE_URL: postgresql://auditgraph:auditgraph@auditgraph-postgres:5432/auditgraph
+      # Explicit DB_* vars for the old config.py (baked into the image) which
+      # does not parse DATABASE_URL — it reads individual env vars directly.
+      DB_HOST: auditgraph-postgres
+      DB_USER: auditgraph
+      DB_PASSWORD: auditgraph
+      DB_NAME: auditgraph
+      DB_PORT: "5432"
+      DB_SSLMODE: disable
     depends_on:
       auditgraph-postgres:
         condition: service_healthy

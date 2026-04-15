@@ -200,10 +200,19 @@ class _PoolManager:
                 # from the previous user of this connection.
                 try:
                     cur = conn.cursor()
-                    cur.execute("RESET app.current_organization_id")
+                    # Default to '0' (matches no real org) so RLS blocks
+                    # all queries until set_organization_context() is called
+                    # with a real org_id. This is safer than RESET (which
+                    # leaves the GUC empty and could match COALESCE fallbacks).
+                    if not is_admin:
+                        cur.execute(
+                            "SELECT set_config('app.current_organization_id', '0', FALSE)"
+                        )
+                    else:
+                        cur.execute("RESET app.current_organization_id")
                     cur.execute("SET statement_timeout = '30s'")
                     cur.close()
-                    conn.commit()  # Commit the RESET so it takes effect
+                    conn.commit()  # Commit so the default takes effect
                 except Exception:
                     # Connection may be stale — close and get a new one
                     try:
@@ -238,6 +247,16 @@ class _PoolManager:
                 sslmode=DB_SSLMODE, connect_timeout=DB_CONNECT_TIMEOUT,
                 options='-c statement_timeout=30000',
             )
+            # Set default org context = '0' so RLS blocks until real org is set
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT set_config('app.current_organization_id', '0', FALSE)"
+                )
+                cur.close()
+                conn.commit()
+            except Exception:
+                pass  # Connection just opened — unlikely to fail
         return conn, False
 
     @classmethod
@@ -520,20 +539,28 @@ class Database:
     def set_organization_context(self, organization_id):
         """Set PostgreSQL session variable for RLS organization isolation.
 
-        IMPORTANT — TRANSACTION-SCOPED CONTEXT:
-        Uses SET LOCAL (is_local=TRUE in set_config). This means the setting
-        is automatically rolled back when the transaction ends. This is the
-        ONLY safe mode for connection pooling (PgBouncer, pgpool). Do NOT
-        change to session-level scope (is_local=FALSE) — that would allow
-        context leakage across pooled connections.
+        SESSION-LEVEL CONTEXT (is_local=FALSE):
+        Uses SET (session-level) so the context survives commits and
+        rollbacks within the same connection. This is safe because the
+        app uses connection-per-request: each request gets a fresh
+        connection, sets context once, and the connection is closed at
+        request end — no context leakage between requests.
 
         After setting, verifies the value was persisted correctly.
         Raises SecurityViolationError if verification fails.
         """
         if organization_id is not None and self.conn:
+            # Warn on sentinel/invalid org_id — these will match no real data
+            if organization_id in (0, -1, '0', '-1'):
+                _db_logger.warning(
+                    "set_organization_context called with sentinel org_id=%s — "
+                    "RLS will block all queries. This is expected for "
+                    "unauthenticated/superadmin paths.",
+                    organization_id,
+                )
             cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT set_config('app.current_organization_id', %s, TRUE)",
+                "SELECT set_config('app.current_organization_id', %s, FALSE)",
                 (str(organization_id),)
             )
             # Verify the context was actually set (fail closed)
@@ -550,28 +577,20 @@ class Database:
                 )
 
     def _commit(self):
-        """Commit and auto-restore RLS context (SET LOCAL is transaction-scoped).
+        """Commit the current transaction.
 
-        Every self._commit() resets SET LOCAL variables. This method
-        re-applies the organization context after committing so subsequent
-        queries through the same Database instance still work under RLS.
-        Admin connections (organization_id is None) skip the restore.
+        Session-level RLS context (set_config with is_local=FALSE)
+        survives commits — no need to restore after commit.
         """
-        _raw = self.conn.commit
-        _raw()
-        if self._organization_id is not None:
-            self.set_organization_context(self._organization_id)
+        self.conn.commit()
 
     def _rollback(self):
-        """Rollback and auto-restore RLS context (SET LOCAL is transaction-scoped).
+        """Rollback the current transaction.
 
-        Same rationale as _commit — rollback also ends the transaction,
-        clearing SET LOCAL. We restore context so the next operation works.
+        Session-level RLS context (set_config with is_local=FALSE)
+        survives rollbacks — no need to restore after rollback.
         """
-        _raw = self.conn.rollback
-        _raw()
-        if self._organization_id is not None:
-            self.set_organization_context(self._organization_id)
+        self.conn.rollback()
 
     def safe_commit(self):
         """Alias for _commit(). Kept for backward compatibility."""
@@ -909,12 +928,56 @@ class Database:
                     cursor.execute(f'ROLLBACK TO SAVEPOINT rls_en_{table_name}')
                     logger.warning("Could not ENABLE RLS on %s: %s", table_name, te)
 
+            # Ensure standard RLS policies exist for all organization_id tables.
+            # Without policies, RLS-enabled tables are inaccessible to non-owner
+            # users (fail-closed), but we need explicit policies so the app user
+            # can read rows scoped to the current organization.
+            policies_created = 0
+            for table_name, _ in tables:
+                try:
+                    sp = f'pol_{table_name[:20]}'
+                    cursor.execute(f'SAVEPOINT {sp}')
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM pg_policy WHERE polrelid = %s::regclass",
+                        (table_name,),
+                    )
+                    policy_count = cursor.fetchone()[0]
+                    if policy_count == 0:
+                        setting = "current_setting('app.current_organization_id', true)::integer"
+                        for suffix in ('sel', 'ins', 'upd', 'del'):
+                            cursor.execute(f'DROP POLICY IF EXISTS org_strict_{suffix} ON "{table_name}"')
+                        cursor.execute(f"""
+                            CREATE POLICY org_strict_sel ON "{table_name}" FOR SELECT
+                                USING (organization_id = {setting})
+                        """)
+                        cursor.execute(f"""
+                            CREATE POLICY org_strict_ins ON "{table_name}" FOR INSERT
+                                WITH CHECK (organization_id = {setting})
+                        """)
+                        cursor.execute(f"""
+                            CREATE POLICY org_strict_upd ON "{table_name}" FOR UPDATE
+                                USING (organization_id = {setting})
+                        """)
+                        cursor.execute(f"""
+                            CREATE POLICY org_strict_del ON "{table_name}" FOR DELETE
+                                USING (organization_id = {setting})
+                        """)
+                        policies_created += 1
+                        logger.info("Created RLS policies for table: %s", table_name)
+                    cursor.execute(f'RELEASE SAVEPOINT {sp}')
+                except Exception as pe:
+                    try:
+                        cursor.execute(f'ROLLBACK TO SAVEPOINT {sp}')
+                    except Exception:
+                        pass
+                    logger.warning("Could not create RLS policies on %s: %s", table_name, pe)
+
             admin_conn.commit()
             cursor.close()
 
             logger.info(
-                "enforce_force_rls: %d tables enforced, %d already enforced, %d skipped, %d total tenant tables",
-                enforced, already, skipped, len(tables),
+                "enforce_force_rls: %d tables enforced, %d already enforced, %d skipped, %d policies created, %d total tenant tables",
+                enforced, already, skipped, policies_created, len(tables),
             )
         except psycopg2.OperationalError as e:
             import logging
@@ -1565,6 +1628,8 @@ class Database:
     _ice_columns_ensured = False
     _discovery_connector_col_ensured = False
     _app_reg_lineage_cols_ensured = False
+    _last_activity_cols_ensured = False
+    _lineage_verdicts_ensured = False
 
     def backfill_microsoft_flag(self):
         """Startup backfill of is_microsoft_system for ALL data.
@@ -1874,6 +1939,116 @@ class Database:
         finally:
             cursor.close()
 
+    def ensure_last_activity_columns(self):
+        """Startup migration: add canonical last_activity_date/source/confidence columns + backfill."""
+        if Database._last_activity_cols_ensured:
+            return
+        _log = logging.getLogger(__name__)
+        cursor = self.conn.cursor()
+        try:
+            # Add canonical activity + IP columns
+            required_cols = [
+                ("last_activity_date", "TIMESTAMPTZ"),
+                ("last_activity_source", "VARCHAR(50)"),
+                ("last_activity_confidence", "VARCHAR(10)"),
+                ("last_observed_ip", "VARCHAR(45)"),
+                ("last_observed_ip_source", "VARCHAR(50)"),
+                ("last_observed_ip_date", "TIMESTAMPTZ"),
+                ("last_observed_operation", "TEXT"),
+            ]
+            for col_name, col_type in required_cols:
+                cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            self._commit()
+
+            # Verify all columns exist
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'identities'
+                AND column_name = ANY(%s)
+            """, ([c[0] for c in required_cols],))
+            existing = {row[0] for row in cursor.fetchall()}
+            missing = [c[0] for c in required_cols if c[0] not in existing]
+            if missing:
+                _log.warning("SSOT columns MISSING after migration: %s", missing)
+            else:
+                _log.info("SSOT columns verified: %d/%d present (last_activity_date, last_observed_ip, etc.)",
+                          len(existing), len(required_cols))
+            # Backfill existing rows that have NULL last_activity_date
+            # Phase 1: sign-in / behavioral columns (high/medium confidence)
+            cursor.execute("""
+                UPDATE identities SET
+                    last_activity_date = GREATEST(
+                        last_sign_in,
+                        last_noninteractive_signin,
+                        last_delegated_signin,
+                        observed_last_used,
+                        last_seen_auth
+                    ),
+                    last_activity_source = CASE
+                        WHEN last_sign_in IS NOT NULL AND last_sign_in = GREATEST(last_sign_in, last_noninteractive_signin, last_delegated_signin, observed_last_used, last_seen_auth)
+                            THEN 'graph_signin'
+                        WHEN last_noninteractive_signin IS NOT NULL AND last_noninteractive_signin = GREATEST(last_sign_in, last_noninteractive_signin, last_delegated_signin, observed_last_used, last_seen_auth)
+                            THEN 'entra_noninteractive'
+                        WHEN observed_last_used IS NOT NULL AND observed_last_used = GREATEST(last_sign_in, last_noninteractive_signin, last_delegated_signin, observed_last_used, last_seen_auth)
+                            THEN 'auditgraph_scan'
+                        WHEN last_seen_auth IS NOT NULL
+                            THEN 'graph_signin'
+                        ELSE NULL
+                    END,
+                    last_activity_confidence = CASE
+                        WHEN last_sign_in IS NOT NULL THEN 'high'
+                        WHEN last_noninteractive_signin IS NOT NULL THEN 'high'
+                        WHEN observed_last_used IS NOT NULL THEN 'medium'
+                        WHEN last_seen_auth IS NOT NULL THEN 'high'
+                        ELSE 'none'
+                    END
+                WHERE last_activity_date IS NULL
+                  AND (last_sign_in IS NOT NULL OR last_noninteractive_signin IS NOT NULL
+                       OR last_delegated_signin IS NOT NULL OR observed_last_used IS NOT NULL
+                       OR last_seen_auth IS NOT NULL)
+            """)
+            phase1 = cursor.rowcount
+            self._commit()
+            # Phase 2: fall back to created_datetime (low confidence)
+            cursor.execute("""
+                UPDATE identities SET
+                    last_activity_date = created_datetime,
+                    last_activity_source = 'created_date',
+                    last_activity_confidence = 'low'
+                WHERE last_activity_date IS NULL AND created_datetime IS NOT NULL
+            """)
+            phase2 = cursor.rowcount
+            self._commit()
+            # Phase 3: upgrade from role_assignments (medium confidence) where newer
+            cursor.execute("""
+                WITH latest_ra AS (
+                    SELECT identity_db_id, MAX(created_on) as latest_role_date
+                    FROM role_assignments
+                    WHERE created_on IS NOT NULL
+                    GROUP BY identity_db_id
+                )
+                UPDATE identities i SET
+                    last_activity_date = lra.latest_role_date,
+                    last_activity_source = 'role_assignment',
+                    last_activity_confidence = 'medium'
+                FROM latest_ra lra
+                WHERE lra.identity_db_id = i.id
+                  AND lra.latest_role_date > COALESCE(i.last_activity_date, '1970-01-01'::timestamptz)
+            """)
+            phase3 = cursor.rowcount
+            self._commit()
+            backfilled = phase1 + phase2 + phase3
+            if backfilled > 0:
+                _log.info("Backfilled last_activity_date: %s sign-in, %s created_datetime, %s role_assignment", phase1, phase2, phase3)
+            # IP columns already created in unified block above
+
+            Database._last_activity_cols_ensured = True
+        except Exception as e:
+            self._rollback()
+            _log.warning("last_activity columns migration error: %s", e)
+        finally:
+            cursor.close()
+
     def sweep_microsoft_flag(self, run_id: int):
         """Post-discovery sweep: mark remaining undetected Microsoft SPNs for a specific run.
 
@@ -2017,6 +2192,26 @@ class Database:
                     self._rollback()
             Database._app_reg_lineage_cols_ensured = True
 
+        # Ensure last_activity canonical columns + last_observed_ip columns exist
+        if not Database._last_activity_cols_ensured:
+            try:
+                cursor.execute("SAVEPOINT last_activity_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_activity_date TIMESTAMPTZ")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_activity_source VARCHAR(50)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_activity_confidence VARCHAR(10)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_observed_ip VARCHAR(45)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_observed_ip_source VARCHAR(50)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_observed_ip_date TIMESTAMPTZ")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_observed_operation TEXT")
+                cursor.execute("RELEASE SAVEPOINT last_activity_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT last_activity_ddl")
+                except Exception:
+                    self._rollback()
+            Database._last_activity_cols_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -2028,6 +2223,8 @@ class Database:
         from app.engines.status_resolver import resolve_status
         status = resolve_status(identity_data)
 
+        # ARCHIVE WRITE — per-run historical snapshot.
+        # identity_list (below) is the SSOT for current state.
         cursor.execute(
             """
             INSERT INTO identities (
@@ -2164,7 +2361,18 @@ class Database:
                 associated_resource_type,
                 associated_resource_name,
                 associated_resource_group,
-                associated_subscription_id
+                associated_subscription_id,
+
+                -- Canonical last-activity SSOT columns
+                last_activity_date,
+                last_activity_source,
+                last_activity_confidence,
+
+                -- Last Observed IP (ARM Activity Log)
+                last_observed_ip,
+                last_observed_ip_source,
+                last_observed_ip_date,
+                last_observed_operation
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -2195,7 +2403,9 @@ class Database:
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s, %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -2328,6 +2538,15 @@ class Database:
                 associated_resource_name = EXCLUDED.associated_resource_name,
                 associated_resource_group = EXCLUDED.associated_resource_group,
                 associated_subscription_id = EXCLUDED.associated_subscription_id,
+
+                last_activity_date = EXCLUDED.last_activity_date,
+                last_activity_source = EXCLUDED.last_activity_source,
+                last_activity_confidence = EXCLUDED.last_activity_confidence,
+
+                last_observed_ip = EXCLUDED.last_observed_ip,
+                last_observed_ip_source = EXCLUDED.last_observed_ip_source,
+                last_observed_ip_date = EXCLUDED.last_observed_ip_date,
+                last_observed_operation = EXCLUDED.last_observed_operation,
 
                 created_at = NOW()
             RETURNING id
@@ -2471,12 +2690,103 @@ class Database:
                 identity_data.get("associated_resource_name"),
                 identity_data.get("associated_resource_group"),
                 identity_data.get("associated_subscription_id"),
+
+                # Canonical last-activity SSOT columns
+                identity_data.get("last_activity_date"),
+                identity_data.get("last_activity_source"),
+                identity_data.get("last_activity_confidence"),
+
+                # Last Observed IP (ARM Activity Log)
+                identity_data.get("last_observed_ip"),
+                identity_data.get("last_observed_ip_source"),
+                identity_data.get("last_observed_ip_date"),
+                identity_data.get("last_observed_operation"),
             ),
         )
 
         identity_db_id = cursor.fetchone()[0]
         self._commit()
         cursor.close()
+
+        # ── Dual-write to identity_list (SSOT) ─────────────────────────
+        # identity_list is the Single Source of Truth for dashboards,
+        # CISO reports, posture scoring, and all UI-facing queries.
+        # The INSERT INTO identities above is the ARCHIVE copy — kept
+        # for historical per-run snapshots and forensic timeline.
+        # Do NOT read from `identities` for current-state queries;
+        # always use `identity_list` instead.
+        try:
+            import uuid as _uuid
+            _cat = (identity_data.get("identity_category") or
+                    identity_data.get("identity_type") or "service_principal").lower().strip()
+            _type_map = {
+                "user": "human_user",
+                "guest": "guest_user",
+                "serviceprincipal": "service_principal",
+            }
+            _il_type = _type_map.get(_cat, _cat)
+            _il_gov = "Orphaned" if not identity_data.get("owner_count") else "Governed"
+            _il_ms = identity_data.get("is_microsoft_system", False)
+
+            # Classify identity: HUMAN / WORKLOAD / EXTERNAL
+            _human_types = {"human_user", "user", "guest", "guest_user", "member", "b2b_user"}
+            _external_types = {"guest", "guest_user", "b2b_user"}
+            if _cat in _external_types or identity_data.get("is_federated"):
+                _il_class = "EXTERNAL"
+            elif _cat in _human_types:
+                _il_class = "HUMAN"
+            else:
+                _il_class = "WORKLOAD"
+
+            cur2 = self.conn.cursor()
+            cur2.execute("""
+                INSERT INTO identity_list (
+                    organization_id, identity_id, global_identity_id,
+                    display_name, identity_type, cloud_provider,
+                    is_microsoft_system, governance, lifecycle_state,
+                    privilege_level, risk_label, risk_score, last_seen,
+                    identity_class
+                ) VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, NOW(),
+                    %s
+                )
+                ON CONFLICT (organization_id, identity_id) DO UPDATE SET
+                    display_name     = EXCLUDED.display_name,
+                    identity_type    = EXCLUDED.identity_type,
+                    is_microsoft_system = EXCLUDED.is_microsoft_system,
+                    identity_class   = EXCLUDED.identity_class,
+                    governance       = EXCLUDED.governance,
+                    risk_label       = EXCLUDED.risk_label,
+                    risk_score       = EXCLUDED.risk_score,
+                    last_seen        = NOW()
+            """, (
+                self._organization_id,
+                identity_data.get("identity_id"),
+                _uuid.uuid5(_uuid.NAMESPACE_DNS,
+                            f"{self._organization_id}|{identity_data.get('identity_id')}"),
+                identity_data.get("display_name", ""),
+                _il_type,
+                identity_data.get("cloud", "azure"),
+                _il_ms,
+                _il_gov,
+                identity_data.get("lifecycle_state", "Active"),
+                identity_data.get("privilege_level", "standard"),
+                identity_data.get("risk_level", "low"),
+                identity_data.get("risk_score", 0),
+                _il_class,
+            ))
+            self._commit()
+            cur2.close()
+        except Exception as _e:
+            _db_logger.debug("identity_list dual-write skipped for %s: %s",
+                             identity_data.get("identity_id"), _e)
+            try:
+                self._rollback()
+            except Exception:
+                pass
 
         return identity_db_id
 
@@ -2515,6 +2825,7 @@ class Database:
         try:
             cursor.execute("ALTER TABLE role_assignments ADD COLUMN IF NOT EXISTS principal_type VARCHAR(50) DEFAULT 'direct'")
             cursor.execute("ALTER TABLE role_assignments ADD COLUMN IF NOT EXISTS group_principal_azure_object_id VARCHAR(255)")
+            cursor.execute("ALTER TABLE role_assignments ADD COLUMN IF NOT EXISTS group_display_name VARCHAR(255)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ra_principal_type ON role_assignments(principal_type) WHERE principal_type != 'direct'")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ra_group_principal ON role_assignments(group_principal_azure_object_id) WHERE group_principal_azure_object_id IS NOT NULL")
             self._commit()
@@ -2542,8 +2853,9 @@ class Database:
                 last_used_at, last_used_operation,
                 organization_id,
                 -- Group inheritance fields
-                principal_type, group_principal_azure_object_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                principal_type, group_principal_azure_object_id,
+                group_display_name
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
                 identity_db_id,
@@ -2569,6 +2881,7 @@ class Database:
                 # Group inheritance fields
                 role_data.get("principal_type", "direct"),
                 role_data.get("group_principal_azure_object_id"),
+                role_data.get("group_display_name"),
             ),
         )
         self._commit()
@@ -3431,6 +3744,15 @@ class Database:
     def _ensure_remediation_playbooks(self):
         """Create remediation_playbooks table and seed default playbooks if empty."""
         cursor = self.conn.cursor()
+        # Check if table already exists — skip DDL to avoid privilege errors with app user
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'remediation_playbooks'
+            )
+        """)
+        if cursor.fetchone()[0]:
+            return
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS remediation_playbooks (
                 id SERIAL PRIMARY KEY,
@@ -3834,7 +4156,8 @@ class Database:
             """, (use_run_ids,))
             ghost_count = cursor.fetchone()['ghost_count'] or 0
         except Exception:
-            pass
+            try: self.conn.rollback()
+            except Exception: pass
 
         cursor.close()
 
@@ -4282,7 +4605,8 @@ class Database:
                 if row and row[0]:
                     prev_hash = row[0]
             except Exception:
-                pass  # First entry or column doesn't exist yet
+                try: self.conn.rollback()
+                except Exception: pass
 
             # Compute chain hash: SHA-256(prev_hash + action + description + now)
             now_str = datetime.utcnow().isoformat()
@@ -6225,14 +6549,10 @@ class Database:
     def seed_dev_tenant(self):
         """Create the AzureCredits organization + azadmin user for LOCAL only.
 
-        Mirrors the local development setup. Non-local environments (dev/qa/
-        stg/prod) manage organizations via the admin portal — no auto-seeding.
-
-        Runs for APP_ENV == 'local' ONLY. Skipped in dev/qa/stg/prod.
+        DISABLED: Client orgs are now created via the admin portal.
+        Re-enable by removing the early return below.
         """
-        from app.config import IS_LOCAL
-        if not IS_LOCAL:
-            return
+        return  # Disabled — client orgs managed via admin portal
 
         import bcrypt as bcrypt_lib
 
@@ -6367,15 +6687,10 @@ class Database:
     def seed_demo_tenant(self):
         """Create demo organization + demo users for LOCAL only.
 
-        Non-local environments (dev/qa/stg/prod) manage organizations via
-        the admin portal — no auto-seeding of demo data.
-
-        Idempotent: skips if the 'demo' org slug already exists.
-        Creates 3 users (demo/analyst/viewer) all mapped to the demo org.
+        DISABLED: Demo org is now created via the admin portal.
+        Re-enable by removing the early return below.
         """
-        from app.config import IS_LOCAL
-        if not IS_LOCAL:
-            return
+        return  # Disabled — demo org managed via admin portal
 
         import bcrypt as bcrypt_lib
         self._ensure_users_table()
@@ -9097,11 +9412,21 @@ class Database:
         latest_run = lr['max'] if lr else None
 
         auto = []
+        seen_auto_names = set()
         if latest_run:
-            cursor.execute("SELECT * FROM identity_groups WHERE group_type = 'auto'")
+            # Filter by organization_id to prevent duplicate auto groups across orgs
+            if self._organization_id:
+                cursor.execute(
+                    "SELECT * FROM identity_groups WHERE group_type = 'auto' AND organization_id = %s",
+                    (self._organization_id,))
+            else:
+                cursor.execute("SELECT * FROM identity_groups WHERE group_type = 'auto'")
             auto_groups = [dict(r) for r in cursor.fetchall()]
             for ag in auto_groups:
                 if not ag.get('auto_criteria'):
+                    continue
+                # Deduplicate by name in case org filter is unavailable
+                if ag['name'] in seen_auto_names:
                     continue
                 criteria = ag['auto_criteria'] if isinstance(ag['auto_criteria'], dict) else json.loads(ag['auto_criteria'])
                 where_parts, where_params = self._build_auto_criteria_where(criteria)
@@ -9113,6 +9438,7 @@ class Database:
                 """, [latest_run, identity_id] + where_params)
                 if cursor.fetchone():
                     auto.append({'id': ag['id'], 'name': ag['name'], 'color': ag['color'], 'group_type': 'auto'})
+                    seen_auto_names.add(ag['name'])
 
         cursor.close()
         return auto + custom
@@ -9345,18 +9671,25 @@ class Database:
 
         Handles the mismatch where some anomaly sources store Entra string
         identity_id and others store DB integer id.
+        Always filters by organization_id for tenant isolation.
         """
         self._ensure_anomalies_table()
         if not identity_ids:
             return []
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         placeholders = ','.join(['%s'] * len(identity_ids))
+        # Always scope by organization_id for tenant isolation
+        org_filter = ""
+        org_params: list = []
+        if self._organization_id:
+            org_filter = " AND organization_id = %s"
+            org_params = [self._organization_id]
         cursor.execute(f"""
             SELECT * FROM anomalies
-            WHERE identity_id IN ({placeholders})
+            WHERE identity_id IN ({placeholders}){org_filter}
             ORDER BY created_at DESC
             LIMIT %s
-        """, (*identity_ids, limit))
+        """, (*identity_ids, *org_params, limit))
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -19794,12 +20127,14 @@ class Database:
 
         Joins on azure_object_id (Graph object ID), not identity_id (app_id for SPNs).
         Filters both tables by discovery_run_id to prevent stale data leakage.
+        Uses DISTINCT ON (group_id) to deduplicate when multiple run_ids match.
         """
         self._ensure_entra_group_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         try:
             cursor.execute("""
-                SELECT eg.id, eg.group_id, eg.display_name, eg.description,
+                SELECT DISTINCT ON (eg.group_id)
+                       eg.id, eg.group_id, eg.display_name, eg.description,
                        eg.security_enabled, eg.is_role_assignable,
                        eg.is_privileged, eg.member_count, eg.rbac_roles,
                        egm.is_nested, egm.depth, egm.member_type
@@ -19808,7 +20143,7 @@ class Database:
                   AND eg.discovery_run_id = egm.discovery_run_id
                 WHERE egm.member_object_id = %s
                   AND egm.discovery_run_id = ANY(%s)
-                ORDER BY eg.is_privileged DESC, egm.depth ASC, eg.display_name
+                ORDER BY eg.group_id, eg.is_privileged DESC, egm.depth ASC
             """, (identity_object_id, run_ids))
             groups = [dict(r) for r in cursor.fetchall()]
             return groups
@@ -20740,6 +21075,28 @@ class Database:
             ON identity_exposures(organization_id, fingerprint)
             WHERE fingerprint IS NOT NULL
         """)
+        # RLS: enable + standard 4 policies
+        cursor.execute("ALTER TABLE identity_exposures ENABLE ROW LEVEL SECURITY")
+        cursor.execute("ALTER TABLE identity_exposures FORCE ROW LEVEL SECURITY")
+        setting = "current_setting('app.current_organization_id', true)::integer"
+        for suffix in ('sel', 'ins', 'upd', 'del'):
+            cursor.execute(f"DROP POLICY IF EXISTS org_strict_{suffix} ON identity_exposures")
+        cursor.execute(f"""
+            CREATE POLICY org_strict_sel ON identity_exposures FOR SELECT
+                USING (organization_id = {setting})
+        """)
+        cursor.execute(f"""
+            CREATE POLICY org_strict_ins ON identity_exposures FOR INSERT
+                WITH CHECK (organization_id = {setting})
+        """)
+        cursor.execute(f"""
+            CREATE POLICY org_strict_upd ON identity_exposures FOR UPDATE
+                USING (organization_id = {setting})
+        """)
+        cursor.execute(f"""
+            CREATE POLICY org_strict_del ON identity_exposures FOR DELETE
+                USING (organization_id = {setting})
+        """)
         self._commit()
         cursor.close()
         Database._identity_exposures_ensured = True
@@ -20822,11 +21179,16 @@ class Database:
                                          status=None, run_ids=None) -> list:
         """Get persisted identity exposures with optional filters.
         When run_ids is provided, only return exposures from those discovery runs.
+        Always filters by organization_id for tenant isolation.
         """
         self._ensure_identity_exposures_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         conditions = []
         params = []
+        # Always scope by organization_id for tenant isolation
+        if self._organization_id:
+            conditions.append("organization_id = %s")
+            params.append(self._organization_id)
         if run_ids:
             conditions.append("discovery_run_id = ANY(%s)")
             params.append(run_ids)
@@ -20871,9 +21233,17 @@ class Database:
     def get_identity_exposures_stats(self, run_ids=None) -> dict:
         """Summary stats for identity exposures.
         When run_ids is provided, only count exposures from those discovery runs.
+        Always filters by organization_id for tenant isolation.
         """
         self._ensure_identity_exposures_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Build org + run filters
+        org_filter = ""
+        org_params: list = []
+        if self._organization_id:
+            org_filter = " AND organization_id = %s"
+            org_params = [self._organization_id]
 
         run_filter = ""
         run_params: list = []
@@ -20881,24 +21251,26 @@ class Database:
             run_filter = " AND discovery_run_id = ANY(%s)"
             run_params = [run_ids]
 
-        cursor.execute(f"SELECT COUNT(*) as total FROM identity_exposures WHERE true{run_filter}", run_params)
+        combined_params = org_params + run_params
+
+        cursor.execute(f"SELECT COUNT(*) as total FROM identity_exposures WHERE true{org_filter}{run_filter}", combined_params)
         total = cursor.fetchone()['total']
 
-        cursor.execute(f"SELECT COUNT(*) as open FROM identity_exposures WHERE status = 'open'{run_filter}", run_params)
+        cursor.execute(f"SELECT COUNT(*) as open FROM identity_exposures WHERE status = 'open'{org_filter}{run_filter}", combined_params)
         open_count = cursor.fetchone()['open']
 
         cursor.execute(f"""
             SELECT exposure_type, COUNT(*) as count
-            FROM identity_exposures WHERE status = 'open'{run_filter}
+            FROM identity_exposures WHERE status = 'open'{org_filter}{run_filter}
             GROUP BY exposure_type ORDER BY count DESC
-        """, run_params)
+        """, combined_params)
         by_type = {r['exposure_type']: r['count'] for r in cursor.fetchall()}
 
         cursor.execute(f"""
             SELECT severity, COUNT(*) as count
-            FROM identity_exposures WHERE status = 'open'{run_filter}
+            FROM identity_exposures WHERE status = 'open'{org_filter}{run_filter}
             GROUP BY severity ORDER BY count DESC
-        """, run_params)
+        """, combined_params)
         by_severity = {r['severity']: r['count'] for r in cursor.fetchall()}
 
         cursor.close()
@@ -21128,6 +21500,16 @@ class Database:
         if Database._attack_paths_ensured:
             return
         cursor = self.conn.cursor()
+        # Check if table already exists — skip DDL to avoid privilege errors with app user
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'attack_paths'
+            )
+        """)
+        if cursor.fetchone()[0]:
+            Database._attack_paths_ensured = True
+            return
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS attack_paths (
                 id SERIAL PRIMARY KEY,
@@ -21185,6 +21567,20 @@ class Database:
             ON attack_paths(organization_id, path_fingerprint)
             WHERE path_fingerprint IS NOT NULL
         """)
+        # Drop legacy unique constraint on (discovery_run_id, source_entity_id, path_type, description).
+        # This conflicts with fingerprint-based UPSERT when descriptions are truncated — e.g., multiple
+        # Owner → /providers/Microsoft.Management/managementGroups/<different> paths produce distinct
+        # fingerprints but the same truncated description, causing the whole save batch to roll back.
+        # path_fingerprint is now the canonical uniqueness key.
+        cursor.execute("SAVEPOINT drop_legacy_ap_uq")
+        try:
+            cursor.execute("""
+                ALTER TABLE attack_paths
+                DROP CONSTRAINT IF EXISTS attack_paths_discovery_run_id_source_entity_id_path_type_de_key
+            """)
+            cursor.execute("RELEASE SAVEPOINT drop_legacy_ap_uq")
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT drop_legacy_ap_uq")
         # Cleanup migration: delete orphaned attack paths whose source identity
         # no longer exists in any discovery run (stale seed/demo data).
         try:
@@ -21657,15 +22053,34 @@ class Database:
         cursor.close()
         return self._format_attack_path_row(dict(row)) if row else {}
 
-    def get_attack_paths_for_identity(self, identity_id: int) -> list:
-        """Get all v1 attack paths for a specific identity (DB id).
+    def get_attack_paths_for_identity(self, identity_id: int, identity_id_str: str = None) -> list:
+        """Get all v1 attack paths for a specific identity.
 
+        Column names verified via attack_paths table schema inspection:
+          - identity_id    INTEGER FK → identities(id)   — DB integer PK
+          - source_entity_id TEXT                         — Azure object UUID
+          - target_resource_id TEXT                       — ARM resource path
+
+        Matches on identity_id (int FK) OR source_entity_id (text UUID).
+        This query is identical for all identities — no per-identity branching.
         Ordered by path_risk_score DESC.
         """
         self._ensure_attack_paths_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         org_id = self._organization_id
-        if org_id is not None:
+        if identity_id_str and org_id is not None:
+            cursor.execute("""
+                SELECT * FROM attack_paths
+                WHERE (identity_id = %s OR source_entity_id = %s) AND organization_id = %s
+                ORDER BY path_risk_score DESC
+            """, (identity_id, identity_id_str, org_id))
+        elif identity_id_str:
+            cursor.execute("""
+                SELECT * FROM attack_paths
+                WHERE identity_id = %s OR source_entity_id = %s
+                ORDER BY path_risk_score DESC
+            """, (identity_id, identity_id_str))
+        elif org_id is not None:
             cursor.execute("""
                 SELECT * FROM attack_paths
                 WHERE identity_id = %s AND organization_id = %s
@@ -25036,21 +25451,39 @@ class Database:
 
     # ── Investigation context methods (AI Copilot Enhancement) ─────
 
-    def get_identity_investigation_context(self, identity_id: int) -> dict:
-        """Gather comprehensive identity data for AI investigation."""
+    def get_identity_investigation_context(self, identity_id: int,
+                                              run_ids: list = None) -> dict:
+        """Gather comprehensive identity data for AI investigation.
+
+        Args:
+            identity_id: integer DB id of the identity
+            run_ids: list of org-scoped discovery_run_ids to restrict lookup
+                     (prevents cross-org data access since identities has no RLS)
+        """
         from psycopg2.extras import RealDictCursor
         ctx = {}
         try:
             cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            # Core identity
-            cursor.execute("""
-                SELECT i.id, i.identity_id, i.display_name, i.identity_type,
-                       i.identity_category, i.risk_level, i.risk_score, i.risk_reasons,
-                       i.credential_status, i.credential_count, i.credential_expiration,
-                       i.activity_status, i.last_sign_in, i.enabled, i.cloud,
-                       i.discovery_run_id
-                FROM identities i WHERE i.id = %s
-            """, (identity_id,))
+            # Core identity — scoped to caller's discovery runs
+            if run_ids:
+                cursor.execute("""
+                    SELECT i.id, i.identity_id, i.display_name, i.identity_type,
+                           i.identity_category, i.risk_level, i.risk_score, i.risk_reasons,
+                           i.credential_status, i.credential_count, i.credential_expiration,
+                           i.activity_status, i.last_sign_in, i.enabled, i.cloud,
+                           i.discovery_run_id
+                    FROM identities i
+                    WHERE i.id = %s AND i.discovery_run_id = ANY(%s)
+                """, (identity_id, run_ids))
+            else:
+                cursor.execute("""
+                    SELECT i.id, i.identity_id, i.display_name, i.identity_type,
+                           i.identity_category, i.risk_level, i.risk_score, i.risk_reasons,
+                           i.credential_status, i.credential_count, i.credential_expiration,
+                           i.activity_status, i.last_sign_in, i.enabled, i.cloud,
+                           i.discovery_run_id
+                    FROM identities i WHERE i.id = %s
+                """, (identity_id,))
             identity = cursor.fetchone()
             if not identity:
                 cursor.close()

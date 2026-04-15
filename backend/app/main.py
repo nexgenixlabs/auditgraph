@@ -264,6 +264,7 @@ from app.api.handlers import (
     verify_admin_invoice,
     get_client_billing_preview,
     get_client_connections,
+    get_inventory_summary,
     create_client_connection,
     update_client_connection,
     delete_client_connection,
@@ -310,6 +311,7 @@ from app.api.handlers import (
     platform_integrity_check_handler,
     data_source_map_handler,
     metric_integrity_debug_handler,
+    governance_reconciliation_handler,
     # Phase 5: Launch Readiness
     validate_launch_readiness,
     # Phase 6: Scan Schedules, Stripe, Pilot, Password Policy
@@ -534,6 +536,10 @@ from app.api.handlers import (
     get_remediation_queue_item_detail,
     patch_remediation_queue_item,
     get_remediation_queue_summary,
+    get_ciso_summary,
+    recompute_cvss_scores,
+    get_identity_top_fixes,
+    get_org_remediation_summary,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -927,6 +933,7 @@ def create_app():
             ('permission_plane_column', lambda: _db_init.ensure_permission_plane_column()),
             ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
             ('identity_lineage_columns', lambda: _db_init.ensure_identity_lineage_columns()),
+            ('last_activity_columns', lambda: _db_init.ensure_last_activity_columns()),
             ('spn_exposure', lambda: _db_init._ensure_spn_exposure()),
             ('app_reg_exposure', lambda: _db_init._ensure_app_reg_exposure()),
             ('workload_telemetry', lambda: _db_init._ensure_workload_telemetry_tables()),
@@ -1111,6 +1118,7 @@ def create_app():
         return auth_verify_email()
 
     @app.get("/api/plan/limits")
+    @require_role('viewer')
     def plan_limits():
         return get_plan_limits_handler()
 
@@ -1126,10 +1134,13 @@ def create_app():
         return auth_logout()
 
     @app.get("/api/auth/me")
+    @require_role('viewer')
     def me():
         return auth_me()
 
     @app.put("/api/auth/password")
+    @require_role('viewer')
+    @rate_limit(max_requests=5, window_seconds=300)
     @validate_json(CHANGE_PASSWORD_SCHEMA)
     def password_change():
         return change_password()
@@ -2054,6 +2065,21 @@ def create_app():
         return get_attack_surface_score()
 
     # -----------------------
+    # Tier 1: Inventory (always available)
+    # Also available at /api/v1/inventory/summary via _register_v1_routes() auto-mirror
+    # -----------------------
+    @app.get("/api/inventory/summary")
+    def inventory_summary():
+        return get_inventory_summary()
+
+    # -----------------------
+    # CISO Dashboard SSOT
+    # -----------------------
+    @app.get("/api/ciso/summary")
+    def ciso_summary():
+        return get_ciso_summary()
+
+    # -----------------------
     # Canonical risk/exposure/attack-path summaries
     # -----------------------
     @app.get("/api/risk/summary")
@@ -2789,6 +2815,11 @@ def create_app():
     def system_data_source_map():
         return data_source_map_handler()
 
+    @app.get("/api/system/governance-reconciliation")
+    @require_role('admin')
+    def system_governance_reconciliation():
+        return governance_reconciliation_handler()
+
     @app.get("/api/system/metric-integrity-debug")
     @require_role('admin')
     def system_metric_integrity_debug():
@@ -2798,6 +2829,30 @@ def create_app():
     @require_portal_access()
     def system_launch_readiness():
         return validate_launch_readiness()
+
+    # CVSS Identity Scoring
+    @app.post("/api/scoring/recompute")
+    @require_role('admin')
+    def scoring_recompute():
+        return recompute_cvss_scores()
+
+    # Fix Prioritizer — per-identity top 3 fixes
+    @app.get("/api/identities/<path:identity_id>/fixes")
+    @require_role('viewer', 'auditor', 'admin')
+    def identity_top_fixes(identity_id):
+        return get_identity_top_fixes(identity_id)
+
+    # Canonical recommendation route (W2-R3)
+    @app.get("/api/remediation/recommendations/<path:identity_id>")
+    @require_role('viewer', 'auditor', 'admin')
+    def remediation_recommendations(identity_id):
+        return get_identity_top_fixes(identity_id)
+
+    # Org-level recommendations (W2-R3)
+    @app.get("/api/remediation/org-summary")
+    @require_role('viewer', 'auditor', 'admin')
+    def remediation_org_summary():
+        return get_org_remediation_summary()
 
     # Phase 58: Compliance Auto-Remediation
     @app.post("/api/identities/<path:identity_id>/remediation-execute")
@@ -3851,6 +3906,81 @@ def create_app():
     def platform_metrics():
         return get_system_metrics_handler()
 
+    # ─── W2-A1: Approval Workflow + W2-A2: Audit Trail ──────────────
+    from app.api.routes.approvals import (
+        create_approval_request,
+        list_approval_requests,
+        get_approval_request,
+        approve_request,
+        reject_request,
+        cancel_request,
+        get_approvals_summary,
+        get_audit_log,
+        get_audit_log_for_identity,
+        get_audit_log_summary,
+        execute_approval_request,
+        get_execution_history,
+        rollback_execution,
+        get_execution_queue,
+    )
+
+    @app.post("/api/approvals")
+    def approvals_create():
+        return create_approval_request()
+
+    @app.get("/api/approvals/summary")
+    def approvals_summary():
+        return get_approvals_summary()
+
+    @app.get("/api/approvals")
+    def approvals_list():
+        return list_approval_requests()
+
+    @app.get("/api/approvals/<request_ref>")
+    def approvals_get(request_ref):
+        return get_approval_request(request_ref)
+
+    @app.post("/api/approvals/<request_ref>/approve")
+    def approvals_approve(request_ref):
+        return approve_request(request_ref)
+
+    @app.post("/api/approvals/<request_ref>/reject")
+    def approvals_reject(request_ref):
+        return reject_request(request_ref)
+
+    @app.post("/api/approvals/<request_ref>/cancel")
+    def approvals_cancel(request_ref):
+        return cancel_request(request_ref)
+
+    # ─── W3: Execution Engine ──────────────
+    @app.post("/api/approvals/<request_ref>/execute")
+    def approvals_execute(request_ref):
+        return execute_approval_request(request_ref)
+
+    @app.get("/api/approvals/<request_ref>/execution-history")
+    def approvals_exec_history(request_ref):
+        return get_execution_history(request_ref)
+
+    @app.post("/api/approvals/<request_ref>/rollback")
+    def approvals_rollback(request_ref):
+        return rollback_execution(request_ref)
+
+    @app.get("/api/execution/queue")
+    def execution_queue():
+        return get_execution_queue()
+
+    @app.get("/api/audit-log/summary")
+    def audit_log_summary():
+        return get_audit_log_summary()
+
+    @app.get("/api/audit-log/identity/<identity_id>")
+    def audit_log_identity(identity_id):
+        return get_audit_log_for_identity(identity_id)
+
+    @app.get("/api/audit-log")
+    def audit_log_list():
+        return get_audit_log()
+
     # -----------------------
     # Start background scheduler (only in main process, not reloader)
     # -----------------------
@@ -3923,6 +4053,22 @@ def create_app():
     # Existing /api/ routes remain unchanged (backward compatible).
     # New /api/v1/ prefix allows future version evolution.
     _register_v1_routes(app)
+
+    # ── Phase 3 FastAPI mount (A3) ──
+    # Mount the Phase 3 FastAPI routers (identities, resources, snapshots)
+    # under the Flask WSGI stack via a2wsgi. This installs a dispatcher
+    # that delegates matching (method, path) tuples to FastAPI and falls
+    # through to Flask for everything else — including every legacy v1
+    # mirror created by _register_v1_routes that Phase 3 does not own.
+    # See app.api.phase3_wsgi.SHADOWED_ROUTES for the exact shadow set.
+    try:
+        from app.api.phase3_wsgi import install as install_phase3
+        install_phase3(app)
+    except Exception:
+        logger.exception(
+            "Phase 3 FastAPI mount failed — Flask continues without "
+            "/api/v1 Phase 3 routes"
+        )
 
     return app
 

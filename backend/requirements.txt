@@ -94,3 +94,10 @@ sendgrid>=6.10.0
 # API Security & Validation
 jsonschema>=4.20.0
 tenacity>=8.2.0
+
+# Phase 3 async layer (FastAPI routes under app/api/routes/*) —
+# additive, does not replace the sync psycopg2 Flask stack.
+asyncpg>=0.29.0
+greenlet>=3.0.0
+# A3: ASGI → WSGI bridge for mounting FastAPI under Flask.
+a2wsgi>=1.10.0

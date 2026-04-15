@@ -373,6 +373,22 @@ class AzureDiscoveryEngine:
         self._update_job_progress('initializing', 5, discovery_run_id=run_id)
         self._update_job_metrics(subscriptions=len(self.subscriptions))
 
+        # Capture scanner's own public IP (assigned to discovery SPN in IP enrichment)
+        self._scanner_ip = None
+        try:
+            import aiohttp as _aio
+            async with _aio.ClientSession() as _ip_session:
+                async with _ip_session.get(
+                    'https://api.ipify.org?format=json',
+                    timeout=_aio.ClientTimeout(total=5)
+                ) as _ip_resp:
+                    if _ip_resp.status == 200:
+                        _ip_data = await _ip_resp.json()
+                        self._scanner_ip = _ip_data.get('ip')
+                        logger.info("Scanner public IP: %s", self._scanner_ip)
+        except Exception as e:
+            logger.debug("Could not detect scanner public IP: %s", e)
+
         # Step 1: Get role assignments FIRST
         logger.info("Discovering Role Assignments...")
         self._update_job_progress('discovering_roles', 10)
@@ -474,6 +490,17 @@ class AzureDiscoveryEngine:
         group_memberships = await self._discover_group_memberships(groups)
         self._update_job_progress('discovering_groups', 44)
 
+        # Step 5b2: Identity-centric memberOf enrichment
+        # Always run — merges with group-centric results and catches memberships
+        # that group-centric discovery may miss (e.g. if GroupMember.Read.All is
+        # not granted, or if the group-centric approach returns partial data).
+        logger.info("Running identity-centric memberOf enrichment...")
+        group_memberships = await self._discover_identity_group_memberships(
+            all_identities, groups, group_memberships
+        )
+        logger.info("After memberOf enrichment: %s groups with members",
+                    sum(1 for v in group_memberships.values() if v))
+
         # Step 5c: Compute member/nested counts (rbac_roles populated at save time
         # from the canonical role_assignments list to avoid JSONB drift — FIX A)
         from app.constants.roles import RBACRole
@@ -515,10 +542,27 @@ class AzureDiscoveryEngine:
         self._update_job_progress('analyzing_risk', 52)
         identities_with_creds = self._check_credentials(identities_with_risks)
 
+        # Attach role_assignments to each identity dict for the activity waterfall
+        _ra_by_pid = {}
+        for ra in role_assignments:
+            _ra_by_pid.setdefault(ra['principal_id'], []).append(ra)
+        for identity in identities_with_creds:
+            pid = identity.get('object_id') or identity.get('principal_id')
+            if pid and pid in _ra_by_pid:
+                identity['role_assignments'] = _ra_by_pid[pid]
+
         # Step 8: Check activity
         logger.info("Checking Last Activity...")
         self._update_job_progress('analyzing_risk', 56)
         final_identities = self._check_activity(identities_with_creds)
+
+        # Step 8.05: Enrich with last observed IP from ARM Activity Log (no P2 required)
+        self._update_job_progress('analyzing_risk', 57)
+        if await self._validate_arm_activity_log_permission():
+            logger.info("Enriching identities with ARM Activity Log IPs...")
+            await self._fetch_last_observed_ips(final_identities)
+        else:
+            logger.info("Skipping ARM Activity Log IP enrichment — permission not available")
 
         # Step 8.1: Module 4 — Sign-in Intelligence
         logger.info("Discovering sign-in intelligence (M4)...")
@@ -884,6 +928,50 @@ class AzureDiscoveryEngine:
             except Exception as e2:
                 logger.error("Fallback completion also failed: %s", e2)
                 self.db._rollback()
+
+        # Phase 3 graph writer — populate graph_nodes + graph_edges for
+        # the blast-radius / attack-path traversal engine.  Gated by
+        # USE_BLAST_RADIUS so it can be toggled without redeploying.
+        # Failure here must NEVER abort the discovery run.
+        try:
+            from app.config.feature_flags import FeatureFlags
+            if FeatureFlags.USE_BLAST_RADIUS:
+                from app.services.phase3_graph_writer import Phase3GraphWriter
+                gw = Phase3GraphWriter(self.db_org_id, self.cloud_connection_id, self.db)
+                gw_summary = gw.write_from_discovery(
+                    final_identities,
+                    permissions_map=permissions_map,
+                )
+                logger.info(
+                    "Phase 3 graph: nodes=%d edges=%d invalidated=%d",
+                    gw_summary.get("nodes_upserted", 0),
+                    gw_summary.get("edges_upserted", 0),
+                    gw_summary.get("edges_invalidated", 0),
+                )
+        except Exception as e:
+            logger.warning("Phase 3 graph writer warning (non-fatal): %s", e)
+
+        # Phase 3 skeleton writer — populate builder input tables
+        # (identity_role_assignments, identity_activity, identity_privilege_summary,
+        # identity_list) so B02/B05/B07 builders return real data.
+        # Always runs (not feature-gated) — these tables are the foundation
+        # for the list endpoint and all builder state.
+        try:
+            from app.services.phase3_skeleton_writer import Phase3SkeletonWriter
+            sw = Phase3SkeletonWriter(self.db_org_id, self.cloud_connection_id, self.db)
+            sw_summary = sw.write_from_discovery(
+                final_identities,
+                discovery_run_id=run_id,
+            )
+            logger.info(
+                "Phase 3 skeleton: roles=%d activity=%d privilege=%d list=%d",
+                sw_summary.get("identity_role_assignments", 0),
+                sw_summary.get("identity_activity", 0),
+                sw_summary.get("identity_privilege_summary", 0),
+                sw_summary.get("identity_list", 0),
+            )
+        except Exception as e:
+            logger.warning("Phase 3 skeleton writer warning (non-fatal): %s", e)
 
         # Sync discovered subscriptions into cloud_subscriptions registry
         try:
@@ -1766,6 +1854,12 @@ class AzureDiscoveryEngine:
         finally:
             cursor.close()
 
+        # Build group_name_map: group_id → display_name
+        group_name_map = {
+            (g.get('group_id') or g.get('id')): g.get('display_name', '')
+            for g in groups if g.get('group_id') or g.get('id')
+        }
+
         # Build group_role_index: group_id → list of role dicts
         group_role_index = {}
         for group in groups:
@@ -1836,6 +1930,7 @@ class AzureDiscoveryEngine:
                         'role_type': 'azure',
                         'principal_type': ptype,
                         'group_principal_azure_object_id': group_id,
+                        'group_display_name': group_name_map.get(group_id, ''),
                     })
                     expanded_count += 1
 
@@ -4942,7 +5037,7 @@ class AzureDiscoveryEngine:
                     resource_type = parts[provider_idx + 1] + '/' + parts[provider_idx + 2]
                     resource_name = parts[-1]
                     return (resource_type, resource_name)
-            except:
+            except Exception:
                 pass
 
         return (None, parts[-1] if parts else None)
@@ -5206,6 +5301,149 @@ class AzureDiscoveryEngine:
             logger.error("Group membership discovery failed: %s", e)
             return memberships
 
+    async def _discover_identity_group_memberships(
+        self, identities: List[Dict], groups: List[Dict],
+        existing_memberships: Dict[str, List[Dict]]
+    ) -> Dict[str, List[Dict]]:
+        """Identity-centric group membership discovery via memberOf endpoint.
+
+        For each identity, calls:
+          - GET /users/{object_id}/memberOf          (human_user, guest)
+          - GET /servicePrincipals/{object_id}/memberOf  (service_principal, managed_identity_*)
+
+        Works with Directory.Read.All, GroupMember.Read.All, or Group.Read.All.
+        Always runs to enrich group-centric results with identity-centric data.
+
+        Returns updated memberships dict: group_id -> list of member dicts.
+        Merges with existing_memberships (deduplicates by member_object_id per group).
+        """
+        import aiohttp
+
+        # Build lookup structures from discovered groups
+        group_id_set = {g.get('group_id') or g.get('id') for g in groups if g.get('group_id') or g.get('id')}
+        group_name_map = {
+            (g.get('group_id') or g.get('id')): g.get('display_name', '')
+            for g in groups if g.get('group_id') or g.get('id')
+        }
+
+        memberships: Dict[str, List[Dict]] = {gid: list(members) for gid, members in existing_memberships.items()}
+        # Track existing members per group for dedup
+        existing_members: Dict[str, set] = {
+            gid: {m.get('member_object_id') for m in members}
+            for gid, members in memberships.items()
+        }
+
+        if not groups or not identities:
+            return memberships
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+        except Exception as e:
+            logger.error("Failed to get token for memberOf discovery: %s", e)
+            return memberships
+
+        total_added = 0
+        groups_touched = set()
+        permission_denied = False
+        select_fields = "id,displayName,@odata.type,securityEnabled,groupTypes,isAssignableToRole,mailEnabled"
+
+        async with aiohttp.ClientSession() as session:
+            for idx, identity in enumerate(identities):
+                oid = identity.get('object_id') or identity.get('id')
+                if not oid:
+                    continue
+
+                cat = identity.get('identity_category', '')
+                if cat in ('human_user', 'guest'):
+                    endpoint = f"https://graph.microsoft.com/v1.0/users/{oid}/memberOf"
+                elif cat in ('service_principal', 'managed_identity_system', 'managed_identity_user'):
+                    endpoint = f"https://graph.microsoft.com/v1.0/servicePrincipals/{oid}/memberOf"
+                else:
+                    continue
+
+                url: Optional[str] = f"{endpoint}?$select={select_fields}&$top=999"
+
+                # Paginate through all memberOf results
+                while url:
+                    try:
+                        async with session.get(url, headers=headers) as resp:
+                            if resp.status == 403:
+                                if not permission_denied:
+                                    logger.warning(
+                                        "Identity memberOf discovery: 403 on %s. "
+                                        "Required permission (Directory.Read.All or GroupMember.Read.All) "
+                                        "may not be granted. Aborting memberOf enrichment.", oid
+                                    )
+                                    permission_denied = True
+                                url = None
+                                break
+                            if resp.status == 404:
+                                url = None
+                                break
+                            if resp.status != 200:
+                                logger.debug("memberOf returned %s for %s", resp.status, oid)
+                                url = None
+                                break
+                            data = await resp.json()
+                    except Exception as e:
+                        logger.debug("memberOf request error for %s: %s", oid, e)
+                        url = None
+                        break
+
+                    display_name = identity.get('display_name', '')
+                    for obj in data.get('value', []):
+                        odata_type = obj.get('@odata.type', '')
+                        if '#microsoft.graph.group' not in odata_type:
+                            continue
+                        if not obj.get('securityEnabled', False):
+                            continue
+
+                        grp_id = obj.get('id')
+                        if not grp_id or grp_id not in group_id_set:
+                            continue
+
+                        # Dedup
+                        if grp_id not in existing_members:
+                            existing_members[grp_id] = set()
+                        if oid in existing_members[grp_id]:
+                            continue
+
+                        if grp_id not in memberships:
+                            memberships[grp_id] = []
+
+                        if cat in ('human_user', 'guest'):
+                            member_type = 'user'
+                        else:
+                            member_type = 'servicePrincipal'
+
+                        memberships[grp_id].append({
+                            'member_object_id': oid,
+                            'member_type': member_type,
+                            'member_display_name': display_name,
+                            'is_nested': False,
+                            'depth': 0,
+                        })
+                        existing_members[grp_id].add(oid)
+                        total_added += 1
+                        groups_touched.add(grp_id)
+
+                    # Follow pagination link
+                    url = data.get('@odata.nextLink')
+
+                if permission_denied:
+                    break
+
+                # Rate limit — sleep every 10 identities
+                if idx > 0 and idx % 10 == 0:
+                    await asyncio.sleep(0.1)
+
+        logger.info(
+            "Identity-centric memberOf: discovered %s memberships across %s groups",
+            total_added, len(groups_touched)
+        )
+        return memberships
+
     def _save_entra_groups(self, run_id: int, groups: List[Dict], group_memberships: Dict[str, List[Dict]]):
         """Save discovered groups and their memberships to the database."""
         saved = 0
@@ -5376,7 +5614,7 @@ class AzureDiscoveryEngine:
                         try:
                             role_def = await self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(assignment.role_definition_id).get()
                             role_name = role_def.display_name if role_def else "Unknown Role"
-                        except:
+                        except Exception:
                             role_name = "Unknown Role"
                         
                         # Calculate Entra role risk level
@@ -5623,7 +5861,7 @@ class AzureDiscoveryEngine:
                 else:
                     signin_dt = last_sign_in
                 days_since_signin = (datetime.now(timezone.utc) - signin_dt).days
-            except:
+            except Exception:
                 pass
 
         has_expired_creds = credential_status and 'expired' in credential_status.lower()
@@ -5927,7 +6165,7 @@ class AzureDiscoveryEngine:
                             active_cred_count += 1
                             if (end_dt - now).days < 30:
                                 has_expiring_soon = True
-                    except:
+                    except Exception:
                         active_cred_count += 1
 
             if has_expired:
@@ -6058,6 +6296,7 @@ class AzureDiscoveryEngine:
 
         for identity in identities:
             last_sign_in = identity.get('last_sign_in')
+            observed = identity.get('observed_last_used')
 
             if last_sign_in:
                 try:
@@ -6065,6 +6304,8 @@ class AzureDiscoveryEngine:
                         signin_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00'))
                     else:
                         signin_dt = last_sign_in
+                        if signin_dt.tzinfo is None:
+                            signin_dt = signin_dt.replace(tzinfo=timezone.utc)
 
                     days_since = (datetime.now(timezone.utc) - signin_dt).days
 
@@ -6077,29 +6318,72 @@ class AzureDiscoveryEngine:
                     else:
                         identity['activity_status'] = 'stale'
                         stale_count += 1
-                except:
+                except Exception:
+                    identity['activity_status'] = 'unknown'
+                    unknown_count += 1
+            elif observed:
+                # AuditGraph-observed activity (connector SPN authenticates
+                # during scan). Classify by age of observation.
+                try:
+                    if isinstance(observed, str):
+                        obs_dt = datetime.fromisoformat(str(observed).replace('Z', '+00:00'))
+                        if obs_dt.tzinfo is None:
+                            obs_dt = obs_dt.replace(tzinfo=timezone.utc)
+                    else:
+                        obs_dt = observed
+                        if obs_dt.tzinfo is None:
+                            obs_dt = obs_dt.replace(tzinfo=timezone.utc)
+                    days_since = (datetime.now(timezone.utc) - obs_dt).days
+                    if days_since <= 30:
+                        identity['activity_status'] = 'active'
+                        active_count += 1
+                    elif days_since <= 90:
+                        identity['activity_status'] = 'inactive'
+                        inactive_count += 1
+                    else:
+                        identity['activity_status'] = 'stale'
+                        stale_count += 1
+                except Exception:
                     identity['activity_status'] = 'unknown'
                     unknown_count += 1
             else:
-                # No sign-in data - check if identity is new (created recently)
+                # No sign-in data — use multi-signal behavioral intelligence
+                # to avoid false never_used classification.
                 created = identity.get('created_datetime')
+                days_old = None
                 if created:
                     try:
-                        if isinstance(created, str):
-                            created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                        else:
-                            created_dt = created
+                        created_dt = datetime.fromisoformat(str(created).replace('Z', '+00:00')) if isinstance(created, str) else created
                         days_old = (datetime.now(timezone.utc) - created_dt).days
-                        if days_old < 7:
-                            # New identity, no sign-in expected yet
-                            identity['activity_status'] = 'unknown'
-                            unknown_count += 1
-                        else:
-                            identity['activity_status'] = 'never_used'
-                            never_used_count += 1
-                    except:
-                        identity['activity_status'] = 'never_used'
-                        never_used_count += 1
+                    except Exception:
+                        pass
+
+                if days_old is not None and days_old < 7:
+                    # Recently created — too early to classify
+                    identity['activity_status'] = 'recently_created'
+                    unknown_count += 1
+
+                # Signal 1: Federated credential = OIDC/workload identity (authenticates without sign-in logs)
+                elif identity.get('federated_workload_type') or identity.get('is_federated'):
+                    identity['activity_status'] = 'likely_active'
+                    active_count += 1
+
+                # Signal 2: Privileged accounts (T0/T1) should never be classified never_used
+                # without explicit decommission evidence — they require manual review
+                elif identity.get('privilege_tier') in ('T0', 'T1', 0, 1):
+                    identity['activity_status'] = 'likely_active'
+                    active_count += 1
+
+                # Signal 3: Has active credentials (secrets/certs) = likely in use
+                elif (identity.get('credential_count') or 0) > 0 and identity.get('credential_risk') != 'expired':
+                    identity['activity_status'] = 'likely_active'
+                    active_count += 1
+
+                # Signal 4: Recent ARM role assignments (< 90 days) = operational identity
+                elif self._has_recent_role_assignment(identity, max_days=90):
+                    identity['activity_status'] = 'likely_active'
+                    active_count += 1
+
                 else:
                     identity['activity_status'] = 'never_used'
                     never_used_count += 1
@@ -6116,6 +6400,13 @@ class AzureDiscoveryEngine:
             new_flags = signin_result['signin_risk_flags']
             identity['workload_risk_flags'] = list(dict.fromkeys(existing_flags + new_flags))
 
+            # ── Canonical last_activity waterfall (SSOT) ──────────────
+            try:
+                self._compute_last_activity(identity)
+            except Exception as exc:
+                logger.warning("_compute_last_activity failed for %s: %s",
+                               identity.get('display_name', '?'), exc)
+
         logger.info("Activity Summary:")
         if active_count > 0:
             logger.info("Active (30 days): %s", active_count)
@@ -6129,7 +6420,372 @@ class AzureDiscoveryEngine:
             logger.info("Unknown: %s", unknown_count)
 
         return identities
-    
+
+    @staticmethod
+    def _has_recent_role_assignment(identity: Dict, max_days: int = 90) -> bool:
+        """Check if identity has ARM role assignments created within max_days."""
+        from datetime import datetime, timezone
+        roles = identity.get('role_assignments') or []
+        now = datetime.now(timezone.utc)
+        for ra in roles:
+            created = ra.get('created_on')
+            if not created:
+                continue
+            try:
+                if isinstance(created, str):
+                    created = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                if hasattr(created, 'timestamp'):
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if (now - created).days <= max_days:
+                        return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _compute_last_activity(identity: Dict):
+        """Compute canonical last_activity_date/source/confidence via priority waterfall.
+
+        Priority (highest first):
+        1. signInActivity.lastSignInDateTime → graph_signin / high
+        2. lastNonInteractiveSignInDateTime → entra_noninteractive / high
+        3. observed_last_used (AuditGraph scan — currently only set for the
+           discovery connector SPN, which authenticated to Azure to run us) →
+           auditgraph_scan / high
+        4. Most recent role_assignments[].created_on → role_assignment / medium
+        5. credential_expiration (non-expired = implies rotation) → credential_rotation / medium
+        6. federated_credential_created / created_datetime for federated → federated_credential / medium
+        7. created_datetime → created_date / low
+        8. null → null / none
+
+        Note: workload_signin_events (signal 0) is applied at API query time,
+        not here — it lives in a separate table.
+        """
+        from datetime import datetime, timezone
+
+        def _parse(v):
+            if not v:
+                return None
+            if hasattr(v, 'timestamp'):
+                # Normalize naive datetimes to UTC to prevent
+                # "offset-naive vs offset-aware" comparison errors.
+                if v.tzinfo is None:
+                    v = v.replace(tzinfo=timezone.utc)
+                return v
+            try:
+                dt = datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except (ValueError, TypeError):
+                return None
+
+        best_date = None
+        source = None
+        confidence = 'none'
+
+        # Signal 1: Graph signInActivity (interactive sign-in)
+        last_si = _parse(identity.get('last_sign_in'))
+        if last_si:
+            best_date = last_si
+            source = 'graph_signin'
+            confidence = 'high'
+
+        # Signal 2: Non-interactive sign-in
+        last_ni = _parse(identity.get('last_noninteractive_signin'))
+        if last_ni and (best_date is None or last_ni > best_date):
+            best_date = last_ni
+            source = 'entra_noninteractive'
+            confidence = 'high'
+
+        # Signal 3: AuditGraph scan activity (observed_last_used)
+        # We set this for the connector SPN at discovery time — it proves the
+        # SPN successfully authenticated to Azure within the last few minutes.
+        obs = _parse(identity.get('observed_last_used'))
+        if obs and (best_date is None or obs > best_date):
+            best_date = obs
+            source = 'auditgraph_scan'
+            confidence = 'high'
+
+        # Signal 3: Most recent role assignment created_on
+        role_assignments = identity.get('role_assignments') or []
+        for ra in role_assignments:
+            ra_dt = _parse(ra.get('created_on'))
+            if ra_dt and (best_date is None or ra_dt > best_date):
+                best_date = ra_dt
+                source = 'role_assignment'
+                confidence = 'medium'
+
+        # Signal 4: Credential expiration (non-expired implies rotation activity)
+        cred_exp = _parse(identity.get('credential_expiration'))
+        if cred_exp and cred_exp > datetime.now(timezone.utc):
+            # Non-expired credential — use as activity signal only if nothing better
+            if best_date is None:
+                best_date = cred_exp
+                source = 'credential_rotation'
+                confidence = 'medium'
+
+        # Signal 5: Federated credential
+        if identity.get('federated_workload_type') or identity.get('is_federated'):
+            created = _parse(identity.get('created_datetime'))
+            if created and best_date is None:
+                best_date = created
+                source = 'federated_credential'
+                confidence = 'medium'
+
+        # Signal 6: created_datetime as last resort
+        if best_date is None:
+            created = _parse(identity.get('created_datetime'))
+            if created:
+                best_date = created
+                source = 'created_date'
+                confidence = 'low'
+
+        identity['last_activity_date'] = best_date.isoformat() if best_date else None
+        identity['last_activity_source'] = source
+        identity['last_activity_confidence'] = confidence
+
+    async def _validate_arm_activity_log_permission(self) -> bool:
+        """Verify ARM Activity Log read permission exists before bulk fetch.
+
+        Tests a single $top=1 call against the first subscription.
+        Logs clear guidance if permission is missing (403).
+        Returns True if ARM Activity Log is accessible.
+        """
+        import aiohttp
+
+        sub_ids = [s['id'] for s in self.subscriptions]
+        if not sub_ids:
+            return False
+
+        try:
+            arm_token = self.credential.get_token("https://management.azure.com/.default")
+            arm_headers = {"Authorization": f"Bearer {arm_token.token}"}
+        except Exception as e:
+            logger.warning("ARM token acquisition failed — cannot validate Activity Log permission: %s", e)
+            return False
+
+        test_sub = sub_ids[0]
+
+        try:
+            from urllib.parse import quote
+            # ARM Activity Log requires $filter with eventTimestamp
+            cutoff = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            filter_str = f"eventTimestamp ge '{cutoff}'"
+            async with aiohttp.ClientSession() as session:
+                url = (
+                    f"https://management.azure.com"
+                    f"/subscriptions/{test_sub}"
+                    f"/providers/microsoft.insights"
+                    f"/eventtypes/management/values"
+                    f"?api-version=2015-04-01"
+                    f"&$filter={quote(filter_str)}"
+                    f"&$top=1"
+                )
+                async with session.get(url, headers=arm_headers) as resp:
+                    if resp.status == 200:
+                        logger.info("ARM Activity Log permission verified for subscription %s", test_sub[:8])
+                        return True
+                    elif resp.status == 403:
+                        logger.warning(
+                            "ARM Activity Log PERMISSION MISSING for subscription %s. "
+                            "Last IP column will show '—'. "
+                            "Fix: assign 'Monitoring Reader' role to AuditGraph service principal "
+                            "on subscription %s. No P2 license required.",
+                            test_sub, test_sub
+                        )
+                        return False
+                    else:
+                        body = await resp.text()
+                        logger.warning("ARM Activity Log validation returned HTTP %s for %s: %s", resp.status, test_sub[:8], body[:500])
+                        return False
+        except Exception as e:
+            logger.warning("ARM Activity Log validation failed: %s", e)
+            return False
+
+    async def _fetch_last_observed_ips(self, identities: List[Dict]) -> None:
+        """Fetch last observed IP from ARM Activity Log for all identities.
+
+        ARM Activity Log is free (no P2 license required), 90-day retention.
+        Falls back to directory audit log for identities with no ARM activity.
+        Runs as a batch enrichment pass after _check_activity().
+        """
+        import aiohttp
+        import asyncio as _asyncio
+        from urllib.parse import quote
+
+        sub_ids = [s['id'] for s in self.subscriptions]
+        if not sub_ids:
+            logger.debug("No subscriptions — skipping ARM activity IP enrichment")
+            return
+
+        cutoff = (datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # Get ARM token for Activity Log API
+        try:
+            arm_token = self.credential.get_token("https://management.azure.com/.default")
+            arm_headers = {"Authorization": f"Bearer {arm_token.token}"}
+        except Exception as e:
+            logger.debug("ARM token acquisition failed — skipping IP enrichment: %s", e)
+            return
+
+        # Get Graph token for directory audit fallback
+        try:
+            graph_token = self.credential.get_token("https://graph.microsoft.com/.default")
+            graph_headers = {"Authorization": f"Bearer {graph_token.token}"}
+        except Exception as e:
+            logger.debug("Graph token acquisition failed for audit fallback: %s", e)
+            graph_headers = None
+
+        enriched = 0
+        scanner_client_id = getattr(self, 'client_id', None)
+        scanner_ip = getattr(self, '_scanner_ip', None)
+
+        # ── Helper: try ARM Activity Log across subscriptions ──
+        async def _try_arm(session, identity, principal_id):
+            for sub_id in sub_ids:
+                try:
+                    filter_str = (
+                        f"eventTimestamp ge '{cutoff}'"
+                        f" and caller eq '{principal_id}'"
+                    )
+                    url = (
+                        f"https://management.azure.com"
+                        f"/subscriptions/{sub_id}"
+                        f"/providers/microsoft.insights"
+                        f"/eventtypes/management/values"
+                        f"?api-version=2015-04-01"
+                        f"&$filter={quote(filter_str)}"
+                        f"&$select=caller,callerIpAddress,eventTimestamp,operationName"
+                        f"&$top=1"
+                        f"&$orderby=eventTimestamp desc"
+                    )
+                    async with session.get(url, headers=arm_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            events = data.get('value', [])
+                            if events and events[0].get('callerIpAddress'):
+                                event = events[0]
+                                op_name = event.get('operationName')
+                                if isinstance(op_name, dict):
+                                    op_name = op_name.get('localizedValue') or op_name.get('value')
+                                identity['last_observed_ip'] = event['callerIpAddress']
+                                identity['last_observed_ip_source'] = 'arm_activity_log'
+                                identity['last_observed_ip_date'] = event.get('eventTimestamp')
+                                identity['last_observed_operation'] = op_name
+                                return True
+                except Exception as e:
+                    status_code = getattr(e, 'status', None) or getattr(getattr(e, 'response', None), 'status', None)
+                    if status_code == 403:
+                        logger.warning("ARM Activity Log: PERMISSION DENIED for subscription %s. Identity: %s", sub_id, principal_id)
+                    elif status_code == 429:
+                        logger.warning("ARM Activity Log: RATE LIMITED for %s in %s.", principal_id, sub_id)
+                    elif status_code == 404:
+                        logger.warning("ARM Activity Log: NOT FOUND for subscription %s.", sub_id)
+                    else:
+                        logger.warning("ARM Activity Log: fetch failed for %s in %s. Error: %s", principal_id, sub_id, e)
+                await _asyncio.sleep(0.05)
+            return False
+
+        # ── Helper: try Graph directory audit log (has IP, no P2 needed) ──
+        # Directory audit retention: 30 days for free/P1, 30 days for P2
+        # Graph API rejects activityDateTime older than retention window
+        audit_cutoff = (datetime.utcnow() - timedelta(days=29)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        async def _try_directory_audit(session, identity, principal_id):
+            if not graph_headers:
+                return False
+            app_id = identity.get('app_id')
+            try:
+                if app_id:
+                    filter_clause = f"initiatedBy/app/appId eq '{app_id}'"
+                else:
+                    filter_clause = f"initiatedBy/user/id eq '{principal_id}'"
+                full_filter = f"{filter_clause} and activityDateTime ge {audit_cutoff}"
+                audit_url = (
+                    f"https://graph.microsoft.com/v1.0"
+                    f"/auditLogs/directoryAudits"
+                    f"?$filter={quote(full_filter)}"
+                    f"&$top=1"
+                    f"&$orderby=activityDateTime desc"
+                    f"&$select=activityDateTime,initiatedBy,operationType"
+                )
+                for attempt in range(3):
+                    async with session.get(audit_url, headers=graph_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            audits = data.get('value', [])
+                            if audits:
+                                initiated_by = audits[0].get('initiatedBy', {})
+                                ip = (
+                                    initiated_by.get('user', {}).get('ipAddress')
+                                    or initiated_by.get('app', {}).get('ipAddress')
+                                )
+                                if ip:
+                                    identity['last_observed_ip'] = ip
+                                    identity['last_observed_ip_source'] = 'directory_audit_log'
+                                    identity['last_observed_ip_date'] = audits[0].get('activityDateTime')
+                                    identity['last_observed_operation'] = audits[0].get('operationType')
+                                    return True
+                            return False
+                        elif resp.status == 429:
+                            # Rate limited — exponential backoff
+                            retry_after = int(resp.headers.get('Retry-After', 2 ** (attempt + 1)))
+                            await _asyncio.sleep(min(retry_after, 10))
+                            continue
+                        elif resp.status == 403:
+                            logger.warning("Directory audit: PERMISSION DENIED (AuditLog.Read.All required)")
+                            return False
+                        else:
+                            return False
+            except Exception as e:
+                logger.warning("Directory audit log query failed for %s: %s", principal_id, e)
+            await _asyncio.sleep(0.1)
+            return False
+
+        # ── Main enrichment loop ──
+        async with aiohttp.ClientSession() as session:
+            for identity in identities:
+                if identity.get('is_microsoft_system'):
+                    continue
+                principal_id = identity.get('object_id') or identity.get('principal_id')
+                if not principal_id:
+                    continue
+
+                # Scanner self-IP: assign to the discovery SPN (we know our own IP)
+                if scanner_client_id and scanner_ip and identity.get('app_id') == scanner_client_id:
+                    identity['last_observed_ip'] = scanner_ip
+                    identity['last_observed_ip_source'] = 'scanner_self'
+                    identity['last_observed_ip_date'] = datetime.utcnow().isoformat() + 'Z'
+                    identity['last_observed_operation'] = 'AuditGraph discovery scan'
+                    enriched += 1
+                    continue
+
+                is_human = identity.get('identity_category') in ('human_user', 'guest')
+
+                if is_human:
+                    # Humans: directory audit first (portal/directory ops include IP)
+                    if await _try_directory_audit(session, identity, principal_id):
+                        enriched += 1
+                        continue
+                    # Fallback: ARM Activity Log (if they did write operations)
+                    if await _try_arm(session, identity, principal_id):
+                        enriched += 1
+                        continue
+                else:
+                    # SPNs/managed identities: ARM Activity Log first (write operations)
+                    if await _try_arm(session, identity, principal_id):
+                        enriched += 1
+                        continue
+                    # Fallback: directory audit log
+                    if await _try_directory_audit(session, identity, principal_id):
+                        enriched += 1
+                        continue
+
+        if enriched > 0:
+            logger.info("IP enrichment: %s identities enriched (ARM + directory audit + scanner self)", enriched)
+
     def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None, pim_map: Dict[str, Dict] = None, ca_policies: List[Dict] = None) -> int:
         """Save all identities to database (customer-owned only, Microsoft system apps excluded at discovery)"""
         saved_count = 0

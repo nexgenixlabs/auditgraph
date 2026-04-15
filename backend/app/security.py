@@ -148,9 +148,12 @@ def add_security_headers(response):
     )
 
     # Cache control for API responses
+    # Skip for Phase 3 FastAPI routes — they set their own Cache-Control headers
     if response.content_type and 'application/json' in response.content_type:
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
-        response.headers['Pragma'] = 'no-cache'
+        from flask import request as _req
+        if not _req.path.startswith('/api/v1/'):
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
 
     return response
 

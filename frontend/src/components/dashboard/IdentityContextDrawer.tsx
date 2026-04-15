@@ -13,13 +13,17 @@ import { useConnection } from '../../contexts/ConnectionContext';
 import { useIdentityDrawer } from '../../contexts/IdentityDrawerContext';
 import { COLORS } from '../../constants/ciso';
 import { FONT } from './ciso-shared';
+import { computeIdentityRisk } from '../../utils/identityRiskScore';
+import { getSeverityColor } from '../../constants/riskScoring';
+import { deriveIdentityState, STATE_COLORS } from '../../constants/identityState';
+import { TIME_MS } from '../../constants/metrics';
 
 // ─── Filter label mapping ────────────────────────────────────────
 
 const FILTER_LABELS: Record<string, string> = {
   // Canonical metric drill-downs (exact dashboard count match)
   'metric=dormant': 'Dormant Identities',
-  'metric=ghost': 'Ghost Accounts',
+  'metric=ghost': 'Ghost Identities',
   'metric=unowned_nhi': 'Unowned Service Principals',
   'metric=privileged': 'Privileged Identities',
   'metric=high_risk': 'High Risk Identities',
@@ -32,6 +36,10 @@ const FILTER_LABELS: Record<string, string> = {
   'pillar=external-exposure': 'External Exposure',
   'pillar=dormant-risk': 'Dormant Risk',
   'pillar=compliance-alignment': 'Compliance Alignment',
+  // Priority action routes (CISO posture dashboard)
+  'status=Disabled&hasRoles=true': 'Ghost Identities',
+  'workload=true&owner=none': 'Unowned Service Principals',
+  'risk=critical,high': 'At-Risk Identities',
   // Ad-hoc filters
   'risk_level=critical': 'Critical Risk Identities',
   'risk_level=high': 'High Risk Identities',
@@ -40,6 +48,7 @@ const FILTER_LABELS: Record<string, string> = {
   'privilege_tier=0': 'T0 Administrators',
   'privilege_tier=0,1': 'T0/T1 Privileged',
   'activity_status=dormant': 'Dormant Identities',
+  'activity_status=dormant_strict': 'Dormant Privileged Identities',
   'activity_status=stale': 'Stale Identities',
   'identity_category=guest': 'Guest Identities',
   'identity_category=service_principal': 'Service Principals',
@@ -52,8 +61,11 @@ const FILTER_LABELS: Record<string, string> = {
 // Maps filter query params to risk driver labels for drawer context header
 const DRIVER_LABELS: Record<string, string> = {
   'metric=dormant': 'Dormant Privileged',
-  'metric=ghost': 'Ghost Accounts',
+  'metric=ghost': 'Ghost Identities',
   'metric=unowned_nhi': 'Unowned SPNs',
+  'status=Disabled&hasRoles=true': 'Ghost Identities',
+  'workload=true&owner=none': 'Unowned SPNs',
+  'activity_status=dormant_strict': 'Dormant Privileged',
   'activity_status=stale': 'Dormant Privileged',
   'pillar=effective-privilege': 'Over-Privileged',
   'pillar=credential-risk': 'Credential Exposure',
@@ -99,6 +111,14 @@ function categoryLabel(cat: string): string {
     .replace(/\b\w/g, c => c.toUpperCase());
 }
 
+/** Resolve status from the enabled boolean — matches backend SSOT. */
+function resolveRowStatus(row: IdentityRow): { label: string; color: string } | null {
+  if (row.enabled === false) return { label: 'Disabled', color: '#ef4444' };
+  if (row.activity_status === 'stale' || row.activity_status === 'never_used')
+    return { label: 'Dormant', color: '#f59e0b' };
+  return null; // active — no extra badge needed
+}
+
 // ─── Types ───────────────────────────────────────────────────────
 
 interface IdentityRow {
@@ -108,8 +128,10 @@ interface IdentityRow {
   identity_category: string;
   risk_level: string;
   risk_score: number;
-  privilege_tier?: number;
+  privilege_tier?: string | number;
   role_count?: number;
+  enabled?: boolean;
+  activity_status?: string;
 }
 
 interface IdentityDetail {
@@ -120,25 +142,69 @@ interface IdentityDetail {
   identity_category: string;
   risk_level: string;
   risk_score: number;
-  privilege_tier?: number;
+  privilege_tier?: string | number;
   role_count?: number;
   rbac_role_count?: number;
   entra_role_count?: number;
   last_seen_auth?: string | null;
   last_sign_in?: string | null;
-  risk_factors?: Array<{ factor: string; severity: string; detail?: string }>;
+  risk_factors?: Array<{ factor?: string; severity: string; detail?: string; description?: string; category?: string; code?: string }>;
   blast_radius_score?: number;
   attack_path_count?: number;
   credential_count?: number;
   credential_risk?: string;
   activity_status?: string;
   owner_display_name?: string | null;
+  owner_status?: string | null;
+  roles?: Array<Record<string, any>>;
   trend?: {
     previous_risk_level?: string | null;
     previous_risk_score?: number | null;
     risk_direction?: string;
     is_new?: boolean;
   } | null;
+  // SSOT canonical activity fields
+  last_activity_date?: string | null;
+  last_activity_source?: string | null;
+  last_activity_confidence?: string | null;
+  // IP observation fields (ARM Activity Log)
+  last_observed_ip?: string | null;
+  last_observed_ip_source?: string | null;
+  last_observed_ip_date?: string | null;
+  last_observed_operation?: string | null;
+  // Additional fields
+  enabled?: boolean;
+  account_enabled?: boolean;
+  user_type?: string | null;
+  highest_role?: string | null;
+  assigned_roles?: number;
+  blast_scope?: string | null;
+  federated_credential_issuer?: string | null;
+  inferred_origin?: string | null;
+  associated_resource?: string | null;
+  lineage_verdict?: string | null;
+  owner_deleted?: boolean;
+  app_id?: string | null;
+  effective_scope?: string;
+  federated_workload_type?: string | null;
+  federated_workload_name?: string | null;
+  associated_resource_name?: string | null;
+  created_datetime?: string | null;
+  credential_status?: string;
+  effective_access?: string | null;
+  sensitive_access?: string | null;
+  first_seen?: string | null;
+  days_inactive?: number | null;
+  // Canonical identity state (from build_identity_state)
+  activity_label?: string | null;
+  activity_detail?: string | null;
+  is_dormant?: boolean;
+  lifecycle_state?: string | null;
+  governance_state?: string | null;
+  privilege_level?: string | null;
+  risk_label?: string | null;
+  is_federated?: boolean;
+  last_signin_at?: string | null;
 }
 
 // ─── Time helpers ────────────────────────────────────────────────
@@ -239,12 +305,16 @@ export function IdentityContextDrawer() {
         return r.json();
       })
       .then(data => {
+        // API returns { identity: {...fields}, roles: [...], trend: {...}, ... }
+        // Flatten so component can read detail.identity_id, detail.blast_radius_score, etc.
+        const { identity: identityFields, ...rest } = data;
+        const flat = identityFields ? { ...identityFields, ...rest } : data;
         // Merge: API response wins, but prefill fills any blank fields
         const merged = prefill ? {
-          ...data,
-          display_name: data.display_name || prefill.display_name || '',
-          identity_category: data.identity_category || prefill.identity_category || '',
-        } : data;
+          ...flat,
+          display_name: flat.display_name || prefill.display_name || '',
+          identity_category: flat.identity_category || prefill.identity_category || '',
+        } : flat;
         setDetail(merged);
         setDetailLoading(false);
       })
@@ -291,7 +361,12 @@ export function IdentityContextDrawer() {
               error={detailError}
               onBack={filterUrl ? backToList : closeDrawer}
               onClose={closeDrawer}
-              onOpenFull={(id) => { closeDrawer(); navigate(`/identities/${encodeURIComponent(id)}`); }}
+              onOpenFull={(id) => {
+                const resolvedId = id || (selectedIdentityId != null ? String(selectedIdentityId) : '');
+                if (!resolvedId || resolvedId === 'undefined') return;
+                closeDrawer();
+                navigate(`/identities/${encodeURIComponent(resolvedId)}`);
+              }}
               onNavigate={(path) => { closeDrawer(); navigate(path); }}
             />
           : <ListView
@@ -312,8 +387,12 @@ export function IdentityContextDrawer() {
 
 function getContextBadge(row: IdentityRow, filterUrl: string): { label: string; value: string; color: string } | null {
   const query = filterUrl.split('?')[1] || '';
+  if (query.includes('status=Disabled')) {
+    return { label: 'Status', value: row.enabled === false ? 'Disabled' : 'Active', color: row.enabled === false ? COLORS.danger : COLORS.success };
+  }
   if (query.includes('pillar=effective-privilege') || query.includes('contributing_pillar=effective_privilege')) {
-    const tier = row.privilege_tier != null ? `T${row.privilege_tier}` : null;
+    const rawT = row.privilege_tier;
+    const tier = rawT == null ? null : (typeof rawT === 'string' && String(rawT).startsWith('T') ? String(rawT) : `T${rawT}`);
     if (tier) return { label: 'Tier', value: tier, color: tier === 'T0' ? COLORS.danger : tier === 'T1' ? '#FF8C42' : COLORS.warning };
   }
   if (query.includes('activity_status=stale') || query.includes('activity_status=dormant') || query.includes('pillar=usage-dormancy')) {
@@ -329,7 +408,7 @@ function getContextBadge(row: IdentityRow, filterUrl: string): { label: string; 
     return { label: 'Scope', value: 'Tenant-wide', color: COLORS.danger };
   }
   if (query.includes('blast_radius_score')) {
-    return { label: 'Blast', value: String(row.risk_score), color: COLORS.danger };
+    return { label: 'Blast', value: (row.risk_level || 'HIGH').toUpperCase(), color: COLORS.danger };
   }
   return null;
 }
@@ -405,7 +484,7 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
                 background: riskDot(row.risk_level),
               }} />
 
-              {/* Name + category */}
+              {/* Name + category + status */}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{
                   fontSize: 12, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui,
@@ -413,8 +492,21 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
                 }}>
                   {row.display_name || row.identity_id}
                 </div>
-                <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, marginTop: 1 }}>
+                <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, marginTop: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
                   {categoryLabel(row.identity_category)}
+                  {(() => {
+                    const st = resolveRowStatus(row);
+                    return st ? (
+                      <span style={{
+                        fontSize: 8, fontWeight: 700, fontFamily: FONT.mono,
+                        padding: '1px 4px', borderRadius: 3,
+                        background: `${st.color}18`, color: st.color,
+                        border: `1px solid ${st.color}30`,
+                      }}>
+                        {st.label}
+                      </span>
+                    ) : null;
+                  })()}
                 </div>
               </div>
 
@@ -430,14 +522,17 @@ function ListView({ filterUrl, identities, loading, onSelect, onClose, onOpenFul
                 </span>
               )}
 
-              {/* Risk score */}
-              <div style={{
-                fontSize: 13, fontWeight: 700, fontFamily: FONT.mono,
+              {/* Severity badge */}
+              <span style={{
+                fontSize: 9, fontWeight: 700, fontFamily: FONT.mono,
+                padding: '2px 6px', borderRadius: 4, textTransform: 'uppercase',
+                background: riskDot(row.risk_level) + '22',
                 color: riskDot(row.risk_level),
-                minWidth: 28, textAlign: 'right',
+                border: `1px solid ${riskDot(row.risk_level)}44`,
+                letterSpacing: '0.3px', flexShrink: 0,
               }}>
-                {row.risk_score}
-              </div>
+                {(row.risk_level || 'INFO').toUpperCase()}
+              </span>
             </div>
             );
           })
@@ -701,6 +796,187 @@ interface AIExplanation {
   recommended_action: string;
 }
 
+// ─── Activity Signals — architecture-derived, no log dependency ──
+
+function ActivitySignals({ detail }: { detail: IdentityDetail }) {
+  const d = detail as Record<string, any>;
+
+  // Derive latest role assignment date from roles array
+  const roles: Array<{ created_on?: string }> = d.roles || [];
+  const latestRoleDate = roles
+    .map(r => r.created_on)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b!).getTime() - new Date(a!).getTime())[0] || null;
+
+  // Canonical SSOT last-activity fields
+  const lastActivityDate: string | null = d.last_activity_date || null;
+  const lastActivitySource: string | null = d.last_activity_source || null;
+  const lastActivityConf: string = d.last_activity_confidence || 'none';
+
+  const SOURCE_LABELS: Record<string, string> = {
+    entra_signin_log: 'Entra sign-in logs',
+    graph_signin: 'Graph API sign-in activity',
+    entra_noninteractive: 'Non-interactive sign-in',
+    role_assignment: 'Role assignment date',
+    credential_rotation: 'Credential rotation',
+    federated_credential: 'Federated credential',
+    created_date: 'Creation date only',
+    auditgraph_scan: 'AuditGraph scan',
+  };
+
+  // Legacy sign-in detection (for backward compat log-access note)
+  const lastSignIn = d.last_signin_at || d.last_seen_auth || d.last_sign_in;
+  const hasLogAccess = !!lastSignIn || !!lastActivityDate;
+  const activitySources: Array<{ type: string; available: boolean; detail?: string }> = d.activity_sources || [];
+  const p2Source = activitySources.find(s => s.type === 'azure_signin');
+
+  // Credential state
+  const credCount = d.credential_count ?? 0;
+  const credExpiry = d.credential_expiration;
+  const credStatus = d.credential_status || '';
+
+  const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+  // Dormancy — prefer canonical backend state, fallback to frontend heuristic
+  const rawStatus = d.activity_status || 'unknown';
+  const isFederated = !!(d.is_federated || d.federated_workload_type);
+  const hasRoles = roles.length > 0;
+  const hasRecentRole = !!latestRoleDate && ((Date.now() - new Date(latestRoleDate).getTime()) / TIME_MS.DAY) < 90;
+  const hasActiveCreds = credCount > 0 && d.credential_risk !== 'expired';
+  const tierStr = typeof d.privilege_tier === 'string' ? d.privilege_tier : `T${d.privilege_tier ?? 3}`;
+  const isPrivileged = tierStr === 'T0' || tierStr === 'T1';
+
+  // Use canonical activity_label when available from backend
+  let activityStatus = rawStatus;
+  let dormancySub = '';
+  if (d.activity_label) {
+    activityStatus = d.is_dormant ? 'stale' : 'active';
+    dormancySub = d.activity_detail || '';
+  } else if (rawStatus === 'never_used') {
+    // Legacy frontend override when backend canonical state not available
+    if (isFederated) {
+      activityStatus = 'likely_active';
+      dormancySub = 'OIDC federation — no sign-in logs expected';
+    } else if (isPrivileged) {
+      activityStatus = 'likely_active';
+      dormancySub = 'Privileged account with active roles';
+    } else if (hasActiveCreds) {
+      activityStatus = 'likely_active';
+      dormancySub = 'Active credentials configured';
+    } else if (hasRecentRole) {
+      activityStatus = 'likely_active';
+      dormancySub = `Role assigned ${latestRoleDate ? fmtDate(latestRoleDate) : 'recently'}`;
+    } else if (hasRoles) {
+      dormancySub = 'Has roles but no activity signals';
+    } else {
+      dormancySub = 'No credentials, roles, or sign-in data';
+    }
+  }
+
+  const dormancyColor = activityStatus === 'never_used' ? COLORS.danger
+    : activityStatus === 'stale' || activityStatus === 'dormant' ? COLORS.warning
+    : activityStatus === 'active' || activityStatus === 'likely_active' ? COLORS.success
+    : activityStatus === 'recently_created' ? COLORS.accent
+    : COLORS.textDim;
+  const dormancyLabel = activityStatus === 'never_used' ? 'Provisioned'
+    : activityStatus === 'stale' ? 'Stale'
+    : activityStatus === 'dormant' ? 'Dormant'
+    : activityStatus === 'inactive' ? 'Inactive'
+    : activityStatus === 'active' ? 'Active'
+    : activityStatus === 'likely_active' ? 'Likely active'
+    : activityStatus === 'recently_created' ? 'Recently created'
+    : 'Unknown';
+
+  const signalRowStyle: React.CSSProperties = {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    padding: '5px 0', borderBottom: `1px solid ${COLORS.border}15`,
+  };
+  const labelStyle: React.CSSProperties = { fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui };
+  const valueStyle: React.CSSProperties = { fontSize: 10, fontFamily: FONT.mono, fontWeight: 600 };
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, fontFamily: FONT.ui, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Activity Signals
+        </span>
+        <span style={{ fontSize: 8, color: COLORS.textDim, fontFamily: FONT.ui }}>
+          Architecture-derived
+        </span>
+      </div>
+
+      <div style={{
+        padding: '8px 10px', borderRadius: 8,
+        background: COLORS.surfaceAlt || '#0f1729',
+        border: `1px solid ${COLORS.border}`,
+      }}>
+        {/* Credential state */}
+        <div style={signalRowStyle}>
+          <span style={labelStyle}>Credential</span>
+          <span style={{ ...valueStyle, color: credCount === 0 ? COLORS.textDim : credExpiry ? COLORS.warning : COLORS.textSecondary }}>
+            {credCount === 0
+              ? 'No secrets'
+              : credExpiry
+                ? `Expires ${fmtDate(credExpiry)}`
+                : credStatus === 'Valid' ? `${credCount} active` : (credStatus || `${credCount} credential${credCount !== 1 ? 's' : ''}`)}
+          </span>
+        </div>
+
+        {/* Latest role assignment */}
+        <div style={signalRowStyle}>
+          <span style={labelStyle}>Last Role Assignment</span>
+          <span style={{ ...valueStyle, color: latestRoleDate ? COLORS.textSecondary : COLORS.textDim }}>
+            {latestRoleDate ? fmtDate(latestRoleDate) : 'No assignments'}
+          </span>
+        </div>
+
+        {/* Federated credential */}
+        {(d.is_federated || d.federated_workload_type) && (
+          <div style={signalRowStyle}>
+            <span style={labelStyle}>Federated Credential</span>
+            <span style={{ ...valueStyle, color: COLORS.accent }}>
+              {d.federated_workload_type || 'Configured'}
+            </span>
+          </div>
+        )}
+
+        {/* Identity State — architecture-derived, always has a value */}
+        {(() => {
+          const roleCount = (d.roles || []).length + (d.entra_roles || []).length;
+          const state = deriveIdentityState({
+            enabled: d.enabled !== false,
+            identity_category: d.identity_category,
+            role_count: roleCount > 0 ? roleCount : (d.rbac_role_count || 0) + (d.entra_role_count || 0),
+            privilege_tier: d.privilege_tier,
+            effective_scope: d.effective_scope,
+            federated_workload_type: d.federated_workload_type,
+            is_federated: d.is_federated,
+            associated_resource_name: d.associated_resource_name,
+            owner_display_name: d.owner_display_name,
+            last_activity_source: d.last_activity_source,
+            last_activity_date: d.last_activity_date,
+            created_datetime: d.created_datetime,
+          });
+          const stateHex = STATE_COLORS[state.color].hex;
+          return (
+            <div style={{ ...signalRowStyle, flexDirection: 'column', alignItems: 'stretch', gap: 2, borderBottom: 'none' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={labelStyle}>Identity State</span>
+                <span style={{ ...valueStyle, color: stateHex }}>
+                  {state.label}
+                </span>
+              </div>
+              <span style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, textAlign: 'right' }}>
+                {state.sublabel}
+              </span>
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
+
 function AIExplanationPanel({ identityId }: { identityId: string }) {
   const { withConnection } = useConnection();
   const [explanation, setExplanation] = useState<AIExplanation | null>(null);
@@ -850,84 +1126,82 @@ function AIExplanationPanel({ identityId }: { identityId: string }) {
 
 // ─── Risk Score Breakdown ────────────────────────────────────────
 
-function computeDetailRisk(d: IdentityDetail): { label: string; points: number; max: number }[] {
-  const factors: { label: string; points: number; max: number }[] = [];
-
-  // Privilege Tier (0–30)
-  const tier = d.privilege_tier ?? 3;
-  const tierPts = tier === 0 ? 30 : tier === 1 ? 20 : tier === 2 ? 8 : 0;
-  factors.push({ label: 'Privilege Tier', points: tierPts, max: 30 });
-
-  // Blast Radius (0–25)
-  const brPts = Math.min(25, Math.round(((d.blast_radius_score ?? 0) / 100) * 25));
-  factors.push({ label: 'Blast Radius', points: brPts, max: 25 });
-
-  // Dormancy (0–15)
-  const isDormant = d.activity_status === 'stale' || d.activity_status === 'never_used' || d.activity_status === 'inactive';
-  factors.push({ label: 'Dormancy', points: isDormant ? 15 : 0, max: 15 });
-
-  // Credential Risk (0–15)
-  const hasCred = d.credential_risk === 'expired' || d.credential_risk === 'expiring_soon'
-    || (d.risk_factors || []).some(rf => /credential|secret|cert|expired/i.test(rf.factor || rf.detail || ''));
-  factors.push({ label: 'Credential Risk', points: hasCred ? 15 : 0, max: 15 });
-
-  // Attack Path Participation (0–10)
-  const apPts = (d.attack_path_count ?? 0) > 0 ? 10 : d.risk_score >= 80 ? 10 : d.risk_score >= 60 ? 6 : d.risk_score >= 40 ? 3 : 0;
-  factors.push({ label: 'Attack Path Participation', points: apPts, max: 10 });
-
-  // Ownership Status (0–5)
-  const unowned = !d.owner_display_name;
-  const isMachine = d.identity_category === 'service_principal' || d.identity_category?.startsWith('managed_identity');
-  factors.push({ label: 'Ownership Status', points: unowned && isMachine ? 5 : 0, max: 5 });
-
-  return factors;
-}
-
 function RiskScoreBreakdown({ detail }: { detail: IdentityDetail }) {
-  const factors = computeDetailRisk(detail);
-  const total = Math.min(100, factors.reduce((s, f) => s + f.points, 0));
-  const totalColor = total >= 75 ? COLORS.danger : total >= 50 ? '#FF8C42' : total >= 25 ? COLORS.warning : COLORS.success;
+  const result = computeIdentityRisk(detail as Record<string, any>);
+  // Use backend risk_level as authoritative severity badge — dimension bars show the breakdown
+  const backendLevel = (detail.risk_level || '').toLowerCase();
+  const badgeSeverity = backendLevel || result.overall_severity;
+  const badgeColor = riskDot(badgeSeverity);
 
   return (
     <div style={{ marginTop: 16 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, fontFamily: FONT.ui, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        Risk Score Breakdown
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, fontFamily: FONT.ui, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Risk Score Breakdown
+        </span>
+        <span style={{
+          fontSize: 8, fontWeight: 600, padding: '2px 5px', borderRadius: 3,
+          background: `${badgeColor}18`, color: badgeColor,
+          fontFamily: FONT.mono, textTransform: 'uppercase',
+        }}>
+          {badgeSeverity}
+        </span>
+      </div>
+      <div style={{
+        fontSize: 9, color: COLORS.textMuted, letterSpacing: '0.5px',
+        marginBottom: 12, fontFamily: FONT.mono,
+      }}>
+        CVSS v3.1 · NIST SP 800-63B · SP 800-207 · CIS Controls v8
       </div>
       <div style={{
         padding: '10px 12px', borderRadius: 8,
         background: COLORS.surfaceAlt || '#0f1729',
         border: `1px solid ${COLORS.border}`,
       }}>
-        {factors.map(f => {
-          const pct = f.max > 0 ? (f.points / f.max) * 100 : 0;
-          const barColor = f.points === 0 ? COLORS.textDim
-            : pct >= 80 ? COLORS.danger
-            : pct >= 50 ? '#FF8C42'
-            : COLORS.warning;
+        {result.dimensions.map(dim => {
+          const barPct = (dim.score / 10) * 100;
+          const sevColor = getSeverityColor(dim.severity);
+          const primaryMitre = dim.score > 0 && dim.mitre.length > 0 ? dim.mitre[0] : null;
           return (
-            <div key={f.label} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-              <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, width: 140, flexShrink: 0 }}>
-                {f.label}
+            <div key={dim.dimension} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+              <span style={{ fontSize: 12, width: 16, textAlign: 'center', flexShrink: 0 }}>{dim.icon}</span>
+              <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui, width: 110, flexShrink: 0 }}>
+                {dim.name}
               </span>
-              <div style={{ flex: 1, height: 4, borderRadius: 2, background: `${COLORS.border}`, overflow: 'hidden' }}>
-                <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: barColor, transition: 'width 0.3s ease' }} />
+              <div style={{ flex: 1, height: 4, borderRadius: 2, background: COLORS.border, overflow: 'hidden' }}>
+                <div style={{
+                  width: `${barPct}%`, height: '100%', borderRadius: 2,
+                  background: dim.score > 0 ? dim.color : COLORS.textDim,
+                  transition: 'width 0.3s ease',
+                }} />
               </div>
               <span style={{
-                fontSize: 10, fontWeight: 700, fontFamily: FONT.mono, width: 24, textAlign: 'right', flexShrink: 0,
-                color: f.points > 0 ? COLORS.text : COLORS.textDim,
+                fontSize: 10, fontWeight: 700, fontFamily: FONT.mono, width: 28, textAlign: 'right', flexShrink: 0,
+                color: dim.score > 0 ? sevColor : COLORS.textDim,
               }}>
-                {f.points}
+                {dim.score.toFixed(1)}
               </span>
+              {primaryMitre && (
+                <span style={{
+                  fontSize: 7, padding: '1px 4px', borderRadius: 2,
+                  background: `${COLORS.accent}18`, color: COLORS.accent,
+                  fontWeight: 600, fontFamily: FONT.mono, flexShrink: 0,
+                }}>
+                  {primaryMitre}
+                </span>
+              )}
             </div>
           );
         })}
-        {/* Total */}
+        {/* Overall */}
         <div style={{
           borderTop: `1px solid ${COLORS.border}`, marginTop: 6, paddingTop: 6,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <span style={{ fontSize: 10, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>Total</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: totalColor, fontFamily: FONT.mono }}>{total}</span>
+          <span style={{ fontSize: 10, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui }}>Peak Dimension</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: badgeColor, fontFamily: FONT.mono }}>
+            {Math.min(10, result.overall_score).toFixed(1)}/10
+          </span>
         </div>
       </div>
     </div>
@@ -968,7 +1242,7 @@ function deriveActions(
 ): QuickAction[] {
   const actions: QuickAction[] = [];
   const cat = detail.identity_category || '';
-  const isDormant = detail.activity_status === 'stale' || detail.activity_status === 'never_used';
+  const isDormant = detail.is_dormant === true || detail.activity_status === 'stale' || detail.activity_status === 'never_used';
   const isHighRisk = detail.risk_level === 'critical' || detail.risk_level === 'high';
   const hasCredIssue = detail.credential_risk === 'expired' || detail.credential_risk === 'expiring_soon';
   const isUnowned = !detail.owner_display_name;
@@ -1191,14 +1465,22 @@ function PrivilegeComparison({ detail }: { detail: IdentityDetail }) {
     fetch(withConnection('/api/identities?limit=2000'))
       .then(r => r.ok ? r.json() : { identities: [] })
       .then(data => {
-        const all: Array<{ privilege_tier?: number; risk_score: number }> = data.identities || [];
+        const all: Array<{ privilege_tier?: string | number; risk_score: number }> = data.identities || [];
         if (all.length < 2) return;
 
-        const myTier = detail.privilege_tier ?? 3;
+        // Normalize tier to number: "T0"→0, "T1"→1, etc.
+        const tierNum = (t: any): number => {
+          if (t == null) return 3;
+          if (typeof t === 'number') return t;
+          const s = String(t).replace(/^T/i, '');
+          const n = parseInt(s, 10);
+          return isNaN(n) ? 3 : n;
+        };
+        const myTier = tierNum(detail.privilege_tier);
         const myBlast = detail.blast_radius_score ?? 0;
 
         // Privilege tier: lower tier = more privileged. Percentile = % of identities with a HIGHER (less privileged) tier.
-        const higherTier = all.filter(i => (i.privilege_tier ?? 3) > myTier).length;
+        const higherTier = all.filter(i => tierNum(i.privilege_tier) > myTier).length;
         const tierPct = Math.round((higherTier / all.length) * 100);
 
         // Blast radius: higher = more impactful. Percentile = % of identities with a LOWER blast radius.
@@ -1282,9 +1564,9 @@ function deriveChangeReasons(detail: IdentityDetail): string[] {
   const factors = detail.risk_factors || [];
 
   for (const rf of factors) {
-    const text = (rf.factor || rf.detail || '').toLowerCase();
+    const text = (rf.factor || rf.detail || rf.description || '').toLowerCase();
     if (/role.*assign|new.*role|contributor|owner role|reader role/i.test(text))
-      reasons.push(rf.factor || rf.detail || 'Role assignment change');
+      reasons.push(rf.factor || rf.description || rf.detail || 'Role assignment change');
     else if (/attack.*path|lateral|escalat/i.test(text))
       reasons.push('New attack path detected');
     else if (/credential.*expir|secret.*expir|cert.*expir/i.test(text))
@@ -1464,9 +1746,17 @@ function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNav
     );
   }
 
-  const roleCount = detail.role_count ?? ((detail.rbac_role_count ?? 0) + (detail.entra_role_count ?? 0));
-  const privilegeTier = detail.privilege_tier != null ? `T${detail.privilege_tier}` : 'T3';
-  const riskFactors = detail.risk_factors || [];
+  const roleCount = detail.role_count ?? ((detail as any).roles?.length ?? ((detail.rbac_role_count ?? 0) + (detail.entra_role_count ?? 0)));
+  // API returns privilege_tier as "T0"/"T1"/"T2"/"T3" (string) or number 0-3
+  const rawTier = detail.privilege_tier;
+  const privilegeTier = rawTier == null ? 'T3'
+    : typeof rawTier === 'string' && rawTier.startsWith('T') ? rawTier
+    : `T${rawTier}`;
+  const riskFactors = (detail.risk_factors || []).map((rf: any) => ({
+    factor: rf.factor || rf.description || rf.code || '',
+    severity: rf.severity || 'medium',
+    detail: rf.detail || rf.description || '',
+  }));
   const blastRadius = detail.blast_radius_score ?? 0;
   const attackPaths = detail.attack_path_count ?? 0;
 
@@ -1485,26 +1775,13 @@ function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNav
     { label: 'Assigned Roles', value: (
       <span style={{ fontFamily: FONT.mono, fontWeight: 600, color: COLORS.text }}>{roleCount}</span>
     )},
-    { label: 'Last Authentication', value: (() => {
-      const authDate = (detail as any).last_signin_at || detail.last_seen_auth || detail.last_sign_in;
-      if (authDate) {
-        return <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textSecondary }}>{new Date(authDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>;
-      }
-      const src = (detail as any).auth_source;
-      return <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textDim }}>{src === 'static_analysis_only' ? 'Not observed' : 'Never'}</span>;
-    })()},
-    { label: 'Last Activity', value: (() => {
-      const candidates = [detail.last_seen_auth, detail.last_sign_in].filter(Boolean) as string[];
-      const latest = candidates.length > 0 ? candidates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] : null;
-      if (!latest) return <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textDim }}>No activity recorded</span>;
-      const days = Math.floor((Date.now() - new Date(latest).getTime()) / 86400000);
-      const color = days > 90 ? COLORS.danger : days > 30 ? COLORS.warning : COLORS.success;
-      return (
-        <span style={{ fontFamily: FONT.mono, fontSize: 11, fontWeight: 600, color }}>
-          {timeAgo(latest)}
-        </span>
-      );
-    })()},
+    { label: 'Created', value: (
+      <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textSecondary }}>
+        {(detail as any).created_datetime
+          ? new Date((detail as any).created_datetime).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          : 'Unknown'}
+      </span>
+    )},
     { label: 'Blast Radius Score', value: (
       <span style={{ fontFamily: FONT.mono, fontWeight: 700, color: blastRadius > 60 ? COLORS.danger : blastRadius > 30 ? COLORS.warning : COLORS.success }}>
         {blastRadius}
@@ -1558,17 +1835,18 @@ function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNav
           </div>
         </div>
 
-        {/* Composite risk score badge */}
-        <div style={{
-          width: 36, height: 36, borderRadius: '50%',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: riskDot(detail.risk_level) + '22',
-          border: `2px solid ${riskDot(detail.risk_level)}`,
-          fontSize: 13, fontWeight: 700, fontFamily: FONT.mono,
+        {/* Severity badge — replaces raw numeric score */}
+        <span style={{
+          fontFamily: FONT.mono,
+          fontSize: 11, fontWeight: 700,
+          padding: '4px 10px', borderRadius: 6,
+          letterSpacing: '0.5px', textTransform: 'uppercase',
+          background: riskDot(detail.risk_level) + '33',
           color: riskDot(detail.risk_level),
+          border: `1px solid ${riskDot(detail.risk_level)}66`,
         }}>
-          {detail.risk_score}
-        </div>
+          {detail.risk_level ?? 'INFO'}
+        </span>
 
         <button
           onClick={onClose}
@@ -1592,6 +1870,9 @@ function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNav
             </span>
           </div>
         ))}
+
+        {/* Activity Signals — architecture-derived, no log dependency */}
+        <ActivitySignals detail={detail} />
 
         {/* Risk factors section */}
         {riskFactors.length > 0 && (
@@ -1648,7 +1929,7 @@ function DetailView({ detail, loading, error, onBack, onClose, onOpenFull, onNav
       {/* Footer */}
       <div style={{ padding: '12px 20px', borderTop: `1px solid ${COLORS.border}` }}>
         <button
-          onClick={() => onOpenFull(detail.identity_id)}
+          onClick={() => onOpenFull(detail.identity_id || String(detail.db_id || ''))}
           style={{
             width: '100%', padding: '8px 0',
             background: COLORS.accent + '18',

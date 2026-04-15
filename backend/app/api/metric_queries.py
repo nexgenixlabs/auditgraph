@@ -29,6 +29,7 @@ HIDE_DELETED_WHERE = """
 
 METRIC_DORMANT = """
     AND i.activity_status IN ('stale', 'never_used')
+    AND i.identity_category IN ('human_user', 'guest')
 """
 
 METRIC_DORMANT_NHI = """
@@ -57,6 +58,8 @@ METRIC_OVER_PERMISSIONED = """
     AND (COALESCE(i.risk_score, 0) >= 70 OR i.privilege_tier = 'T0')
 """
 
+# SSOT: governance_service.derive_governance_state() step 1 — owner_count==0 → Orphaned
+# This SQL is the bulk-count approximation of the canonical Python derivation.
 METRIC_UNOWNED_NHI = """
     AND (i.owner_count = 0 OR i.owner_count IS NULL)
     AND COALESCE(i.identity_category, '') NOT IN ('human_user', 'guest', 'microsoft_internal')
@@ -83,11 +86,17 @@ METRIC_NO_CREDENTIALS = """
 """
 
 METRIC_GHOST = """
-    AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL OR i.status IN ('disabled', 'deleted'))
+    AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL)
     AND (
         EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
         OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
     )
+"""
+
+METRIC_DORMANT_PRIVILEGED = """
+    AND i.activity_status IN ('stale', 'never_used')
+    AND i.identity_category IN ('human_user', 'guest')
+    AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
 """
 
 METRIC_SA_CATEGORIES = "('service_principal', 'managed_identity_system', 'managed_identity_user')"
@@ -113,6 +122,7 @@ METRIC_REGISTRY = {
     'credential_healthy': METRIC_CREDENTIAL_HEALTHY,
     'no_credentials': METRIC_NO_CREDENTIALS,
     'ghost': METRIC_GHOST,
+    'dormant_privileged': METRIC_DORMANT_PRIVILEGED,
 }
 
 

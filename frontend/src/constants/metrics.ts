@@ -216,6 +216,14 @@ export const THRESHOLDS = {
   MAX_UNOWNED_SPNS: 3,
 } as const;
 
+// ── Time constants (milliseconds) ───────────────────────────────────
+export const TIME_MS = {
+  SECOND: 1000,
+  MINUTE: 60_000,
+  HOUR: 3_600_000,
+  DAY: 86_400_000,
+} as const;
+
 // ── Activity / Dormancy ──────────────────────────────────────────────
 
 export type DormantStatus = 'yes' | 'idle' | 'never' | 'new' | 'no' | 'likely_active' | 'unknown';
@@ -238,15 +246,15 @@ export const DORMANT_LABELS: Record<DormantStatus, { label: string; color: strin
   new:     { label: 'New',                                                                           color: 'bg-blue-100 text-blue-700', tooltip: 'Created within the last 30 days' },
   no:      { label: 'Active',                                                                        color: 'bg-green-100 text-green-700', tooltip: 'Sign-in activity within the last 30 days' },
   likely_active: { label: 'Likely Active', color: 'bg-purple-100 text-purple-700', tooltip: 'Azure does not emit sign-in logs for federated identities (GitHub, AKS, Terraform). Activity is inferred based on configuration and role usage.' },
-  unknown: { label: 'Unknown',                                                                       color: 'bg-gray-100 text-gray-500', tooltip: 'No sign-in data — requires Azure AD Premium P1/P2 license' },
+  unknown: { label: 'Unknown',                                                                       color: 'bg-gray-100 text-gray-500', tooltip: 'Sign-in telemetry unavailable — architecture signals used instead' },
 };
 
 // ── Data Explanations (Pillar 3: Telemetry Truth) ───────────────────
 
 /** Standard explanations for why data may be missing */
 export const DATA_EXPLANATIONS = {
-  SIGN_IN:        'Sign-in logs require Azure AD Premium P1/P2',
-  PIM:            'PIM requires Azure AD Premium P2 license',
+  SIGN_IN:        'Sign-in logs not available in log-independent mode',
+  PIM:            'PIM data requires RoleManagement.Read.Directory permission',
   CA_POLICY:      'CA analysis requires Policy.Read.All permission',
   AUDIT_LOG:      'Audit logs require AuditLog.Read.All permission',
   CREDENTIAL_NA:  'Human users authenticate via Entra ID (password/MFA), not app secrets',
@@ -261,6 +269,34 @@ export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: 
   privileged: { label: 'Privileged',  color: 'bg-red-100 text-red-800 border-red-200',     tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
   elevated:   { label: 'Elevated',    color: 'bg-orange-100 text-orange-800 border-orange-200', tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
   standard:   { label: 'Standard',    color: 'bg-gray-100 text-gray-600 border-gray-200',  tooltip: 'Tier 2-3: Limited or no privileged roles' },
+};
+
+// ── Three-Dimension Identity Classification ─────────────────────────
+
+export type LifecycleState = 'Provisioned' | 'Active' | 'Dormant' | 'Disabled';
+
+export const LIFECYCLE_STATE_DISPLAY: Record<LifecycleState, { label: string; color: string; tooltip: string }> = {
+  Provisioned: { label: 'Provisioned', color: 'text-blue-500',  tooltip: 'Identity exists but has no observed activity' },
+  Active:      { label: 'Active',      color: 'text-green-500', tooltip: 'Identity has recent sign-in or usage activity' },
+  Dormant:     { label: 'Dormant',     color: 'text-amber-500', tooltip: 'Identity has been stale or never used' },
+  Disabled:    { label: 'Disabled',    color: 'text-gray-400',  tooltip: 'Identity is disabled in the directory' },
+};
+
+export type GovernanceState = 'Governed' | 'Ungoverned' | 'Orphaned' | 'Policy Violation';
+
+export const GOVERNANCE_STATE_DISPLAY: Record<GovernanceState, { label: string; badgeClass: string; tooltip: string }> = {
+  Governed:             { label: 'Governed',         badgeClass: 'badge-governance-governed',         tooltip: 'Identity has an owner and is in a healthy governance state' },
+  Ungoverned:           { label: 'Ungoverned',       badgeClass: 'badge-governance-ungoverned',       tooltip: 'Identity has governance gaps — stale, unreviewed, or missing policy coverage' },
+  Orphaned:             { label: 'Orphaned',         badgeClass: 'badge-governance-orphaned',         tooltip: 'Identity has no owner in the directory' },
+  'Policy Violation':   { label: 'Policy Violation', badgeClass: 'badge-governance-ungoverned',       tooltip: 'Identity has an active policy breach' },
+};
+
+export type PrivilegeLevel = 'Highly Privileged' | 'Privileged' | 'Standard';
+
+export const PRIVILEGE_LEVEL_DISPLAY: Record<PrivilegeLevel, { label: string; badgeClass: string; tooltip: string }> = {
+  'Highly Privileged': { label: 'Highly Privileged', badgeClass: 'badge-privilege-high', tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
+  Privileged:          { label: 'Privileged',        badgeClass: 'badge-privilege-med',  tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
+  Standard:            { label: 'Standard',          badgeClass: '',                     tooltip: 'Tier 2-3: Limited or no privileged roles' },
 };
 
 export type EffectiveScope = 'tenant' | 'directory' | 'subscription' | 'resource_group' | 'resource' | 'none';

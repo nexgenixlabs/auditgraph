@@ -54,7 +54,7 @@ export function IdentityNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-blue-500 bg-blue-50';
   return (
     <div
-      title={`${data.label}\nRisk: ${(data.risk_level as string || 'unknown').toUpperCase()} (${data.risk_score} pts)${data.category ? `\nCategory: ${data.category}` : ''}`}
+      title={`${data.label}\nRisk: ${(data.risk_level as string || 'unknown').toUpperCase()}${data.category ? `\nCategory: ${data.category}` : ''}`}
       className={`px-5 py-3 rounded-xl border-2 shadow-lg ${colors} min-w-[180px] max-w-[240px]`}
     >
       <Handle type="target" position={Position.Left} className="!bg-gray-400" />
@@ -68,7 +68,7 @@ export function IdentityNode({ data }: NodeProps) {
         <span className={`font-bold uppercase ${riskText[data.risk_level as string] || 'text-gray-500'}`}>
           {(data.risk_level as string || 'unknown').toUpperCase()}
         </span>
-        <span className="text-gray-400">{data.risk_score as number} pts</span>
+        <span className="text-gray-400">{(data.risk_level as string || 'unknown').toUpperCase()}</span>
         {!!data.category && <span className="text-gray-400 truncate">{data.category as string}</span>}
       </div>
       <Handle type="source" position={Position.Right} className="!bg-gray-400" />
@@ -368,7 +368,7 @@ export function AgentNode({ data }: NodeProps) {
   const tooltip = [
     data.label as string,
     `Platform: ${data.detected_platform || 'Unknown'}`,
-    `AGIRS: ${data.agirs_score ?? 'N/A'}`,
+    `Risk: ${(data.risk_level as string || 'unknown').toUpperCase()}`,
     data.days_inactive != null
       ? `Inactive: ${data.days_inactive} days`
       : 'Inactive: Never signed in',
@@ -392,7 +392,7 @@ export function AgentNode({ data }: NodeProps) {
         <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold text-[9px]">AI Agent</span>
         <span className={`font-bold uppercase ${statusColor}`}>{statusLabel}</span>
         {data.agirs_score != null && (
-          <span className="text-gray-400">{data.agirs_score as number} pts</span>
+          <span className="text-gray-400">{(data.risk_level as string || 'unknown').toUpperCase()}</span>
         )}
       </div>
       <Handle type="source" position={Position.Right} className={handleColor} />

@@ -41,7 +41,7 @@ export function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <SectionTitle>Highest Impact Remediations</SectionTitle>
-        <span style={{ fontFamily: F.data, fontSize: 13, color: '#22c55e', fontWeight: 700 }}>Potential Gain: +{d.riskScore.potentialGain} pts</span>
+        <span style={{ fontFamily: F.data, fontSize: 13, color: '#22c55e', fontWeight: 700 }}>Potential Gain: +{d.riskScore.potentialGain}</span>
       </div>
 
       {/* Empty state when no identity remediations */}
@@ -94,7 +94,7 @@ export function ActionPlanTab({ d, nav }: { d: TenantData; nav: Nav }) {
               { l: 'Automation', v: null as string | null, comp: <AutomationBadge level={r.automation || 'manual'} />, drillUrl: null as string | null },
               { l: 'Blast Radius', v: null as string | null, drillUrl: '/identities', comp: <span><DrillableNumber value={r.blastRadius.identities} label="Affected identities" onClick={() => nav('/identities')} /> ids &middot; <DrillableNumber value={r.blastRadius.subscriptions} label="Affected subscriptions" onClick={() => nav('/subscriptions')} /> subs &middot; <DrillableNumber value={r.blastRadius.workloads} label="Affected workloads" onClick={() => nav('/workload-identities')} /> wklds</span> },
               { l: 'Rollback', v: null as string | null, comp: <RollbackBadge safety={r.rollbackSafety || 'requires-validation'} />, drillUrl: null as string | null },
-              { l: 'Pts/Day', v: r.estimatedDays != null ? `${getRiskPerDay(r.gain, r.estimatedDays)} pts/day` : '\u2014', drillUrl: null as string | null },
+              { l: 'Gain/Day', v: r.estimatedDays != null ? `${getRiskPerDay(r.gain, r.estimatedDays)}/day` : '\u2014', drillUrl: null as string | null },
             ].map((chip, i) => (
               <div key={i} style={{ padding: '6px 8px', background: P.bgHover, borderRadius: 6 }}>
                 <div style={{ fontFamily: F.data, fontSize: 9, color: P.textFaint, textTransform: 'uppercase', marginBottom: 2 }}>{chip.l}</div>

@@ -6,6 +6,7 @@ import { useCopilot } from '../contexts/CopilotContext';
 import { getMitreTechnique, collectMitreTags } from '../constants/mitre';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 interface SimulationResult {
   simulation_id: string;
@@ -453,7 +454,7 @@ export default function AttackSimulator() {
                   <div className="flex-1 h-2 bg-slate-900 rounded-full overflow-hidden">
                     <div className={`h-full rounded-full ${impactData.impact.barColor}`} style={{ width: `${Math.min(result.risk_score, 100)}%` }} />
                   </div>
-                  <span className={`text-[10px] font-bold ${impactData.impact.color}`}>{result.risk_score}/100</span>
+                  <span className={`text-[10px] font-bold ${impactData.impact.color}`}>{normalizeScore(result.risk_score, 10).toFixed(1)}/10</span>
                 </div>
               </div>
               {impactData.mitreTags.length > 0 && (

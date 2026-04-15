@@ -4,6 +4,7 @@ import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { TIME_MS } from '../constants/metrics';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -414,7 +415,7 @@ export default function AccessReviews() {
 
   function daysUntil(deadline: string | null): string {
     if (!deadline) return '';
-    const diff = Math.ceil((new Date(deadline).getTime() - Date.now()) / 86400000);
+    const diff = Math.ceil((new Date(deadline).getTime() - Date.now()) / TIME_MS.DAY);
     if (diff < 0) return 'Overdue';
     if (diff === 0) return 'Due today';
     return `${diff}d left`;

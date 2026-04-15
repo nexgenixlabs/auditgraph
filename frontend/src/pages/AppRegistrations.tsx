@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
-import { RISK_BADGE, safeLower } from '../constants/metrics';
+import { RISK_BADGE, safeLower, TIME_MS } from '../constants/metrics';
 import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ function SortHeader({ label, field, currentField, currentDir, onSort }: {
 
 function daysUntil(iso: string | null): string {
   if (!iso) return '\u2014';
-  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / TIME_MS.DAY);
   if (d < 0) return `${Math.abs(d)}d ago`;
   if (d === 0) return 'Today';
   return `${d}d`;
@@ -736,7 +737,7 @@ export default function AppRegistrations() {
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[safeLower(row.risk_level)] || 'bg-gray-100 text-gray-600'}`}>
                         {row.risk_level}
                       </span>
-                      <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{row.risk_score} pts</div>
+                      <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{normalizeScore(row.risk_score, 10).toFixed(1)}/10</div>
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-1.5">

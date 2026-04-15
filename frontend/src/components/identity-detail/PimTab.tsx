@@ -12,9 +12,11 @@ interface PimTabProps {
   pimLoading: boolean;
   data: IdentityDetailsResponse;
   identity: IdentityDetailsResponse['identity'];
+  riskLevel?: string;
+  identityCategory?: string;
 }
 
-export function PimTab({ pimData, pimLoading, data, identity }: PimTabProps) {
+export function PimTab({ pimData, pimLoading, data, identity, riskLevel, identityCategory }: PimTabProps) {
   return (
     <div className="space-y-6">
       {pimLoading ? (
@@ -23,14 +25,32 @@ export function PimTab({ pimData, pimLoading, data, identity }: PimTabProps) {
           <div className="h-40 bg-gray-100 rounded-xl" />
         </div>
       ) : !pimData || (pimData.eligible_assignments.length === 0 && pimData.activations.length === 0) ? (
-        <div className="text-center py-8">
-          <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-          </svg>
-          <div className="text-sm text-gray-500">No PIM data available for this identity.</div>
-          <div className="text-xs text-gray-400 mt-1">
-            {DATA_EXPLANATIONS.PIM}. Eligible roles and activations will appear here when available.
+        <div className="py-8 space-y-4 px-4">
+          <div className="text-center">
+            <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <div className="text-sm text-gray-500">No PIM role eligibility assignments found.</div>
+            <div className="text-xs text-gray-400 mt-1">
+              {DATA_EXPLANATIONS.PIM}
+            </div>
+            <div className="text-xs text-gray-400 mt-1">
+              Source: Microsoft Graph API /roleManagement/directory/roleEligibilityScheduleInstances
+            </div>
           </div>
+          {(() => {
+            const rl = (riskLevel || '').toLowerCase();
+            const isHighRisk = rl === 'critical' || rl === 'high';
+            if (!isHighRisk) return null;
+            return (
+              <div className="border-l-4 border-l-amber-400 bg-amber-50 rounded-r-lg p-4">
+                <div className="text-sm font-semibold text-amber-800 mb-1">NIST AC-6 — Least Privilege</div>
+                <div className="text-xs text-amber-700">
+                  This {rl.toUpperCase()} {identityCategory === 'service_principal' ? 'service principal' : 'identity'} has no PIM role eligibility. Standing privileged access without just-in-time controls increases breach exposure.
+                </div>
+              </div>
+            );
+          })()}
         </div>
       ) : (
         <>

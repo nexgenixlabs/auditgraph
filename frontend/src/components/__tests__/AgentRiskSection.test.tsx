@@ -274,7 +274,7 @@ describe('AgentRiskSection', () => {
     expect(screen.getByText('Access')).toBeInTheDocument();
     // Agent info grid (from agentInfo, not blast radius) still renders
     expect(screen.getByText('Platform')).toBeInTheDocument();
-    expect(screen.getByText('AGIRS Score')).toBeInTheDocument();
+    expect(screen.getByText('Risk Level')).toBeInTheDocument();
     // Full Detail link still works
     expect(screen.getByText('Full Detail')).toBeInTheDocument();
     // Close button still present

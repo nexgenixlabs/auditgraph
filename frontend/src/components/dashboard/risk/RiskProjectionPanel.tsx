@@ -32,7 +32,7 @@ export function RiskProjectionPanel({ d }: RiskProjectionPanelProps) {
           padding: '14px 18px',
         }}>
           <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
-            Current AGIRS Score
+            Current Posture Score
           </div>
           <DN navigateTo="/dashboard">
             <div style={{ fontSize: 28, fontWeight: 700, fontFamily: FONT.mono, color: getTierColor(d.riskScore.tier), marginTop: 4 }}>
@@ -55,7 +55,7 @@ export function RiskProjectionPanel({ d }: RiskProjectionPanelProps) {
           padding: '14px 18px',
         }}>
           <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
-            Projected AGIRS Score
+            Projected Posture Score
           </div>
           <div style={{ fontSize: 28, fontWeight: 700, fontFamily: FONT.mono, color: getTierColor(d.projection.remediated.tier), marginTop: 4 }}>
             {projected.toFixed(1)}
@@ -106,7 +106,7 @@ export function RiskProjectionPanel({ d }: RiskProjectionPanelProps) {
                 <div style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.textSecondary, textAlign: 'right' as const }}>{r.affected}</div>
               </DN>
               <div style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.textSecondary, textAlign: 'right' as const }}>{contribution}%</div>
-              <div style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.success, textAlign: 'right' as const }}>+{r.gain} pts</div>
+              <div style={{ fontSize: 11, fontFamily: FONT.mono, color: COLORS.success, textAlign: 'right' as const }}>+{r.gain}</div>
             </div>
           );
         })}

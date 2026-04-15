@@ -55,7 +55,7 @@ REMEDIATION_KNOWLEDGE = {
             'Rotate the SPN client secret or certificate immediately',
             'Move to certificate-based authentication (eliminate client secrets)',
             'Reduce the SPN\'s role assignments to minimum required scope',
-            'Enable Conditional Access for workload identities (requires Entra P2)',
+            'Enable Conditional Access for workload identities',
             'Set up credential expiry monitoring and automated rotation',
         ],
     },

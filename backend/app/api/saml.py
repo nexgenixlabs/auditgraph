@@ -77,7 +77,7 @@ def build_saml_settings(sso_config, base_url):
             'x509cert': sso_config.get('sso_idp_x509_cert', ''),
         },
         'security': {
-            'authnRequestsSigned': False,
+            'authnRequestsSigned': True,
             'wantAssertionsSigned': True,
             'wantNameIdEncrypted': False,
         },

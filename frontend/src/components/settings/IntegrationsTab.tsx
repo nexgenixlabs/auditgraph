@@ -59,8 +59,8 @@ export function IntegrationsTab({
 
         <div className="rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 p-3">
           <p className="text-xs text-blue-700 dark:text-blue-300">
-            Requires Entra ID P2 license and <code className="px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-[10px]">AuditLog.Read.All</code> permission on the registered app.
-            When enabled, sign-in logs are ingested during each snapshot and behavioral anomalies are detected automatically.
+            Optional enhanced telemetry. Requires <code className="px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-[10px]">AuditLog.Read.All</code> permission on the registered app.
+            When enabled, sign-in logs supplement the core log-independent analysis with behavioral anomaly detection.
           </p>
         </div>
 

@@ -6,6 +6,7 @@ import {
   RISK_BADGE, RISK_ORDER, CLOUD_BADGE, DORMANT_LABELS,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel,
   getDormantStatus as getDormantStatusFromActivity,
+  TIME_MS,
 } from '../constants/metrics';
 
 // ── Types (copied from IdentityDetail.tsx) ──────────────────────
@@ -91,7 +92,7 @@ function credentialCountdown(expiration?: string | null): string {
   if (!expiration) return 'N/A';
   const diff = new Date(expiration).getTime() - Date.now();
   if (diff < 0) return 'Expired';
-  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const days = Math.floor(diff / TIME_MS.DAY);
   if (days === 0) return 'Today';
   if (days === 1) return '1 day';
   return `${days} days`;

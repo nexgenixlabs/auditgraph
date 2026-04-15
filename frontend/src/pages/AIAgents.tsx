@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { TIME_MS } from '../constants/metrics';
 
 interface AgentRow {
   id: number;
@@ -34,7 +35,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 function formatRelativeTime(d: string | null): string {
   if (!d) return 'Never';
-  const days = Math.round((Date.now() - new Date(d).getTime()) / 86400000);
+  const days = Math.round((Date.now() - new Date(d).getTime()) / TIME_MS.DAY);
   if (days <= 0) return 'Today';
   if (days === 1) return '1d ago';
   if (days < 30) return `${days}d ago`;

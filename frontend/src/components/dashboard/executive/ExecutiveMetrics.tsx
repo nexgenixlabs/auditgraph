@@ -64,7 +64,7 @@ function ScoreBreakdownTooltip({ pillars, total, children }: { pillars: PillarBr
           marginBottom: 8, pointerEvents: 'none', width: 220,
         }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui, marginBottom: 8, letterSpacing: '0.03em' }}>
-            AGIRS Score Breakdown
+            Risk Score Breakdown
           </div>
           {contributions.map(c => (
             <div key={c.name} style={{
@@ -112,8 +112,8 @@ export function ExecutiveMetrics({
           )}
         </div>
         <div style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui, marginTop: 4 }}>
-          AGIRS
-          <Tooltip text="AuditGraph Identity Risk Score: Composite of Human Identity Risk (40%), Machine Identity Risk (40%), and Governance Effectiveness (20%). Higher = better posture.">
+          Posture
+          <Tooltip text="Identity Posture Score: Composite of Human Identity Risk (40%), Machine Identity Risk (40%), and Governance Effectiveness (20%). Higher = better posture.">
             <span style={{ marginLeft: 4, color: COLORS.textDim, cursor: 'help' }}>{'\u24D8'}</span>
           </Tooltip>
         </div>
@@ -127,7 +127,7 @@ export function ExecutiveMetrics({
             </Tooltip>
           )}
           {industryBenchmark != null && (
-            <Tooltip text="Industry average AGIRS score based on peer organizations of similar size">
+            <Tooltip text="Industry average posture score based on peer organizations of similar size">
               <span style={{ fontSize: 9, fontFamily: FONT.mono, color: COLORS.textMuted, background: `${COLORS.textMuted}15`, padding: '1px 5px', borderRadius: 3 }}>
                 Avg {industryBenchmark}
               </span>
@@ -139,7 +139,7 @@ export function ExecutiveMetrics({
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr 1fr 1fr 1fr', gap: 14, alignItems: 'stretch' }}>
-      {/* AGIRS Score Ring — with breakdown tooltip on hover */}
+      {/* Posture Score Ring — with breakdown tooltip on hover */}
       {pillars && pillars.length > 0 ? (
         <ScoreBreakdownTooltip pillars={pillars} total={score}>
           {scoreCard}

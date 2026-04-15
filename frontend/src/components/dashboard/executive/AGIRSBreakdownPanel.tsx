@@ -2,6 +2,8 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { COLORS, type Pillar } from '../../../constants/ciso';
 import { FONT, CISOCard, SectionTitle, DN } from '../ciso-shared';
+import { DIMENSIONS, getSeverityColor, MITRE_TECHNIQUE_LABELS, CIS_CONTROL_LABELS, NIST_FUNCTION_LABELS } from '../../../constants/riskScoring';
+import { computeIdentityRisk, type IdentityRiskResult } from '../../../utils/identityRiskScore';
 
 interface AGIRSBreakdownPanelProps {
   score: number;
@@ -11,6 +13,8 @@ interface AGIRSBreakdownPanelProps {
   scoreAnalysis?: string;
   potentialScore?: number;
   dataCoverage?: Array<{ source: string; status: string; detail: string }>;
+  /** Dangerous identities from AGIRS data — used to compute aggregate dimension scores */
+  dangerousIdentities?: Record<string, any>[];
 }
 
 const PILLAR_COLORS: Record<string, string> = {
@@ -49,7 +53,39 @@ const COVERAGE_ICONS: Record<string, string> = {
   inactive: '\u2717',  // x
 };
 
-export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, scoreAnalysis, potentialScore, dataCoverage }: AGIRSBreakdownPanelProps) {
+/** Aggregate dimension scores across multiple identities — take max per dimension */
+function aggregateDimensionScores(identities: Record<string, any>[]): IdentityRiskResult | null {
+  if (!identities || identities.length === 0) return null;
+  const results = identities.map(id => computeIdentityRisk(id));
+
+  // For each dimension, take the max score across all identities
+  const aggregated = DIMENSIONS.map((dim, i) => {
+    let maxScore = 0;
+    let maxResult = results[0].dimensions[i];
+    for (const r of results) {
+      if (r.dimensions[i].score > maxScore) {
+        maxScore = r.dimensions[i].score;
+        maxResult = r.dimensions[i];
+      }
+    }
+    return maxResult;
+  });
+
+  const maxScore = Math.max(0, ...aggregated.map(d => d.score));
+  const sevOrder: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+  const maxSeverity = aggregated.reduce((best, d) =>
+    (sevOrder[d.severity] ?? 0) > (sevOrder[best] ?? 0) ? d.severity : best, 'info');
+
+  return {
+    dimensions: aggregated,
+    overall_severity: maxSeverity,
+    overall_score: maxScore,
+    critical_count: aggregated.filter(d => d.score >= 9.0).length,
+    high_count: aggregated.filter(d => d.score >= 7.0).length,
+  };
+}
+
+export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, scoreAnalysis, potentialScore, dataCoverage, dangerousIdentities }: AGIRSBreakdownPanelProps) {
   const navigate = useNavigate();
 
   // Use backend-computed score_impact (authoritative) — fall back to local calc if absent
@@ -76,17 +112,26 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
   const displayPotential = potentialScore != null ? potentialScore : Math.min(98, Math.round((score + totalPenalty) * 10) / 10);
   const delta = previousScore != null ? Math.round((score - previousScore) * 10) / 10 : null;
 
-  const SEVERITY_COLORS: Record<string, string> = {
+  const SEVERITY_COLORS_MAP: Record<string, string> = {
     critical: COLORS.danger,
     high: COLORS.elevated,
     medium: COLORS.warning,
     low: COLORS.success,
   };
 
+  // Compute v2.0 dimension scores from dangerous identities
+  const riskResult = aggregateDimensionScores(dangerousIdentities || []);
+
+  // Collect all standards references from active dimensions
+  const activeDimensions = riskResult?.dimensions.filter(d => d.score > 0) || [];
+  const allMitre = Array.from(new Set(activeDimensions.flatMap(d => d.mitre)));
+  const allCis = Array.from(new Set(activeDimensions.flatMap(d => d.cis)));
+  const allNist = Array.from(new Set(activeDimensions.flatMap(d => d.nist)));
+
   return (
     <CISOCard>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-        <SectionTitle>AGIRS Score Breakdown</SectionTitle>
+        <SectionTitle>Risk Score Breakdown</SectionTitle>
         {delta != null && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>Previous: {previousScore?.toFixed(1)}</span>
@@ -122,10 +167,10 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 12, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
-            AGIRS Score: <span style={{ fontWeight: 700, color: COLORS.text }}>{score.toFixed(1)} / 100</span>
+            Posture Score: <span style={{ fontWeight: 700, color: COLORS.text }}>{score.toFixed(1)} / 100</span>
           </div>
           <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.mono, marginTop: 2 }}>
-            AGIRS = 100 &minus; &Sigma;(risk_exposure &times; pillar_weight)
+            Score = 100 &minus; &Sigma;(risk_exposure &times; pillar_weight)
           </div>
         </div>
         <div style={{
@@ -144,6 +189,90 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
           </div>
         </div>
       </div>
+
+      {/* ── Identity Risk Dimensions (v2.0) ── */}
+      {riskResult && riskResult.dimensions.some(d => d.score > 0) && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <span style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Identity Risk Dimensions
+            </span>
+            <span style={{
+              fontSize: 8, padding: '1px 5px', borderRadius: 3,
+              background: `${getSeverityColor(riskResult.overall_severity)}18`,
+              color: getSeverityColor(riskResult.overall_severity),
+              fontWeight: 600, fontFamily: FONT.mono, textTransform: 'uppercase',
+            }}>
+              {riskResult.overall_severity}
+            </span>
+          </div>
+          <div style={{ fontSize: 9, color: COLORS.textMuted, letterSpacing: '0.5px', marginBottom: 10, fontFamily: FONT.mono }}>
+            CVSS v3.1 · NIST SP 800-63B · SP 800-207 · CIS Controls v8
+          </div>
+
+          {/* 5 dimension bars */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            {riskResult.dimensions.map((dim, i) => {
+              const barPct = (dim.score / 10) * 100;
+              const sevColor = getSeverityColor(dim.severity);
+              const primaryMitre = dim.score > 0 && dim.mitre.length > 0 ? dim.mitre[0] : null;
+              return (
+                <div
+                  key={dim.dimension}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '7px 10px',
+                    borderBottom: i < riskResult.dimensions.length - 1 ? `1px solid ${COLORS.border}` : 'none',
+                  }}
+                >
+                  <span style={{ fontSize: 13, width: 18, textAlign: 'center', flexShrink: 0 }}>{dim.icon}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                      <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui }}>{dim.name}</span>
+                      {primaryMitre && (
+                        <span style={{
+                          fontSize: 7, padding: '1px 4px', borderRadius: 2,
+                          background: `${COLORS.accent}18`, color: COLORS.accent,
+                          fontWeight: 600, fontFamily: FONT.mono,
+                        }}>
+                          {primaryMitre}
+                        </span>
+                      )}
+                    </div>
+                    {/* Bar */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{
+                        flex: 1, height: 5, borderRadius: 3,
+                        background: COLORS.border, overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          width: `${barPct}%`, height: '100%', borderRadius: 3,
+                          background: dim.score > 0 ? dim.color : COLORS.textDim,
+                          transition: 'width 0.6s ease',
+                        }} />
+                      </div>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, fontFamily: FONT.mono,
+                        color: dim.score > 0 ? sevColor : COLORS.textDim,
+                        width: 28, textAlign: 'right', flexShrink: 0,
+                      }}>
+                        {dim.score.toFixed(1)}
+                      </span>
+                    </div>
+                  </div>
+                  <span style={{
+                    fontSize: 7, fontWeight: 600, padding: '2px 5px', borderRadius: 3,
+                    background: `${sevColor}18`, color: sevColor, fontFamily: FONT.mono,
+                    textTransform: 'uppercase', flexShrink: 0,
+                  }}>
+                    {dim.severity}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Stacked Bar */}
       <div style={{ marginBottom: 14 }}>
@@ -166,7 +295,7 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
                 width: `${p.penalty}%`, background: p.color, transition: 'width 0.8s ease',
                 cursor: 'pointer', position: 'relative',
               }}
-              title={`${p.icon} ${p.name}: -${p.penalty.toFixed(1)} pts (${p.identityCount} identities, ${p.riskPct.toFixed(1)}% risk)`}
+              title={`${p.icon} ${p.name}: -${p.penalty.toFixed(1)} (${p.identityCount} identities, ${p.riskPct.toFixed(1)}% risk)`}
               onClick={() => navigate(p.nav)}
             >
               {p.penalty > 4 && (
@@ -202,7 +331,7 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
       {/* Pillar Detail Rows */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
         {penalties.map((p, i) => {
-          const sevColor = SEVERITY_COLORS[p.severity] || COLORS.textDim;
+          const sevColor = SEVERITY_COLORS_MAP[p.severity] || COLORS.textDim;
           return (
             <div
               key={p.name}
@@ -241,6 +370,70 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
         })}
       </div>
 
+      {/* Standards Mapping (v2.0) — collected from active dimensions */}
+      {(allMitre.length > 0 || allCis.length > 0 || allNist.length > 0) && (
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.border}` }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui, marginBottom: 8 }}>Standards Mapping</div>
+
+          {allMitre.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 9, fontWeight: 600, color: COLORS.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                MITRE ATT&CK
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {allMitre.map(t => (
+                  <span key={t} title={MITRE_TECHNIQUE_LABELS[t] || t} style={{
+                    fontSize: 9, padding: '2px 6px', borderRadius: 3,
+                    background: `${COLORS.danger}12`, color: COLORS.danger,
+                    fontWeight: 600, fontFamily: FONT.mono,
+                  }}>
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {allCis.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 9, fontWeight: 600, color: COLORS.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                CIS Controls v8
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {allCis.map(c => (
+                  <span key={c} title={CIS_CONTROL_LABELS[c] || c} style={{
+                    fontSize: 9, padding: '2px 6px', borderRadius: 3,
+                    background: `${COLORS.accent}12`, color: COLORS.accent,
+                    fontWeight: 600, fontFamily: FONT.mono,
+                  }}>
+                    CIS {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {allNist.length > 0 && (
+            <div>
+              <div style={{ fontSize: 9, fontWeight: 600, color: COLORS.textMuted, fontFamily: FONT.ui, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                NIST CSF 2.0
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {allNist.map(n => (
+                  <span key={n} title={NIST_FUNCTION_LABELS[n] || n} style={{
+                    fontSize: 9, padding: '2px 6px', borderRadius: 3,
+                    background: `${COLORS.purple}12`, color: COLORS.purple,
+                    fontWeight: 600, fontFamily: FONT.mono,
+                  }}>
+                    {n}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Score Analysis — per-pillar breakdown (distinct from AI Posture Analysis summary) */}
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.border}` }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, fontFamily: FONT.ui, marginBottom: 6 }}>Pillar Impact Breakdown</div>
@@ -252,7 +445,7 @@ export function AGIRSBreakdownPanel({ score, tier, pillars, previousScore, score
               <div key={p.name} style={{ marginBottom: 4 }}>
                 <span style={{ fontWeight: 600, color: COLORS.text }}>{PILLAR_ICONS[p.name] || '\u25CF'} {p.name}</span>
                 {' \u2014 '}
-                <span style={{ color: COLORS.danger, fontWeight: 600, fontFamily: FONT.mono }}>{p._scoreImpact?.toFixed(1)} pts</span>
+                <span style={{ color: COLORS.danger, fontWeight: 600, fontFamily: FONT.mono }}>{p._scoreImpact?.toFixed(1)} impact</span>
                 {p.identityCount ? ` (${p.identityCount} ${p.identityCount === 1 ? 'identity' : 'identities'} affected)` : ''}
                 {p._severity ? <span style={{
                   marginLeft: 6, fontSize: 8, padding: '1px 4px', borderRadius: 3,

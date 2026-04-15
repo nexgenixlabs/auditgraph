@@ -158,6 +158,7 @@ export function DN({ children, navigateTo, tooltip, prefill }: {
           const idMatch = navigateTo.match(/^\/identities\/([^?/]+)$/);
           if (idMatch) {
             const raw = idMatch[1];
+            if (raw === 'undefined' || raw === 'null' || !raw) return; // guard against bad IDs
             const numVal = parseInt(raw, 10);
             // Accept both numeric DB ids and UUID identity_ids
             drawerCtx.openIdentity(!isNaN(numVal) && String(numVal) === raw ? numVal : raw, prefill);
@@ -175,6 +176,35 @@ export function DN({ children, navigateTo, tooltip, prefill }: {
       }}
     >
       {children}
+    </span>
+  );
+}
+
+// ─── InsightSentence ─────────────────────────────────────────────
+
+export function InsightSentence({ children, icon }: { children: React.ReactNode; icon?: string }) {
+  return (
+    <div className="flex items-start gap-2 py-1.5">
+      <span className="text-[11px] flex-shrink-0 mt-0.5">{icon || '→'}</span>
+      <span className="text-[11.5px] text-[#8fa3bf] leading-relaxed">{children}</span>
+    </div>
+  );
+}
+
+// ─── SeverityPill ────────────────────────────────────────────────
+
+const PILL_CLS: Record<string, string> = {
+  critical: 'bg-[rgba(232,70,90,0.15)] text-[#e8465a]',
+  high: 'bg-[rgba(255,114,22,0.15)] text-[#FF7216]',
+  medium: 'bg-[rgba(245,158,11,0.12)] text-[#f59e0b]',
+  low: 'bg-[rgba(34,197,94,0.12)] text-[#22c55e]',
+};
+
+export function SeverityPill({ severity }: { severity: string }) {
+  const cls = PILL_CLS[severity] || PILL_CLS.medium;
+  return (
+    <span className={`inline-block text-[9px] font-semibold uppercase tracking-[0.5px] px-2 py-[2px] rounded-full ${cls}`}>
+      {severity}
     </span>
   );
 }

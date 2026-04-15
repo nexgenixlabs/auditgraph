@@ -612,7 +612,7 @@ export default function RemediationCenter() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right font-mono font-bold" style={{ color: '#4ADE80' }}>
-                      +{a.risk_reduction} pts
+                      +{a.risk_reduction}
                     </td>
                     <td className="px-4 py-3 text-right font-mono" style={{ color: R.text }}>
                       {a.affected_count}
@@ -703,7 +703,7 @@ export default function RemediationCenter() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
                   <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Risk Reduction</p>
-                  <p className="text-xl font-bold" style={{ color: '#4ADE80' }}>+{selectedAction.risk_reduction} pts</p>
+                  <p className="text-xl font-bold" style={{ color: '#4ADE80' }}>+{selectedAction.risk_reduction}</p>
                 </div>
                 <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
                   <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>AI Confidence</p>

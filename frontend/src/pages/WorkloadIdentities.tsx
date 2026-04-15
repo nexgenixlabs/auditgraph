@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
-import { WORKLOAD_TYPE_CONFIG, LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG } from '../constants/metrics';
+import { WORKLOAD_TYPE_CONFIG, LIFECYCLE_STATE_CONFIG, OWNER_STATUS_CONFIG, SCOPE_FLAG_CONFIG, TIME_MS } from '../constants/metrics';
 import { verdictBadgeClasses, verdictLabel } from '../constants/verdicts';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ function formatSecretExpiry(expiryDate?: string | null, hasExpired?: boolean, cr
     if (!credCount) return { label: 'No secrets', colorClass: 'text-gray-400 dark:text-slate-500' };
     return { label: 'No expiry', colorClass: 'text-gray-400 dark:text-slate-500' };
   }
-  const daysUntil = Math.round((new Date(expiryDate).getTime() - Date.now()) / 86400000);
+  const daysUntil = Math.round((new Date(expiryDate).getTime() - Date.now()) / TIME_MS.DAY);
   if (daysUntil < 0) return { label: `Expired ${Math.abs(daysUntil)}d ago`, colorClass: 'text-red-500 dark:text-red-400 font-semibold' };
   if (daysUntil <= 30) return { label: `${daysUntil}d left`, colorClass: 'text-red-500 dark:text-red-400' };
   if (daysUntil <= 90) return { label: `${daysUntil}d left`, colorClass: 'text-yellow-500 dark:text-yellow-400' };
@@ -118,17 +119,17 @@ function formatSecretExpiry(expiryDate?: string | null, hasExpired?: boolean, cr
 
 function formatLastActive(d?: string | null, createdAt?: string | null): { label: string; colorClass: string; tooltip?: string } {
   if (!d) {
-    // No sign-in data — provide meaningful context from creation date
+    // No sign-in evidence — provide context from creation date
     if (createdAt) {
-      const ageDays = Math.round((Date.now() - new Date(createdAt).getTime()) / 86400000);
+      const ageDays = Math.round((Date.now() - new Date(createdAt).getTime()) / TIME_MS.DAY);
       if (ageDays <= 30) {
-        return { label: 'Recently created', colorClass: 'text-gray-400 dark:text-slate-500 italic', tooltip: `Created ${ageDays}d ago. No sign-in data yet.` };
+        return { label: 'Recently created', colorClass: 'text-gray-400 dark:text-slate-500 italic', tooltip: `Created ${ageDays}d ago. Awaiting first authentication.` };
       }
-      return { label: 'No activity recorded', colorClass: 'text-gray-400 dark:text-slate-500 italic', tooltip: `Account is ${formatCreatedAge(createdAt)} old. Sign-in logs unavailable — enable P2 license to collect SPN activity.` };
+      return { label: 'Provisioned', colorClass: 'text-amber-500 dark:text-amber-400', tooltip: `Account is ${formatCreatedAge(createdAt)} old. No auth observed — has permissions but no sign-in evidence.` };
     }
-    return { label: 'No activity', colorClass: 'text-gray-400 dark:text-slate-500 italic' };
+    return { label: 'Idle', colorClass: 'text-amber-500 dark:text-amber-400' };
   }
-  const daysAgo = Math.round((Date.now() - new Date(d).getTime()) / 86400000);
+  const daysAgo = Math.round((Date.now() - new Date(d).getTime()) / TIME_MS.DAY);
   if (daysAgo < 0) return { label: 'Today', colorClass: 'text-green-500 dark:text-green-400' };
   if (daysAgo === 0) return { label: 'Today', colorClass: 'text-green-500 dark:text-green-400' };
   if (daysAgo <= 7) return { label: `${daysAgo}d ago`, colorClass: 'text-green-500 dark:text-green-400' };
@@ -139,7 +140,7 @@ function formatLastActive(d?: string | null, createdAt?: string | null): { label
 
 function formatCreatedAge(d?: string | null): string {
   if (!d) return '—';
-  const days = Math.round((Date.now() - new Date(d).getTime()) / 86400000);
+  const days = Math.round((Date.now() - new Date(d).getTime()) / TIME_MS.DAY);
   if (days < 30) return `${days}d`;
   if (days < 365) return `${Math.floor(days / 30)}mo`;
   const yrs = Math.floor(days / 365);
@@ -507,7 +508,7 @@ const WorkloadIdentities: React.FC = () => {
                   {/* Effective Privilege */}
                   <td className="text-center px-2 py-2">
                     <span className={`text-xs font-medium ${row.privilege_score >= 30 ? 'text-red-600 dark:text-red-400' : row.privilege_score >= 15 ? 'text-orange-500 dark:text-orange-400' : 'text-gray-600 dark:text-slate-300'}`}>
-                      {row.privilege_score}/40
+                      {normalizeScore(row.privilege_score, 4).toFixed(1)}/10
                     </span>
                   </td>
                   {/* Sensitive Scope */}

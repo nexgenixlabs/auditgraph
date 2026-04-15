@@ -22,6 +22,7 @@ ORPHANED definition (canonical — do not change without updating all consumers)
 
 import logging
 import json
+from datetime import datetime, timezone
 
 from app.constants.roles import (
     T0_ENTRA_ROLES_LOWER, T1_ENTRA_ROLES_LOWER, T2_RBAC_ROLES_LOWER,
@@ -38,6 +39,12 @@ class RiskSummaryEngine:
     """Single-pass computation of all canonical risk metrics for a discovery run."""
 
     def __init__(self, db, organization_id, run_ids):
+        if not organization_id or (isinstance(organization_id, int) and organization_id <= 0):
+            raise ValueError(
+                f"RiskSummaryEngine requires valid organization_id, got {organization_id!r}"
+            )
+        if not run_ids:
+            raise ValueError("RiskSummaryEngine requires non-empty run_ids")
         self.db = db
         self.org_id = organization_id
         self.run_ids = run_ids
@@ -60,6 +67,9 @@ class RiskSummaryEngine:
 
         # ── Sanity check + fallback (Step 3 & 4) ──
         self._validate_and_fix_agirs(summary)
+
+        # ── Timestamp: set computed_at so envelope lastUpdated is never empty ──
+        summary['computed_at'] = datetime.now(timezone.utc).isoformat()
 
         # ── Step 1: Log computed scores before persistence ──
         logger.info(
@@ -213,6 +223,13 @@ class RiskSummaryEngine:
         Runs AFTER AGIRSEngine (which may have committed the transaction),
         so this opens a fresh cursor.
         """
+        # Ensure connection is in a clean transaction state after AGIRS
+        # (AGIRSEngine DDL or _commit() can leave a poisoned transaction)
+        try:
+            self.db.conn.rollback()
+        except Exception:
+            pass
+
         cursor = self.db.conn.cursor()
         try:
             # Attack path count — max of attack_paths and graph_attack_findings
@@ -268,24 +285,36 @@ class RiskSummaryEngine:
 
             summary['total_resources'] = summary.get('storage_accounts', 0) + summary.get('key_vaults', 0)
 
-            # Subscription count
+            # Subscription inventory (SSOT: cloud_subscriptions table)
+            # Derive connection_id from run_ids for connection-scoped isolation.
+            summary['subscriptions'] = 0
             try:
-                cursor.execute("SAVEPOINT rse_sub")
+                cursor.execute("SAVEPOINT rse_sub_inv")
+                # Get connection_id from the run_ids for tighter scoping
                 cursor.execute("""
-                    SELECT COUNT(DISTINCT SPLIT_PART(ra.scope, '/', 3))
-                    FROM role_assignments ra
-                    JOIN identities i ON i.id = ra.identity_db_id
-                    WHERE i.discovery_run_id = ANY(%s)
-                      AND ra.scope LIKE '/subscriptions/%%'
+                    SELECT DISTINCT cloud_connection_id FROM discovery_runs
+                    WHERE id = ANY(%s) AND cloud_connection_id IS NOT NULL
                 """, (self.run_ids,))
+                rse_conn_ids = [r[0] for r in cursor.fetchall()]
+                if rse_conn_ids:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM cloud_subscriptions
+                        WHERE cloud_connection_id = ANY(%s)
+                          AND organization_id = %s
+                          AND deleted = false
+                    """, (rse_conn_ids, self.org_id))
+                else:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM cloud_subscriptions
+                        WHERE organization_id = %s AND deleted = false
+                    """, (self.org_id,))
                 summary['subscriptions'] = cursor.fetchone()[0] or 0
-                cursor.execute("RELEASE SAVEPOINT rse_sub")
+                cursor.execute("RELEASE SAVEPOINT rse_sub_inv")
             except Exception:
                 try:
-                    cursor.execute("ROLLBACK TO SAVEPOINT rse_sub")
+                    cursor.execute("ROLLBACK TO SAVEPOINT rse_sub_inv")
                 except Exception:
                     pass
-                summary['subscriptions'] = 0
 
             # Privileged role count
             try:

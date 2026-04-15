@@ -19,6 +19,60 @@ logger = logging.getLogger(__name__)
 MAX_LIMIT = 1000  # Global safety cap for all paginated endpoints
 
 
+# ── Platform Standard: Safe DB Query Helper ─────────────────────────
+# Every except block that catches a DB error MUST call db.conn.rollback()
+# to clear PostgreSQL's "aborted transaction" state. Without rollback,
+# all subsequent queries on the same connection fail with:
+#   "current transaction is aborted, commands ignored until end
+#    of transaction block"
+#
+# For NEW code: use _safe_query() below.
+# For EXISTING code: add rollback in every except block per this pattern:
+#   except Exception:
+#       try: db.conn.rollback()
+#       except Exception: pass
+# ─────────────────────────────────────────────────────────────────────
+
+def _safe_query(db, query, params=None, default=None, fetch='all'):
+    """Execute a read-only DB query with automatic rollback on failure.
+
+    Platform standard — prevents transaction poisoning when a query fails.
+    On exception, rolls back the connection (clearing aborted state)
+    and returns the default value.
+
+    Args:
+        db: Database instance (must have db.conn)
+        query: SQL string
+        params: Query parameters tuple
+        default: Value to return on failure
+        fetch: 'all' → fetchall(), 'one' → fetchone(), 'scalar' → first col of first row
+
+    Returns:
+        Query result, or default on failure.
+    """
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute(query, params)
+        if fetch == 'scalar':
+            row = cursor.fetchone()
+            return row[0] if row else default
+        elif fetch == 'one':
+            return cursor.fetchone() or default
+        else:
+            return cursor.fetchall()
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+            pass
+        logger.debug("_safe_query failed (%s): %s", fetch, e)
+        return default if default is not None else ([] if fetch == 'all' else None)
+    finally:
+        cursor.close()
+
+
 def _safe_int(val, field_name: str) -> int:
     """Parse user-supplied value as int, returning 400 on failure."""
     try:
@@ -91,6 +145,19 @@ ACTIVATED_SUB_FILTER_SQL = """
             AND i.associated_subscription_id = ANY(%s))
     )
 """
+
+
+def _scalar(cursor, default=None):
+    """Safe fetchone-then-index-zero helper.
+    Returns default if no rows or value is None.
+    Prevents TypeError crashes on empty result sets.
+    """
+    row = cursor.fetchone()
+    if row is None:
+        return default
+    val = row[0] if isinstance(row, (tuple, list)) \
+          else next(iter(row.values()), None)
+    return val if val is not None else default
 
 
 def _get_pillar_filter_sql(pillar: str) -> str:
@@ -266,6 +333,11 @@ def _org_id():
     return -1
 
 
+def _tenant_id():
+    """Alias for _org_id(). Do not add new calls — use _org_id() instead."""
+    return _org_id()
+
+
 def _current_user_id():
     """Get the authenticated user's ID (never overridden)."""
     user = getattr(g, 'current_user', None)
@@ -273,11 +345,20 @@ def _current_user_id():
 
 
 def _log(db, action_type, description, metadata=None):
-    """Log activity with auto-injected user/org context."""
-    user = getattr(g, 'current_user', None)
-    uid = user.get('id') if user else None
-    tid = user.get('organization_id') if user else None
-    db.log_activity(action_type, description, metadata, user_id=uid, organization_id=tid)
+    """Log activity with auto-injected user/org context.
+
+    Safe: catches DB errors and rolls back to prevent transaction poisoning.
+    Logging should never crash the request.
+    """
+    try:
+        user = getattr(g, 'current_user', None)
+        uid = user.get('id') if user else None
+        tid = user.get('organization_id') if user else None
+        db.log_activity(action_type, description, metadata, user_id=uid, organization_id=tid)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.debug("_log failed (%s): %s", action_type, e)
 
 
 def _log_ai_audit(db, query_type, input_payload, output_payload,
@@ -315,6 +396,8 @@ def _log_ai_audit(db, query_type, input_payload, output_payload,
             duration_ms=duration_ms,
         )
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.warning(f"AI audit log failed: {e}")
 
 
@@ -347,6 +430,8 @@ def _get_org_plan(db, org_id):
         cursor.close()
         return (row[0] if row and row[0] else 'free')
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         return 'free'
 
 
@@ -388,6 +473,8 @@ def _active_subscription_ids(cursor, org_id, connection_id=None):
                 active_ids.append(aid)
         return active_ids, len(all_ids), len(active_ids)
     except Exception:
+        try: cursor.connection.rollback()
+        except Exception: pass
         return [], 0, 0
 
 
@@ -407,6 +494,8 @@ def _monitored_sub_ids(cursor, org_id, connection_id=None):
             """, (org_id,))
         return [r[0] if not isinstance(r, dict) else r['account_id'] for r in cursor.fetchall()]
     except Exception:
+        try: cursor.connection.rollback()
+        except Exception: pass
         return []
 
 
@@ -585,7 +674,7 @@ def get_stats():
             cursor.execute("SELECT COUNT(*) FROM discovery_runs WHERE organization_id = %s", (tid,))
         else:
             cursor.execute("SELECT COUNT(*) FROM discovery_runs")
-        total_runs = cursor.fetchone()[0] or 0
+        total_runs = _scalar(cursor, 0)
 
         run_ids = _latest_run_ids(cursor, tid, _connection_id())
         if not run_ids:
@@ -595,7 +684,7 @@ def get_stats():
         cursor.execute("""
             SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)
         """, (run_ids,))
-        completed_at = cursor.fetchone()[0]
+        completed_at = _scalar(cursor)
 
         # Activated-subscription filter for identity counts
         mon_subs = _monitored_sub_ids(cursor, tid, _connection_id())
@@ -632,7 +721,7 @@ def get_stats():
             cursor.execute("""
                 SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)
             """, (prev_ids,))
-            prev_completed = cursor.fetchone()[0]
+            prev_completed = _scalar(cursor)
             prev_sql = f"""
                 SELECT COUNT(*),
                        SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END),
@@ -686,9 +775,10 @@ def get_stats():
                     SELECT COUNT(*) FROM workload_anomaly_events
                     WHERE discovery_run_id = ANY(%s) AND NOT resolved
                 """, (run_ids,))
-                anomalies_unresolved = cursor.fetchone()[0] or 0
+                anomalies_unresolved = _scalar(cursor, 0)
             except Exception:
-                pass
+                try: db.conn.rollback()
+                except Exception: pass
             workload_exposure = {
                 'total': we_row[0] or 0,
                 'critical': we_row[1] or 0,
@@ -705,7 +795,8 @@ def get_stats():
                 'avg_exposure_score': float(we_row[8] or 0),
             }
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Ghost identities: read from persisted risk_summary (canonical SSOT)
         ghost_count = 0
@@ -714,7 +805,8 @@ def get_stats():
             if rs:
                 ghost_count = rs.get('ghost_accounts', 0)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Disabled/deleted counts (regardless of role assignments)
         disabled_count = 0
@@ -731,7 +823,8 @@ def get_stats():
             disabled_count = row[0] or 0
             deleted_count = row[1] or 0
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Zombie personas: disabled account with correlated active account
         zombie_count = 0
@@ -747,9 +840,10 @@ def get_stats():
                 WHERE (i1.enabled = FALSE OR i1.deleted_at IS NOT NULL)
                   AND i2.enabled = TRUE AND i2.deleted_at IS NULL
             """)
-            zombie_count = cursor.fetchone()[0] or 0
+            zombie_count = _scalar(cursor, 0)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # New/removed identity counts from latest drift report
         new_identities_count = 0
@@ -768,7 +862,8 @@ def get_stats():
                 new_identities_count = drift_row[0] or 0
                 removed_identities_count = drift_row[1] or 0
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Identity count separation (total including Microsoft)
         customer_count = microsoft_count = total_including_microsoft = 0
@@ -785,7 +880,8 @@ def get_stats():
             microsoft_count = ms_row[1] or 0
             total_including_microsoft = ms_row[2] or 0
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Lineage verdict distribution (recommended_action counts)
         lineage_verdicts = None
@@ -816,7 +912,8 @@ def get_stats():
                 'distribution': verdicts,
             }
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         result = {
             "latest_run": latest,
@@ -1023,7 +1120,7 @@ def get_identities():
         # Get total count using lightweight query (no correlated subqueries)
         count_query = f"SELECT COUNT(*) {base_from} {where_clauses}"
         cursor.execute(count_query, params)
-        total_count = cursor.fetchone()[0]
+        total_count = _scalar(cursor, 0)
 
         # Build the full query with correlated subqueries for the data fetch
         query = _identity_list_select() + where_clauses
@@ -1049,7 +1146,24 @@ def get_identities():
 
         identities = [_map_identity_row(row) for row in rows]
 
-        result = {"count": len(identities), "total": total_count, "identities": identities}
+        # Compute governance summary counts from mapped identities
+        gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0}
+        for ident in identities:
+            gs = ident.get('governance_state') or 'Governed'
+            pl = ident.get('privilege_level') or 'Standard'
+            if gs == 'Orphaned':
+                gov_counts['orphaned'] += 1
+            elif gs == 'Ungoverned':
+                gov_counts['ungoverned'] += 1
+            elif gs == 'Policy Violation':
+                gov_counts['policy_violation'] += 1
+            if pl in ('Privileged', 'Highly Privileged'):
+                gov_counts['privileged'] += 1
+            if gs in ('Orphaned', 'Ungoverned', 'Policy Violation') and pl in ('Privileged', 'Highly Privileged'):
+                gov_counts['combo'] += 1
+
+        result = {"count": len(identities), "total": total_count, "identities": identities,
+                  "governance_summary": gov_counts}
         if limit:
             result["limit"] = limit
             result["offset"] = offset
@@ -1248,7 +1362,8 @@ def get_identity_details(identity_id: str):
                 last_signin_at = identity['last_sign_in']
                 auth_source = 'graph_sign_in_activity'
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         identity["last_signin_at"] = last_signin_at
         identity["last_signin_ip"] = last_signin_ip
@@ -1269,10 +1384,25 @@ def get_identity_details(identity_id: str):
             activity_sources.append({"type": ActivitySource.AZURE_SIGNIN, "label": ACTIVITY_SOURCE_LABELS[ActivitySource.AZURE_SIGNIN], "available": True})
         else:
             activity_sources.append({"type": ActivitySource.AZURE_SIGNIN, "label": ACTIVITY_SOURCE_LABELS[ActivitySource.AZURE_SIGNIN], "available": False,
-                                     "detail": ACTIVITY_SOURCE_LABELS[ActivitySource.FEDERATED_INFERENCE]})
+                                     "detail": "Not available — log-independent mode"})
+        # ARM role assignment analysis — always available (log-independent)
+        _act_status = (identity.get('activity_status') or '').lower()
+        _arm_available = _act_status in ('likely_active', 'active', 'recently_created')
+        activity_sources.append({
+            "type": "arm_analysis", "label": "ARM role assignments",
+            "available": _arm_available,
+            "detail": "Role assignments analyzed via static analysis" if _arm_available else "No recent role assignment changes detected",
+        })
         if fed_wt_raw:
             activity_sources.append({"type": ActivitySource.FEDERATED_INFERENCE, "label": "Federated inference", "available": True,
                                      "detail": f"Inferred from {fed_wt_raw} workload configuration"})
+        # AuditGraph snapshot source
+        _run_id = identity.get('discovery_run_id')
+        activity_sources.append({
+            "type": "auditgraph_snapshot", "label": "AuditGraph snapshot",
+            "available": True,
+            "detail": f"Snapshot #{_run_id}" if _run_id else "Available",
+        })
         identity["activity_sources"] = activity_sources
 
         # ── Rule 6: Active access hints for federated identities ──
@@ -1293,7 +1423,8 @@ def get_identity_details(identity_id: str):
                         for r in access_rows
                     ]
             except Exception:
-                pass  # non-critical enrichment
+                try: db.conn.rollback()
+                except Exception: pass
 
         run_completed_at = row[31].isoformat() if row[31] else None
         current_run_id = row[30]
@@ -1352,24 +1483,31 @@ def get_identity_details(identity_id: str):
                         "is_new": True,
                     }
             except Exception:
-                pass
+                try: db.conn.rollback()
+                except Exception: pass
 
         # ✅ FIXED: clean try/except blocks
         try:
             graph_permissions = db.get_graph_permissions(identity_db_id)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error("Error getting graph permissions: %s", e)
             graph_permissions = []
 
         try:
             app_roles = db.get_app_roles(identity_db_id)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error("Error getting app roles: %s", e)
             app_roles = []
 
         try:
             owners = db.get_ownership(identity_db_id)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error("Error getting owners: %s", e)
             owners = []
 
@@ -1457,7 +1595,7 @@ def get_identity_details(identity_id: str):
                 JOIN entra_groups eg ON eg.id = egm.group_db_id
                 WHERE egm.member_object_id = %s AND eg.discovery_run_id = ANY(%s)
             """, (row[1], run_ids))  # row[1] = identity_id (Azure object_id)
-            identity['group_count'] = cursor.fetchone()[0] or 0
+            identity['group_count'] = _scalar(cursor, 0)
 
             # Top 5 privileged groups this identity belongs to
             cursor.execute("""
@@ -1490,6 +1628,8 @@ def get_identity_details(identity_id: str):
                 })
             identity['privileged_groups'] = priv_groups
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             identity['group_count'] = 0
             identity['privileged_groups'] = []
 
@@ -1516,6 +1656,8 @@ def get_identity_details(identity_id: str):
             else:
                 identity['resource_context'] = None
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             identity['resource_context'] = None
 
         # Gather compliance and attack intelligence for each role
@@ -1529,10 +1671,14 @@ def get_identity_details(identity_id: str):
             try:
                 attacks = db.get_role_attack_patterns(rn)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 attacks = []
             try:
                 hipaa = db.get_role_hipaa_violations(rn)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 hipaa = []
             if attacks or hipaa:
                 role_intelligence.append({
@@ -1546,19 +1692,72 @@ def get_identity_details(identity_id: str):
         try:
             database_admin_context = db.get_identity_database_admin_context(identity['id'])
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         analytics_context = {}
         try:
             analytics_context = db.get_identity_analytics_context(identity['id'])
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         devops_context = []
         try:
             devops_context = db.get_identity_devops_context(identity['id'])
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
+
+        # ── Compute privilege_tier from roles for governance service ──
+        _T0_ENTRA = {'global administrator', 'privileged role administrator',
+                     'privileged authentication administrator', 'security operator',
+                     'application administrator', 'cloud application administrator',
+                     'hybrid identity administrator', 'domain name administrator',
+                     'external identity provider administrator'}
+        _T0_ARM = {'owner', 'user access administrator'}
+        _T1_ENTRA = {'user administrator', 'exchange administrator',
+                     'sharepoint administrator', 'teams administrator',
+                     'intune administrator', 'conditional access administrator',
+                     'authentication administrator', 'groups administrator',
+                     'license administrator', 'password administrator',
+                     'security administrator', 'compliance administrator',
+                     'billing administrator', 'helpdesk administrator'}
+        _T1_ARM = {'owner', 'contributor', 'user access administrator'}
+        _priv_tier = 3
+        for r in roles:
+            rn = (r.get('role_name') or '').lower()
+            rt = (r.get('role_type') or '').lower()
+            if rt == 'entra' and rn in _T0_ENTRA:
+                _priv_tier = 0; break
+            st = (r.get('scope_type') or '').lower()
+            if rt == 'azure' and rn in _T0_ARM and st in ('subscription', 'tenant', ''):
+                _priv_tier = 0; break
+        if _priv_tier > 0:
+            for r in roles:
+                rn = (r.get('role_name') or '').lower()
+                rt = (r.get('role_type') or '').lower()
+                if rt == 'entra' and rn in _T1_ENTRA:
+                    _priv_tier = min(_priv_tier, 1); break
+                if rt == 'azure' and rn in _T1_ARM:
+                    _priv_tier = min(_priv_tier, 1); break
+        if _priv_tier > 1:
+            for r in roles:
+                if r.get('role_type', '').lower() in ('entra', 'azure'):
+                    _priv_tier = min(_priv_tier, 2); break
+        identity['privilege_tier'] = _priv_tier
+
+        # ── Canonical identity state via governance service ──
+        try:
+            from app.services.governance_service import build_identity_state
+            _identity_state = build_identity_state(
+                identity,
+                roles=roles,
+                attack_path_count=identity.get('attack_path_count', 0),
+            )
+            identity.update(_identity_state)
+        except Exception as e:
+            logger.warning("build_identity_state failed: %s", e)
 
         return jsonify(
             {
@@ -1877,7 +2076,8 @@ def get_snapshot_state():
                         "evaluated_at": cr[6].isoformat() if cr[6] else None,
                     })
         except Exception:
-            pass  # Table may not exist
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Resource counts from that run
         resource_counts = {"storage_accounts": 0, "key_vaults": 0}
@@ -1885,13 +2085,14 @@ def get_snapshot_state():
             cursor.execute("""
                 SELECT COUNT(*) FROM azure_storage_accounts WHERE discovery_run_id = %s
             """, (run_id,))
-            resource_counts["storage_accounts"] = cursor.fetchone()[0] or 0
+            resource_counts["storage_accounts"] = _scalar(cursor, 0)
             cursor.execute("""
                 SELECT COUNT(*) FROM azure_key_vaults WHERE discovery_run_id = %s
             """, (run_id,))
-            resource_counts["key_vaults"] = cursor.fetchone()[0] or 0
+            resource_counts["key_vaults"] = _scalar(cursor, 0)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         snapshot = {
             "snapshot_date": date_str,
@@ -2128,7 +2329,8 @@ def get_drift_report(run_id: int):
                 'identity_resurrection_count': result.get('identity_resurrection_count', 0),
             }
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         return jsonify({
             "current_run_id": run_id,
@@ -2642,7 +2844,8 @@ def save_app_settings():
                 if org and org.get('onboarding_stage') == 'locked':
                     db.update_organization(tid, onboarding_stage='authenticating')
             except Exception:
-                pass
+                try: db.conn.rollback()
+                except Exception: pass
 
         settings = db.get_settings(organization_id=tid)
         _log(db,'settings_updated', f'Settings updated: {", ".join(updates.keys())}', {
@@ -2754,6 +2957,8 @@ def trigger_discovery():
             trigger_manual_discovery(db_org_id=tid, org_name=tname,
                                      connection_id=conn_id)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
 
     thread = threading.Thread(target=_run, daemon=True)
@@ -2918,6 +3123,8 @@ def get_activity():
             "entries": entries,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"Activity log load failed: {e}", exc_info=True)
         return jsonify({"error": "Failed to load activity log", "entries": []}), 500
     finally:
@@ -3058,6 +3265,8 @@ def export_audit_trail():
             'admin_audit_log': admin_entries,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"Audit export failed: {e}", exc_info=True)
         return jsonify({"error": "Failed to export audit trail"}), 500
     finally:
@@ -3673,6 +3882,34 @@ def _identity_list_select():
     """
 
 
+def _derive_privilege_level(privilege_tier):
+    """Map numeric privilege tier to Title Case privilege level."""
+    if privilege_tier == 0:
+        return 'Highly Privileged'
+    if privilege_tier == 1:
+        return 'Privileged'
+    return 'Standard'
+
+
+def _derive_governance_state_from_row(row, privilege_tier):
+    """Derive governance state from identity row data (inline version)."""
+    owner_ct = int(row.get('owner_count') or 0)
+    rec_action = (row.get('recommended_action') or '').upper()
+    activity = (row.get('activity_status') or 'unknown').lower()
+
+    if owner_ct == 0:
+        return 'Orphaned'
+    if rec_action == 'AT_RISK':
+        return 'Policy Violation'
+    if activity in ('stale', 'never_used'):
+        return 'Ungoverned'
+    if rec_action in ('UNUSED', 'STALE', 'NEEDS_REVIEW', 'ORPHANED'):
+        return 'Ungoverned'
+    if privilege_tier <= 1 and activity == 'inactive':
+        return 'Ungoverned'
+    return 'Governed'
+
+
 def _map_identity_row(row):
     """Maps a DB row dict from _identity_list_select() to the API response dict.
 
@@ -3756,6 +3993,8 @@ def _map_identity_row(row):
         "is_microsoft_system": bool(row.get('is_microsoft_system', False)),
         "permission_plane": row.get('permission_plane') or "entra_id",
         "privileged_level": "privileged" if privilege_tier == 0 else "elevated" if privilege_tier == 1 else "standard",
+        "privilege_level": _derive_privilege_level(privilege_tier),
+        "governance_state": _derive_governance_state_from_row(row, privilege_tier),
         "credential_health": (
             "none" if cred_count == 0
             else "expired" if cred_risk.lower() == "expired"
@@ -4917,7 +5156,7 @@ def get_attack_surface_score():
             AND COALESCE(i.identity_category, '') IN ('service_principal','managed_identity_system','managed_identity_user')
             AND {_T0T1_COND}
         """, (run_ids,))
-        privileged_nhi_count = cursor.fetchone()[0] or 0
+        privileged_nhi_count = _scalar(cursor, 0)
 
         # Multi-subscription identities (2+ subscriptions)
         cursor.execute(f"""
@@ -4925,7 +5164,7 @@ def get_attack_surface_score():
             WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
             AND COALESCE(i.additional_subscription_count, 0) >= 1
         """, (run_ids,))
-        multi_sub_count = cursor.fetchone()[0] or 0
+        multi_sub_count = _scalar(cursor, 0)
 
         # RBAC modifiers (Owner or User Access Administrator)
         cursor.execute(f"""
@@ -4934,7 +5173,7 @@ def get_attack_surface_score():
             WHERE i.discovery_run_id = ANY(%s) {HIDE_MICROSOFT_SQL}
             AND LOWER(ra.role_name) IN ('owner','user access administrator')
         """, (run_ids,))
-        rbac_modifier_count = cursor.fetchone()[0] or 0
+        rbac_modifier_count = _scalar(cursor, 0)
 
         attack_opportunities = {
             "top_riskiest": top_riskiest,
@@ -4958,13 +5197,17 @@ def get_attack_surface_score():
             cursor.execute("""
                 SELECT COUNT(DISTINCT identity_db_id) FROM pim_eligible_assignments
             """)
-            pim_count = cursor.fetchone()[0] or 0
+            pim_count = _scalar(cursor, 0)
             pim_adoption_pct = round((pim_count / max(t0t1_count, 1)) * 100, 1) if t0t1_count > 0 else 0
             cursor.execute("RELEASE SAVEPOINT gov_pim")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT gov_pim")
             except Exception as e:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 # Continue: read-only PIM analytics — no data mutation at risk.
                 # Connection will be closed by handler teardown.
                 logger.error(
@@ -4981,13 +5224,17 @@ def get_attack_surface_score():
                 SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))/86400)
                 FROM remediation_actions WHERE status = 'resolved'
             """)
-            avg_val = cursor.fetchone()[0]
+            avg_val = _scalar(cursor, 0)
             avg_remediation_days = round(avg_val, 1) if avg_val is not None else None
             cursor.execute("RELEASE SAVEPOINT gov_rem")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT gov_rem")
             except Exception as e:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 # Continue: read-only remediation avg — no data mutation at risk.
                 # Connection will be closed by handler teardown.
                 logger.error(
@@ -5002,20 +5249,24 @@ def get_attack_surface_score():
         try:
             cursor.execute("SAVEPOINT gov_rev")
             cursor.execute("SELECT COUNT(*) FROM access_reviews WHERE status = 'completed'")
-            access_reviews_done = cursor.fetchone()[0] or 0
+            access_reviews_done = _scalar(cursor, 0)
             cursor.execute("""
                 SELECT COUNT(DISTINCT ari.identity_id)
                 FROM access_review_items ari
                 JOIN access_reviews ar ON ar.id = ari.review_id
                 WHERE ar.status = 'completed'
             """)
-            reviewed = cursor.fetchone()[0] or 0
+            reviewed = _scalar(cursor, 0)
             privileged_under_review_pct = round((reviewed / max(t0t1_count, 1)) * 100, 1)
             cursor.execute("RELEASE SAVEPOINT gov_rev")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT gov_rev")
             except Exception as e:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 # Continue: read-only access-review analytics — no data mutation at risk.
                 # Connection will be closed by handler teardown.
                 logger.error(
@@ -5093,6 +5344,8 @@ def get_attack_surface_score():
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT wl_agg")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # ── Data Integrity ────────────────────────────────────────
@@ -5111,7 +5364,8 @@ def get_attack_surface_score():
                 if run_row[1] and run_row[0]:
                     scan_duration_seconds = round((run_row[0] - run_row[1]).total_seconds(), 1)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         confidence = 'High' if data_completeness_pct >= 90 else ('Medium' if data_completeness_pct >= 60 else 'Low')
         tid = _org_id()
@@ -5126,7 +5380,8 @@ def get_attack_surface_score():
                 if tn_row:
                     org_name = tn_row[0]
             except Exception:
-                pass
+                try: db.conn.rollback()
+                except Exception: pass
         data_integrity = {
             "confidence": confidence,
             "last_scan": last_scan,
@@ -5190,9 +5445,10 @@ def get_attack_surface_score():
                   AND (EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                        OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id))
             """, (run_ids,))
-            ghost_count = cursor.fetchone()[0] or 0
+            ghost_count = _scalar(cursor, 0)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         return jsonify({
             "score": score,
@@ -5300,16 +5556,20 @@ def get_exposure_summary():
             try:
                 cursor.execute(f"SAVEPOINT exp_{var_name}")
                 cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE discovery_run_id = ANY(%s)", (run_ids,))
-                val = cursor.fetchone()[0] or 0
+                val = _scalar(cursor, 0)
                 if var_name == "sa":
                     sa_count = val
                 else:
                     kv_count = val
                 cursor.execute(f"RELEASE SAVEPOINT exp_{var_name}")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 try:
                     cursor.execute(f"ROLLBACK TO SAVEPOINT exp_{var_name}")
                 except Exception:
+                    try: cursor.connection.rollback()
+                    except Exception: pass
                     pass
 
         # Subscription count from role_assignments scopes
@@ -5321,9 +5581,10 @@ def get_exposure_summary():
                 JOIN identities i ON i.id = ra.identity_db_id
                 WHERE i.discovery_run_id = ANY(%s) AND ra.scope LIKE '/subscriptions/%%'
             """, (run_ids,))
-            sub_count = cursor.fetchone()[0] or 0
+            sub_count = _scalar(cursor, 0)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         # Privileged identity count (T0/T1 roles)
         priv_count = 0
@@ -5344,9 +5605,10 @@ def get_exposure_summary():
                                  AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')))
                 )
             """, (run_ids,))
-            priv_count = cursor.fetchone()[0] or 0
+            priv_count = _scalar(cursor, 0)
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
 
         return jsonify({
             "total_resources": sa_count + kv_count,
@@ -5396,7 +5658,8 @@ def get_attack_path_count():
                 ap_low = row[4] or 0
                 ap_affected = row[5] or 0
             except Exception:
-                pass
+                try: db.conn.rollback()
+                except Exception: pass
 
             # Supplemental: graph_attack_findings (BFS analysis)
             try:
@@ -5404,9 +5667,10 @@ def get_attack_path_count():
                     SELECT COUNT(*) FROM graph_attack_findings
                     WHERE organization_id = %s AND discovery_run_id = ANY(%s)
                 """, (org_id, run_ids))
-                gf_total = cursor.fetchone()[0] or 0
+                gf_total = _scalar(cursor, 0)
             except Exception:
-                pass
+                try: db.conn.rollback()
+                except Exception: pass
 
         cursor.close()
         total = max(ap_total, gf_total)
@@ -5420,6 +5684,8 @@ def get_attack_path_count():
             "affected_identities": ap_affected,
         })
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         return jsonify({"total": 0, "open": 0, "critical": 0, "high": 0,
                         "medium": 0, "low": 0, "affected_identities": 0})
     finally:
@@ -5448,7 +5714,7 @@ def _compute_compliance_metrics(cursor, run_ids):
                      AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'))
         )
     """, (run_ids,))
-    t0_count = cursor.fetchone()[0]
+    t0_count = _scalar(cursor, 0)
 
     # Dormant privileged — SSOT: T0/T1 roles only (matches risk_summary_engine + AGIRS P1)
     _priv_entra = list(T0_ENTRA_ROLES_LOWER | T1_ENTRA_ROLES_LOWER)
@@ -5464,7 +5730,7 @@ def _compute_compliance_metrics(cursor, run_ids):
                 AND LOWER(ra.role_name) = ANY(%s))
         )
     """, (run_ids, _priv_entra, _priv_rbac))
-    dormant_privileged = cursor.fetchone()[0]
+    dormant_privileged = _scalar(cursor, 0)
 
     # Expired credentials
     cursor.execute(f"""
@@ -5472,7 +5738,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         {HIDE_MICROSOFT_SQL}
         AND i.credential_status = 'expired'
     """, (run_ids,))
-    expired_credentials = cursor.fetchone()[0]
+    expired_credentials = _scalar(cursor, 0)
 
     # Expiring within 30 days
     cursor.execute(f"""
@@ -5482,7 +5748,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         AND i.credential_expiration > NOW()
         AND i.credential_expiration < NOW() + INTERVAL '30 days'
     """, (run_ids,))
-    expiring_credentials_30d = cursor.fetchone()[0]
+    expiring_credentials_30d = _scalar(cursor, 0)
 
     # Unowned SPNs — SSOT uses recommended_action='ORPHANED'
     cursor.execute(f"""
@@ -5491,7 +5757,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         AND i.recommended_action = 'ORPHANED'
         AND i.deleted_at IS NULL
     """, (run_ids,))
-    unowned_spns = cursor.fetchone()[0]
+    unowned_spns = _scalar(cursor, 0)
 
     # HIPAA violations
     cursor.execute(f"""
@@ -5511,7 +5777,7 @@ def _compute_compliance_metrics(cursor, run_ids):
             AND ra.role_name = rhm.role_name
         )
     """, (run_ids, run_ids))
-    hipaa_violations = cursor.fetchone()[0]
+    hipaa_violations = _scalar(cursor, 0)
 
     # MFA not enforced (identities not covered by any CA policy requiring MFA)
     cursor.execute(f"""
@@ -5520,7 +5786,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         AND COALESCE(i.ca_mfa_enforced, false) = false
         AND LOWER(COALESCE(i.identity_category, '')) IN ('human_user', 'guest')
     """, (run_ids,))
-    mfa_not_enforced = cursor.fetchone()[0]
+    mfa_not_enforced = _scalar(cursor, 0)
 
     # Excessive permissions (>5 role assignments)
     cursor.execute(f"""
@@ -5531,7 +5797,7 @@ def _compute_compliance_metrics(cursor, run_ids):
             + (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
         ) > 5
     """, (run_ids,))
-    excessive_permissions = cursor.fetchone()[0]
+    excessive_permissions = _scalar(cursor, 0)
 
     # Stale accounts (inactive > 90 days)
     cursor.execute(f"""
@@ -5539,7 +5805,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         {HIDE_MICROSOFT_SQL}
         AND i.activity_status IN ('stale', 'never_used')
     """, (run_ids,))
-    stale_accounts = cursor.fetchone()[0]
+    stale_accounts = _scalar(cursor, 0)
 
     # No credential rotation (credentials not rotated in 180+ days)
     cursor.execute(f"""
@@ -5551,7 +5817,7 @@ def _compute_compliance_metrics(cursor, run_ids):
             AND c.start_datetime < NOW() - INTERVAL '180 days'
         )
     """, (run_ids,))
-    no_credential_rotation = cursor.fetchone()[0]
+    no_credential_rotation = _scalar(cursor, 0)
 
     # Shared/generic/test accounts (no_shared_accounts)
     cursor.execute(f"""
@@ -5559,7 +5825,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         {HIDE_MICROSOFT_SQL}
         AND LOWER(COALESCE(i.display_name, '')) ~* '(shared|generic|test|temp|svc[-_]?test)'
     """, (run_ids,))
-    no_shared_accounts = cursor.fetchone()[0]
+    no_shared_accounts = _scalar(cursor, 0)
 
     # PIM coverage % (T0/T1 identities with PIM eligible assignments)
     cursor.execute(f"""
@@ -5580,7 +5846,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         )
         AND EXISTS (SELECT 1 FROM pim_eligible_assignments pea WHERE pea.identity_db_id = i.id)
     """, (run_ids,))
-    pim_eligible_t0 = cursor.fetchone()[0]
+    pim_eligible_t0 = _scalar(cursor, 0)
     pim_coverage_pct = round(pim_eligible_t0 / max(t0_count, 1) * 100)
 
     # Access reviews completed (table may not exist)
@@ -5588,9 +5854,11 @@ def _compute_compliance_metrics(cursor, run_ids):
     try:
         cursor.execute("SAVEPOINT access_reviews_check")
         cursor.execute("SELECT COUNT(*) FROM access_reviews WHERE status = 'completed'")
-        access_reviews_completed = cursor.fetchone()[0]
+        access_reviews_completed = _scalar(cursor, 0)
         cursor.execute("RELEASE SAVEPOINT access_reviews_check")
     except Exception:
+        try: cursor.connection.rollback()
+        except Exception: pass
         cursor.execute("ROLLBACK TO SAVEPOINT access_reviews_check")
 
     # Managed identity % (MI vs SPN among NHIs)
@@ -5612,7 +5880,7 @@ def _compute_compliance_metrics(cursor, run_ids):
         {HIDE_MICROSOFT_SQL}
         AND EXISTS (SELECT 1 FROM credentials c WHERE c.identity_db_id = i.id)
     """, (run_ids,))
-    total_with_creds = cursor.fetchone()[0]
+    total_with_creds = _scalar(cursor, 0)
     credential_rotation_compliance_pct = round(
         (max(total_with_creds - no_credential_rotation, 0) / max(total_with_creds, 1)) * 100
     )
@@ -5930,7 +6198,8 @@ def toggle_compliance_framework_handler(framework_id):
                 {'framework_id': framework_id, 'enabled': enabled}
             )
         except Exception:
-            pass
+            try: db.conn.rollback()
+            except Exception: pass
         return jsonify(result)
     finally:
         db.close()
@@ -5965,6 +6234,8 @@ def get_compliance_trends_handler():
                     try:
                         metrics = _compute_compliance_metrics(cursor, rid)
                     except Exception:
+                        try: db.conn.rollback()
+                        except Exception: pass
                         cursor.close()
                         continue
                     cursor.close()
@@ -6348,6 +6619,8 @@ def get_compliance_intelligence():
                 })
             trend_mini.reverse()
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # Batch-fetch evidence for non-passing controls
@@ -6424,7 +6697,7 @@ def get_dashboard_posture():
         filt = cursor.fetchone()
 
         cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (run_ids,))
-        completed_at = cursor.fetchone()[0]
+        completed_at = _scalar(cursor)
 
         current_run = {
             "id": run_ids[0],
@@ -6440,7 +6713,7 @@ def get_dashboard_posture():
         previous_run = None
         if prev_ids:
             cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (prev_ids,))
-            prev_completed = cursor.fetchone()[0]
+            prev_completed = _scalar(cursor)
             cursor.execute(f"""
                 SELECT COUNT(*),
                        SUM(CASE WHEN i.risk_level = 'critical' THEN 1 ELSE 0 END),
@@ -6467,13 +6740,13 @@ def get_dashboard_posture():
         _mparams = {'run_ids': run_ids}
 
         cursor.execute(get_metric_count_sql('credential_expired'), _mparams)
-        expired = cursor.fetchone()[0] or 0
+        expired = _scalar(cursor, 0)
         cursor.execute(get_metric_count_sql('credential_expiring'), _mparams)
-        expiring_soon = cursor.fetchone()[0] or 0
+        expiring_soon = _scalar(cursor, 0)
         cursor.execute(get_metric_count_sql('credential_healthy'), _mparams)
-        healthy = cursor.fetchone()[0] or 0
+        healthy = _scalar(cursor, 0)
         cursor.execute(get_metric_count_sql('no_credentials'), _mparams)
-        no_credentials = cursor.fetchone()[0] or 0
+        no_credentials = _scalar(cursor, 0)
 
         credential_health = {
             "expired": expired,
@@ -6483,10 +6756,10 @@ def get_dashboard_posture():
         }
 
         cursor.execute(get_metric_count_sql('dormant'), _mparams)
-        dormant_count = cursor.fetchone()[0] or 0
+        dormant_count = _scalar(cursor, 0)
 
         cursor.execute(get_metric_count_sql('unowned_nhi'), _mparams)
-        no_owner_count = cursor.fetchone()[0] or 0
+        no_owner_count = _scalar(cursor, 0)
 
         # Posture score: % of identities at low/info risk
         total = current_run["total_identities"] or 0
@@ -6722,7 +6995,7 @@ def get_identity_summary():
             })
 
         cursor.execute("SELECT MAX(completed_at) FROM discovery_runs WHERE id = ANY(%s)", (run_ids,))
-        completed_at = cursor.fetchone()[0]
+        completed_at = _scalar(cursor)
 
         # Get individual identities to properly categorize each one
         # This ensures Microsoft internal detection works correctly
@@ -6775,7 +7048,7 @@ def get_identity_summary():
             WHERE i.discovery_run_id = ANY(%s)
               AND ra.scope LIKE '/subscriptions/%%'
         """, (run_ids,))
-        arm_sub_count = cursor.fetchone()[0] or 0
+        arm_sub_count = _scalar(cursor, 0)
 
         # Also get the distinct subscription names/IDs for the detail view
         cursor.execute("""
@@ -6810,7 +7083,7 @@ def get_identity_summary():
                     WHERE cs.organization_id = %s AND cs.cloud = 'azure'
                       AND cs.status IN ('active', 'discovered')
                 """, (tid,))
-            cs_count = cursor.fetchone()[0] or 0
+            cs_count = _scalar(cursor, 0)
             # Also get sub IDs from cloud_subscriptions
             if conn_id:
                 cursor.execute("""
@@ -6851,8 +7124,10 @@ def get_identity_summary():
                 WHERE cc.organization_id = %s AND cc.cloud = 'azure'
                   AND cc.azure_directory_id IS NOT NULL
             """, (tid,))
-            azure_tenant_count = cursor.fetchone()[0] or 1
+            azure_tenant_count = _scalar(cursor, 1)
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # ── Read cloud_connections table per provider ──
@@ -6886,6 +7161,8 @@ def get_identity_summary():
                         'sub_count': row[8],
                     })
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # AWS/GCP subscription counts from cloud_subscriptions
@@ -6916,6 +7193,8 @@ def get_identity_summary():
                         gcp_project_ids = ids
                         gcp_project_count = len(ids)
                 except Exception:
+                    try: cursor.connection.rollback()
+                    except Exception: pass
                     pass
 
         # Determine connected status per provider
@@ -7147,6 +7426,8 @@ def get_identity_graph_data(identity_id):
                         'has_orphan_finding': has_orphan,
                     }
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass  # Non-blocking — fall back to regular identity node
 
         # ── TRUST RELATIONSHIPS ──────────────────────────────────
@@ -8618,6 +8899,8 @@ def get_generated_remediations_handler():
             try:
                 db.conn.rollback()
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
 
         # ── 6. Stale privileged identities ──
@@ -8715,6 +8998,8 @@ def get_generated_remediations_handler():
         try:
             db.upsert_generated_remediations(organization_id, run_id, actions)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.warning(f"Failed to persist generated remediations: {e}")
 
         # Proactive cleanup: delete stale Microsoft entries from generated_remediations
@@ -8722,6 +9007,8 @@ def get_generated_remediations_handler():
         try:
             db.cleanup_microsoft_remediations()
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.debug(f"Inline Microsoft cleanup skipped: {e}")
 
         # Read back from persisted table — scoped to current connection's run_ids
@@ -8746,9 +9033,11 @@ def get_generated_remediations_handler():
                 WHERE discovery_run_id = %s
                   AND COALESCE(is_microsoft_system, FALSE) = TRUE
             """, (run_id,))
-            microsoft_excluded_count = ms_cursor.fetchone()[0]
+            microsoft_excluded_count = _scalar(ms_cursor, 0)
             ms_cursor.close()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Debug logging for remediation safety audit
@@ -8757,6 +9046,8 @@ def get_generated_remediations_handler():
 
         return jsonify({'actions': persisted, 'stats': stats, 'microsoft_excluded_count': microsoft_excluded_count})
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         logger.error(f"Generated remediations failed: {e}", exc_info=True)
         return jsonify({
             'actions': [],
@@ -8784,6 +9075,8 @@ def update_generated_remediation_handler(remediation_id):
             return jsonify({'error': 'Remediation not found'}), 404
         return jsonify({'status': 'updated', 'id': int(remediation_id), 'new_status': new_status})
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"Update generated remediation failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -9288,6 +9581,8 @@ def auth_login():
                 _log(db,'auth_failed', f'Login failed for "{username}": user not found or disabled',
                                 {'username': username, 'ip': request.remote_addr})
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
             from app.security_events import SecurityEventLogger
             evt = SecurityEventLogger.login_failed(username, request.remote_addr, 'user not found or disabled')
@@ -9314,11 +9609,15 @@ def auth_login():
             try:
                 db.increment_failed_login(user['id'])
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
             try:
                 _log(db,'auth_failed', f'Login failed for "{username}": wrong password',
                                 {'username': username, 'ip': request.remote_addr})
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
             from app.security_events import SecurityEventLogger
             evt = SecurityEventLogger.login_failed(username, request.remote_addr, 'wrong password')
@@ -9351,6 +9650,8 @@ def auth_login():
                              {'username': username, 'user_org': user.get('org_name'),
                               'target_org': origin_org.get('name'), 'ip': request.remote_addr})
                     except Exception:
+                        try: db.conn.rollback()
+                        except Exception: pass
                         pass
                     return jsonify({'error': 'You do not have access to this organization'}), 403
 
@@ -9370,6 +9671,8 @@ def auth_login():
         try:
             db.reset_failed_login(user['id'])
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         try:
@@ -9381,6 +9684,8 @@ def auth_login():
                              'portal': portal},
                             user_id=user['id'], organization_id=user.get('organization_id'))
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
     finally:
         db.close()
@@ -9470,6 +9775,8 @@ def auth_signup():
                 user_id=user['id'], organization_id=org['id'],
             )
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Auto-login: generate tokens (must happen before db.close())
@@ -9487,6 +9794,8 @@ def auth_signup():
     except ValueError as ve:
         return jsonify({'error': str(ve)}), 409
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.exception("Signup DB error for %s / %s", email, org_name)
         return jsonify({'error': 'Signup failed. Please try again.'}), 500
     finally:
@@ -9498,6 +9807,8 @@ def auth_signup():
         access_token = generate_access_token(user_for_token, portal='client', org_slug=org['slug'])
         refresh_token = generate_refresh_token(user_for_token, portal='client')
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.exception("Signup token generation failed for %s / %s", email, org_name)
         return jsonify({'error': 'Account created but login failed. Please sign in manually.'}), 500
 
@@ -9549,6 +9860,8 @@ def auth_verify_email():
                 user_id=user['id'], organization_id=user.get('organization_id'),
             )
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'verified': True, 'user_id': user['id']})
@@ -9600,6 +9913,8 @@ def auth_refresh():
                 db.revoke_all_user_tokens(token_record['user_id'])
                 logger.warning(f"Refresh token reuse detected for user_id={token_record['user_id']} — all tokens revoked")
             except Exception as e:
+                try: db.conn.rollback()
+                except Exception: pass
                 logger.error(f"Failed to revoke all tokens for user_id={token_record['user_id']}: {e}")
             return jsonify({'error': 'Token reuse detected — all sessions invalidated'}), 401
 
@@ -9626,6 +9941,8 @@ def auth_refresh():
                 if org:
                     slug = org.get('slug')
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
     finally:
         db.close()
@@ -9679,6 +9996,8 @@ def auth_logout():
                 _log(db, action_type, f'User "{user["username"]}" logged out ({portal} portal)',
                                 {'user_id': user['id'], 'portal': portal})
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
 
         from flask import make_response as _mkr
@@ -9737,6 +10056,8 @@ def change_password():
             _log(db,'password_changed', f'User "{user["username"]}" changed their password',
                             {'user_id': user['id']})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': 'Password changed successfully'})
@@ -9790,6 +10111,8 @@ def forgot_password_handler():
                  f'Password reset requested for "{email}"',
                  {'user_id': user['id'], 'ip': request.remote_addr})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': success_msg})
@@ -9855,6 +10178,8 @@ def reset_password_handler():
                  f'Password reset completed for user "{user["username"]}"',
                  {'user_id': user['id'], 'ip': request.remote_addr})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': 'Password reset successfully. You can now log in with your new password.'})
@@ -9890,6 +10215,8 @@ def admin_reset_user_password(user_id):
                                details={'target_username': target['username']},
                                ip_address=request.remote_addr)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         try:
@@ -9897,6 +10224,8 @@ def admin_reset_user_password(user_id):
                  f'Admin "{current_user["username"]}" reset password for user "{target["username"]}"',
                  {'admin_user_id': current_user['id'], 'target_user_id': user_id})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({
@@ -9997,6 +10326,8 @@ def create_user_handler():
             _log(db,'user_created', f'User "{username}" created with role "{role}"',
                             {'user_id': user['id'], 'role': role, 'created_by': created_by})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'user': user, 'message': 'User created'}), 201
@@ -10119,6 +10450,8 @@ def update_user_handler(user_id):
                 )
                 SecurityEventLogger.persist(evt, db)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'user': user, 'message': 'User updated'})
@@ -10153,6 +10486,8 @@ def delete_user_handler(user_id):
             _log(db,'user_deleted', f'User "{existing["username"]}" deleted',
                             {'deleted_user_id': user_id, 'deleted_by': current_user['id'] if current_user else None})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': f'User "{existing["username"]}" deleted'})
@@ -10650,6 +10985,8 @@ def _export_evidence_package():
                             })
             cursor.close()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         try:
@@ -10895,6 +11232,8 @@ def _export_evidence_json():
                 if result:
                     compliance_section.append(result)
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # --- 4. Drift summary (latest) ---
@@ -10914,6 +11253,8 @@ def _export_evidence_json():
                     'summary': drift_row.get('summary') or {},
                 }
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # --- 5. Remediation status ---
@@ -10927,6 +11268,8 @@ def _export_evidence_json():
             """, (tid,))
             remediation_section = {row['status']: row['cnt'] for row in cursor.fetchall()}
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # --- 6. Credential health ---
@@ -10945,6 +11288,8 @@ def _export_evidence_json():
             if cred_row:
                 cred_section = dict(cred_row)
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         # --- 7. Sensitive data classifications ---
@@ -10967,6 +11312,8 @@ def _export_evidence_json():
                 'by_classification': classified_counts,
             }
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         cursor.close()
@@ -10975,6 +11322,8 @@ def _export_evidence_json():
             _log(db, 'export', 'GRC evidence JSON export generated',
                  {'export_type': 'evidence-json'})
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         return jsonify({
@@ -11225,6 +11574,8 @@ def export_evidence_zip():
                                 'detail': str(item.get('detail', item.get('change', ''))),
                             })
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
         drift_cols = ['change_type', 'identity_id', 'display_name', 'detail']
         files['07_drift_changes.csv'] = _make_csv(drift_csv, drift_cols)
@@ -11252,6 +11603,8 @@ def export_evidence_zip():
                     'user': row.get('user_name', ''),
                 })
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
         act_cols = ['timestamp', 'action_type', 'description', 'user']
         files['08_activity_log.csv'] = _make_csv(activity_csv, act_cols)
@@ -11327,6 +11680,8 @@ def export_evidence_zip():
             download_name=filename,
         )
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         cursor.close()
         db.close()
         logger.error(f"Export failed: {e}", exc_info=True)
@@ -11376,6 +11731,8 @@ def create_saved_view_handler():
             _log(db,'saved_view', f'Created saved view "{name}"',
                             {'view_id': view['id'], 'user': user['username']})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify(view), 201
     finally:
@@ -11421,6 +11778,8 @@ def update_saved_view_handler(view_id):
             _log(db,'saved_view', f'Updated saved view "{view["name"]}"',
                             {'view_id': view_id, 'user': user['username']})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify(view)
     finally:
@@ -11443,6 +11802,8 @@ def delete_saved_view_handler(view_id):
             _log(db,'saved_view', f'Deleted saved view "{existing["name"]}"',
                             {'view_id': view_id, 'user': user['username']})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'status': 'deleted', 'id': view_id})
     finally:
@@ -11753,6 +12114,8 @@ def create_access_review():
                                    f'{review_count} identities included for review',
                                    {'campaign_id': campaign['id']}, None, None, None)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         campaign = db.get_campaign(campaign['id'])
@@ -11834,6 +12197,8 @@ def update_access_review(campaign_id):
                                            f'{updated.get("completed_reviews", 0)} of {updated.get("total_reviews", 0)} identities reviewed',
                                            {'campaign_id': campaign_id}, None, None, None)
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     pass
 
         return jsonify(updated)
@@ -12003,7 +12368,7 @@ def get_groups_list():
                         WHERE i.discovery_run_id = ANY(%s)
                           {where_clause} {HIDE_MICROSOFT_SQL}
                     """, [run_ids] + where_params)
-                    grp['member_count'] = cursor.fetchone()[0]
+                    grp['member_count'] = _scalar(cursor, 0)
         cursor.close()
 
         return jsonify({'groups': groups})
@@ -12223,7 +12588,7 @@ def query_identities():
         # Total count
         count_query = f"SELECT COUNT(*) FROM ({query}) sub"
         cursor.execute(count_query, params)
-        total_count = cursor.fetchone()[0]
+        total_count = _scalar(cursor, 0)
 
         # Sort
         sort_dir = "DESC" if sort_direction == 'desc' else "ASC"
@@ -12552,6 +12917,8 @@ def update_api_key_handler(key_id):
                 f'API key "{existing["name"]}" updated: {", ".join(updates.keys())}',
                 {'api_key_id': key_id, 'changes': list(updates.keys())})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'api_key': api_key, 'message': 'API key updated'})
@@ -12577,6 +12944,8 @@ def delete_api_key_handler(key_id):
                 {'deleted_key_id': key_id,
                  'deleted_by': current_user['id'] if current_user else None})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': f'API key "{existing["name"]}" deleted'})
@@ -12705,6 +13074,8 @@ def update_soar_playbook_handler(playbook_id):
                 f'SOAR playbook "{playbook["name"]}" updated',
                 {'playbook_id': playbook_id, 'changes': list(updates.keys())})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'playbook': playbook, 'message': 'Playbook updated'})
@@ -12727,6 +13098,8 @@ def delete_soar_playbook_handler(playbook_id):
                 f'SOAR playbook "{existing["name"]}" deleted',
                 {'playbook_id': playbook_id})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': f'Playbook "{existing["name"]}" deleted'})
@@ -12881,6 +13254,8 @@ def save_dashboard_preferences_handler():
                 f'Dashboard layout updated by {user["username"]}',
                 {'user_id': user['id']})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'preferences': result['preferences']})
@@ -12900,6 +13275,8 @@ def reset_dashboard_preferences_handler():
                 f'Dashboard layout reset to default by {user["username"]}',
                 {'user_id': user['id']})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({'message': 'Dashboard reset to default'})
@@ -12924,6 +13301,8 @@ def get_organizations_list():
         # Return both keys: 'organizations' (TopBar, Settings) + 'tenants' (AdminTenants compat)
         return jsonify({'organizations': organizations, 'tenants': organizations})
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.exception("Failed to list organizations: %s", e)
         return jsonify({'error': 'Internal server error', 'organizations': [], 'tenants': []}), 500
     finally:
@@ -12984,6 +13363,8 @@ def create_organization_handler():
                 f'Tenant "{name}" created (slug: {slug}, plan: {plan})',
                 {'organization_id': org['id'], 'slug': slug, 'plan': plan})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Phase 84: Optional root user creation during org onboarding
@@ -13020,6 +13401,8 @@ def create_organization_handler():
                 try:
                     settings = json.loads(settings)
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     settings = {}
             settings['provisioned'] = True
             settings['provisioned_at'] = datetime.now(timezone.utc).isoformat()
@@ -13039,6 +13422,8 @@ def create_organization_handler():
                                    details={'root_username': root_username},
                                    ip_address=request.remote_addr)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
 
         # Send welcome email to root user
@@ -13049,6 +13434,8 @@ def create_organization_handler():
                 portal_url = f"https://{slug}.auditgraph.ai"
                 email_svc.send_welcome_email(root_email, name, portal_url, root_username)
             except Exception as e:
+                try: db.conn.rollback()
+                except Exception: pass
                 logger.warning(f"Failed to send welcome email: {e}")
 
         result = {'organization': org, 'message': 'Organization created'}
@@ -13129,6 +13516,8 @@ def update_organization_handler(organization_id):
                 f'Tenant "{existing["name"]}" updated: {", ".join(updates.keys())}',
                 {'organization_id': organization_id, 'updates': list(updates.keys())})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         try:
             user = getattr(g, 'current_user', None)
@@ -13137,6 +13526,8 @@ def update_organization_handler(organization_id):
                                details={'fields_changed': list(updates.keys())},
                                ip_address=request.remote_addr)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'organization': org, 'message': 'Organization updated'})
     finally:
@@ -13157,6 +13548,8 @@ def delete_organization_handler(organization_id):
         try:
             db.delete_organization(organization_id)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error(f"Failed to delete organization {organization_id}: {e}", exc_info=True)
             detail = str(e)
             # Surface the actual constraint name for debugging
@@ -13169,6 +13562,8 @@ def delete_organization_handler(organization_id):
                 f'Tenant "{existing["name"]}" deleted',
                 {'organization_id': organization_id, 'slug': existing.get('slug')})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'message': f'Tenant "{existing["name"]}" deleted'})
     finally:
@@ -13380,6 +13775,8 @@ def get_organization_branding():
             try:
                 settings = json.loads(settings)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 settings = {}
         return jsonify({
             'company_name': org.get('name'),
@@ -13435,6 +13832,8 @@ def update_organization_stage():
                  f'Onboarding stage changed to "{stage}"',
                  {'organization_id': tid, 'stage': stage})
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'stage': stage, 'message': 'Stage updated'})
     finally:
@@ -13770,6 +14169,8 @@ def get_onboarding_status():
             azure_configured = row and row[0] > 0
             cursor.close()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             # Fallback to settings keys if cloud_connections table doesn't exist
             azure_configured = all([
                 settings.get('azure_directory_id'),
@@ -13790,6 +14191,8 @@ def get_onboarding_status():
             subs_activated = row and row[0] > 0
             cursor.close()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Build onboarding checklist
@@ -13842,6 +14245,8 @@ def get_onboarding_status():
                 if row and row[0] > 0:
                     checklist[4]['done'] = True  # review_identities (index 4)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         finally:
             cursor.close()
@@ -13937,6 +14342,8 @@ def test_azure_connection():
             'message': msg,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"Azure connection test failed: {e}", exc_info=True)
         return jsonify({
             'status': 'error',
@@ -13992,6 +14399,8 @@ def get_client_connections():
                     cursor.close()
                     connections = db.get_cloud_connections(tid)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
 
         if not connections:
@@ -14006,6 +14415,8 @@ def get_client_connections():
             'requires_setup': False,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.exception("Failed to list cloud connections: %s", e)
         return jsonify({
             'connected': False,
@@ -14133,6 +14544,8 @@ def create_client_connection():
                     discovered_count += len(group_list)
                     discovered_subs.extend(group_list)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass  # Non-fatal — connection is still saved
         elif cloud == 'aws' and status == 'connected':
             access_key_id = metadata.get('access_key_id') or client_id
@@ -14156,6 +14569,8 @@ def create_client_connection():
                         # Store account_id as azure_directory_id for UNIQUE constraint compatibility
                         db.update_cloud_connection(conn['id'], azure_directory_id=account_id)
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     pass  # Non-fatal
 
         _log(db, 'connection_created', f'Created {cloud} connection: {label}',
@@ -14548,6 +14963,8 @@ def test_client_connection():
                 finally:
                     adm.close()
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
 
             msg = f'Connected successfully. Found {len(subs)} subscription(s).'
@@ -14614,6 +15031,8 @@ def test_client_connection():
                 'message': f'Connected successfully. AWS Account: {account_id}',
             })
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             connection_id_param = data.get('connection_id')
             if connection_id_param:
                 db = _db()
@@ -14696,6 +15115,8 @@ def discover_client_connection(connection_id):
         finally:
             adm.close()
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         pass
 
     # Run discovery in background thread (after DB closed to avoid holding connection)
@@ -15351,6 +15772,8 @@ def provision_organization_handler(organization_id):
             try:
                 settings = json.loads(settings)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 settings = {}
         settings['provisioned'] = True
         settings['provisioned_at'] = datetime.now(timezone.utc).isoformat()
@@ -15435,6 +15858,8 @@ def reset_client_root_user(organization_id):
                                },
                                ip_address=request.remote_addr)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         try:
@@ -16913,6 +17338,8 @@ def health_check():
         db.close()
         checks['database'] = {'status': 'healthy', 'latency_ms': db_latency}
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"Health check DB probe failed: {e}", exc_info=True)
         checks['database'] = {'status': 'unhealthy', 'error': 'Database connection failed'}
         overall = 'degraded'
@@ -17034,6 +17461,8 @@ def health_ready():
         db.close()
         checks['database'] = 'ok'
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         checks['database'] = 'failed'
         ready = False
 
@@ -17045,6 +17474,8 @@ def health_ready():
         if not sched_ok:
             ready = False
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         checks['scheduler'] = 'unknown'
 
     status_code = 200 if ready else 503
@@ -17696,7 +18127,7 @@ def get_spn_list():
         # Count total
         count_sql = f"SELECT COUNT(*) FROM identities i {''.join(where)}"
         cursor.execute(count_sql, params)
-        total = cursor.fetchone()[0]
+        total = _scalar(cursor, 0)
 
         # Sort
         allowed_sorts = {
@@ -18073,6 +18504,8 @@ def validate_org_isolation():
 
         cursor.close()
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         results.append({
             'check': 'RLS validation',
             'status': 'error',
@@ -18244,9 +18677,13 @@ def get_identity_lineage(identity_id):
             role_assignments = [dict(r) for r in cursor.fetchall()]
             cursor.execute("RELEASE SAVEPOINT lin_roles")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT lin_roles")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # Active role count: excludes read-only roles (Reader/Viewer)
@@ -18283,9 +18720,13 @@ def get_identity_lineage(identity_id):
             elif has_static_intel:
                 enrichment_tier = 'ENRICHED'
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT lin_p2")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
             if ((identity.get('signin_pattern') and identity.get('signin_pattern') not in ('never_used', 'unknown'))
                     or identity.get('last_sign_in')
@@ -18314,6 +18755,8 @@ def get_identity_lineage(identity_id):
                     try:
                         ev = json.loads(ev)
                     except Exception:
+                        try: cursor.connection.rollback()
+                        except Exception: pass
                         ev = {}
                 binding = {
                     'resource_id': row['resource_id'],
@@ -18334,9 +18777,13 @@ def get_identity_lineage(identity_id):
                     arm_associations.append(binding)
             cursor.execute("RELEASE SAVEPOINT lin_rb")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT lin_rb")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # ── Federated credentials ─────────────────────────────────────
@@ -18355,9 +18802,13 @@ def get_identity_lineage(identity_id):
                 )
             cursor.execute("RELEASE SAVEPOINT lin_fed")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT lin_fed")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # ── Dependency impact ─────────────────────────────────────────
@@ -18367,6 +18818,8 @@ def get_identity_lineage(identity_id):
             try:
                 dep_resources_raw = json.loads(dep_resources_raw)
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 dep_resources_raw = []
         dep_resources = dep_resources_raw if isinstance(dep_resources_raw, list) else []
 
@@ -18628,9 +19081,13 @@ def get_identity_lineage(identity_id):
                 })
             cursor.execute("RELEASE SAVEPOINT lin_auth_hist")
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT lin_auth_hist")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         auth_source = 'static_analysis_only'
@@ -18876,6 +19333,8 @@ def get_app_reg_stats():
             'by_audience': by_audience,
         })
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         logger.error(f"App registration stats failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -18969,6 +19428,8 @@ def get_app_reg_list():
         cursor.close()
         return jsonify({'items': items, 'total': total})
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         logger.error(f"App registration list failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -19260,7 +19721,7 @@ def _check_tier_limits(db, organization_id):
                 SELECT id FROM discovery_runs WHERE organization_id = %s ORDER BY id DESC LIMIT 1
             )
         """, (organization_id, organization_id))
-        count = cursor.fetchone()[0]
+        count = _scalar(cursor, 0)
         cursor.close()
         if count >= limits['max_identities']:
             return False, {
@@ -19330,10 +19791,14 @@ def copilot_chat():
         try:
             response_text = service.ask(message, messages_history, db)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error(f"AI copilot service error: {e}", exc_info=True)
             try:
                 db._rollback()
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
             return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
 
@@ -19604,7 +20069,7 @@ def get_identity_usage(identity_id):
 
         # Permissions count
         cursor.execute("SELECT COUNT(*) FROM graph_api_permissions WHERE identity_db_id = %s", (identity_db_id,))
-        perm_count = cursor.fetchone()[0] or 0
+        perm_count = _scalar(cursor, 0)
 
         return jsonify({
             "identity_id": identity_id,
@@ -20533,6 +20998,8 @@ def activate_all_subscriptions():
                 finally:
                     adm.close()
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass
 
             # Trigger discovery scan in background
@@ -20865,7 +21332,7 @@ def get_discovery_status():
             SELECT COUNT(*) FROM discovery_runs
             WHERE organization_id = %s AND status = 'completed'
         """, (tid,))
-        total_completed = cursor.fetchone()[0]
+        total_completed = _scalar(cursor, 0)
         cursor.close()
 
         if row:
@@ -20886,6 +21353,8 @@ def get_discovery_status():
         try:
             jobs = db.get_snapshot_jobs_for_org(tid, limit=10)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({
@@ -21019,6 +21488,8 @@ def run_discovery():
             trigger_manual_discovery(db_org_id=tid, org_name=tname,
                                      connection_id=conn_id)
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logging.getLogger(__name__).error(f"Discovery run failed: {e}")
 
     threading.Thread(target=_run, daemon=True).start()
@@ -21054,6 +21525,8 @@ def get_admin_organization_billing(organization_id):
             'recent_events': events,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.exception("Failed to load org billing: %s", e)
         return jsonify({'error': 'Internal server error', 'organization': None,
                         'billing': {}, 'subscriptions': [], 'recent_events': []}), 500
@@ -21356,6 +21829,8 @@ def get_admin_action_log():
                 try:
                     row['details'] = _json.loads(row['details']) if isinstance(row['details'], str) else row['details']
                 except Exception:
+                    try: cursor.connection.rollback()
+                    except Exception: pass
                     pass
 
         cursor.close()
@@ -21420,6 +21895,8 @@ def admin_impersonate():
             db._commit()
             cursor.close()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
     finally:
         db.close()
@@ -21480,6 +21957,8 @@ def admin_end_impersonation():
         db._commit()
         cursor.close()
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         pass
     finally:
         db.close()
@@ -21532,6 +22011,8 @@ def get_client_billing_summary():
             'billing': billing,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.exception("Failed to load client billing: %s", e)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -21563,7 +22044,7 @@ def get_client_usage_metering():
                 SELECT COUNT(*) FROM identities
                 WHERE discovery_run_id = ANY(%s) AND NOT COALESCE(is_microsoft_system, false)
             """, (run_ids,))
-            identity_count = cursor.fetchone()[0]
+            identity_count = _scalar(cursor, 0)
 
         # Get subscription count
         stats = db.get_subscription_stats(tid)
@@ -22118,6 +22599,8 @@ def run_rbac_hygiene_scan():
             'tier_distribution': result.get('tier_distribution', {}),
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"RBAC hygiene data load failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -22235,6 +22718,8 @@ def get_workload_stats():
             """, (run_ids, run_ids))
             top_findings = [dict(r) for r in cursor.fetchall()]
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         spn_count = int(id_stats.get('spn_count') or 0)
@@ -22276,7 +22761,7 @@ def get_workload_stats():
                       AND NOT COALESCE(i.is_microsoft_system, false)
                       AND COALESCE(i.lifecycle_state, '') = 'dormant'
                 """, (run_ids, cats))
-                dormant = cursor.fetchone()[0] or 0
+                dormant = _scalar(cursor, 0)
 
                 # Anomaly counts
                 cursor.execute("""
@@ -22297,6 +22782,8 @@ def get_workload_stats():
                     'unresolved_anomalies': int(anom.get('unresolved') or 0),
                 }
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 telemetry = None
 
         cursor.close()
@@ -22602,6 +23089,8 @@ def get_workload_list():
                             if not it.get('last_sign_in') and db_id in signin_map:
                                 it['last_sign_in'] = signin_map[db_id]
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass  # Tables may not exist
 
         cursor.close()
@@ -22811,6 +23300,8 @@ def get_workload_detail(workload_id):
                 permissions = [dict(r) for r in cursor.fetchall()]
                 cursor.execute("RELEASE SAVEPOINT sp_perms")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_perms")
 
             # Findings
@@ -22932,9 +23423,13 @@ def get_workload_detail(workload_id):
                         recent_signins.append(si)
                     cursor.execute("RELEASE SAVEPOINT sp_p2")
                 except Exception:
+                    try: cursor.connection.rollback()
+                    except Exception: pass
                     try:
                         cursor.execute("ROLLBACK TO SAVEPOINT sp_p2")
                     except Exception:
+                        try: cursor.connection.rollback()
+                        except Exception: pass
                         pass
                     recent_signins = []
 
@@ -23016,6 +23511,8 @@ def get_workload_findings():
             """, (run_ids, run_ids, limit))
             findings = [dict(r) for r in cursor.fetchall()]
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             findings = []
 
         cursor.close()
@@ -23434,6 +23931,8 @@ def get_dashboard_identity_correlation():
                     for r in rows
                 ]
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
             return jsonify({
@@ -23759,6 +24258,65 @@ def metric_integrity_debug_handler():
         db.close()
 
 
+def governance_reconciliation_handler():
+    """GET /api/system/governance-reconciliation — Check governance data consistency.
+
+    Verifies that governance decisions, attestations, and identity states
+    are consistent across tables.
+    """
+    from app.database import Database
+    db = Database(_admin_reason='governance_reconciliation')
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        results = []
+
+        # Check: identities with governance decisions but missing from identity_list
+        cursor.execute("""
+            SELECT COUNT(*) FROM governance_decisions gd
+            WHERE gd.organization_id = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM identity_list il WHERE il.identity_id = gd.identity_id
+              )
+        """, (org_id,))
+        orphaned_decisions = _scalar(cursor, 0)
+        results.append({
+            'check': 'orphaned_governance_decisions',
+            'status': 'pass' if orphaned_decisions == 0 else 'warn',
+            'count': orphaned_decisions,
+        })
+
+        # Check: SA attestations referencing missing identities
+        cursor.execute("""
+            SELECT COUNT(*) FROM sa_attestations sa
+            WHERE sa.organization_id = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM identities i WHERE i.id = sa.identity_db_id
+              )
+        """, (org_id,))
+        orphaned_attestations = _scalar(cursor, 0)
+        results.append({
+            'check': 'orphaned_sa_attestations',
+            'status': 'pass' if orphaned_attestations == 0 else 'warn',
+            'count': orphaned_attestations,
+        })
+
+        cursor.close()
+
+        all_pass = all(r['status'] == 'pass' for r in results)
+        return jsonify({
+            'status': 'consistent' if all_pass else 'inconsistent',
+            'checks': results,
+        })
+    except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
+        logger.error("governance_reconciliation error: %s", e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    finally:
+        db.close()
+
+
 def validate_launch_readiness():
     """GET /api/system/launch-readiness — Comprehensive gate validation.
 
@@ -23795,32 +24353,32 @@ def validate_launch_readiness():
         # Gate 1: Multi-cloud identity discovery
         def g1():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='identities'")
-            exists = cursor.fetchone()[0] > 0
+            exists = _scalar(cursor, 0) > 0
             return exists, 'identities table exists' if exists else 'identities table missing'
         gate(1, 'Identity Discovery Engine', g1)
 
         # Gate 2: Risk scoring engine
         def g2():
             cursor.execute("SELECT COUNT(*) FROM information_schema.columns WHERE table_name='identities' AND column_name='risk_score'")
-            return cursor.fetchone()[0] > 0, 'risk_score column present'
+            return _scalar(cursor, 0) > 0, 'risk_score column present'
         gate(2, 'Risk Scoring (0-100)', g2)
 
         # Gate 3: Drift detection
         def g3():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='drift_reports'")
-            return cursor.fetchone()[0] > 0, 'drift_reports table exists'
+            return _scalar(cursor, 0) > 0, 'drift_reports table exists'
         gate(3, 'Drift Detection', g3)
 
         # Gate 4: Remediation engine
         def g4():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='remediation_playbooks'")
-            return cursor.fetchone()[0] > 0, 'remediation_playbooks table exists'
+            return _scalar(cursor, 0) > 0, 'remediation_playbooks table exists'
         gate(4, 'Remediation Engine', g4)
 
         # Gate 5: Compliance frameworks
         def g5():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='compliance_frameworks'")
-            return cursor.fetchone()[0] > 0, 'compliance_frameworks table exists'
+            return _scalar(cursor, 0) > 0, 'compliance_frameworks table exists'
         gate(5, 'Compliance Frameworks (6+)', g5)
 
         # Gate 6: Report generation
@@ -23835,7 +24393,7 @@ def validate_launch_readiness():
         # Gate 9: PIM tracking
         def g9():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='pim_eligible_assignments'")
-            return cursor.fetchone()[0] > 0, 'PIM tables exist'
+            return _scalar(cursor, 0) > 0, 'PIM tables exist'
         gate(9, 'PIM Tracking', g9)
 
         # Gate 10: Conditional Access
@@ -23845,7 +24403,7 @@ def validate_launch_readiness():
         # Gate 11: Access reviews
         def g11():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='access_review_campaigns'")
-            return cursor.fetchone()[0] > 0, 'access_review_campaigns table exists'
+            return _scalar(cursor, 0) > 0, 'access_review_campaigns table exists'
         gate(11, 'Access Review Campaigns', g11)
 
         # Gate 12: Role mining
@@ -23854,13 +24412,13 @@ def validate_launch_readiness():
         # Gate 13: Anomaly detection
         def g13():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='anomalies'")
-            return cursor.fetchone()[0] > 0, 'anomalies table exists'
+            return _scalar(cursor, 0) > 0, 'anomalies table exists'
         gate(13, 'Anomaly Detection (6 types)', g13)
 
         # Gate 14: SOAR integration
         def g14():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='soar_playbooks'")
-            return cursor.fetchone()[0] > 0, 'soar_playbooks table exists'
+            return _scalar(cursor, 0) > 0, 'soar_playbooks table exists'
         gate(14, 'SOAR Automation', g14)
 
         # Gate 15: Advanced query builder
@@ -23869,38 +24427,38 @@ def validate_launch_readiness():
         # Gate 16: Activity log
         def g16():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='activity_log'")
-            return cursor.fetchone()[0] > 0, 'activity_log table exists'
+            return _scalar(cursor, 0) > 0, 'activity_log table exists'
         gate(16, 'Audit Activity Log', g16)
 
         # Gate 17: Webhook notifications
         def g17():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='webhooks'")
-            return cursor.fetchone()[0] > 0, 'webhooks table exists'
+            return _scalar(cursor, 0) > 0, 'webhooks table exists'
         gate(17, 'Webhook Notifications', g17)
 
         # Gate 18: Custom risk rules
         def g18():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='custom_risk_rules'")
-            return cursor.fetchone()[0] > 0, 'custom_risk_rules table exists'
+            return _scalar(cursor, 0) > 0, 'custom_risk_rules table exists'
         gate(18, 'Custom Risk Rules', g18)
 
         # Gate 19: Identity groups
         def g19():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='identity_groups'")
-            return cursor.fetchone()[0] > 0, 'identity_groups table exists'
+            return _scalar(cursor, 0) > 0, 'identity_groups table exists'
         gate(19, 'Identity Groups', g19)
 
         # Gate 20: Saved views
         def g20():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='saved_views'")
-            return cursor.fetchone()[0] > 0, 'saved_views table exists'
+            return _scalar(cursor, 0) > 0, 'saved_views table exists'
         gate(20, 'Saved Views', g20)
 
         # ── Phase 3 Gates ──────────────────────────────────────────
         # Gate 21: Multi-organization foundation
         def g21():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='organizations'")
-            return cursor.fetchone()[0] > 0, 'organizations table exists'
+            return _scalar(cursor, 0) > 0, 'organizations table exists'
         gate(21, 'Multi-Tenant Foundation', g21)
 
         # Gate 22: JWT auth + RBAC
@@ -23912,7 +24470,7 @@ def validate_launch_readiness():
         # Gate 24: API key management
         def g24():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='api_keys'")
-            return cursor.fetchone()[0] > 0, 'api_keys table exists'
+            return _scalar(cursor, 0) > 0, 'api_keys table exists'
         gate(24, 'API Key Management', g24)
 
         # Gate 25: Admin portal (4 roles)
@@ -23924,7 +24482,7 @@ def validate_launch_readiness():
         # Gate 27: Data retention & cleanup
         def g27():
             cursor.execute("SELECT COUNT(*) FROM settings WHERE key LIKE 'retention_%'")
-            count = cursor.fetchone()[0]
+            count = _scalar(cursor, 0)
             return count >= 1, f'{count} retention settings configured'
         gate(27, 'Data Retention & Cleanup', g27)
 
@@ -23969,18 +24527,18 @@ def validate_launch_readiness():
         # Gate 40: Subscription management
         def g40():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='cloud_subscriptions'")
-            exists = cursor.fetchone()[0] > 0
+            exists = _scalar(cursor, 0) > 0
             if not exists:
                 return False, 'cloud_subscriptions table missing'
             cursor.execute("SELECT COUNT(*) FROM cloud_subscriptions WHERE rate_cents = 6900")
-            azure_count = cursor.fetchone()[0]
+            azure_count = _scalar(cursor, 0)
             return True, f'cloud_subscriptions exists, {azure_count} Azure subs at $69/mo'
         gate(40, 'Subscription Management ($69/sub)', g40)
 
         # Gate 41: Invoice generation
         def g41():
             cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='invoices'")
-            exists = cursor.fetchone()[0] > 0
+            exists = _scalar(cursor, 0) > 0
             return exists, 'invoices table exists with line_items' if exists else 'invoices table missing'
         gate(41, 'Invoice Generation ($200+N*$69)', g41)
 
@@ -23990,7 +24548,7 @@ def validate_launch_readiness():
                 SELECT COUNT(*) FROM pg_policies
                 WHERE schemaname = 'public'
             """)
-            policy_count = cursor.fetchone()[0]
+            policy_count = _scalar(cursor, 0)
             return policy_count >= 20, f'{policy_count} RLS policies active'
         gate(42, 'Tenant Isolation (RLS)', g42)
 
@@ -24326,6 +24884,8 @@ def create_stripe_customer_handler(organization_id):
         except ImportError:
             return jsonify({'error': 'stripe Python package not installed. Run: pip install stripe'}), 503
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error(f"Stripe API error: {e}", exc_info=True)
             return jsonify({'error': 'Billing service temporarily unavailable'}), 502
     finally:
@@ -24413,6 +24973,8 @@ def create_pilot_organization():
                              'root_username': root_username},
                             user_id=g.current_user.get('id'), organization_id=organization_id)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         return jsonify({
@@ -25197,10 +25759,14 @@ def get_graph_debug_handler():
                 diag['test_insert'] = 'NO_IDENTITIES'
             cursor.execute("ROLLBACK TO SAVEPOINT test_ra")
         except Exception as insert_err:
+            try: cursor.connection.rollback()
+            except Exception: pass
             diag['test_insert'] = f'FAILED: {str(insert_err)}'
             try:
                 cursor.execute("ROLLBACK TO SAVEPOINT test_ra")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # 10. Check if role_assignments has RLS enabled
@@ -25212,6 +25778,8 @@ def get_graph_debug_handler():
             rls_row = cursor.fetchone()
             diag['role_assignments_rls'] = dict(rls_row) if rls_row else 'NOT_FOUND'
         except Exception as rls_err:
+            try: cursor.connection.rollback()
+            except Exception: pass
             diag['role_assignments_rls'] = f'ERROR: {str(rls_err)}'
 
         # 11. Check organization_id column nullable status
@@ -25224,11 +25792,15 @@ def get_graph_debug_handler():
             col_info = cursor.fetchone()
             diag['role_assignments_org_id_info'] = dict(col_info) if col_info else 'NOT_FOUND'
         except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
             pass
 
         cursor.close()
         return jsonify(diag)
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         logger.exception(f"Graph debug failed: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
@@ -25371,6 +25943,8 @@ def get_graph_visualization_handler():
                 for r in cursor.fetchall():
                     identity_meta[r['identity_id']] = dict(r)
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # ── Enrich subscriptions ───────────────────────────────────────
@@ -25391,6 +25965,8 @@ def get_graph_visualization_handler():
                 for r in cursor.fetchall():
                     sub_labels[r['account_id']] = r['account_name']
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         # ── Build adjacency maps for tooltip enrichment ────────────────
@@ -26940,6 +27516,8 @@ def get_security_findings_handler():
                 try:
                     meta = json.loads(meta)
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     meta = {}
             # Prefer the dedicated identity_id column; fall back to entity_id
             # for all identity-related entity types
@@ -27017,6 +27595,8 @@ def get_security_findings_summary_handler():
             'total': stats.get('open', 0),
         })
     except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
         import traceback
         traceback.print_exc()
         return jsonify({'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'total': 0})
@@ -27196,7 +27776,7 @@ def get_identity_persisted_attack_paths(identity_id):
             return jsonify({'paths': [], 'count': 0, 'identity_id': identity_id})
 
         db_id = row['id']
-        paths = db.get_attack_paths_for_identity(db_id)
+        paths = db.get_attack_paths_for_identity(db_id, identity_id_str=identity_id)
         cursor.close()
         return jsonify({'paths': paths, 'count': len(paths), 'identity_id': identity_id})
     finally:
@@ -27301,6 +27881,8 @@ def trigger_attack_path_analysis():
                     converted = [_convert_bfs_path_to_attack_path(p) for p in bfs_paths]
                     total_bfs += db.save_attack_paths(run_id, converted)
             except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
                 pass  # Non-critical if BFS engine isn't available
 
         total = total_pattern + total_bfs
@@ -27974,6 +28556,8 @@ def get_platform_health_handler():
                 scheduler_running = _sched.running
                 active_jobs_count = len(_sched.get_jobs()) if scheduler_running else 0
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         from app.engines.platform_health import MAX_JOB_FAILURE_RATE
@@ -28123,6 +28707,8 @@ def admin_trigger_tenant_snapshot(organization_id):
         try:
             trigger_manual_discovery(db_org_id=organization_id, org_name=org.get('name'))
         except Exception as e:
+            try: db.conn.rollback()
+            except Exception: pass
             logger.error("Admin snapshot trigger failed for org %s: %s", organization_id, e)
 
     thread = threading.Thread(target=_run, daemon=True)
@@ -28272,6 +28858,8 @@ def admin_flush_cache():
             from app.metrics import MetricsCollector
             MetricsCollector.instance().reset()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         user = getattr(g, 'current_user', None)
@@ -28347,6 +28935,8 @@ def admin_restart_workers():
         else:
             return jsonify({'error': 'Scheduler not available'}), 503
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         return jsonify({'error': f'Failed to restart scheduler: {str(e)}'}), 500
 
 
@@ -28944,6 +29534,8 @@ def copilot_query_handler():
         try:
             db._rollback()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
     finally:
@@ -28985,10 +29577,14 @@ def copilot_security_summary_handler():
             'duration_ms': duration_ms,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error(f"Security summary error: {e}", exc_info=True)
         try:
             db._rollback()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
     finally:
@@ -29060,6 +29656,8 @@ def copilot_investigate_handler():
         try:
             db._rollback()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
     finally:
@@ -29150,6 +29748,8 @@ def copilot_graph_query_handler():
         try:
             db._rollback()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
     finally:
@@ -29266,6 +29866,8 @@ def get_identity_exposures_handler():
                 try:
                     details = json.loads(details)
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     details = {}
             exposures.append({
                 'id': r['id'],
@@ -30233,6 +30835,8 @@ def get_identity_risk_summary_detail(identity_id):
         try:
             blast_radius = db.get_blast_radius_for_identity(db_id) or {}
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         blast_radius_score = blast_radius.get('blast_radius_score', 0)
 
@@ -30242,6 +30846,8 @@ def get_identity_risk_summary_detail(identity_id):
             paths = db.get_attack_paths(source_entity_id=db_id, limit=100)
             attack_path_count = len(paths) if paths else 0
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Escalation paths via graph engine
@@ -30252,6 +30858,8 @@ def get_identity_risk_summary_detail(identity_id):
             engine._build_graph(_org_id(), run_ids[0])
             escalation_paths = engine.find_escalation_paths(str(db_id))
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Key Vault access
@@ -30267,6 +30875,8 @@ def get_identity_risk_summary_detail(identity_id):
             pim_data = db.get_pim_data(db_id)
             pim_eligible = pim_data.get('eligible_assignments', []) if pim_data else []
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Dormancy
@@ -30473,6 +31083,8 @@ def get_identity_ai_risk_explanation(identity_id):
             br = db.get_blast_radius_for_identity(db_id) or {}
             blast_radius = br.get('blast_radius_score', 0)
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         # Attack path count
@@ -30481,6 +31093,8 @@ def get_identity_ai_risk_explanation(identity_id):
             paths = db.get_attack_paths(source_entity_id=db_id, limit=100)
             attack_path_count = len(paths) if paths else 0
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
 
         cursor.close()
@@ -30839,6 +31453,8 @@ def ai_investigate_assistant_handler():
         try:
             db._rollback()
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass
         return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
     finally:
@@ -30992,22 +31608,30 @@ def get_risk_summary_full():
                     # Re-read the now-persisted data (scoped to run_ids)
                     latest, previous = db.get_latest_risk_summaries(organization_id=org_id, run_ids=run_ids)
                 except Exception as pe:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     logger.warning("RiskSummaryEngine persist failed (using computed data): %s", pe)
                     # Rollback aborted transaction so subsequent queries work
                     try:
                         db.conn.rollback()
                     except Exception:
+                        try: db.conn.rollback()
+                        except Exception: pass
                         pass
                     # Use computed summary directly as latest
                     latest = summary
                     latest.setdefault('discovery_run_id', run_ids[0] if run_ids else None)
                     previous = None
             except Exception as e:
+                try: db.conn.rollback()
+                except Exception: pass
                 logger.error("Live RiskSummaryEngine compute failed: %s", e, exc_info=True)
                 # Rollback aborted transaction
                 try:
                     db.conn.rollback()
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     pass
 
             # If persist/re-read still failed, build latest from live query
@@ -31097,6 +31721,8 @@ def get_risk_summary_full():
                 live_human_count = row[3] or 0
                 live_nhi_count = row[4] or 0
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
             # Live risk_level distribution for risk bar (exact match for ?risk_level=X drill-downs)
@@ -31117,9 +31743,13 @@ def get_risk_summary_full():
                         risk_level_dist[lvl] = row[1]
                 exp_cursor.execute("RELEASE SAVEPOINT full_rld")
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 try:
                     exp_cursor.execute("ROLLBACK TO SAVEPOINT full_rld")
                 except Exception:
+                    try: cursor.connection.rollback()
+                    except Exception: pass
                     pass
 
             # Override persisted counts with live values if available
@@ -31143,16 +31773,20 @@ def get_risk_summary_full():
                             (run_ids, active_sub_ids))
                     else:
                         exp_cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)", (run_ids,))
-                    val = exp_cursor.fetchone()[0] or 0
+                    val = _scalar(exp_cursor, 0)
                     if var == "sa":
                         sa_count = val
                     else:
                         kv_count = val
                     exp_cursor.execute(f"RELEASE SAVEPOINT full_{var}")
                 except Exception:
+                    try: cursor.connection.rollback()
+                    except Exception: pass
                     try:
                         exp_cursor.execute(f"ROLLBACK TO SAVEPOINT full_{var}")
                     except Exception:
+                        try: cursor.connection.rollback()
+                        except Exception: pass
                         pass
 
             try:
@@ -31162,8 +31796,10 @@ def get_risk_summary_full():
                     JOIN identities i ON i.id = ra.identity_db_id
                     WHERE i.discovery_run_id = ANY(%s) AND ra.scope LIKE '/subscriptions/%%'
                 """, (run_ids,))
-                sub_count = exp_cursor.fetchone()[0] or 0
+                sub_count = _scalar(exp_cursor, 0)
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
             try:
@@ -31183,8 +31819,10 @@ def get_risk_summary_full():
                                      AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')))
                     )
                 """, (run_ids,))
-                priv_count = exp_cursor.fetchone()[0] or 0
+                priv_count = _scalar(exp_cursor, 0)
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
             # Attack path count — use graph_attack_findings (comprehensive BFS analysis)
@@ -31197,8 +31835,10 @@ def get_risk_summary_full():
                     WHERE organization_id = %s
                       AND discovery_run_id = ANY(%s)
                 """, (org_id, run_ids))
-                graph_finding_count = exp_cursor.fetchone()[0] or 0
+                graph_finding_count = _scalar(exp_cursor, 0)
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
             try:
                 # Attack paths persist across runs — scope by org only
@@ -31206,8 +31846,10 @@ def get_risk_summary_full():
                     SELECT COUNT(*) FROM attack_paths
                     WHERE organization_id = %s
                 """, (org_id,))
-                confirmed_path_count = exp_cursor.fetchone()[0] or 0
+                confirmed_path_count = _scalar(exp_cursor, 0)
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
             # Use the larger count for honest risk assessment
             attack_path_count = max(graph_finding_count, confirmed_path_count)
@@ -31239,6 +31881,8 @@ def get_risk_summary_full():
                 nhi_ownerless = nhi_row[2] or 0
                 nhi_cursor.close()
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         exp_cursor.close()
@@ -31375,6 +32019,8 @@ def get_risk_summary_full():
                 try:
                     db.conn.rollback()
                 except Exception:
+                    try: db.conn.rollback()
+                    except Exception: pass
                     pass
 
         # 3. Blast radius — find top identity
@@ -31438,8 +32084,10 @@ def get_risk_summary_full():
                             WHERE ra.identity_db_id = %s
                               AND ra.scope LIKE '/subscriptions/%%'
                         """, (identity_db_id,))
-                        d_id['subscription_count'] = br_cursor.fetchone()[0] or 0
+                        d_id['subscription_count'] = _scalar(br_cursor, 0)
                     except Exception:
+                        try: db.conn.rollback()
+                        except Exception: pass
                         d_id['subscription_count'] = 0
 
                     # Count total role assignments (RBAC + Entra)
@@ -31454,6 +32102,8 @@ def get_risk_summary_full():
                         d_id['entra_role_count'] = row[1] or 0
                         d_id['total_role_count'] = (row[0] or 0) + (row[1] or 0)
                     except Exception:
+                        try: cursor.connection.rollback()
+                        except Exception: pass
                         d_id['total_role_count'] = 0
 
                     # Count resource groups reachable
@@ -31465,11 +32115,15 @@ def get_risk_summary_full():
                               AND ra.scope LIKE '/subscriptions/%%/resourceGroups/%%'
                               AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%/%%'
                         """, (identity_db_id,))
-                        d_id['resource_group_count'] = br_cursor.fetchone()[0] or 0
+                        d_id['resource_group_count'] = _scalar(br_cursor, 0)
                     except Exception:
+                        try: cursor.connection.rollback()
+                        except Exception: pass
                         d_id['resource_group_count'] = 0
                 br_cursor.close()
             except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
                 pass
 
         top_ident = dangerous[0] if dangerous else None
@@ -31598,8 +32252,8 @@ def get_risk_summary_full():
                  "detail": f"{customer_identities} customer identities"},
                 {"source": "Graph API permissions", "status": "active" if exposure_priv > 0 else "inactive",
                  "detail": f"{exposure_priv} privileged role assignments"},
-                {"source": "Sign-in activity logs", "status": "partial",
-                 "detail": "P2 license — partial data"},
+                {"source": "Sign-in activity logs", "status": "inactive",
+                 "detail": "Not used — log-independent analysis"},
                 {"source": "Privileged Identity Mgmt", "status": "inactive",
                  "detail": "PIM not configured"},
                 {"source": "Conditional Access", "status": "inactive",
@@ -31709,7 +32363,7 @@ def get_agent_identities():
         """
         cursor = db.conn.cursor()
         cursor.execute(count_sql, params)
-        total = cursor.fetchone()[0]
+        total = _scalar(cursor, 0)
 
         # Fetch identities + classification metadata
         offset = (page - 1) * per_page
@@ -31849,6 +32503,8 @@ def get_agent_identity_count():
             'possible_ai_agent': counts.get('possible_ai_agent', 0),
         })
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         logger.error("get_agent_identity_count failed: %s", e)
         return jsonify({'ai_agent': 0, 'possible_ai_agent': 0})
     finally:
@@ -31912,7 +32568,7 @@ def get_agent_risk_summary():
               AND NOT COALESCE(i.is_microsoft_system, false)
               AND i.deleted_at IS NULL
         """)
-        total_agents = cursor.fetchone()[0] or 0
+        total_agents = _scalar(cursor, 0)
 
         # Average AGIRS score across AI agents
         cursor.execute("""
@@ -31923,7 +32579,7 @@ def get_agent_risk_summary():
               AND NOT COALESCE(i.is_microsoft_system, false)
               AND i.deleted_at IS NULL
         """)
-        avg_agirs = round(float(cursor.fetchone()[0] or 0), 1)
+        avg_agirs = round(float(_scalar(cursor, 0)), 1)
 
         # Critical orphans (open IASM-AG-001 findings)
         cursor.execute("""
@@ -31932,7 +32588,7 @@ def get_agent_risk_summary():
             WHERE finding_type = 'orphaned_ai_agent_spn'
               AND status = 'open'
         """)
-        critical_orphans = cursor.fetchone()[0] or 0
+        critical_orphans = _scalar(cursor, 0)
 
         # Highest risk agent
         cursor.execute("""
@@ -31962,6 +32618,8 @@ def get_agent_risk_summary():
             'highest_risk_agent': highest_risk_agent,
         })
     except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
         logger.error("get_agent_risk_summary failed: %s", e)
         return jsonify({
             'total_agents': 0, 'avg_agirs': 0,
@@ -31983,6 +32641,8 @@ def get_agent_delegations():
         delegations = db.get_agent_delegations()
         return jsonify({'delegations': delegations, 'total': len(delegations)})
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error("get_agent_delegations failed: %s", e)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -32093,6 +32753,8 @@ def delete_agent_delegation():
         return jsonify({'message': 'Delegation removed' if deleted else 'No delegation found',
                         'deleted': deleted})
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error("delete_agent_delegation failed: %s", e, exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -32188,10 +32850,14 @@ def get_agent_blast_radius(identity_id):
                     'includes_delegations': [d['target_display_name'] for d in delegations],
                 }
         except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
             pass  # agent_delegations table may not exist yet
 
         return jsonify(result)
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error("get_agent_blast_radius failed: %s", e, exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -32252,6 +32918,8 @@ def scan_orphan_agents():
             'run_id': run_id,
         })
     except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
         logger.error("scan_orphan_agents failed: %s", e, exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
@@ -32559,4 +33227,775 @@ def get_remediation_queue_summary():
     finally:
         db.close()
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# CISO Summary — SSOT dashboard endpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+_ciso_cache: dict = {}   # {(org_id, conn_id): {'data': envelope, 'ts': float}}
+_CISO_CACHE_TTL = 120    # seconds
+
+# Gap priority order — highest priority first.
+_GAP_PRIORITY = [
+    'RISK_SUMMARY_FAILED',
+    'ANOMALY_DISABLED',
+    'DRIFT_NOT_ENABLED',
+    'DRIFT_NEEDS_SECOND_SCAN',
+    'REMEDIATION_UNAVAILABLE',
+    'SPN_UNAVAILABLE',
+]
+
+# Source usability checks — shared by _has_real_data and _count_usable_sources
+_SOURCE_CHECKS = {
+    'risk': lambda d: bool(isinstance(d, dict) and d.get('latest', {}) and isinstance(d['latest'], dict) and d['latest'].get('total_identities')),
+    'trends': lambda d: bool(isinstance(d, dict) and d.get('runs')),
+    'anomalies': lambda d: isinstance(d, dict) and (d.get('unresolved', 0) > 0 or bool(d.get('top_anomalies'))),
+    'remediation': lambda d: isinstance(d, dict) and d.get('total', 0) > 0,
+    'drift': lambda d: isinstance(d, dict) and d.get('total_changes', 0) > 0,
+    'spn': lambda d: isinstance(d, dict) and d.get('total_custom', 0) > 0,
+}
+
+
+def _has_real_data(sources: dict) -> bool:
+    """Return True if at least one source has meaningful data."""
+    if not isinstance(sources, dict):
+        return False
+    for key, check_fn in _SOURCE_CHECKS.items():
+        data = sources.get(key)
+        if data and check_fn(data):
+            return True
+    return False
+
+
+def _count_usable_sources(sources: dict):
+    """Count how many of the 6 data sources have usable data.
+
+    Returns (usable_count, total_count) tuple.
+    """
+    total = 6
+    if not isinstance(sources, dict):
+        return 0, total
+    usable = 0
+    for key, check_fn in _SOURCE_CHECKS.items():
+        data = sources.get(key)
+        if data and check_fn(data):
+            usable += 1
+    return usable, total
+
+
+def _safe_collect(fn, label='', *args):
+    """Call fn(*args), return result. On error, return None and log."""
+    try:
+        return fn(*args) if args else fn()
+    except Exception as e:
+        logger.warning("_safe_collect(%s) failed: %s", label, e)
+        return None
+
+
+# ── Pure data builders (no DB — operate on pre-collected sources dicts) ──
+
+def _build_risk_summary_data(sources: dict):
+    """Extract risk summary from sources dict. Returns None if unavailable."""
+    if not isinstance(sources, dict):
+        return None
+    risk = sources.get('risk')
+    if not isinstance(risk, dict):
+        return None
+    latest = risk.get('latest')
+    if not isinstance(latest, dict) or not latest.get('total_identities'):
+        return None
+    # Build standardised output
+    agirs_data = None
+    if latest.get('agirs_score') is not None:
+        s = latest['agirs_score']
+        agirs_data = {
+            'score': s,
+            'tier': latest.get('agirs_tier') or (
+                'A' if s >= 92 else 'B' if s >= 80 else 'C' if s >= 65 else 'D' if s >= 45 else 'F'
+            ),
+        }
+    return {
+        'identity_counts': {
+            'total': latest.get('total_identities', 0),
+            'customer': latest.get('customer_identities', 0),
+            'microsoft': latest.get('microsoft_identities', 0),
+            'human': latest.get('human_count', 0),
+            'nhi': latest.get('nhi_count', 0),
+            'guest': 0,  # populated below if available
+        },
+        'agirs': agirs_data,
+        'computed_at': latest.get('computed_at'),
+        'risk_counts': {
+            'dormant_privileged': latest.get('dormant_privileged', 0),
+            'ghost_accounts': latest.get('ghost_accounts', 0),
+            'orphaned_spns': latest.get('orphaned_spns', 0),
+            'over_privileged': latest.get('over_privileged', 0),
+            'external_exposure': latest.get('external_exposure', 0),
+        },
+        'exposure': {
+            'subscriptions': latest.get('subscriptions', 0),
+            'active_subscriptions': latest.get('subscriptions', 0),
+        },
+        **{k: v for k, v in latest.items() if k not in (
+            'total_identities', 'customer_identities', 'microsoft_identities',
+            'agirs_score', 'agirs_tier', 'computed_at',
+        )},
+    }
+
+
+def _build_trends_data(sources: dict) -> dict:
+    """Extract trend data from sources dict."""
+    if not isinstance(sources, dict):
+        return {'available': False}
+    trends = sources.get('trends')
+    if not isinstance(trends, dict) or not trends.get('runs'):
+        return {'available': False}
+    runs = trends['runs']
+    return {
+        'available': True,
+        'runs': [r.get('date', str(r)) if isinstance(r, dict) else str(r) for r in runs],
+        'postureScores': [r.get('posture_score', 0) if isinstance(r, dict) else 0 for r in runs],
+    }
+
+
+def _build_anomaly_data(sources: dict) -> dict:
+    """Extract anomaly data from sources dict."""
+    if not isinstance(sources, dict):
+        return {'available': False}
+    anomalies = sources.get('anomalies')
+    if not isinstance(anomalies, dict):
+        return {'available': False}
+    if anomalies.get('unresolved', 0) == 0 and not anomalies.get('top_anomalies'):
+        return {'available': False}
+    return {
+        'available': True,
+        'unresolved': anomalies.get('unresolved', 0),
+        'bySeverity': anomalies.get('by_severity', {}),
+        'topAnomalies': anomalies.get('top_anomalies', []),
+    }
+
+
+def _build_remediation_data(sources: dict) -> dict:
+    """Extract remediation data from sources dict."""
+    if not isinstance(sources, dict):
+        return {'available': False}
+    rem = sources.get('remediation')
+    if not isinstance(rem, dict) or not rem.get('total'):
+        return {'available': False}
+    total = rem['total']
+    completed = rem.get('completed', 0)
+    return {
+        'available': True,
+        'total': total,
+        'open': rem.get('open', 0),
+        'completed': completed,
+        'completionPct': round(completed / total * 100, 1) if total else 0,
+    }
+
+
+def _build_drift_data(sources: dict) -> dict:
+    """Extract drift data from sources dict."""
+    if not isinstance(sources, dict):
+        return {'available': False}
+    drift = sources.get('drift')
+    if not isinstance(drift, dict) or not drift.get('total_changes'):
+        return {'available': False}
+    return {
+        'available': True,
+        'totalChanges': drift.get('total_changes', 0),
+        'permissionChanges': drift.get('permission_changes', 0),
+        'roleChanges': drift.get('role_changes', 0),
+        'credentialChanges': drift.get('credential_changes', 0),
+    }
+
+
+def _build_spn_data(sources: dict) -> dict:
+    """Extract SPN data from sources dict."""
+    if not isinstance(sources, dict):
+        return {'available': False}
+    spn = sources.get('spn')
+    if not isinstance(spn, dict) or not spn.get('total_custom'):
+        return {'available': False}
+    return {
+        'available': True,
+        'totalCustom': spn.get('total_custom', 0),
+        'critical': spn.get('critical', 0),
+        'expiredCreds': spn.get('expired_credentials', 0),
+        'orphanedPrivileged': spn.get('orphaned_privileged', 0),
+    }
+
+
+def _build_ciso_envelope(sources: dict, gaps: list, data: dict,
+                         run_ids: list = None) -> dict:
+    """Build the full CISO summary response envelope.
+
+    Args:
+        sources: raw collected data per source key
+        gaps: list of gap strings (from _GAP_PRIORITY constants)
+        data: pre-built data dict to pass through to response
+        run_ids: discovery run IDs (empty → DISCOVERY_REQUIRED)
+    """
+    if not run_ids:
+        return {
+            'status': 'DISCOVERY_REQUIRED',
+            'ready': False,
+            'coverage': 0,
+            'confidence': 'low',
+            'usableSources': 0,
+            'totalSources': 6,
+            'gaps': gaps,
+            'primaryGap': gaps[0] if gaps else None,
+            'data': data,
+        }
+
+    usable, total = _count_usable_sources(sources)
+    has_data = _has_real_data(sources)
+    coverage = round(usable / total * 100) if total else 0
+
+    if not has_data:
+        status = 'DISCOVERY_REQUIRED'
+        ready = False
+    elif usable < total:
+        status = 'PARTIAL'
+        ready = True
+    else:
+        status = 'READY'
+        ready = True
+
+    confidence = 'high' if coverage >= 85 else 'medium' if coverage >= 50 else 'low'
+
+    # Pick highest-priority gap
+    primary_gap = None
+    if gaps:
+        gap_set = set(gaps)
+        for g in _GAP_PRIORITY:
+            if g in gap_set:
+                primary_gap = g
+                break
+        if primary_gap is None:
+            primary_gap = gaps[0]
+
+    return {
+        'status': status,
+        'ready': ready,
+        'coverage': coverage,
+        'confidence': confidence,
+        'usableSources': usable,
+        'totalSources': total,
+        'gaps': gaps,
+        'primaryGap': primary_gap,
+        'data': data,
+    }
+
+
+def _ciso_empty_envelope() -> dict:
+    """Return empty CISO envelope for no-data state."""
+    unavailable = {'available': False}
+    data = {
+        'riskSummary': None,
+        'trends': dict(unavailable),
+        'anomalies': dict(unavailable),
+        'remediation': dict(unavailable),
+        'drift': dict(unavailable),
+        'spn': dict(unavailable),
+    }
+    return {
+        'status': 'DISCOVERY_REQUIRED',
+        'ready': False,
+        'coverage': 0,
+        'confidence': 'low',
+        'usableSources': 0,
+        'totalSources': 6,
+        'gaps': list(_GAP_PRIORITY),
+        'primaryGap': _GAP_PRIORITY[0] if _GAP_PRIORITY else None,
+        'data': data,
+    }
+
+
+def _ciso_system_error_envelope(reason: str = None) -> dict:
+    """Return error envelope for system failures."""
+    envelope = _ciso_empty_envelope()
+    envelope['status'] = 'ERROR'
+    envelope['primaryGap'] = reason or "System error retrieving security data"
+    return envelope
+
+
+def _ciso_cache_get(org_id: int, conn_id: int = None):
+    """Get cached CISO envelope if still valid."""
+    key = (org_id, conn_id)
+    entry = _ciso_cache.get(key)
+    if not entry:
+        return None
+    if time.time() - entry['ts'] > _CISO_CACHE_TTL:
+        del _ciso_cache[key]
+        return None
+    return entry['data']
+
+
+def _ciso_cache_set(org_id: int, conn_id: int, data: dict):
+    """Cache a CISO envelope."""
+    _ciso_cache[(org_id, conn_id)] = {'data': data, 'ts': time.time()}
+
+
+def _ciso_cache_invalidate(org_id: int = None):
+    """Invalidate cached CISO envelope. If org_id given, only that org; else all."""
+    if org_id is None:
+        _ciso_cache.clear()
+    else:
+        keys_to_del = [k for k in _ciso_cache if k[0] == org_id]
+        for k in keys_to_del:
+            del _ciso_cache[k]
+
+
+def _collect_ciso_sources_from_db(db, org_id, run_ids):
+    """Collect raw source data from DB for CISO summary.
+
+    Each section is independently protected: on query failure,
+    rollback clears the aborted transaction state so the next
+    section can proceed (prevents cascading transaction poisoning).
+    """
+    raw = {}
+
+    # Risk
+    try:
+        summary = db.get_latest_risk_summary(org_id, run_ids=run_ids or None)
+        raw['risk'] = {'latest': summary} if summary else {}
+    except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
+        raw['risk'] = {}
+
+    # Trends
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT started_at::date, rs.agirs_score
+            FROM discovery_runs dr
+            LEFT JOIN risk_summary rs ON rs.discovery_run_id = dr.id
+            WHERE dr.organization_id = %s AND dr.status = 'completed'
+            ORDER BY dr.started_at DESC LIMIT 30
+        """, (org_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        if rows:
+            raw['trends'] = {'runs': [
+                {'date': str(r[0]), 'posture_score': float(r[1] or 0)} for r in rows
+            ]}
+        else:
+            raw['trends'] = {}
+    except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
+        raw['trends'] = {}
+
+    # Anomalies
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM anomalies WHERE organization_id = %s AND resolved = false", (org_id,))
+        unresolved = _scalar(cursor, 0)
+        cursor.execute("""
+            SELECT severity, COUNT(*) FROM anomalies
+            WHERE organization_id = %s AND resolved = false GROUP BY severity
+        """, (org_id,))
+        by_sev = {r[0]: r[1] for r in cursor.fetchall()}
+        cursor.execute("""
+            SELECT id, anomaly_type, severity, description, created_at
+            FROM anomalies WHERE organization_id = %s AND resolved = false
+            ORDER BY created_at DESC LIMIT 5
+        """, (org_id,))
+        top = [{'id': r[0], 'type': r[1], 'severity': r[2], 'description': r[3]} for r in cursor.fetchall()]
+        cursor.close()
+        raw['anomalies'] = {'unresolved': unresolved, 'by_severity': by_sev, 'top_anomalies': top}
+    except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
+        raw['anomalies'] = {}
+
+    # Remediation
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'open'),
+                   COUNT(*) FILTER (WHERE status = 'completed')
+            FROM remediation_actions WHERE organization_id = %s
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row and row[0]:
+            raw['remediation'] = {'total': row[0], 'open': row[1], 'completed': row[2]}
+        else:
+            raw['remediation'] = {}
+    except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
+        raw['remediation'] = {}
+
+    # Drift
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT total_changes, permission_changes_count, risk_changes_count, credential_changes_count
+            FROM drift_reports WHERE organization_id = %s ORDER BY created_at DESC LIMIT 1
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            raw['drift'] = {'total_changes': row[0] or 0, 'permission_changes': row[1] or 0,
+                            'role_changes': row[2] or 0, 'credential_changes': row[3] or 0}
+        else:
+            raw['drift'] = {}
+    except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
+        raw['drift'] = {}
+
+    # SPN
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE discovery_run_id = ANY(%s) AND identity_category = 'service_principal'
+              AND NOT COALESCE(is_microsoft_system, false)
+        """, (run_ids,))
+        total_custom = _scalar(cursor, 0)
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE discovery_run_id = ANY(%s) AND identity_category = 'service_principal'
+              AND NOT COALESCE(is_microsoft_system, false) AND risk_level = 'critical'
+        """, (run_ids,))
+        critical = _scalar(cursor, 0)
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE discovery_run_id = ANY(%s) AND identity_category = 'service_principal'
+              AND NOT COALESCE(is_microsoft_system, false) AND credential_status = 'expired'
+        """, (run_ids,))
+        expired = _scalar(cursor, 0)
+        cursor.close()
+        if total_custom:
+            raw['spn'] = {'total_custom': total_custom, 'critical': critical, 'expired_credentials': expired}
+        else:
+            raw['spn'] = {}
+    except Exception:
+        try: db.conn.rollback()
+        except Exception: pass
+        raw['spn'] = {}
+
+    return raw
+
+
+def get_ciso_summary():
+    """GET /api/ciso/summary — SSOT CISO dashboard data.
+
+    Collects 6 data sources (risk, trends, anomalies, remediation, drift, spn),
+    wraps them in a readiness envelope with coverage percentage.
+    Cached for 2 minutes per org+connection.
+    """
+    org_id = _org_id()
+    conn_id = _connection_id()
+
+    cached = _ciso_cache_get(org_id, conn_id)
+    if cached:
+        return jsonify(cached)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, conn_id)
+        cursor.close()
+
+        if not run_ids:
+            envelope = _ciso_empty_envelope()
+            return jsonify(envelope)
+
+        # Collect raw sources from DB
+        raw_sources = _collect_ciso_sources_from_db(db, org_id, run_ids)
+
+        # Build transformed data using pure builders
+        data = {
+            'riskSummary': _build_risk_summary_data(raw_sources),
+            'trends': _build_trends_data(raw_sources),
+            'anomalies': _build_anomaly_data(raw_sources),
+            'remediation': _build_remediation_data(raw_sources),
+            'drift': _build_drift_data(raw_sources),
+            'spn': _build_spn_data(raw_sources),
+        }
+
+        # Detect gaps
+        gaps = []
+        if not _SOURCE_CHECKS['risk'](raw_sources.get('risk', {})):
+            gaps.append('RISK_SUMMARY_FAILED')
+        if not _SOURCE_CHECKS['anomalies'](raw_sources.get('anomalies', {})):
+            gaps.append('ANOMALY_DISABLED')
+        if not _SOURCE_CHECKS['drift'](raw_sources.get('drift', {})):
+            gaps.append('DRIFT_NOT_ENABLED')
+        if not _SOURCE_CHECKS['remediation'](raw_sources.get('remediation', {})):
+            gaps.append('REMEDIATION_UNAVAILABLE')
+        if not _SOURCE_CHECKS['spn'](raw_sources.get('spn', {})):
+            gaps.append('SPN_UNAVAILABLE')
+
+        envelope = _build_ciso_envelope(raw_sources, gaps, data, run_ids=run_ids)
+
+        # Add lastUpdated
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT MAX(completed_at) FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+        """, (org_id,))
+        envelope['lastUpdated'] = str(_scalar(cursor)) if _scalar(cursor) else None
+        # Re-fetch since _scalar consumed the row
+        cursor.execute("""
+            SELECT MAX(completed_at) FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+        """, (org_id,))
+        last_ts = _scalar(cursor)
+        envelope['lastUpdated'] = str(last_ts) if last_ts else None
+        cursor.close()
+
+        _ciso_cache_set(org_id, conn_id, envelope)
+        return jsonify(envelope)
+
+    except Exception as e:
+        try: cursor.connection.rollback()
+        except Exception: pass
+        logger.error("get_ciso_summary error: %s", e, exc_info=True)
+        return jsonify(_ciso_system_error_envelope(str(e))), 500
+    finally:
+        db.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CVSS Scoring — recompute endpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+def recompute_cvss_scores():
+    """POST /api/scoring/recompute — Recompute CVSS identity scores for the org."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id)
+
+        if not run_ids:
+            return jsonify({'error': 'No completed discovery runs'}), 404
+
+        from app.engines.scoring.cvss_identity_scorer import CVSSIdentityScorer
+        scorer = CVSSIdentityScorer()
+
+        # Get all non-Microsoft identities
+        cursor.execute("""
+            SELECT id, identity_id FROM identities
+            WHERE discovery_run_id = ANY(%s)
+              AND NOT COALESCE(is_microsoft_system, false)
+        """, (run_ids,))
+        identities = cursor.fetchall()
+
+        scored = 0
+        for row in identities:
+            identity_db_id = row[0]
+            try:
+                result = scorer.score_identity(cursor, identity_db_id, org_id)
+                if result:
+                    scored += 1
+            except Exception as e:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                logger.warning("CVSS score failed for %s: %s", identity_db_id, e)
+
+        db.conn.commit()
+        cursor.close()
+
+        _log(db, 'cvss_recompute', f'Recomputed CVSS scores for {scored}/{len(identities)} identities')
+        return jsonify({
+            'scored': scored,
+            'total': len(identities),
+            'message': f'Recomputed CVSS scores for {scored} identities',
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("recompute_cvss_scores error: %s", e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Fix Prioritizer — per-identity and org-level endpoints
+# ═══════════════════════════════════════════════════════════════════════
+
+def get_identity_top_fixes(identity_id):
+    """GET /api/identities/<id>/fixes — Top 3 fixes for an identity."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id)
+
+        if not run_ids:
+            return jsonify({'fixes': [], 'identity': None}), 200
+
+        from app.engines.remediation.fix_prioritizer import FixPrioritizer
+        prioritizer = FixPrioritizer()
+        result = prioritizer.get_top_3_fixes_with_projection(
+            cursor, str(identity_id), org_id, run_ids,
+        )
+        cursor.close()
+        return jsonify(result)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_identity_top_fixes error: %s", e, exc_info=True)
+        return jsonify({'fixes': [], 'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_org_remediation_summary():
+    """GET /api/remediation/org-summary — Org-level top 3 remediation actions."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+
+        from app.engines.remediation.fix_prioritizer import FixPrioritizer
+        prioritizer = FixPrioritizer()
+        actions = prioritizer.get_org_top_3(cursor, org_id)
+        cursor.close()
+        return jsonify({'actions': actions})
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_org_remediation_summary error: %s", e, exc_info=True)
+        return jsonify({'actions': [], 'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+def get_inventory_summary():
+    """GET /api/inventory/summary
+    Returns connection + subscription inventory state.
+    Response shape matches useInventorySummary.ts:
+      has_connection: bool
+      connections: list of per-connector objects
+      aggregate: rolled-up totals
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        org_id = _org_id()
+
+        cursor.execute("""
+            SELECT
+                cc.id,
+                cc.label,
+                cc.status,
+                cc.cloud,
+                MAX(dr.started_at) as last_discovery_at,
+                COUNT(DISTINCT cs.id)
+                    as inventory_subscriptions,
+                COUNT(DISTINCT cs.id)
+                    FILTER (WHERE cs.monitored = true)
+                    as monitored_subscriptions,
+                COUNT(DISTINCT cs.id)
+                    FILTER (WHERE cs.monitored = true
+                      AND cs.deleted = false)
+                    as active_inventory_subscriptions,
+                MAX(cs.discovered_at)
+                    as last_subscription_discovered_at
+            FROM cloud_connections cc
+            LEFT JOIN cloud_subscriptions cs
+                ON cs.cloud_connection_id = cc.id
+                AND cs.deleted = false
+                AND cs.organization_id = cc.organization_id
+            LEFT JOIN discovery_runs dr
+                ON dr.cloud_connection_id = cc.id
+                AND dr.status = 'completed'
+                AND dr.organization_id = cc.organization_id
+            WHERE cc.organization_id = %s
+              AND cc.status = 'connected'
+            GROUP BY cc.id, cc.label,
+                     cc.status, cc.cloud
+            ORDER BY cc.id
+        """, (org_id,))
+
+        rows = cursor.fetchall()
+
+        if not rows:
+            return jsonify({
+                'has_connection': False,
+                'connections': [],
+                'aggregate': {
+                    'total_connections': 0,
+                    'inventory_subscriptions': 0,
+                    'monitored_subscriptions': 0,
+                    'active_inventory_subscriptions': 0,
+                    'last_discovery_at': None
+                }
+            })
+
+        cols = [d[0] for d in cursor.description]
+        connections = []
+        for row in rows:
+            r = dict(zip(cols, row)) \
+                if not isinstance(row, dict) else row
+            connections.append({
+                'id': r['id'],
+                'label': r['label'] or 'Primary',
+                'status': r['status'],
+                'cloud': r['cloud'],
+                'last_discovery_at':
+                    r['last_discovery_at'].isoformat()
+                    if r['last_discovery_at'] else None,
+                'inventory_subscriptions':
+                    r['inventory_subscriptions'] or 0,
+                'monitored_subscriptions':
+                    r['monitored_subscriptions'] or 0,
+                'active_inventory_subscriptions':
+                    r['active_inventory_subscriptions'] or 0,
+                'last_subscription_discovered_at':
+                    r['last_subscription_discovered_at'
+                      ].isoformat()
+                    if r.get('last_subscription_discovered_at')
+                    else None,
+            })
+
+        last_disc = max(
+            (c['last_discovery_at'] for c in connections
+             if c['last_discovery_at']),
+            default=None
+        )
+
+        return jsonify({
+            'has_connection': True,
+            'connections': connections,
+            'aggregate': {
+                'total_connections': len(connections),
+                'inventory_subscriptions': sum(
+                    c['inventory_subscriptions']
+                    for c in connections),
+                'monitored_subscriptions': sum(
+                    c['monitored_subscriptions']
+                    for c in connections),
+                'active_inventory_subscriptions': sum(
+                    c['active_inventory_subscriptions']
+                    for c in connections),
+                'last_discovery_at': last_disc,
+            }
+        })
+
+    except Exception as e:
+        logger.error("get_inventory_summary error: %s", e)
+        return jsonify({
+            'has_connection': False,
+            'connections': [],
+            'aggregate': {
+                'total_connections': 0,
+                'inventory_subscriptions': 0,
+                'monitored_subscriptions': 0,
+                'active_inventory_subscriptions': 0,
+                'last_discovery_at': None
+            }
+        }), 500
+    finally:
+        cursor.close()
 

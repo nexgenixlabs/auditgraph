@@ -18,11 +18,14 @@ interface EntraGroup {
 
 interface EntraGroupsTabProps {
   identityId: string;
+  riskLevel?: string; // kept for backwards compat, no longer used for finding logic
 }
 
 export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
   const { withConnection } = useConnection();
   const [groups, setGroups] = useState<EntraGroup[]>([]);
+  const [directPrivWithoutGroups, setDirectPrivWithoutGroups] = useState(false);
+  const [privilegeLevel, setPrivilegeLevel] = useState('unknown');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -33,6 +36,8 @@ export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
         if (res.ok) {
           const data = await res.json();
           setGroups(data.groups || []);
+          setDirectPrivWithoutGroups(!!data.direct_privilege_without_groups);
+          setPrivilegeLevel(data.privilege_level || 'unknown');
         }
       } catch { /* ignore */ }
       setLoading(false);
@@ -51,12 +56,26 @@ export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
 
   if (groups.length === 0) {
     return (
-      <div className="text-center py-8">
-        <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-            d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-        </svg>
-        <p className="text-gray-500">This identity is not a member of any Entra security groups</p>
+      <div className="py-8 space-y-4 px-4">
+        {directPrivWithoutGroups && (
+          <div className="border-l-4 border-l-amber-400 bg-amber-50 rounded-r-lg p-4">
+            <div className="text-sm font-semibold text-amber-800 mb-1">CIS v8 §5.4 — Restrict Admin Privileges</div>
+            <div className="text-xs text-amber-700">
+              This highly privileged identity has direct subscription-scope role assignments with no group-based access control. Consider adding to a role-assignable security group for auditable privilege management.
+            </div>
+          </div>
+        )}
+        <div className="text-center">
+          <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+          </svg>
+          <p className="text-gray-500">
+            {privilegeLevel === 'highly_privileged'
+              ? 'This identity is not a member of any Entra security groups'
+              : 'This identity has no Entra security group memberships. No security implication \u2014 standard privilege only.'}
+          </p>
+        </div>
       </div>
     );
   }

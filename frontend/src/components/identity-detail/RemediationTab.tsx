@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   type RemediationData,
   type RemediationActionsMap,
@@ -6,6 +6,8 @@ import {
   type RemediationAction,
   type RemediationItem,
   type IdentityDetailsResponse,
+  type CvssFix,
+  type CvssFixResponse,
   DataSource,
 } from './types';
 
@@ -37,6 +39,120 @@ const STATUS_LABELS: Record<RemediationStatus, string> = {
   completed: 'Completed',
   skipped: 'Skipped',
 };
+
+// ─── CvssFixRecommendations (internal) ──────────────────────────────
+
+function CvssFixRecommendations({ identityId }: { identityId: string }) {
+  const [data, setData] = useState<CvssFixResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/identities/${encodeURIComponent(identityId)}/fixes`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [identityId]);
+
+  if (loading) {
+    return (
+      <div className="animate-pulse space-y-3 mb-6">
+        {[1, 2, 3].map(i => <div key={i} className="h-24 bg-gray-100 rounded-xl" />)}
+      </div>
+    );
+  }
+
+  if (!data || !data.fixes || data.fixes.length === 0) return null;
+
+  const projected = data.projected_impact?.after_all_fixes;
+
+  return (
+    <div className="mb-8">
+      <div className="text-xs text-gray-400 uppercase tracking-wider font-semibold mb-3">CVSS-Aligned Recommendations</div>
+      <div className="space-y-3">
+        {data.fixes.map((fix: CvssFix, idx: number) => (
+          <div key={fix.fix_type} className="border rounded-xl p-4 bg-white hover:shadow-md transition">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                  <span className="text-xs font-bold text-gray-400">#{idx + 1}</span>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase text-white" style={{ backgroundColor: '#24A2A1' }}>
+                    {fix.verb}
+                  </span>
+                  <span className="text-sm font-semibold text-gray-900">{fix.title}</span>
+                </div>
+                <p className="text-xs text-gray-600 mb-2">{fix.description}</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700">
+                    -{fix.risk_reduction_pct}% risk
+                  </span>
+                  <span className="text-[10px] text-gray-500">
+                    {fix.current_score.toFixed(1)} → {fix.simulated_score.toFixed(1)} ({fix.simulated_band})
+                  </span>
+                  <span className="text-[10px] text-gray-400">·</span>
+                  <span className="text-[10px] text-gray-500">{fix.effort_minutes} min effort</span>
+                  <span className="text-[10px] text-gray-400">·</span>
+                  <span
+                    className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-white"
+                    style={{ backgroundColor: fix.safety_color || '#6b7280' }}
+                  >
+                    {fix.execution_safety}
+                  </span>
+                  {fix.safety_reason && (
+                    <span className="text-[10px] text-gray-400 italic">{fix.safety_reason}</span>
+                  )}
+                </div>
+                {fix.framework_badges.length > 0 && (
+                  <div className="flex gap-1.5 mt-2 flex-wrap">
+                    {fix.framework_badges.map(badge => (
+                      <span key={badge} className="px-2 py-0.5 rounded-full text-[10px] font-medium text-white" style={{ backgroundColor: '#15306A' }}>
+                        {badge}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                disabled
+                className="px-3 py-1.5 rounded-lg text-[10px] font-medium bg-gray-100 text-gray-400 cursor-not-allowed whitespace-nowrap"
+                title="Coming soon"
+              >
+                + Add to Queue
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {projected && (
+        <div className="mt-4 bg-gray-50 rounded-xl p-4 border">
+          <div className="text-xs font-semibold text-gray-700 mb-2">Projected Impact (all fixes applied)</div>
+          <div className="grid grid-cols-4 gap-3">
+            <div className="text-center">
+              <div className="text-lg font-bold text-green-700">-{projected.risk_reduction_pct}%</div>
+              <div className="text-[10px] text-gray-500">Total Reduction</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-gray-900">{projected.simulated_score.toFixed(1)}</div>
+              <div className="text-[10px] text-gray-500">Projected Score</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-gray-900">{projected.simulated_band}</div>
+              <div className="text-[10px] text-gray-500">Projected Band</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-blue-700">+{projected.posture_score_delta.toFixed(1)}</div>
+              <div className="text-[10px] text-gray-500">Posture Improvement</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── RemediationCard (internal) ─────────────────────────────────────
 
@@ -290,20 +406,76 @@ export function RemediationTab({
   handleRemediationExecute,
   data,
 }: RemediationTabProps) {
+  const identityId = data?.identity?.identity_id;
+
   return (
     <div className="space-y-6">
+      {identityId && <CvssFixRecommendations identityId={identityId} />}
       {remediationLoading ? (
         <div className="animate-pulse space-y-4">
           {[1, 2, 3].map(i => <div key={i} className="h-32 bg-gray-100 rounded-xl" />)}
         </div>
       ) : !remediationData || remediationData.remediations.length === 0 ? (
-        <div className="text-center py-12">
-          <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <div className="text-sm font-medium text-gray-600">No remediations needed</div>
-          <div className="text-xs text-gray-400 mt-1">This identity has no risk factors matching the remediation playbook library.</div>
-        </div>
+        (() => {
+          const govActions = (
+            (data as any)?.remediation_actions ??
+            (data as any)?.governance_remediation_actions ??
+            (data as any)?.identity?.remediation_actions
+          ) as Array<{
+            priority: string; impact: string; action: string; reason: string; framework: string | null; effort: string | null;
+          }> | undefined;
+          const hasGovActions = govActions && govActions.length > 0 && govActions[0].priority !== 'P2';
+          if (!hasGovActions) {
+            const gov = (data as any)?.identity?.governance_state;
+            const priv = (data as any)?.identity?.privilege_level;
+            if (gov && gov !== 'Governed') {
+              console.warn('RemediationTab: no actions for identity', (data as any)?.identity?.identity_id, { governance: gov, privilege: priv });
+            }
+          }
+
+          if (!hasGovActions) {
+            return (
+              <div className="text-center py-12">
+                <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div className="text-sm font-medium text-gray-600">No remediations needed</div>
+                <div className="text-xs text-gray-400 mt-1">This identity meets current governance requirements.</div>
+              </div>
+            );
+          }
+
+          const priorityColor: Record<string, string> = {
+            P0: 'bg-red-100 text-red-700 border-red-200',
+            P1: 'bg-orange-100 text-orange-700 border-orange-200',
+            P2: 'bg-blue-100 text-blue-700 border-blue-200',
+          };
+          const impactColor: Record<string, string> = {
+            Critical: 'text-red-700',
+            High: 'text-orange-700',
+            Medium: 'text-yellow-700',
+            Low: 'text-gray-500',
+          };
+
+          return (
+            <div className="space-y-4">
+              <div className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Governance-Derived Actions</div>
+              {govActions!.map((a, idx) => (
+                <div key={idx} className="border rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${priorityColor[a.priority] || 'bg-gray-100 text-gray-600'}`}>{a.priority}</span>
+                    <span className={`text-sm font-semibold ${impactColor[a.impact] || 'text-gray-700'}`}>{a.action}</span>
+                  </div>
+                  <div className="text-xs text-gray-600 mb-2">{a.reason}</div>
+                  <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                    {a.framework && <span>Framework: {a.framework}</span>}
+                    {a.effort && <span>Effort: {a.effort}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()
       ) : (
         <>
           {/* Summary bar */}

@@ -18,5 +18,5 @@ class ActivitySource(StrEnum):
 ACTIVITY_SOURCE_LABELS: dict[ActivitySource, str] = {
     ActivitySource.AUDITGRAPH:          "AuditGraph observed",
     ActivitySource.AZURE_SIGNIN:        "Azure sign-in logs",
-    ActivitySource.FEDERATED_INFERENCE: "Requires Entra ID P1/P2 license",
+    ActivitySource.FEDERATED_INFERENCE: "Inferred from workload configuration",
 }

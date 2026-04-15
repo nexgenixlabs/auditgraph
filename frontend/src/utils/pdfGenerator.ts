@@ -6,6 +6,7 @@
  */
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { TIME_MS } from '../constants/metrics';
 
 // Extend jsPDF type for autotable
 declare module 'jspdf' {
@@ -557,7 +558,7 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
 
   // Days since last snapshot
   const daysSinceSnapshot = data.collected_at
-    ? Math.max(0, Math.floor((Date.now() - new Date(data.collected_at).getTime()) / 86400000))
+    ? Math.max(0, Math.floor((Date.now() - new Date(data.collected_at).getTime()) / TIME_MS.DAY))
     : -1;
 
   // ── Header ──────────────────────────────────────────────────

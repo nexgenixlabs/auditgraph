@@ -10,6 +10,8 @@ import { queryIdentities, getQueryFields } from '../services/api';
 import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { deriveIdentityState } from '../constants/identityState';
+import { formatRelativeDate, lastSeenColor, SOURCE_LABELS, enrichIpLabel } from '../constants/activitySignals';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSelectFilter';
 import { maskCredential } from '../utils/maskCredential';
@@ -21,21 +23,74 @@ import LineageDetailPanel from '../components/LineageDetailPanel';
 import {
   type IdentityCategory, type RiskLevel, type DormantStatus,
   type PrivilegedLevel, type EffectiveScope, type CredentialHealth,
+  type LifecycleState, type GovernanceState, type PrivilegeLevel,
   CATEGORY_FILTER_OPTIONS, RISK_FILTER_OPTIONS, RISK_ORDER, RISK_BADGE, RISK_SOLID, CLOUD_BADGE,
   THRESHOLDS, DORMANT_LABELS, DATA_EXPLANATIONS,
   PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, EFFECTIVE_SCOPE_ORDER, CREDENTIAL_HEALTH_CONFIG,
+  LIFECYCLE_STATE_DISPLAY, GOVERNANCE_STATE_DISPLAY, PRIVILEGE_LEVEL_DISPLAY,
   SCOPE_LABELS, CATEGORY_LABELS_MULTI, IDENTITY_CATEGORIES,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel, getCategoryShortLabel, getDormantStatus as getDormantStatusFromActivity,
-  getCategoriesForClouds, MANAGED_IDENTITY_GROUP,
+  getCategoriesForClouds, MANAGED_IDENTITY_GROUP, TIME_MS,
 } from '../constants/metrics';
 
 interface IdentityRow {
+  // Core identity fields
+  id?: string;
   identity_id: string;
+  principal_id?: string;
   display_name: string;
   identity_type?: string;
   identity_category?: IdentityCategory;
   cloud?: string;
+  owner_display_name?: string | null;
+  owner_count?: number;
+  account_enabled?: boolean;
+  enabled?: boolean;
+  user_type?: string | null;
+  privilege_tier?: number;
+  highest_role?: string | null;
+  assigned_roles?: number;
+  blast_scope?: string | null;
+  federated_credential_issuer?: string | null;
+  inferred_origin?: string | null;
+  associated_resource?: string | null;
+  lineage_verdict?: string | null;
+  owner_deleted?: boolean;
+  app_id?: string | null;
+  status?: IdentityStatus;
+
+  // Risk fields
+  risk_level?: RiskLevel;
+  risk_score?: number;
+
+  // Canonical SSOT activity fields
+  last_activity_date?: string | null;
+  last_activity_source?: string | null;
+  last_activity_confidence?: string | null;
+  last_activity_note?: string | null;
+  activity_status?: string;
+  days_inactive?: number | null;
+  role_assignment_date?: string | null;
+
+  // IP observation fields (ARM Activity Log)
+  last_observed_ip?: string | null;
+  last_observed_ip_source?: string | null;
+  last_observed_ip_date?: string | null;
+  last_observed_operation?: string | null;
+
+  // Access fields
+  effective_access?: string | null;
+  sensitive_access?: string | null;
+  effective_scope?: EffectiveScope;
+  privileged_level?: PrivilegedLevel;
+
+  // Snapshot fields
+  first_seen?: string | null;
+  created_date?: string | null;
   created_datetime?: string | null;
+  snapshot_id?: string | null;
+
+  // Legacy / existing fields (backward compat)
   last_seen_auth?: string | null;
   last_sign_in?: string | null;
   api_permission_count?: number;
@@ -49,14 +104,7 @@ interface IdentityRow {
   credential_count?: number;
   credential_expiration?: string | null;
   credential_status?: string | null;
-  owner_display_name?: string | null;
-  owner_count?: number;
-  status?: IdentityStatus;
-  enabled?: boolean;
-  risk_level?: RiskLevel;
-  risk_score?: number;
-  activity_status?: string;
-  privilege_tier?: number;
+  credential_health?: CredentialHealth;
   pim_eligible_count?: number;
   has_permanent_assignment?: boolean;
   ca_coverage_status?: string | null;
@@ -65,15 +113,12 @@ interface IdentityRow {
   subscription_name?: string | null;
   primary_subscription_id?: string | null;
   additional_subscription_count?: number;
-  effective_scope?: EffectiveScope;
-  privileged_level?: PrivilegedLevel;
-  credential_health?: CredentialHealth;
   identity_age_days?: number | null;
-  // AI Agent Governance (additive only)
+  // AI Agent Governance
   agent_identity_type?: string | null;
   detected_platform?: string | null;
   classification_confidence?: number | null;
-  // Identity Lineage (Phase 91)
+  // Identity Lineage
   lineage_score?: number | null;
   orphan_status?: string | null;
   // Discovery connector flag
@@ -103,7 +148,7 @@ interface IdentityRow {
   last_delegated_signin?: string | null;
   last_noninteractive_signin?: string | null;
   days_since_last_signin?: number | null;
-  // Verdict assembly fields (Prompt 5)
+  // Verdict assembly fields
   verdict_confidence?: string | null;
   verdict_score?: number;
   workload_origin?: string | null;
@@ -123,6 +168,28 @@ interface IdentityRow {
   last_signin_at?: string | null;
   last_signin_ip?: string | null;
   auth_source?: string | null;
+  // Three-dimension identity classification
+  lifecycle_state?: string | null;
+  governance_state?: string | null;
+  privilege_level?: string | null;
+  // Canonical identity state fields (from build_identity_state)
+  activity_label?: string | null;
+  activity_detail?: string | null;
+  auth_activity?: {
+    interactive_signin: boolean;
+    non_interactive_signin: boolean;
+    arm_activity: boolean;
+    token_usage: boolean;
+    lineage_activity: boolean;
+    any_activity_observed: boolean;
+    confidence: string;
+  } | null;
+  is_dormant?: boolean;
+  last_seen?: string | null;
+  last_seen_source?: string | null;
+  last_seen_available?: boolean;
+  last_seen_confidence?: string | null;
+  risk_label?: string | null;
 }
 
 interface SavedView {
@@ -171,7 +238,10 @@ type SortField =
   | 'owner_display_name'
   | 'last_signin_at'
   | 'last_signin_ip'
-  | 'recommended_action';
+  | 'last_activity_date'
+  | 'recommended_action'
+  | 'lifecycle_state'
+  | 'governance_state';
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -193,11 +263,11 @@ function formatAge(days: number | null | undefined): string {
 function formatLastSeen(dateStr?: string | null, authSource?: string | null): { label: string; colorClass: string } {
   if (!dateStr) {
     return authSource === 'static_analysis_only'
-      ? { label: 'Not observed', colorClass: 'text-gray-400 italic' }
-      : { label: 'Never', colorClass: 'text-red-400 italic' };
+      ? { label: 'Provisioned', colorClass: 'text-amber-500' }
+      : { label: 'Idle', colorClass: 'text-amber-400' };
   }
   try {
-    const days = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
+    const days = Math.floor((Date.now() - new Date(dateStr).getTime()) / TIME_MS.DAY);
     if (days === 0) return { label: 'Today', colorClass: 'text-green-500' };
     if (days <= 6) return { label: `${days}d ago`, colorClass: 'text-green-500' };
     if (days <= 29) return { label: `${Math.floor(days / 7)}w ago`, colorClass: 'text-green-500' };
@@ -214,7 +284,7 @@ function formatLastSeen(dateStr?: string | null, authSource?: string | null): { 
 function credentialCountdownText(iso?: string | null): { text: string; color: string } | null {
   if (!iso) return null;
   try {
-    const days = Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+    const days = Math.ceil((new Date(iso).getTime() - Date.now()) / TIME_MS.DAY);
     if (days < 0) return { text: `Expired ${Math.abs(days)}d ago`, color: 'text-red-600' };
     if (days === 0) return { text: 'Expires today', color: 'text-red-600' };
     if (days <= 30) return { text: `${days}d left`, color: days <= 7 ? 'text-red-600' : 'text-orange-600' };
@@ -344,6 +414,39 @@ function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
   return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.color}`} title={cfg.tooltip}>{cfg.label}</span>;
 }
 
+function LifecycleLabel({ state }: { state?: string | null }) {
+  const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Provisioned') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Provisioned;
+  const colorMap: Record<string, string> = {
+    Provisioned: 'var(--accent-primary, #60a5fa)',
+    Active: 'var(--accent-success, #4ade80)',
+    Dormant: 'var(--accent-warning, #fbbf24)',
+    Disabled: 'var(--text-tertiary, #9ca3af)',
+  };
+  return (
+    <span style={{ fontSize: '11px', color: colorMap[state || 'Provisioned'] ?? colorMap.Provisioned, opacity: 0.75, fontWeight: 400 }} title={cfg.tooltip}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function GovernanceBadge({ state }: { state?: string | null }) {
+  const key = (state || 'Governed') as GovernanceState;
+  const cfg = GOVERNANCE_STATE_DISPLAY[key] || GOVERNANCE_STATE_DISPLAY.Governed;
+  const cssClass = key === 'Policy Violation' ? 'badge-governance-policy-violation'
+    : key === 'Ungoverned' ? 'badge-governance-ungoverned'
+    : key === 'Orphaned' ? 'badge-governance-orphaned'
+    : 'badge-governance-governed';
+  return <span className={cssClass} title={cfg.tooltip}>{cfg.label}</span>;
+}
+
+function PrivilegeLevelBadge({ level }: { level?: string | null }) {
+  const key = (level || 'Standard') as PrivilegeLevel;
+  const cfg = PRIVILEGE_LEVEL_DISPLAY[key] || PRIVILEGE_LEVEL_DISPLAY.Standard;
+  if (key === 'Highly Privileged') return <span className="badge-privilege-high" title={cfg.tooltip}>{cfg.label}</span>;
+  if (key === 'Privileged') return <span className="badge-privilege-med" title={cfg.tooltip}>{cfg.label}</span>;
+  return <span style={{ color: 'var(--text-tertiary, #9ca3af)', fontSize: '11px' }}>Standard</span>;
+}
+
 function ScopeBadge({ scope, cloud }: { scope?: EffectiveScope; cloud?: string }) {
   const cfg = EFFECTIVE_SCOPE_CONFIG[scope || 'none'];
   const cloudLabels = cloud && SCOPE_LABELS[cloud.toLowerCase()];
@@ -407,6 +510,12 @@ export default function IdentitiesPage() {
   const [showDeleted, setShowDeleted] = useState(false);
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
+  // Three-dimension signal chip filter (single-select toggle)
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | null>(null);
+  // Governance summary from backend — SSOT, avoids frontend recomputation
+  const [governanceSummary, setGovernanceSummary] = useState<{
+    orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number;
+  } | null>(null);
   // AI Agent Governance filter state (additive, gated by feature flag)
   const agentFilterEnabled = useFeatureFlag('ai_agent_governance');
   const [agentFilter, setAgentFilter] = useState(false);              // filter active
@@ -620,7 +729,7 @@ export default function IdentitiesPage() {
     } else if (activityParamForBanner === 'dormant_strict') {
       setContextBanner('Dormant identities (stale or never used — excludes idle)');
     } else if (statusParamForBanner?.toLowerCase() === 'disabled' && hasRolesParam === 'true') {
-      setContextBanner('Ghost accounts — disabled in Entra ID but retain active RBAC roles');
+      setContextBanner('Ghost identities — disabled in Entra ID but retain active RBAC roles');
     } else if (catParamForBanner === 'guest' && hasRolesParam === 'true') {
       setContextBanner('Guest users with active role assignments');
     } else if (workloadParam === 'true' && ownerParam === 'none') {
@@ -707,8 +816,25 @@ export default function IdentitiesPage() {
             last_signin_at: raw.last_signin_at || null,
             last_signin_ip: raw.last_signin_ip || null,
             auth_source: raw.auth_source || null,
+            // Three-dimension governance fields — SSOT from backend
+            lifecycle_state: raw.lifecycle_state || null,
+            governance_state: raw.governance_state || null,
+            privilege_level: raw.privilege_level || null,
+            // Canonical identity state fields
+            activity_label: raw.activity_label || null,
+            activity_detail: raw.activity_detail || null,
+            auth_activity: raw.auth_activity || null,
+            is_dormant: raw.is_dormant ?? false,
+            last_seen: raw.last_seen || null,
+            last_seen_source: raw.last_seen_source || null,
+            last_seen_available: raw.last_seen_available ?? false,
+            last_seen_confidence: raw.last_seen_confidence || null,
+            risk_label: raw.risk_label || null,
           }));
-          if (!cancelled) setIdentities(rows);
+          if (!cancelled) {
+            setIdentities(rows);
+            if (data.governance_summary) setGovernanceSummary(data.governance_summary);
+          }
           return;
         }
 
@@ -804,8 +930,25 @@ export default function IdentitiesPage() {
           last_signin_at: raw.last_signin_at || null,
           last_signin_ip: raw.last_signin_ip || null,
           auth_source: raw.auth_source || null,
+          // Three-dimension governance fields — SSOT from backend
+          lifecycle_state: raw.lifecycle_state || null,
+          governance_state: raw.governance_state || null,
+          privilege_level: raw.privilege_level || null,
+          // Canonical identity state fields
+          activity_label: raw.activity_label || null,
+          activity_detail: raw.activity_detail || null,
+          auth_activity: raw.auth_activity || null,
+          is_dormant: raw.is_dormant ?? false,
+          last_seen: raw.last_seen || null,
+          last_seen_source: raw.last_seen_source || null,
+          last_seen_available: raw.last_seen_available ?? false,
+          last_seen_confidence: raw.last_seen_confidence || null,
+          risk_label: raw.risk_label || null,
         }));
-        if (!cancelled) setIdentities(rows);
+        if (!cancelled) {
+          setIdentities(rows);
+          if (data.governance_summary) setGovernanceSummary(data.governance_summary);
+        }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || 'Failed to load identities');
       } finally {
@@ -1028,9 +1171,24 @@ export default function IdentitiesPage() {
           federated_workload_name: raw.federated_workload_name || null,
           dependency_impact: raw.dependency_impact || null,
           observed_last_used: raw.observed_last_used || null,
+          // Three-dimension governance fields — SSOT from backend
+          lifecycle_state: raw.lifecycle_state || null,
+          governance_state: raw.governance_state || null,
+          privilege_level: raw.privilege_level || null,
+          // Canonical identity state fields
+          activity_label: raw.activity_label || null,
+          activity_detail: raw.activity_detail || null,
+          auth_activity: raw.auth_activity || null,
+          is_dormant: raw.is_dormant ?? false,
+          last_seen: raw.last_seen || null,
+          last_seen_source: raw.last_seen_source || null,
+          last_seen_available: raw.last_seen_available ?? false,
+          last_seen_confidence: raw.last_seen_confidence || null,
+          risk_label: raw.risk_label || null,
         }));
         setQueryResults(rows);
         setQueryTotal(data.total ?? rows.length);
+        if (data.governance_summary) setGovernanceSummary(data.governance_summary);
       } catch (e: any) {
         const msg = e?.response?.data?.error || e?.message || 'Query failed';
         addToast(msg, 'error');
@@ -1273,6 +1431,10 @@ export default function IdentitiesPage() {
             break;
           case 'last_signin_ip':
             aVal = safeLower(a.last_signin_ip); bVal = safeLower(b.last_signin_ip); break;
+          case 'last_activity_date':
+            aVal = a.last_activity_date ? new Date(a.last_activity_date).getTime() : 0;
+            bVal = b.last_activity_date ? new Date(b.last_activity_date).getTime() : 0;
+            break;
           case 'recommended_action': {
             const vOrd: Record<string, number> = { ORPHANED: 5, AT_RISK: 4, UNUSED: 3, STALE: 2, NEEDS_REVIEW: 1, HEALTHY: 0 };
             aVal = vOrd[a.recommended_action || ''] ?? -1; bVal = vOrd[b.recommended_action || ''] ?? -1;
@@ -1342,7 +1504,7 @@ export default function IdentitiesPage() {
     if (tierFilter !== 'all') result = result.filter(i => tierFilter.includes(getPrivilegeTier(i)));
     if (credentialFilter !== 'all') {
       const now = Date.now();
-      const thirtyDays = THRESHOLDS.CREDENTIAL_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+      const thirtyDays = THRESHOLDS.CREDENTIAL_EXPIRY_DAYS * TIME_MS.DAY;
       result = result.filter(i => {
         if (credentialFilter === 'none') return (i.credential_count ?? 0) === 0;
         if (credentialFilter === 'expired') return i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < now);
@@ -1362,9 +1524,16 @@ export default function IdentitiesPage() {
       result = result.filter(i => groupMemberIds.has(i.identity_id));
     }
     if (multiStatusFilter.length > 0) {
-      result = result.filter(i => multiStatusFilter.includes(safeLower(i.status)) || (multiStatusFilter.includes('disabled') && i.enabled === false));
+      result = result.filter(i => {
+        // SSOT: enabled boolean is the ONLY source for disabled/active status
+        const resolved = i.enabled === false ? 'disabled' : 'active';
+        return multiStatusFilter.includes(resolved);
+      });
     } else if (statusFilter !== 'all') {
-      result = result.filter(i => safeLower(i.status) === statusFilter || (statusFilter === 'disabled' && i.enabled === false));
+      result = result.filter(i => {
+        const resolved = i.enabled === false ? 'disabled' : 'active';
+        return resolved === statusFilter;
+      });
     }
     if (hasRolesFilter) {
       result = result.filter(i => (i.rbac_role_count ?? 0) + (i.entra_role_count ?? 0) > 0);
@@ -1375,6 +1544,14 @@ export default function IdentitiesPage() {
         return os === 'SAFE_TO_RETIRE' || os === 'CAUTION' || os === 'BLOCKED';
       });
     }
+    // Three-dimension signal chip filters
+    if (signalChip === 'ungoverned') result = result.filter(i => i.governance_state === 'Ungoverned');
+    if (signalChip === 'orphaned') result = result.filter(i => i.governance_state === 'Orphaned');
+    if (signalChip === 'privileged') result = result.filter(i => i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged');
+    if (signalChip === 'priv_ungoverned') result = result.filter(i =>
+      (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
+      && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
+    );
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -1422,6 +1599,10 @@ export default function IdentitiesPage() {
           break;
         case 'last_signin_ip':
           aVal = safeLower(a.last_signin_ip); bVal = safeLower(b.last_signin_ip); break;
+        case 'last_activity_date':
+          aVal = a.last_activity_date ? new Date(a.last_activity_date).getTime() : 0;
+          bVal = b.last_activity_date ? new Date(b.last_activity_date).getTime() : 0;
+          break;
         case 'recommended_action': {
           const vOrd2: Record<string, number> = { ORPHANED: 5, AT_RISK: 4, UNUSED: 3, STALE: 2, NEEDS_REVIEW: 1, HEALTHY: 0 };
           aVal = vOrd2[a.recommended_action || ''] ?? -1; bVal = vOrd2[b.recommended_action || ''] ?? -1;
@@ -1430,6 +1611,18 @@ export default function IdentitiesPage() {
             const bTime2 = b.last_signin_at ? new Date(b.last_signin_at).getTime() : 0;
             return aTime2 - bTime2;
           }
+          break;
+        }
+        case 'lifecycle_state': {
+          const lcOrd: Record<string, number> = { Disabled: 1, Dormant: 2, Provisioned: 3, Active: 4 };
+          aVal = lcOrd[a.lifecycle_state || 'Provisioned'] || 0;
+          bVal = lcOrd[b.lifecycle_state || 'Provisioned'] || 0;
+          break;
+        }
+        case 'governance_state': {
+          const gsOrd: Record<string, number> = { Orphaned: 1, 'Policy Violation': 2, Ungoverned: 3, Governed: 4 };
+          aVal = gsOrd[a.governance_state || 'Governed'] || 0;
+          bVal = gsOrd[b.governance_state || 'Governed'] || 0;
           break;
         }
         case 'risk_level':
@@ -1442,13 +1635,13 @@ export default function IdentitiesPage() {
       return 0;
     });
     return result;
-  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
     else {
       setSortField(field);
-      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health', 'status', 'recommended_action'].includes(field) ? 'desc' : 'asc');
+      setSortDir(['risk_level', 'entra_role_count', 'rbac_role_count', 'api_permission_count', 'privilege_tier', 'dormant', 'effective_scope', 'credential_health', 'status', 'recommended_action', 'lifecycle_state', 'governance_state'].includes(field) ? 'desc' : 'asc');
     }
   }
 
@@ -1570,7 +1763,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 13; // checkbox + 11 primary columns + lineage
+  const colSpan = 12; // checkbox + Identity + Type + Cloud + Status + Lifecycle + Governance + Risk + Privilege + Effective Access + Last Seen + Lineage
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -2220,7 +2413,44 @@ export default function IdentitiesPage() {
         </div>
       )}
 
-      {/* KPI Summary Strip — removed in Phase 4 (enterprise cleanup) */}
+      {/* Three-dimension stat cards + signal filter chips — reads from backend governance_summary (SSOT) */}
+      {queryMode === 'simple' && (() => {
+        // Use backend-computed governance_summary when available; fallback to local recomputation
+        const ungovernedCount = governanceSummary?.ungoverned ?? filtered.filter(i => i.governance_state === 'Ungoverned').length;
+        const orphanedCount = governanceSummary?.orphaned ?? filtered.filter(i => i.governance_state === 'Orphaned').length;
+        const privilegedCount = governanceSummary?.privileged ?? filtered.filter(i => i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged').length;
+        const privUngovernedCount = governanceSummary?.combo ?? filtered.filter(i =>
+          (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
+          && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
+        ).length;
+        return (
+          <div className="mb-3 space-y-2">
+            {/* Stat cards */}
+            <div className="grid grid-cols-4 gap-2">
+              <button onClick={() => setSignalChip(s => s === 'ungoverned' ? null : 'ungoverned')}
+                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'ungoverned' ? 'chip-active-ungov' : ''}`}>
+                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Ungoverned</div>
+                <div className="text-lg font-bold" style={{ color: signalChip === 'ungoverned' ? '#f87171' : '#f87171' }}>{ungovernedCount}</div>
+              </button>
+              <button onClick={() => setSignalChip(s => s === 'orphaned' ? null : 'orphaned')}
+                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'orphaned' ? 'chip-active-orphan' : ''}`}>
+                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Orphaned</div>
+                <div className="text-lg font-bold" style={{ color: signalChip === 'orphaned' ? '#fbbf24' : '#fbbf24' }}>{orphanedCount}</div>
+              </button>
+              <button onClick={() => setSignalChip(s => s === 'privileged' ? null : 'privileged')}
+                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'privileged' ? 'chip-active-priv' : ''}`}>
+                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Privileged</div>
+                <div className="text-lg font-bold" style={{ color: signalChip === 'privileged' ? '#a78bfa' : '#a78bfa' }}>{privilegedCount}</div>
+              </button>
+              <button onClick={() => setSignalChip(s => s === 'priv_ungoverned' ? null : 'priv_ungoverned')}
+                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'priv_ungoverned' ? 'chip-active-combo' : ''}`}>
+                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Priv + Ungoverned</div>
+                <div className="text-lg font-bold" style={{ color: signalChip === 'priv_ungoverned' ? '#fca5a5' : '#fca5a5' }}>{privUngovernedCount}</div>
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Exposure Graph (V2 Phase 5) */}
       {viewMode === 'graph' && (
@@ -2244,15 +2474,26 @@ export default function IdentitiesPage() {
                 <SortHeader label="Identity" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Type" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Owner" field="owner_display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
+                  onClick={() => handleSort('lifecycle_state')}>
+                  Lifecycle{' '}
+                  <span className="text-gray-400 normal-case" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>
+                  {sortField === 'lifecycle_state' && <span className="ml-0.5">{sortDir === 'asc' ? '▲' : '▼'}</span>}
+                </th>
+                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
+                  onClick={() => handleSort('governance_state')}>
+                  Governance{' '}
+                  <span className="text-gray-400 normal-case" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>
+                  {sortField === 'governance_state' && <span className="ml-0.5">{sortDir === 'asc' ? '▲' : '▼'}</span>}
+                </th>
                 <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Last Auth" field="last_signin_at" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Last Auth IP" field="last_signin_ip" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">
+                  Privilege{' '}
+                  <span className="text-gray-400 normal-case" title="Highly Privileged (T0) > Privileged (T1) > Standard (T2/T3) — derived from privilege tier">&#9432;</span>
+                </th>
                 <SortHeader label="Effective Access" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Sensitive Access" field="effective_scope" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Last Seen" field="last_seen_auth" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="First Seen" field="created_datetime" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                <SortHeader label="Last Seen" field="last_activity_date" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <th className="px-2 py-2.5 text-xs whitespace-nowrap">Lineage</th>
               </tr>
             </thead>
@@ -2263,9 +2504,12 @@ export default function IdentitiesPage() {
                 <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">No identities match filters.</td></tr>
-              ) : filtered.map(i => (
+              ) : filtered.map(i => {
+                const isComboRisk = (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
+                  && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged');
+                return (
                   <tr key={i.identity_id}
-                    className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''} ${drawerIdentityId === i.identity_id ? 'bg-blue-100' : ''}`}
+                    className={`cursor-pointer transition-colors ${isComboRisk ? 'row-tint-danger' : 'hover:bg-blue-50'} ${selectedIds.has(i.identity_id) ? 'bg-blue-50' : ''} ${drawerIdentityId === i.identity_id ? 'bg-blue-100' : ''}`}
                     onClick={() => setDrawerIdentityId(i.identity_id)}
                   >
                     {/* Checkbox */}
@@ -2299,75 +2543,35 @@ export default function IdentitiesPage() {
                     {/* Cloud */}
                     <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
 
-                    {/* Owner */}
-                    <td className="px-2 py-2">
-                      {i.owner_display_name ? (
-                        <span className="text-gray-700 text-[11px] truncate block max-w-[140px]" title={i.owner_display_name}>{i.owner_display_name}</span>
-                      ) : (
-                        <span className="text-[10px] text-gray-400 italic">No owner</span>
-                      )}
-                    </td>
-
                     {/* Status */}
                     <td className="px-2 py-2">
                       <StatusBadge status={i.status} />
                     </td>
 
+                    {/* Lifecycle State */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <LifecycleLabel state={i.lifecycle_state} />
+                    </td>
+
+                    {/* Governance State */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <GovernanceBadge state={i.governance_state} />
+                    </td>
+
                     {/* Risk Level */}
                     <td className="px-2 py-2">
-                      <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[i.risk_level || 'info'] || RISK_BADGE.info}`}>
-                        {i.risk_level || 'info'}
-                      </span>
+                      {(i.risk_level === 'low' || i.risk_level === 'info' || !i.risk_level) ? (
+                        <span className="text-[11px] uppercase" style={{ color: 'var(--text-tertiary, #9ca3af)' }}>{i.risk_level || 'info'}</span>
+                      ) : (
+                        <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[i.risk_level] || RISK_BADGE.info}`}>
+                          {i.risk_level}
+                        </span>
+                      )}
                     </td>
 
-                    {/* Last Auth */}
+                    {/* Privilege Level */}
                     <td className="px-2 py-2 whitespace-nowrap">
-                      {(() => {
-                        if (!i.last_signin_at) {
-                          return (
-                            <span
-                              className={`text-xs font-medium ${i.auth_source === 'static_analysis_only' ? 'text-gray-400 italic' : 'text-red-600'}`}
-                              title={i.auth_source === 'static_analysis_only' ? 'No sign-in logs available — rescan for latest' : 'No sign-in recorded'}
-                            >
-                              {i.auth_source === 'static_analysis_only' ? 'Not observed' : 'Never'}
-                            </span>
-                          );
-                        }
-                        const diff = Date.now() - new Date(i.last_signin_at).getTime();
-                        const days = Math.floor(diff / 86400000);
-                        const relText = days === 0 ? 'Today' : days === 1 ? '1d ago' : `${days}d ago`;
-                        return (
-                          <span className="flex items-center gap-1">
-                            <span
-                              className={`text-xs ${days > 90 ? 'text-red-600' : days > 30 ? 'text-amber-600' : 'text-gray-700'}`}
-                              title={new Date(i.last_signin_at).toLocaleString()}
-                            >
-                              {relText}
-                            </span>
-                            {i.auth_source === 'static_analysis_only' && (
-                              <span className="text-gray-400 text-[10px] cursor-help" title="No diagnostic logs — static analysis only">&#9432;</span>
-                            )}
-                          </span>
-                        );
-                      })()}
-                    </td>
-
-                    {/* Last Auth IP */}
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      {(() => {
-                        if (!i.last_signin_ip) {
-                          return <span className="text-gray-400 text-xs">&mdash;</span>;
-                        }
-                        const ip = i.last_signin_ip;
-                        const isInternal = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(ip);
-                        const isMsRange = /^(20\.|40\.|52\.)/.test(ip);
-                        return (
-                          <span className="flex items-center gap-1" title={isMsRange ? 'Microsoft-owned IP range' : undefined}>
-                            <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${isInternal ? 'bg-green-500' : 'bg-blue-500'}`} />
-                            <span className="font-mono text-[11px] text-gray-700">{ip}</span>
-                          </span>
-                        );
-                      })()}
+                      <PrivilegeLevelBadge level={i.privilege_level} />
                     </td>
 
                     {/* Effective Access Level (Privilege Tier) */}
@@ -2375,59 +2579,24 @@ export default function IdentitiesPage() {
                       <PrivilegedBadge level={i.privileged_level} />
                     </td>
 
-                    {/* Sensitive Access (Scope) */}
-                    <td className="px-2 py-2"><ScopeBadge scope={i.effective_scope} cloud={i.cloud} /></td>
-
-                    {/* Last Seen — uses effective_last_used with connector fallback */}
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      {(() => {
-                        const isConnector = !!i.is_discovery_connector;
-
-                        // Demo safety: connector is always active
-                        const obsDate = isConnector
-                          ? (i.observed_last_used || new Date().toISOString())
-                          : (i.observed_last_used || null);
-                        const authDate = i.last_seen_auth || i.last_noninteractive_signin || null;
-
-                        // Pick the most recent (effective_last_used)
-                        let bestDate: string | null = null;
-                        let source: 'auditgraph' | 'azure' | null = null;
-                        if (obsDate && authDate) {
-                          bestDate = new Date(obsDate) >= new Date(authDate) ? obsDate : authDate;
-                          source = new Date(obsDate) >= new Date(authDate) ? 'auditgraph' : 'azure';
-                        } else if (obsDate) {
-                          bestDate = obsDate;
-                          source = 'auditgraph';
-                        } else if (authDate) {
-                          bestDate = authDate;
-                          source = 'azure';
-                        }
-
-                        if (bestDate) {
-                          const ls = formatLastSeen(bestDate);
-                          return (
-                            <span className={`text-xs ${ls.colorClass}`} title={bestDate}>
-                              {ls.label}
-                              {source === 'auditgraph' && <span className="ml-1 text-[8px] text-emerald-600 font-semibold align-super">AG</span>}
-                            </span>
-                          );
-                        }
-                        if (i.days_since_last_signin != null && i.days_since_last_signin >= 0) {
-                          const d = i.days_since_last_signin;
-                          const color = d <= 30 ? 'text-green-600' : d <= 90 ? 'text-yellow-600' : 'text-red-500';
-                          return <span className={`text-xs ${color}`}>{d === 0 ? 'Today' : `${d}d ago`}</span>;
-                        }
-                        return <span className="text-[10px] text-gray-400 italic">No activity observed</span>;
-                      })()}
-                    </td>
-
-                    {/* First Seen */}
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      {i.created_datetime ? (
-                        <span className="text-gray-600">{formatDate(i.created_datetime)}</span>
-                      ) : (
-                        <span className="text-[10px] text-gray-400 italic">—</span>
-                      )}
+                    {/* Last Seen */}
+                    <td
+                      className="col-last-seen px-2 py-2 whitespace-nowrap"
+                      title={[
+                        i.last_activity_date
+                          ? new Date(i.last_activity_date).toLocaleString('en-US', {
+                              month: 'short', day: 'numeric', year: 'numeric',
+                              hour: '2-digit', minute: '2-digit',
+                            })
+                          : null,
+                        i.last_activity_source
+                          ? `Source: ${SOURCE_LABELS[i.last_activity_source] ?? i.last_activity_source}`
+                          : null,
+                      ].filter(Boolean).join(' \u00b7 ')}
+                    >
+                      <span className={`last-seen-${lastSeenColor(i.last_activity_date)}`}>
+                        {formatRelativeDate(i.last_activity_date)}
+                      </span>
                     </td>
 
                     {/* Lineage — Priority: connector > federated > workload_origin > external > owner > ownerless > system */}
@@ -2575,7 +2744,8 @@ export default function IdentitiesPage() {
                     </td>
 
                   </tr>
-                ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

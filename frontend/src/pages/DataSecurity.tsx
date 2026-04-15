@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -732,7 +733,7 @@ export default function DataSecurity() {
               <div>
                 <div style={{ fontSize: 11, color: G.textSecondary }}>Risk Score</div>
                 <div style={{ fontSize: 20, fontWeight: 700, fontFamily: G.mono, color: G.severity[selectedResource.risk_level] }}>
-                  {selectedResource.risk_score}/100
+                  {normalizeScore(selectedResource.risk_score, 10).toFixed(1)}/10
                 </div>
               </div>
             </div>

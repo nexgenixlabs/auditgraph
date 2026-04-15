@@ -51,7 +51,7 @@ const SEVERITY_ORDER: Record<string, number> = { critical: 1, high: 2, medium: 3
 
 const CATEGORY_LABELS: Record<string, string> = {
   high_privilege_identity: 'High Privilege Identity',
-  disabled_account_active_role: 'Ghost Account with Active Roles',
+  disabled_account_active_role: 'Ghost Identity with Active Roles',
   orphaned_spn: 'Orphaned Service Principal',
   dormant_privileged: 'Dormant Privileged Account',
   over_privileged: 'Over-Privileged Identity',

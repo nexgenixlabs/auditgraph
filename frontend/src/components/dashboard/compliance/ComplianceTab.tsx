@@ -88,7 +88,7 @@ export function ComplianceTab({ d }: ComplianceTabProps) {
           borderRadius: 8, padding: '10px 14px', fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui,
           lineHeight: 1.5,
         }}>
-          All frameworks currently share the same score ({allScores[0]}/100). This is expected for initial assessments — scores will diverge as framework-specific controls are evaluated over subsequent snapshots.
+          All frameworks currently share the same score ({(allScores[0] / 10).toFixed(1)}/10). This is expected for initial assessments — scores will diverge as framework-specific controls are evaluated over subsequent snapshots.
         </div>
       )}
 

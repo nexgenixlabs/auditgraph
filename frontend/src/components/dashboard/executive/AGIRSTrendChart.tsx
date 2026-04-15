@@ -23,7 +23,7 @@ export function AGIRSTrendChart({ data }: AGIRSTrendChartProps) {
   return (
     <CISOCard>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-        <SectionTitle>AGIRS Risk Trend (30 Day)</SectionTitle>
+        <SectionTitle>Risk Trend (30 Day)</SectionTitle>
         <span style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>
           Target: 90
         </span>
@@ -55,7 +55,7 @@ export function AGIRSTrendChart({ data }: AGIRSTrendChartProps) {
             labelStyle={{ color: COLORS.textSecondary }}
             itemStyle={{ color: COLORS.accent }}
             labelFormatter={(label: any) => formatDate(String(label))}
-            formatter={(v: any) => [Number(v).toFixed(1), 'AGIRS']}
+            formatter={(v: any) => [Number(v).toFixed(1), 'Score']}
           />
           <ReferenceLine y={90} stroke={COLORS.success} strokeDasharray="4 4" strokeWidth={1} />
           <Area

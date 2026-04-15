@@ -6,7 +6,10 @@ import {
   RISK_BADGE, RISK_ORDER, PRIVILEGED_LEVELS, EFFECTIVE_SCOPE_CONFIG, CREDENTIAL_HEALTH_CONFIG,
   DORMANT_LABELS, DATA_EXPLANATIONS, CLOUD_BADGE,
   safeLower, getCategoryLabel, getDormantStatus as getDormantStatusFromActivity,
+  TIME_MS,
 } from '../constants/metrics';
+import { deriveIdentityState, STATE_COLORS } from '../constants/identityState';
+import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../utils/roleUtils';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -37,6 +40,47 @@ interface IdentityDetail {
   api_permission_count?: number;
   app_role_count?: number;
   risk_factors?: { code: string; description: string; severity: string; points: number; category: string; evidence: string }[];
+  auth_source?: string;
+  enabled?: boolean;
+  // SSOT canonical activity fields
+  last_activity_date?: string | null;
+  last_activity_source?: string | null;
+  last_activity_confidence?: string | null;
+  // IP observation fields (ARM Activity Log)
+  last_observed_ip?: string | null;
+  last_observed_ip_source?: string | null;
+  last_observed_ip_date?: string | null;
+  last_observed_operation?: string | null;
+  // Additional fields
+  account_enabled?: boolean;
+  user_type?: string | null;
+  highest_role?: string | null;
+  assigned_roles?: number;
+  blast_scope?: string | null;
+  federated_credential_issuer?: string | null;
+  inferred_origin?: string | null;
+  associated_resource?: string | null;
+  lineage_verdict?: string | null;
+  owner_deleted?: boolean;
+  app_id?: string | null;
+  privilege_tier?: number | string;
+  effective_scope?: string;
+  federated_workload_type?: string | null;
+  federated_workload_name?: string | null;
+  associated_resource_name?: string | null;
+  role_count?: number;
+  effective_access?: string | null;
+  sensitive_access?: string | null;
+  first_seen?: string | null;
+  days_inactive?: number | null;
+  // Canonical identity state (from build_identity_state)
+  activity_label?: string | null;
+  activity_detail?: string | null;
+  is_dormant?: boolean;
+  lifecycle_state?: string | null;
+  governance_state?: string | null;
+  privilege_level?: string | null;
+  risk_label?: string | null;
 }
 
 interface RoleEdge {
@@ -45,8 +89,6 @@ interface RoleEdge {
   scope: string;
   scope_type: string;
   risk_level: string;
-  usage_status?: string;
-  last_used_display?: string;
   is_removable?: boolean;
 }
 
@@ -56,11 +98,7 @@ interface EnrichedRole {
   scope?: string;
   scope_type?: string;
   risk_level?: string;
-  usage_status?: string;
-  last_used_display?: string;
-  last_used_at?: string;
   is_removable?: boolean;
-  days_since_used?: number;
   days_since_assigned?: number;
   redundant_with?: string;
   why_critical?: string;
@@ -121,7 +159,7 @@ function formatDate(d?: string | null): string {
 function relativeTime(d?: string | null): string {
   if (!d) return '';
   try {
-    const days = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+    const days = Math.floor((Date.now() - new Date(d).getTime()) / TIME_MS.DAY);
     if (days === 0) return 'today';
     if (days === 1) return '1 day ago';
     if (days < 30) return `${days}d ago`;
@@ -137,7 +175,6 @@ function RiskBadge({ level, score }: { level?: string; score?: number }) {
       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
         {risk || '?'}
       </span>
-      {score !== undefined && score > 0 && <span className="text-[10px] text-gray-400 font-mono">{score}</span>}
     </div>
   );
 }
@@ -167,8 +204,11 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
   const [scopeHierarchy, setScopeHierarchy] = useState<ScopeItem[]>([]);
   const [graphPermissions, setGraphPermissions] = useState<GraphPermission[]>([]);
   const [owners, setOwners] = useState<OwnerInfo[]>([]);
-  const [entraScopes, setEntraScopes] = useState<{ role_name: string; directory_scope: string; risk_level: string; usage_status?: string; last_used_display?: string; is_removable?: boolean }[]>([]);
+  const [entraScopes, setEntraScopes] = useState<{ role_name: string; directory_scope: string; risk_level: string; is_removable?: boolean }[]>([]);
   const [enrichedRoles, setEnrichedRoles] = useState<EnrichedRole[]>([]);
+  // Canonical role_usage dict (keyed by normalizeRoleKey) from the detail endpoint.
+  // Non-blocking: drawer renders immediately; Access tab re-renders when this updates.
+  const [drawerRoleUsage, setDrawerRoleUsage] = useState<Record<string, RoleUsageEntry> | undefined>(undefined);
   const [agentInfo, setAgentInfo] = useState<{
     detected_platform?: string; classification_confidence?: number;
     days_inactive?: number | null; agirs_score?: number;
@@ -180,6 +220,8 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
     let cancelled = false;
     setLoading(true);
     setTab('overview');
+    // Reset role_usage so the previous identity's data never leaks
+    setDrawerRoleUsage(undefined);
 
     Promise.all([
       fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}`)).then(r => r.ok ? r.json() : null),
@@ -191,6 +233,12 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
         setGraphPermissions(detailData.graph_permissions || []);
         setOwners(detailData.owners || []);
         setEnrichedRoles(detailData.roles || []);
+        // Canonical role_usage from build_identity_state() — may be {} for
+        // identities with no role assignments or no inference yet.
+        const ru = (detailData as any)?.role_usage;
+        if (ru && typeof ru === 'object' && Object.keys(ru).length > 0) {
+          setDrawerRoleUsage(ru as Record<string, RoleUsageEntry>);
+        }
       }
       if (graphData) {
         setRoles(graphData.trust_relationships?.role_edges || []);
@@ -214,7 +262,9 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const dormantStatus = detail ? getDormantStatusFromActivity(detail.activity_status) : 'unknown';
+  const dormantStatus = detail
+    ? (detail.is_dormant === true ? 'yes' as DormantStatus : detail.is_dormant === false ? 'no' as DormantStatus : getDormantStatusFromActivity(detail.activity_status))
+    : 'unknown' as DormantStatus;
 
   return (
     <div className="fixed inset-y-0 right-0 w-[560px] max-w-full bg-white shadow-lg z-50 flex flex-col border-l">
@@ -272,13 +322,20 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
         ) : tab === 'overview' ? (
           <OverviewTab detail={detail} dormantStatus={dormantStatus} owners={owners} agentInfo={agentInfo} />
         ) : tab === 'access' ? (
-          <AccessTab roles={roles} scopeHierarchy={scopeHierarchy} entraScopes={entraScopes} enrichedRoles={enrichedRoles} detail={detail} />
+          <AccessTab
+            roles={roles}
+            scopeHierarchy={scopeHierarchy}
+            entraScopes={entraScopes}
+            enrichedRoles={enrichedRoles}
+            detail={detail}
+            roleUsage={drawerRoleUsage}
+          />
         ) : tab === 'api' ? (
           <ApiPermsTab permissions={graphPermissions} />
         ) : tab === 'credentials' ? (
           <CredentialsTab credentials={credentials} detail={detail} />
         ) : tab === 'usage' ? (
-          <UsageTab detail={detail} dormantStatus={dormantStatus} roles={roles} />
+          <UsageTab detail={detail} dormantStatus={dormantStatus} roles={roles} roleUsage={drawerRoleUsage} />
         ) : (
           <RiskTab detail={detail} />
         )}
@@ -306,7 +363,6 @@ function OverviewTab({ detail, dormantStatus, owners, agentInfo }: {
     ],
     ['CA Coverage', <span className={`text-xs font-medium ${detail.ca_coverage_status === 'covered' ? 'text-green-700' : 'text-red-500'}`}>{detail.ca_coverage_status || 'Unknown'}</span>],
     ['Created', <span className="text-gray-700">{formatDate(detail.created_datetime)}</span>],
-    ['Last Used', <span className="text-gray-700">{formatDate(detail.last_seen_auth)} <span className="text-gray-400 text-[10px]">{relativeTime(detail.last_seen_auth)}</span></span>],
   ];
 
   if (detail.is_federated) {
@@ -419,8 +475,8 @@ function AgentRiskSection({ agentInfo, identityId }: {
               <div className={`font-medium ${isOrphaned ? 'text-red-700' : 'text-gray-900'}`}>{daysLabel}</div>
             </div>
             <div>
-              <span className="text-gray-500">AGIRS Score</span>
-              <div className="font-medium text-gray-900">{agentInfo.agirs_score ?? 'N/A'}</div>
+              <span className="text-gray-500">Risk Level</span>
+              <div className="font-medium text-gray-900">{agentInfo.agirs_score != null ? (agentInfo.agirs_score >= 9 ? 'CRITICAL' : agentInfo.agirs_score >= 7 ? 'HIGH' : agentInfo.agirs_score >= 4 ? 'MEDIUM' : agentInfo.agirs_score > 0 ? 'LOW' : 'INFO') : 'N/A'}</div>
             </div>
             <div>
               <span className="text-gray-500">Confidence</span>
@@ -524,11 +580,12 @@ function AgentRiskSection({ agentInfo, identityId }: {
 
 // ─── Tab 2: Effective Access ──────────────────────────────────────
 
-function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }: {
+function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail, roleUsage }: {
   roles: RoleEdge[]; scopeHierarchy: ScopeItem[];
-  entraScopes: { role_name: string; directory_scope: string; risk_level: string; usage_status?: string; last_used_display?: string; is_removable?: boolean }[];
+  entraScopes: { role_name: string; directory_scope: string; risk_level: string; is_removable?: boolean }[];
   enrichedRoles: EnrichedRole[];
   detail: IdentityDetail;
+  roleUsage?: Record<string, RoleUsageEntry>;
 }) {
   const [scriptCopied, setScriptCopied] = useState(false);
 
@@ -544,16 +601,34 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
     return enrichedLookup[`${roleName}::${scope || ''}`] || enrichedLookup[`name:${roleName}`];
   };
 
+  // Canonical "unused" calculation — driven by role_usage inference result,
+  // NEVER by legacy usage_status / last_used_at fields.
+  // If roleUsage has not loaded yet, count nothing as unused (avoid false positives).
+  const allRolesForUsage: { role_name?: string; display_name?: string; name?: string }[] = [
+    ...roles,
+    ...entraScopes,
+  ];
+  const unusedRoles = roleUsage
+    ? allRolesForUsage.filter((r) => {
+        const name = r.role_name || r.display_name || r.name || '';
+        const usage = roleUsage[normalizeRoleKey(name)];
+        return !usage?.used;
+      })
+    : [];
+  const unusedCount = unusedRoles.length;
+
+  // Dynamic banner source label — never hardcoded
+  const authActivity = (detail as any)?.auth_activity || {};
+  const bannerSource = authActivity.interactive_signin
+    ? 'sign-in activity'
+    : authActivity.arm_activity
+      ? 'ARM activity (inferred)'
+      : authActivity.any_activity_observed
+        ? 'AuditGraph observation'
+        : 'available activity signals';
+
   const removableRoles = enrichedRoles.filter(r => r.is_removable);
   const removableCount = removableRoles.length;
-
-  const USAGE_BADGE: Record<string, { label: string; color: string; ts: string }> = {
-    active: { label: 'Active', color: 'bg-green-100 text-green-700', ts: 'text-green-600' },
-    stale: { label: 'Stale', color: 'bg-yellow-100 text-yellow-700', ts: 'text-yellow-600' },
-    dormant: { label: 'Dormant', color: 'bg-orange-100 text-orange-700', ts: 'text-orange-600' },
-    never_used: { label: 'Never Used', color: 'bg-red-100 text-red-700', ts: 'text-red-500' },
-    definitely_unused: { label: 'Never Used', color: 'bg-red-100 text-red-700', ts: 'text-red-500' },
-  };
 
   // Generate cleanup script for all removable roles
   const handleCopyCleanup = () => {
@@ -568,7 +643,11 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
       ``,
     ];
     removableRoles.forEach((role, i) => {
-      lines.push(`# --- Role ${i + 1}: ${role.role_name} (${role.usage_status || 'unused'}) ---`);
+      const usageEntry = roleUsage?.[normalizeRoleKey(role.role_name)];
+      const usageNote = usageEntry
+        ? (usageEntry.used ? `used (${usageEntry.confidence})` : 'no evidence')
+        : 'unused';
+      lines.push(`# --- Role ${i + 1}: ${role.role_name} (${usageNote}) ---`);
       if (role.scope) {
         lines.push(`Remove-AzRoleAssignment \``);
         lines.push(`  -ObjectId "${objId}" \``);
@@ -588,11 +667,15 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
   // Generate single-role PS1 script and copy to clipboard
   const handleCopyRoleScript = (er: EnrichedRole) => {
     const objId = detail.principal_id || detail.identity_id;
+    const usageEntry = roleUsage?.[normalizeRoleKey(er.role_name)];
+    const usageNote = usageEntry
+      ? (usageEntry.used ? `used (${usageEntry.confidence})` : 'no evidence')
+      : 'unknown';
     const script = er.scope
       ? [
           `# Remove ${er.role_name} from ${detail.display_name}`,
           `# Scope: ${er.scope}`,
-          `# Status: ${er.usage_status || 'unknown'}${er.last_used_display ? ' · ' + er.last_used_display : ''}`,
+          `# Usage: ${usageNote}`,
           ``,
           `Connect-AzAccount`,
           `Remove-AzRoleAssignment \``,
@@ -604,24 +687,10 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
     navigator.clipboard.writeText(script);
   };
 
-  // Render usage badge + timestamp inline
-  const usageBadge = (usage: string | undefined, lastUsed: string | undefined) => {
-    const ub = usage ? USAGE_BADGE[usage] : null;
-    if (!ub) return null;
-    return (
-      <span className="flex items-center gap-1">
-        <span className={`px-1 py-0.5 rounded text-[9px] font-semibold ${ub.color}`}>{ub.label}</span>
-        {lastUsed && lastUsed !== 'No data' && (
-          <span className={`text-[10px] ${ub.ts}`}>· {lastUsed}</span>
-        )}
-      </span>
-    );
-  };
-
   return (
     <div className="space-y-4">
-      {/* Element 2: Removable roles banner with Copy Cleanup Script */}
-      {removableCount > 0 && (
+      {/* Unused roles banner driven by role_usage inference (not legacy usage_status) */}
+      {roleUsage && unusedCount > 0 && (
         <div className="flex items-center justify-between bg-orange-50 border border-orange-200 rounded-lg px-3 py-2.5">
           <div>
             <div className="flex items-center gap-1.5">
@@ -629,19 +698,21 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
               </svg>
               <span className="text-xs font-semibold text-orange-800">
-                {removableCount} unused role assignment{removableCount > 1 ? 's' : ''} detected
+                {unusedCount} role{unusedCount > 1 ? 's' : ''} with no usage evidence
               </span>
             </div>
             <div className="text-[10px] text-orange-600 mt-0.5 ml-5.5">
-              Based on last sign-in activity
+              Based on {bannerSource}
             </div>
           </div>
-          <button
-            onClick={handleCopyCleanup}
-            className="flex-shrink-0 ml-3 px-2.5 py-1.5 text-[10px] font-medium rounded-md bg-orange-100 text-orange-800 hover:bg-orange-200 transition border border-orange-200"
-          >
-            {scriptCopied ? 'Copied!' : 'Copy cleanup script'}
-          </button>
+          {removableCount > 0 && (
+            <button
+              onClick={handleCopyCleanup}
+              className="flex-shrink-0 ml-3 px-2.5 py-1.5 text-[10px] font-medium rounded-md bg-orange-100 text-orange-800 hover:bg-orange-200 transition border border-orange-200"
+            >
+              {scriptCopied ? 'Copied!' : 'Copy cleanup script'}
+            </button>
+          )}
         </div>
       )}
 
@@ -652,15 +723,13 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
           <div className="space-y-1">
             {entraScopes.map((r, idx) => {
               const er = findEnriched(r.role_name, r.directory_scope);
-              const usage = r.usage_status || er?.usage_status;
-              const lastUsed = r.last_used_display || er?.last_used_display;
               const removable = r.is_removable || er?.is_removable;
               return (
                 <div key={idx} className={`rounded-lg px-2.5 py-1.5 ${removable ? 'bg-orange-50 border border-orange-200' : 'bg-purple-50'}`}>
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-medium text-purple-900">{r.role_name}</span>
                     <div className="flex items-center gap-1">
-                      {usageBadge(usage, lastUsed)}
+                      {getRoleUsageBadge(r.role_name, roleUsage)}
                       <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(r.risk_level)] || 'bg-gray-100 text-gray-500'}`}>{r.risk_level}</span>
                       {removable && er && (
                         <button
@@ -734,9 +803,9 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
           <div className="space-y-1 max-h-[300px] overflow-y-auto">
             {roles.map((r, idx) => {
               const er = findEnriched(r.role_name, r.scope);
-              const usage = r.usage_status || er?.usage_status;
-              const lastUsed = r.last_used_display || er?.last_used_display;
-              const isRemovable = r.is_removable || er?.is_removable || ['stale', 'dormant', 'never_used'].includes(usage || '');
+              const usageEntry = roleUsage?.[normalizeRoleKey(r.role_name)];
+              const isUnused = roleUsage ? !usageEntry?.used : false;
+              const isRemovable = r.is_removable || er?.is_removable || isUnused;
               return (
                 <div key={idx} className={`text-xs rounded px-2.5 py-1.5 ${isRemovable ? 'bg-orange-50 border border-orange-200' : 'bg-gray-50'}`}>
                   <div className="flex items-center justify-between">
@@ -745,7 +814,7 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail }
                       <span className="text-[10px] text-gray-400 ml-1">{r.role_type}</span>
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
-                      {usageBadge(usage, lastUsed)}
+                      {getRoleUsageBadge(r.role_name, roleUsage)}
                       <span className={`px-1 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(r.risk_level)] || 'bg-gray-100 text-gray-500'}`}>{r.risk_level}</span>
                       {isRemovable && er && (
                         <button
@@ -900,7 +969,7 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
 
 // ─── Tab 5: Usage Intelligence ────────────────────────────────────
 
-function UsageTab({ detail, dormantStatus, roles }: { detail: IdentityDetail; dormantStatus: DormantStatus; roles: RoleEdge[] }) {
+function UsageTab({ detail, dormantStatus, roles, roleUsage }: { detail: IdentityDetail; dormantStatus: DormantStatus; roles: RoleEdge[]; roleUsage?: Record<string, RoleUsageEntry> }) {
   const { withConnection } = useConnection();
   const [usageData, setUsageData] = useState<any>(null);
   const [usageLoading, setUsageLoading] = useState(true);
@@ -913,11 +982,18 @@ function UsageTab({ detail, dormantStatus, roles }: { detail: IdentityDetail; do
       .catch(() => setUsageLoading(false));
   }, [detail.identity_id]);
 
-  // Fallback to role-based data if API fails
+  // Fallback to role_usage inference when API doesn't return granted_vs_used.
+  // Never filter by legacy usage_status — the canonical source is role_usage.
+  const fallbackUsedCount = roleUsage
+    ? roles.filter(r => !!roleUsage[normalizeRoleKey(r.role_name)]?.used).length
+    : roles.length;
+  const fallbackUnusedRoles = roleUsage
+    ? roles.filter(r => !roleUsage[normalizeRoleKey(r.role_name)]?.used)
+    : [];
   const totalRoles = usageData?.granted_vs_used?.total_roles ?? roles.length;
-  const usedRoles = usageData?.granted_vs_used?.used_roles ?? roles.filter(r => r.usage_status !== 'definitely_unused').length;
-  const neverUsedCount = usageData?.granted_vs_used?.never_used_count ?? roles.filter(r => r.usage_status === 'definitely_unused').length;
-  const neverUsedRoles = usageData?.granted_vs_used?.never_used_roles ?? roles.filter(r => r.usage_status === 'definitely_unused').map(r => ({ role_name: r.role_name, role_type: r.role_type, scope_type: r.scope_type }));
+  const usedRoles = usageData?.granted_vs_used?.used_roles ?? fallbackUsedCount;
+  const neverUsedCount = usageData?.granted_vs_used?.never_used_count ?? fallbackUnusedRoles.length;
+  const neverUsedRoles = usageData?.granted_vs_used?.never_used_roles ?? fallbackUnusedRoles.map(r => ({ role_name: r.role_name, role_type: r.role_type, scope_type: r.scope_type }));
 
   const confidence = usageData?.confidence || (detail.last_seen_auth ? 'medium' : 'low');
   const confidenceLabels: Record<string, string> = {
@@ -941,21 +1017,37 @@ function UsageTab({ detail, dormantStatus, roles }: { detail: IdentityDetail; do
         <div className="text-center py-4 text-gray-400 text-xs">Loading usage data…</div>
       )}
 
-      {/* Last used */}
-      <div className="bg-gray-50 rounded-lg p-3">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-gray-500">Last Used</span>
-          <span className="text-sm font-medium text-gray-900">{formatDate(usageData?.last_used || detail.last_seen_auth)}</span>
-        </div>
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-gray-500">Relative</span>
-          <span className="text-sm text-gray-700">{relativeTime(usageData?.last_used || detail.last_seen_auth) || (detail.auth_source === 'static_analysis_only' ? 'Not observed' : 'Never')}</span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-gray-500">Source</span>
-          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${src.color}`}>{src.label}</span>
-        </div>
-      </div>
+      {/* Identity State — architecture-derived */}
+      {(() => {
+        const state = deriveIdentityState({
+          enabled: detail.enabled,
+          identity_category: detail.identity_category,
+          role_count: roles.length,
+          federated_workload_type: (detail as Record<string, any>).federated_workload_type,
+          is_federated: detail.is_federated,
+          owner_display_name: detail.owner_display_name,
+          last_activity_source: (detail as Record<string, any>).last_activity_source,
+          last_activity_date: (detail as Record<string, any>).last_activity_date,
+          created_datetime: detail.created_datetime,
+        });
+        const colors = STATE_COLORS[state.color];
+        return (
+          <div className={`${colors.bg} ${colors.border} border rounded-lg p-3`}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-gray-500">Identity State</span>
+              <span className={`text-sm font-semibold ${colors.text}`}>{state.label}</span>
+            </div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-gray-500">Detail</span>
+              <span className={`text-xs ${colors.text}`}>{state.sublabel}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-gray-500">Source</span>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${src.color}`}>{state.source}</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Confidence */}
       <div className={`rounded-lg p-2.5 text-xs border ${

@@ -37,6 +37,7 @@ Usage:
 import os
 import json
 import logging
+import threading
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -554,6 +555,13 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
                 cdb.close()
             except Exception as e:
                 logger.warning(f"  ⚠ Failed to complete snapshot job: {e}")
+
+        # Invalidate CISO dashboard cache after discovery completes
+        try:
+            from app.api.handlers import _ciso_cache_invalidate
+            _ciso_cache_invalidate(db_org_id)
+        except Exception:
+            pass  # non-critical — cache will expire via TTL
     except Exception as e:
         elapsed = _time.monotonic() - start_time
         error_type, is_retryable = _classify_discovery_error(e)
@@ -685,6 +693,41 @@ def run_continuous_discovery():
         logger.error("CONTINUOUS_DISCOVERY error: %s", str(e)[:200])
 
     logger.info("🔄 CONTINUOUS_DISCOVERY complete: triggered=%d", triggered)
+
+
+def run_stale_execution_recovery():
+    """W3: Reset jobs stuck in 'executing' state.
+    Runs every 5 minutes. Uses admin connection to scan all orgs."""
+    try:
+        from app.engines.execution.executor import ExecutionService
+
+        # Admin connection to find stale jobs across all orgs
+        db = Database()
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT organization_id
+            FROM approval_requests
+            WHERE status = 'executing'
+        """)
+        orgs = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        total = 0
+        for org_row in orgs:
+            org_id = org_row[0] if isinstance(org_row, (tuple, list)) else org_row['organization_id']
+            org_db = Database(organization_id=org_id)
+            try:
+                count = ExecutionService.recover_stale_executions(
+                    org_db, stale_threshold_minutes=5)
+                total += count
+            finally:
+                org_db.close()
+
+        if total > 0:
+            logger.info("Stale execution recovery: %s jobs reset to queued", total)
+    except Exception as e:
+        logger.error("Stale recovery scheduler error: %s", e)
 
 
 def run_snapshot_job_maintenance():
@@ -1149,6 +1192,13 @@ def _compute_risk_summary(run_id: int, organization_id: int, db: Database):
         engine = RiskSummaryEngine(db, organization_id, run_ids)
         summary = engine.compute()
         engine.persist(summary)
+
+        # Invalidate CISO dashboard cache after risk recomputation
+        try:
+            from app.api.handlers import _ciso_cache_invalidate
+            _ciso_cache_invalidate(organization_id)
+        except Exception:
+            pass  # non-critical — cache will expire via TTL
 
         log_stage(db, run_id, organization_id, 'risk_engine', 6, 'completed',
                   count=summary.get('total_identities', 0))
@@ -3020,6 +3070,7 @@ def check_scan_schedules():
 
 # Global scheduler instance
 scheduler = None
+_scheduler_lock = threading.Lock()
 
 
 def start_scheduler():
@@ -3028,17 +3079,18 @@ def start_scheduler():
     Called when the Flask app starts.
     """
     global scheduler
-    
-    if scheduler is not None:
-        logger.warning("Scheduler already running")
-        return
-    
-    logger.info("=" * 70)
-    logger.info("INITIALIZING DISCOVERY SCHEDULER")
-    logger.info("=" * 70)
 
-    # Create scheduler
-    scheduler = BackgroundScheduler(timezone="UTC")
+    with _scheduler_lock:
+        if scheduler is not None:
+            logger.warning("Scheduler already running")
+            return
+
+        logger.info("=" * 70)
+        logger.info("INITIALIZING DISCOVERY SCHEDULER")
+        logger.info("=" * 70)
+
+        # Create scheduler (inside lock to prevent double-init race)
+        scheduler = BackgroundScheduler(timezone="UTC")
 
     # Get configurable interval (default: 12 hours)
     interval_hours = int(os.getenv('DISCOVERY_INTERVAL_HOURS', '12'))
@@ -3169,6 +3221,17 @@ def start_scheduler():
         coalesce=True
     )
 
+    # W3: Stale execution recovery — every 5 minutes
+    scheduler.add_job(
+        func=run_stale_execution_recovery,
+        trigger=IntervalTrigger(minutes=5),
+        id='stale_execution_recovery',
+        name='Stale Execution Recovery (every 5 min)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
     # Phase 13: Trial expiration check — daily at 05:00 UTC
     scheduler.add_job(
         func=run_trial_expiration,
@@ -3209,12 +3272,13 @@ def stop_scheduler():
     Called when the Flask app shuts down.
     """
     global scheduler
-    
-    if scheduler is not None:
-        logger.info("Stopping scheduler...")
-        scheduler.shutdown()
-        scheduler = None
-        logger.info("✓ Scheduler stopped")
+
+    with _scheduler_lock:
+        if scheduler is not None:
+            logger.info("Stopping scheduler...")
+            scheduler.shutdown()
+            scheduler = None
+            logger.info("✓ Scheduler stopped")
 
 
 def get_next_run_time():

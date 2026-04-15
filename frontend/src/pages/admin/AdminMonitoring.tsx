@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface TenantMetric {
   id: number;
@@ -543,7 +544,7 @@ export default function AdminMonitoring() {
         <h3 className="text-sm font-semibold text-gray-800 mb-3">Snapshot Freshness</h3>
         <div className="space-y-2">
           {(orgFilter ? metrics.filter(t => t.id === orgFilter) : metrics).map(t => {
-            const hours = t.last_discovery ? (Date.now() - new Date(t.last_discovery).getTime()) / 3600000 : Infinity;
+            const hours = t.last_discovery ? (Date.now() - new Date(t.last_discovery).getTime()) / TIME_MS.HOUR : Infinity;
             const stale = hours > 24;
             const critical = hours > 72;
             return (

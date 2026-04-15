@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useConnection } from '../contexts/ConnectionContext';
+import { normalizeIssuer } from '../constants/identityState';
+import { getSourceLabel } from '../constants/activitySignals';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * LineageDetailPanel — Redesigned identity lineage slide-out panel
@@ -144,23 +147,7 @@ const VERDICT_CONFIG: Record<string, { label: string; pillBg: string; pillText: 
 
 const CONFIDENCE_DOT: Record<string, string> = { high: '#22c55e', medium: '#f59e0b', low: '#ef4444' };
 
-// ── Signal flag descriptions ─────────────────────────────────────────────────
-
-const SIGNAL_FLAG_DESC: Record<string, string> = {
-  never_authenticated:     'no sign-in ever recorded',
-  has_active_roles:        'permissions exist without confirmed use',
-  shared_identity:         'identity may be shared across teams',
-  shared_credential:       'credential shared across services',
-  has_dependents:          'resources depend on this identity',
-  deletion_risk:           'deletion could break workloads',
-  no_permissions:          'no role assignments found',
-  no_dependents:           'no dependent resources detected',
-  workload_confirmed:      'confirmed workload binding',
-  authenticated:           'sign-in activity recorded',
-  has_roles:               'active role assignments present',
-  last_auth_stale:         'authentication data is stale',
-  no_confirmed_use:        'no evidence of active usage',
-};
+// (Signal flag descriptions removed — raw internal keys are no longer displayed)
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -356,7 +343,7 @@ export default function LineageDetailPanel({ identity: identityProp, onClose, on
               {confidence}
             </span>
             {/* Score */}
-            <span className="ml-auto text-[10px] font-bold" style={{ color: BRAND.navy }}>{score}/100</span>
+            <span className="ml-auto text-[10px] font-bold" style={{ color: BRAND.navy }}>{normalizeScore(score, 10).toFixed(1)}/10</span>
           </div>
           {/* Score progress bar */}
           <div className="mt-1.5 w-full h-1 bg-gray-100 rounded-full overflow-hidden">
@@ -401,28 +388,49 @@ export default function LineageDetailPanel({ identity: identityProp, onClose, on
                 </div>
               )}
 
-              {/* Signal flags */}
-              {riskSummary.length > 0 && (
-                <div className="space-y-1">
-                  {riskSummary.map((flag, idx) => {
-                    const key = flag.replace(/\s+/g, '_').toLowerCase().replace(/[^a-z_]/g, '');
-                    const desc = SIGNAL_FLAG_DESC[key];
-                    const dotColor = verdict.group === 'red' ? '#ef4444'
-                      : verdict.group === 'amber' ? '#f59e0b'
-                      : verdict.group === 'green' ? '#22c55e'
-                      : '#6b7280';
-                    return (
-                      <div key={idx} className="flex items-start gap-1.5 text-[10px] text-gray-600 leading-relaxed">
-                        <span className="mt-[3px] shrink-0 inline-block w-1.5 h-1.5 rounded-full" style={{ background: dotColor }} />
-                        <span>
-                          <span className="font-medium text-gray-700">{flag}</span>
-                          {!!desc && <span className="text-gray-400"> {'\u2014'} {desc}</span>}
-                        </span>
-                      </div>
-                    );
-                  })}
+              {/* Trust Signals — structured rows instead of raw internal keys */}
+              <div className="space-y-1.5 mt-1">
+                {/* Workload Origin */}
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-gray-400">Workload Origin</span>
+                  <span className="font-medium text-gray-700 text-right max-w-[55%] truncate"
+                        title={data.workload_origin.origin || 'Unknown'}>
+                    {data.workload_origin.origin && data.workload_origin.origin !== 'Unknown'
+                      ? data.workload_origin.origin
+                      : data.identity_category === 'managed_identity_system'
+                        ? 'System-assigned MSI'
+                        : data.identity_category === 'managed_identity_user'
+                          ? 'User-assigned MSI'
+                          : !!data.workload_origin.workload_type
+                            ? normalizeIssuer(data.workload_origin.workload_type)
+                            : 'Entra ID registration'}
+                  </span>
                 </div>
-              )}
+                {/* Last Seen */}
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-gray-400">Last Seen</span>
+                  <span className="font-medium text-gray-700">
+                    {data.effective_last_used
+                      ? fmtDate(data.effective_last_used)
+                      : data.last_signin_at
+                        ? fmtDate(data.last_signin_at)
+                        : data.sign_in?.last_sign_in
+                          ? fmtDate(data.sign_in.last_sign_in)
+                          : <span style={{ color: '#d97706' }}>No auth observed</span>}
+                  </span>
+                </div>
+                {/* Last Seen From */}
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-gray-400">Last Seen From</span>
+                  <span className="font-medium text-gray-700">
+                    {data.last_signin_ip
+                      ? <span className="font-mono text-gray-600">{data.last_signin_ip}</span>
+                      : <span className="text-gray-300">
+                          {getSourceLabel(data.auth_source || data.effective_last_used_source || null)}
+                        </span>}
+                  </span>
+                </div>
+              </div>
             </Section>
 
             {/* ─── S4: AUTHENTICATION HISTORY ──────────────────────── */}
@@ -437,7 +445,7 @@ export default function LineageDetailPanel({ identity: identityProp, onClose, on
                   {data.last_signin_at ? (
                     <span className="text-[10px] font-medium text-gray-700">{fmtDate(data.last_signin_at)}</span>
                   ) : (
-                    <span className="text-[10px] font-semibold" style={{ color: '#dc2626' }}>Never authenticated</span>
+                    <span className="text-[10px] font-medium" style={{ color: '#d97706' }}>Provisioned — no auth observed</span>
                   )}
                 </div>
                 {/* Last IP */}

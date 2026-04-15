@@ -18,7 +18,8 @@ import {
   DORMANT_LABELS,
   getDormantStatus,
 } from './types';
-import { OWNER_STATUS_CONFIG } from '../../constants/metrics';
+import { OWNER_STATUS_CONFIG, TIME_MS } from '../../constants/metrics';
+import { normalizeScore } from '../../utils/identityRiskScore';
 
 export interface CorrelatedAccount {
   id: number;
@@ -192,11 +193,58 @@ export default function OverviewTab({
       <div>
         <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {/* Activity — uses effective_last_used (MAX of observed + Azure sign-in) */}
+          {/* Activity — canonical state from build_identity_state() */}
           {(() => {
             const isConnector = !!identity.is_discovery_connector;
+            const authActivity = (identity as any).auth_activity;
+            const hasCanonicalState = !!(identity as any).activity_label && !!authActivity;
 
-            // Demo safety fallback: connector is ALWAYS active (it's running right now)
+            // Use canonical state from backend when available
+            if (hasCanonicalState && !isConnector) {
+              const anyActivity = authActivity?.any_activity_observed;
+              const activityLabel = (identity as any).activity_label as string;
+              const activityDetail = (identity as any).activity_detail as string;
+              const isDormant = (identity as any).is_dormant;
+              const confidence = authActivity?.confidence || 'none';
+
+              const badgeColor = anyActivity
+                ? 'bg-green-100 text-green-700'
+                : 'bg-gray-100 text-gray-500';
+              const badgeLabel = isDormant ? 'Dormant' : (anyActivity ? 'Active' : 'Unknown');
+
+              // Source badge based on which signal
+              let sourceBadge: React.ReactNode = null;
+              if (authActivity?.interactive_signin) {
+                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Sign-in</span>;
+              } else if (authActivity?.arm_activity) {
+                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">ARM</span>;
+              } else if (authActivity?.non_interactive_signin) {
+                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Non-interactive</span>;
+              } else if (authActivity?.lineage_activity) {
+                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">Lineage</span>;
+              } else if (authActivity?.token_usage) {
+                sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-cyan-100 text-cyan-700">Token</span>;
+              }
+
+              return (
+                <div className="border rounded-xl p-4 relative group" title={activityDetail}>
+                  <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
+                  <span className={`px-2 py-1 rounded-full text-xs font-semibold ${badgeColor}`}>{badgeLabel}</span>
+                  <div className="text-[10px] text-gray-500 mt-2 flex items-center">
+                    {activityDetail}
+                    {sourceBadge}
+                  </div>
+                  {confidence === 'inferred' && (
+                    <div className="text-[9px] text-gray-400 mt-1">Confidence: Inferred</div>
+                  )}
+                  {!anyActivity && (
+                    <div className="text-[9px] text-gray-400 mt-1">Log-independent mode — activity inferred from static analysis</div>
+                  )}
+                </div>
+              );
+            }
+
+            // Legacy fallback: connector or no canonical state
             const effectiveLastUsed = isConnector
               ? (identity.effective_last_used || new Date().toISOString())
               : identity.effective_last_used;
@@ -207,20 +255,17 @@ export default function OverviewTab({
             const hasEffective = !!effectiveLastUsed;
             const isFederatedInferred = effectiveLastUsedSource === 'inferred_federated';
 
-            // Override dormant status when effective_last_used exists OR connector
             let dormant = getDormantStatus(identity.activity_status || undefined);
             if (isConnector || (hasEffective && !isFederatedInferred)) dormant = 'no';
             if (isFederatedInferred) dormant = 'likely_active';
             const dcfg = DORMANT_LABELS[dormant];
 
-            // Compute relative time label
             let lastUsedLabel = '';
             let sourceBadge: React.ReactNode = null;
             if (isConnector) {
               lastUsedLabel = 'Actively used by AuditGraph';
               sourceBadge = <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>;
             } else if (isFederatedInferred) {
-              // Rule 2: Federated identities — never show "Never Used"
               const fedType = (identity as any).federated_workload_type || '';
               const fedLabel = fedType === 'github_actions' ? 'GitHub Actions'
                 : fedType === 'aks' ? 'AKS'
@@ -231,19 +276,10 @@ export default function OverviewTab({
             } else if (hasEffective) {
               const d = new Date(effectiveLastUsed!);
               const now = new Date();
-              const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+              const diffDays = Math.floor((now.getTime() - d.getTime()) / TIME_MS.DAY);
               if (diffDays === 0) lastUsedLabel = 'Last used: Today';
               else if (diffDays === 1) lastUsedLabel = 'Last used: Yesterday';
               else lastUsedLabel = `Last used: ${diffDays}d ago`;
-
-              // Append source qualifier when identity authenticated but
-              // roles show no activity (prevents misleading "used today"
-              // when no Azure resources were actually accessed).
-              const qualifier = (identity as any).activity_source_qualifier;
-              if (qualifier) {
-                lastUsedLabel += ` \u00b7 ${qualifier}`;
-              }
-
               sourceBadge = effectiveLastUsedSource === 'auditgraph'
                 ? <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
                 : <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>;
@@ -259,14 +295,6 @@ export default function OverviewTab({
                   {lastUsedLabel}
                   {sourceBadge}
                 </div>
-                {/* Rule 3: Explanation tooltip for federated identities */}
-                {isFederatedInferred && (
-                  <div className="absolute left-0 bottom-full mb-2 w-64 bg-gray-900 text-white text-[10px] rounded-lg p-3 hidden group-hover:block z-50 shadow-lg pointer-events-none">
-                    Azure does not emit sign-in logs for federated identities (GitHub, AKS, Terraform).
-                    Activity is inferred based on configuration and role usage.
-                    <div className="mt-1 text-gray-300">Confidence: Medium</div>
-                  </div>
-                )}
               </div>
             );
           })()}
@@ -381,6 +409,51 @@ export default function OverviewTab({
         </div>
       )}
 
+      {/* Auth Activity Breakdown — structured view from canonical state */}
+      {!!(identity as any).auth_activity && (
+        <div className="border border-gray-200 rounded-xl p-4">
+          <div className="text-sm font-semibold text-gray-900 mb-2">Auth Activity Breakdown</div>
+          <table className="w-full text-xs">
+            <tbody>
+              {[
+                { label: 'Interactive sign-in', key: 'interactive_signin', unavailableNote: 'Log-independent mode' },
+                { label: 'Non-interactive sign-in', key: 'non_interactive_signin', unavailableNote: 'Log-independent mode' },
+                { label: 'ARM deployment activity', key: 'arm_activity', unavailableNote: '' },
+                { label: 'Token issuance', key: 'token_usage', unavailableNote: 'Log-independent mode' },
+                { label: 'Lineage activity', key: 'lineage_activity', unavailableNote: '' },
+                { label: 'AuditGraph scan observed', key: 'auditgraph_scan', unavailableNote: '' },
+              ].map(({ label, key, unavailableNote }) => {
+                const auth = (identity as any).auth_activity;
+                const observed = auth?.[key];
+                return (
+                  <tr key={key} className="border-b border-gray-100 last:border-0">
+                    <td className="py-1.5 pr-3 text-gray-600">{label}</td>
+                    <td className="py-1.5">
+                      {observed ? (
+                        <span className="text-green-700 font-medium">Observed</span>
+                      ) : unavailableNote ? (
+                        <span className="text-gray-400">Not available · {unavailableNote}</span>
+                      ) : (
+                        <span className="text-gray-400">Not observed</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="mt-2 text-[10px] text-gray-400">
+            Data confidence: {(identity as any).auth_activity?.confidence || 'none'}
+            {(identity as any).is_dormant === false && (identity as any).auth_activity?.any_activity_observed && (
+              <span className="ml-2 text-green-600 font-medium">Dormancy: Active</span>
+            )}
+            {(identity as any).is_dormant === true && (
+              <span className="ml-2 text-orange-600 font-medium">Dormancy: Dormant</span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Activity source mismatch warning — identity authenticated but
           no role-scoped activity detected. Same visual style as the
           "No owners assigned" amber banner. */}
@@ -434,7 +507,7 @@ export default function OverviewTab({
               <span>{riskHistory.length} runs</span>
               <span className="text-gray-300">|</span>
               <span>
-                {riskHistory[0].risk_score} pts → {riskHistory[riskHistory.length - 1].risk_score} pts
+                {normalizeScore(riskHistory[0].risk_score, 10).toFixed(1)} → {normalizeScore(riskHistory[riskHistory.length - 1].risk_score, 10).toFixed(1)}/10
                 {riskHistory[riskHistory.length - 1].risk_score > riskHistory[0].risk_score
                   ? <span className="text-red-500 ml-1">↑</span>
                   : riskHistory[riskHistory.length - 1].risk_score < riskHistory[0].risk_score

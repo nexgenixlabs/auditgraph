@@ -144,7 +144,7 @@ export function RiskMonitoringTab({ d }: RiskMonitoringTabProps) {
                   fontSize: 14, color: improving ? COLORS.success : COLORS.danger,
                 }}>{improving ? '\u25B2' : '\u25BC'}</span>
                 <span style={{ fontSize: 11, color: improving ? COLORS.success : COLORS.danger, fontFamily: FONT.mono, fontWeight: 600 }}>
-                  {improving ? '+' : ''}{delta?.toFixed(1)} pts
+                  {improving ? '+' : ''}{delta?.toFixed(1)}
                 </span>
                 <span style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
                   vs previous scan ({d.riskScore.previous.toFixed(1)})
@@ -219,7 +219,7 @@ export function RiskMonitoringTab({ d }: RiskMonitoringTabProps) {
       <CISOCard>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
           <SectionTitle>Risk Pillars</SectionTitle>
-          <Tooltip text="Each pillar contributes to the overall AGIRS score. Severity reflects risk level: Healthy (0-20), Moderate (21-40), High (41-70), Critical (71-100).">
+          <Tooltip text="Each pillar contributes to the overall posture score. Severity reflects risk level: Healthy (0-20), Moderate (21-40), High (41-70), Critical (71-100).">
             <span style={{ fontSize: 12, color: COLORS.textDim, cursor: 'help', marginBottom: 16 }}>{'\u24D8'}</span>
           </Tooltip>
         </div>
@@ -417,7 +417,7 @@ export function RiskMonitoringTab({ d }: RiskMonitoringTabProps) {
                   {/* Score gain */}
                   <div style={{ textAlign: 'center' as const, minWidth: 70, flexShrink: 0 }}>
                     <div style={{ fontSize: 18, fontWeight: 700, fontFamily: FONT.mono, color: COLORS.success }}>+{rem.gain}</div>
-                    <div style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>pts gain</div>
+                    <div style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>improvement</div>
                     <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.mono, marginTop: 2 }}>{'\u2192'} {rem.projectedScore}</div>
                   </div>
                 </div>

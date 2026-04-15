@@ -43,8 +43,7 @@ class GhostIdentityDetector:
                 FROM identities i
                 WHERE i.discovery_run_id = %s
                   AND (
-                      i.status IN ('disabled', 'deleted')
-                      OR i.enabled = false
+                      i.enabled = false
                       OR i.deleted_at IS NOT NULL
                   )
                   AND (

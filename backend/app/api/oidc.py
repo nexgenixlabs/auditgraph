@@ -137,7 +137,7 @@ def _verify_id_token(id_token, oidc_config, discovery, expected_nonce=None):
     """Verify and decode an OIDC ID token using JWKS signature verification.
 
     Validates: signature (RS256), issuer, audience, expiration, nonce.
-    Falls back to unverified decode only if JWKS URI is unavailable.
+    Rejects tokens if JWKS URI is unavailable (signature verification is mandatory).
     """
     client_id = oidc_config['oidc_client_id']
     jwks_uri = discovery.get('jwks_uri')
@@ -184,13 +184,9 @@ def _verify_id_token(id_token, oidc_config, discovery, expected_nonce=None):
             # Do NOT fall through — signature verification failure is a hard error
             return None
 
-    # Fallback: no jwks_uri in discovery (rare; some non-standard IdPs)
-    logger.warning("OIDC discovery has no jwks_uri — falling back to unverified decode")
-    try:
-        return pyjwt.decode(id_token, options={"verify_signature": False})
-    except Exception as e:
-        logger.warning("Failed to decode id_token (unverified fallback): %s", e)
-        return None
+    # No jwks_uri — reject entirely. Never disable signature verification.
+    logger.error("OIDC discovery has no jwks_uri — rejecting token (signature verification required)")
+    return None
 
 
 def exchange_oidc_code(oidc_config, code, redirect_uri, expected_nonce=None):

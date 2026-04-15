@@ -7,6 +7,7 @@ import {
   DATA_EXPLANATIONS,
   safeLower,
 } from './types';
+import { TIME_MS } from '../../constants/metrics';
 
 interface CredentialsTabProps {
   identity: IdentityDetailsResponse['identity'];
@@ -57,7 +58,7 @@ export function CredentialsTab({ identity, data }: CredentialsTabProps) {
               <div>
                 <span className={
                   new Date(identity.credential_expiration) < new Date() ? 'text-red-700' :
-                  new Date(identity.credential_expiration) < new Date(Date.now() + 30 * 86400000) ? 'text-orange-700' :
+                  new Date(identity.credential_expiration) < new Date(Date.now() + 30 * TIME_MS.DAY) ? 'text-orange-700' :
                   'text-green-700'
                 }>
                   {formatDate(identity.credential_expiration)}

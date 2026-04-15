@@ -27,6 +27,184 @@ export function fmtPct(value: number): string {
   return `${value}%`;
 }
 
+// ── Posture v3.1 Response Types ──────────────────────────────
+
+export interface PostureV31BlastRadius {
+  identity_id: number;
+  identity_name: string;
+  identity_string_id: string | null;
+  risk_score: number;
+  role_tier: string;
+  scope_string: string;
+  exploitation_text: string;
+  impact_label?: string;
+}
+
+export interface PostureV31AttackPath {
+  identity_id?: number;
+  identity_string_id?: string | null;
+  identity_name: string;
+  actor?: string;
+  role_tier?: string;
+  target?: string;
+  risk_score: number;
+  // Persisted attack path fields
+  id?: number;
+  path_type?: string;
+  severity?: string;
+  description?: string;
+  affected_resource_count?: number;
+  narrative?: string;
+}
+
+export interface PostureV31Coverage {
+  active_sources: number;
+  total_sources: number;
+  sub_count: number;
+  cloud_label: string;
+  confidence_level: 'high' | 'medium' | 'low';
+  coverage_pct: number;
+}
+
+export interface PostureV31PriorityAction {
+  rank: number;
+  action?: string;
+  title?: string;
+  detail?: string;
+  description?: string;
+  impact_description?: string;
+  impact_level?: string;
+  impact_tag?: string;
+  affected_count?: number;
+  affected_identities?: number;
+  total_affected?: number;
+  scope_label?: string;
+  blast_reduction_pct?: number;
+  risk_reduction_pct?: number;
+  compliance_tags?: string[];
+  framework_badges?: string[];
+  is_quick_win?: boolean;
+  execution_safety?: string;
+  safety_color?: string;
+  verb?: string;
+  effort_estimate?: string;
+  route?: string;
+}
+
+export interface PostureV31DriftChange {
+  type: string;
+  count: number;
+}
+
+export interface PostureV31Response {
+  posture_score: number;
+  posture_status: 'STRONG' | 'MODERATE' | 'WEAK';
+  score_delta: number | null;
+  narrative_text: string;
+  top_risk_narrative: string | null;
+  highest_risk_type: string | null;
+  identity_risk: {
+    dormant: number;
+    ghost: number;
+    unowned_nhi: number;
+    machine_pct: number;
+    total: number;
+  };
+  coverage: PostureV31Coverage;
+  blast_radius: PostureV31BlastRadius | null;
+  attack_paths: PostureV31AttackPath[];
+  attack_path_total?: number;
+  attack_path_source_count?: number;
+  scan_metadata: {
+    last_scan_at: string | null;
+    scan_duration_seconds: number | null;
+    scan_count: number;
+    tenant_domain: string | null;
+  };
+  // Full fields (only present with ?include=full)
+  immediate_risks?: Array<{
+    type: string;
+    count: number;
+    severity: string;
+    label: string;
+  }>;
+  if_unaddressed_count?: number;
+  has_overlapping_identities?: boolean;
+  priority_actions?: PostureV31PriorityAction[];
+  anomalies?: Array<{
+    id: number;
+    type: string;
+    severity: string;
+    identity_name: string;
+    identity_id: number | string | null;
+    created_at: string | null;
+  }>;
+  business_impact?: {
+    inactive_admin_count: number;
+    disabled_live_rbac_count: number;
+  };
+  drift?: {
+    has_drift: boolean;
+    total_changes: number;
+    changes: PostureV31DriftChange[];
+    detected_at: string | null;
+  } | null;
+  projected?: {
+    score: number;
+    status: string;
+    at_risk_count: number;
+    score_improvement: number;
+    actions_applied: number;
+    risk_reduction_pct: number;
+  };
+}
+
+// ── Extended VM Sub-Types ─────────────────────────────────────
+
+export interface TrendHistory {
+  available: boolean;
+  runs: string[];            // ISO timestamps
+  posture_scores: number[];  // AGIRS scores per run
+  direction: 'improving' | 'declining' | 'stable' | null;
+  delta_narrative: string;
+}
+
+export interface AnomalySummary {
+  available: boolean;
+  unresolved: number;
+  by_severity: Record<string, number>;
+  top_anomalies: Array<{ type: string; severity: string; identity_name: string; created_at: string }>;
+  narrative: string;
+}
+
+export interface RemediationProgress {
+  available: boolean;
+  open: number;
+  completed: number;
+  total: number;
+  completion_pct: number;
+  narrative: string;
+}
+
+export interface DriftSummary {
+  available: boolean;
+  has_drift: boolean;
+  total_changes: number;
+  permission_changes: number;
+  role_changes: number;
+  credential_changes: number;
+  narrative: string;
+}
+
+export interface SPNExposure {
+  available: boolean;
+  total_custom: number;
+  critical: number;
+  expired_creds: number;
+  orphaned_privileged: number;
+  narrative: string;
+}
+
 // ── Output: What the CISO dashboard renders ──────────────────
 
 export interface CISOViewModel {
@@ -40,7 +218,8 @@ export interface CISOViewModel {
 
   monitored: {
     identities: number;
-    subscriptions: number;
+    subscriptions: number | null;
+    active_subscriptions: number;
   };
 
   /** (critical + high) / total — headline risk metric */
@@ -77,7 +256,7 @@ export interface CISOViewModel {
 
   business_impact: Array<{
     text: string;
-    level: 'red' | 'yellow' | 'green';
+    level: 'red' | 'orange' | 'yellow' | 'green';
   }>;
 
   system_assessment: string;
@@ -89,6 +268,7 @@ export interface CISOViewModel {
 
   last_updated: string;
   data_confidence: 'high' | 'medium' | 'low';
+  coverage_pct: number;
   confidence_reason: string;
   data_origin: 'tenant_scan' | 'no_data' | 'unknown';
 
@@ -97,6 +277,7 @@ export interface CISOViewModel {
     score: number | null;
     tier: string | null;
     nav: string;
+    identities_at_risk: number;
   };
 
   /** Navigation URL for total identities count */
@@ -128,6 +309,14 @@ export interface CISOViewModel {
     /** Pre-populated metadata for drawer (avoids blank name on load). */
     prefill: { display_name?: string; identity_category?: string; risk_level?: string; risk_score?: number };
   }>;
+
+  // ── Extended data (from additional API endpoints) ──
+  trend_history: TrendHistory;
+  anomaly_summary: AnomalySummary;
+  remediation_progress: RemediationProgress;
+  drift_summary: DriftSummary;
+  spn_exposure: SPNExposure;
+  composition_insights: string[];
 }
 
 // ── Risk Driver Definitions ──────────────────────────────────
@@ -151,10 +340,10 @@ const RISK_DRIVER_MAP: Record<string, RiskDriverDef> = {
     nav: '/identities?metric=dormant&pillar=effective-privilege',
   },
   ghost_accounts: {
-    title: 'Ghost Accounts',
+    title: 'Ghost Identities',
     severity: 'critical',
-    narrative: (n, p) => `${n} disabled or deleted account${n !== 1 ? 's' : ''} (${fmtPct(p)}) still hold${n === 1 ? 's' : ''} active RBAC roles — invisible backdoors into your environment.`,
-    action: (n, p) => `Remove all RBAC from ${n} ghost account${n !== 1 ? 's' : ''} (${fmtPct(p)})`,
+    narrative: (n, p) => `${n} disabled or deleted identit${n !== 1 ? 'ies' : 'y'} (${fmtPct(p)}) still hold${n === 1 ? 's' : ''} active RBAC roles — invisible backdoors into your environment.`,
+    action: (n, p) => `Remove all RBAC from ${n} ghost identit${n !== 1 ? 'ies' : 'y'} (${fmtPct(p)})`,
     action_detail: 'Strip role assignments from disabled/deleted identities',
     nav: '/identities?metric=ghost',
   },
@@ -203,7 +392,7 @@ export function buildEmptyCISOViewModel(): CISOViewModel {
     status_reason: 'No identity data available. Connect your Azure tenant and run discovery.',
     trend: null,
     total_identities: 0,
-    monitored: { identities: 0, subscriptions: 0 },
+    monitored: { identities: 0, subscriptions: null, active_subscriptions: 0 },
     risk_exposure: { count: 0, pct: 0, level: 'low', nav: '/identities' },
     top_risk_drivers: [],
     blast_radius: {
@@ -220,12 +409,19 @@ export function buildEmptyCISOViewModel(): CISOViewModel {
     snapshot: { risk_distribution: [], identity_types: [] },
     last_updated: 'Never',
     data_confidence: 'low',
+    coverage_pct: 0,
     confidence_reason: '',
     data_origin: 'no_data',
-    agirs_display: { score: null, tier: null, nav: '/identities' },
+    agirs_display: { score: null, tier: null, nav: '/identities', identities_at_risk: 0 },
     total_identities_nav: '/identities',
     identity_categories: [],
     findings: [],
+    trend_history: { available: false, runs: [], posture_scores: [], direction: null, delta_narrative: '' },
+    anomaly_summary: { available: false, unresolved: 0, by_severity: {}, top_anomalies: [], narrative: '' },
+    remediation_progress: { available: false, open: 0, completed: 0, total: 0, completion_pct: 0, narrative: '' },
+    drift_summary: { available: false, has_drift: false, total_changes: 0, permission_changes: 0, role_changes: 0, credential_changes: 0, narrative: '' },
+    spn_exposure: { available: false, total_custom: 0, critical: 0, expired_creds: 0, orphaned_privileged: 0, narrative: '' },
+    composition_insights: [],
   };
 }
 
@@ -254,7 +450,7 @@ function inferVerdict(identity: Record<string, any>): { verdict: string; variant
 
 function buildFindingSub(identity: Record<string, any>): string {
   const catMap: Record<string, string> = {
-    service_principal: 'SPN', managed_identity_system: 'System MSI',
+    service_principal: 'Service Account', managed_identity_system: 'System MSI',
     managed_identity_user: 'User MSI', human_user: 'Human',
     guest: 'Guest', microsoft_internal: 'Microsoft',
   };
@@ -311,7 +507,7 @@ function buildIdentityCategories(
   if (humanCount > 0) {
     const issues: string[] = [];
     if (rc.dormant_privileged) issues.push(`${rc.dormant_privileged} dormant privileged`);
-    if (rc.ghost_accounts) issues.push(`${rc.ghost_accounts} ghost account${rc.ghost_accounts !== 1 ? 's' : ''}`);
+    if (rc.ghost_accounts) issues.push(`${rc.ghost_accounts} ghost identit${rc.ghost_accounts !== 1 ? 'ies' : 'y'}`);
     if (issues.length === 0) issues.push('No critical issues');
     const crit = (rc.dormant_privileged || 0) + (rc.ghost_accounts || 0);
     cats.push({
@@ -394,7 +590,8 @@ export function buildCISOViewModel(
   vm.total_identities = total;
   vm.total_identities_nav = '/identities';
   vm.monitored.identities = total;
-  vm.monitored.subscriptions = exp.subscriptions || 0;
+  vm.monitored.subscriptions = exp.subscriptions ?? null;
+  vm.monitored.active_subscriptions = exp.active_subscriptions ?? 0;
 
   // ── Confidence + reasoning ──
   const confidence = attackData?.data_integrity?.confidence;
@@ -550,7 +747,8 @@ export function buildCISOViewModel(
   vm.agirs_display = {
     score: riskData?.agirs?.score ?? null,
     tier: riskData?.agirs?.tier ?? null,
-    nav: '/identities',
+    nav: vm.risk_exposure.nav,
+    identities_at_risk: vm.risk_exposure.count,
   };
 
   // ── Identity categories (5 metric cards) ──
@@ -570,7 +768,7 @@ export function buildCISOViewModel(
       blast_color: blast.color,
       blast_label: blast.label,
       action_label: v.action,
-      nav: `/identities/${di.identity_id || di.id}`,
+      nav: di.identity_id || di.id ? `/identities/${di.identity_id || di.id}` : '',
       prefill: {
         display_name: di.display_name || undefined,
         identity_category: di.identity_category || undefined,
@@ -590,13 +788,19 @@ function buildConfidenceReason(vm: CISOViewModel): string {
   const subs = vm.monitored.subscriptions;
   if (total === 0) return 'No identity data ingested — connect a cloud tenant to begin assessment.';
 
+  const subsLabel = subs != null ? `${subs} subscription${subs !== 1 ? 's' : ''}` : null;
+
   if (vm.data_confidence === 'high') {
-    return `Full scan completed across ${total.toLocaleString()} identities and ${subs} subscription${subs !== 1 ? 's' : ''} — all data sources responded.`;
+    return subsLabel
+      ? `Full scan completed across ${total.toLocaleString()} identities and ${subsLabel} — all data sources responded.`
+      : `Full scan completed across ${total.toLocaleString()} identities — all data sources responded.`;
   }
   if (vm.data_confidence === 'medium') {
     return `Partial scan coverage — some data sources may not have responded. ${total.toLocaleString()} identities assessed.`;
   }
-  return `Limited scan data available — results may be incomplete. ${total.toLocaleString()} identities assessed from ${subs} subscription${subs !== 1 ? 's' : ''}.`;
+  return subsLabel
+    ? `Limited scan data available — results may be incomplete. ${total.toLocaleString()} identities assessed from ${subsLabel}.`
+    : `Limited scan data available — results may be incomplete. ${total.toLocaleString()} identities assessed.`;
 }
 
 // ── Finding → Risk Driver Grouping ──────────────────────────
@@ -619,7 +823,7 @@ const FINDING_SEVERITY_ORDER: Record<string, number> = {
 
 const CATEGORY_TITLES: Record<string, string> = {
   high_privilege_identity: 'High Privilege Identity',
-  disabled_account_active_role: 'Ghost Account with Active Roles',
+  disabled_account_active_role: 'Ghost Identity with Active Roles',
   orphaned_spn: 'Orphaned Service Principal',
   dormant_privileged: 'Dormant Privileged Account',
   over_privileged: 'Over-Privileged Identities',
@@ -669,7 +873,7 @@ export function groupFindingsIntoDrivers(findings: Finding[]): RiskDriverGroup[]
 
 const ACTION_TEMPLATES: Record<string, (n: number) => string> = {
   dormant_privileged:          (n) => `Review ${n} dormant privileged account${n !== 1 ? 's' : ''}`,
-  ghost_accounts:              (n) => `Remove roles from ${n} ghost account${n !== 1 ? 's' : ''}`,
+  ghost_accounts:              (n) => `Remove roles from ${n} ghost identit${n !== 1 ? 'ies' : 'y'}`,
   disabled_account_active_role:(n) => `Remove roles from ${n} disabled account${n !== 1 ? 's' : ''}`,
   orphaned_spn:                (n) => `Assign owners to ${n} orphaned service principal${n !== 1 ? 's' : ''}`,
   over_privileged:             (n) => `Remove unused roles from ${n} identit${n !== 1 ? 'ies' : 'y'}`,
@@ -760,9 +964,9 @@ function buildConsequences(
 ): string[] {
   const lines: string[] = [];
 
-  const subs = top.subscription_count || 0;
-  const totalSubs = exposure.subscriptions || 0;
-  if (subs > 0) {
+  const subs = top.subscription_count ?? 0;
+  const totalSubs = exposure.subscriptions ?? 0;
+  if (subs > 0 && totalSubs > 0) {
     lines.push(`Control ${subs} of ${totalSubs} Azure subscription${totalSubs !== 1 ? 's' : ''}`);
   }
 
@@ -832,54 +1036,318 @@ function buildSystemAssessment(vm: CISOViewModel): string {
 
 // ── Business Impact Builder ─────────────────────────────────
 
+/** Driver title → concrete business risk phrase (no jargon, no percentages). */
+const DRIVER_IMPACT: Record<string, (n: number) => string> = {
+  'Dormant Privileged Accounts': n => `${n} unused account${n !== 1 ? 's' : ''} retain admin access`,
+  'Ghost Identities': n => `${n} disabled identit${n !== 1 ? 'ies' : 'y'} still have live access`,
+  'Unowned Service Principals': n => `${n} service account${n !== 1 ? 's' : ''} operate without oversight`,
+  'Excess Privilege': n => `${n} identit${n !== 1 ? 'ies' : 'y'} can modify production resources`,
+  'External Guest Privilege': n => `${n} external user${n !== 1 ? 's' : ''} hold privileged access`,
+};
+
+const IMPACT_SEVERITY_ORDER: Record<string, number> = { red: 0, orange: 1, yellow: 2, green: 3 };
+
 function buildBusinessImpact(
   vm: CISOViewModel,
   exposure: Record<string, any>,
 ): CISOViewModel['business_impact'] {
   const lines: CISOViewModel['business_impact'] = [];
-  const total = vm.total_identities;
 
-  // 1. Overall posture with exposure rate
-  if (vm.status === 'critical' || vm.status === 'high') {
+  // 1. Sensitive data access — Key Vaults + optional storage enrichment
+  const kvs = exposure.key_vaults || 0;
+  const sa = exposure.storage_accounts || 0;
+  if (kvs > 0 && vm.risk_exposure.count > 0) {
+    const suffix = sa > 0 ? ', including production data' : '';
     lines.push({
-      text: `${fmtPct(vm.risk_exposure.pct)} of your identity estate (${vm.risk_exposure.count} of ${total.toLocaleString()}) has critical or high-risk exposures that could be exploited in a breach.`,
-      level: 'red',
-    });
-  } else if (total > 0) {
-    lines.push({
-      text: `Identity exposure rate is ${fmtPct(vm.risk_exposure.pct)} across ${total.toLocaleString()} monitored identities — ${vm.status === 'low' ? 'well within acceptable thresholds' : 'within acceptable range but monitoring recommended'}.`,
-      level: vm.status === 'low' ? 'green' : 'yellow',
-    });
-  }
-
-  // 2. Most dangerous driver with percentage
-  const criticalDrivers = vm.top_risk_drivers.filter(d => d.severity === 'critical');
-  if (criticalDrivers.length > 0) {
-    const d = criticalDrivers[0];
-    lines.push({
-      text: `${d.count} identities (${fmtPct(d.pct)}) classified as ${d.title.toLowerCase()} — ${d.severity} severity.`,
+      text: `${vm.risk_exposure.count} identit${vm.risk_exposure.count !== 1 ? 'ies' : 'y'} can access sensitive data${suffix}`,
       level: 'red',
     });
   }
 
-  // 3. Blast radius as business consequence
-  if (vm.blast_radius.identity_name && vm.blast_radius.consequences.length > 0) {
-    const subs = exposure.subscriptions || 0;
-    const name = vm.blast_radius.identity_name;
-    const text = subs > 1
-      ? `A single compromised identity (${name}) could provide access across ${subs} Azure subscriptions — enough to disrupt production workloads.`
-      : `If ${name} is compromised, an attacker could ${vm.blast_radius.consequences[0].charAt(0).toLowerCase()}${vm.blast_radius.consequences[0].slice(1)}.`;
-    lines.push({ text, level: vm.blast_radius.level === 'critical' ? 'red' : 'yellow' });
+  // 2. Top risk drivers → concrete business impact lines
+  for (const d of vm.top_risk_drivers) {
+    const fmt = DRIVER_IMPACT[d.title];
+    if (fmt) {
+      lines.push({
+        text: fmt(d.count),
+        level: d.severity === 'critical' ? 'red' : 'orange',
+      });
+    }
   }
 
-  // 4. External/guest exposure with percentage
-  const guestDriver = vm.top_risk_drivers.find(d => d.title === 'External Guest Privilege');
-  if (guestDriver) {
+  // 3. Blast radius — subscription-level resource control
+  const subs = exposure.subscriptions ?? 0;
+  if (vm.blast_radius.identity_name && subs > 0 && !lines.some(l => l.text.includes('production'))) {
     lines.push({
-      text: `${guestDriver.count} external guests (${fmtPct(guestDriver.pct)}) hold privileged access — a supply-chain risk if their accounts are compromised.`,
-      level: 'yellow',
+      text: `1 compromised identity could reach ${subs} subscription${subs !== 1 ? 's' : ''}`,
+      level: vm.blast_radius.level === 'critical' ? 'red' : 'orange',
     });
   }
+
+  // 4. Fallback — no drivers, no exposure
+  if (lines.length === 0 && vm.total_identities > 0) {
+    lines.push({
+      text: `${vm.total_identities.toLocaleString()} identities monitored, no business risk detected`,
+      level: 'green',
+    });
+  }
+
+  // Sort: highest severity first
+  lines.sort((a, b) => (IMPACT_SEVERITY_ORDER[a.level] ?? 9) - (IMPACT_SEVERITY_ORDER[b.level] ?? 9));
 
   return lines.slice(0, 4);
+}
+
+// ── Extended VM Builder ──────────────────────────────────────
+
+function buildTrendHistory(trendsData: Record<string, any> | null): TrendHistory {
+  if (!trendsData || !trendsData.runs || !Array.isArray(trendsData.runs)) {
+    return { available: false, runs: [], posture_scores: [], direction: null, delta_narrative: 'Run a second scan to see trends.' };
+  }
+  const runs: Array<Record<string, any>> = trendsData.runs;
+  if (runs.length < 2) {
+    return { available: false, runs: [], posture_scores: [], direction: null, delta_narrative: 'Run a second scan to see trends.' };
+  }
+  const timestamps = runs.map((r: Record<string, any>) => r.completed_at || r.created_at || '');
+  const scores = runs.map((r: Record<string, any>) => r.posture_score ?? r.agirs_score ?? 0);
+  const first = scores[0];
+  const last = scores[scores.length - 1];
+  const diff = last - first;
+  const direction: TrendHistory['direction'] = diff > 1 ? 'improving' : diff < -1 ? 'declining' : 'stable';
+  const absDiff = Math.abs(diff).toFixed(1);
+  const narrative = direction === 'improving'
+    ? `Posture improved ${absDiff} pts over last ${scores.length} scans`
+    : direction === 'declining'
+    ? `Posture declined ${absDiff} pts over last ${scores.length} scans`
+    : `Posture stable across last ${scores.length} scans`;
+  return { available: true, runs: timestamps, posture_scores: scores, direction, delta_narrative: narrative };
+}
+
+function buildAnomalySummary(
+  anomaliesData: Array<Record<string, any>> | null,
+  anomalyStatsData: Record<string, any> | null,
+): AnomalySummary {
+  if (!anomalyStatsData && (!anomaliesData || anomaliesData.length === 0)) {
+    return { available: false, unresolved: 0, by_severity: {}, top_anomalies: [], narrative: 'No anomaly data available.' };
+  }
+  const unresolved = anomalyStatsData?.unresolved ?? anomalyStatsData?.total ?? 0;
+  const bySeverity: Record<string, number> = anomalyStatsData?.by_severity || {};
+  const topAnomalies = (anomaliesData || []).slice(0, 3).map((a: Record<string, any>) => ({
+    type: a.type || a.anomaly_type || 'unknown',
+    severity: a.severity || 'medium',
+    identity_name: a.identity_name || a.display_name || 'Unknown',
+    created_at: a.created_at || '',
+  }));
+  const critCount = bySeverity.critical || 0;
+  const highCount = bySeverity.high || 0;
+  const narrative = unresolved === 0
+    ? 'No unresolved anomalies detected.'
+    : critCount > 0
+    ? `${unresolved} unresolved anomalies including ${critCount} critical — immediate investigation required.`
+    : highCount > 0
+    ? `${unresolved} unresolved anomalies with ${highCount} high-severity — review recommended.`
+    : `${unresolved} unresolved anomalies detected.`;
+  return { available: true, unresolved, by_severity: bySeverity, top_anomalies: topAnomalies, narrative };
+}
+
+function buildRemediationProgress(remediationData: Record<string, any> | null): RemediationProgress {
+  if (!remediationData) {
+    return { available: false, open: 0, completed: 0, total: 0, completion_pct: 0, narrative: 'No remediation data available.' };
+  }
+  const open = remediationData.open ?? remediationData.pending ?? 0;
+  const completed = remediationData.completed ?? remediationData.resolved ?? 0;
+  const total = remediationData.total ?? (open + completed);
+  const completionPct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const narrative = total === 0
+    ? 'No remediation items tracked.'
+    : completionPct >= 80
+    ? `${completionPct}% of remediations completed — strong progress.`
+    : completionPct >= 50
+    ? `${completionPct}% complete — ${open} actions remain open.`
+    : `${open} of ${total} remediation actions remain open — prioritize top items.`;
+  return { available: true, open, completed, total, completion_pct: completionPct, narrative };
+}
+
+function buildDriftSummary(driftData: Record<string, any> | null): DriftSummary {
+  if (!driftData || (!driftData.total_changes && !driftData.changes)) {
+    return { available: false, has_drift: false, total_changes: 0, permission_changes: 0, role_changes: 0, credential_changes: 0, narrative: 'No drift data available — run a scan to establish baseline.' };
+  }
+  const totalChanges = driftData.total_changes || 0;
+  const permChanges = driftData.permission_changes ?? driftData.permissions_changed ?? 0;
+  const roleChanges = driftData.role_changes ?? driftData.roles_changed ?? 0;
+  const credChanges = driftData.credential_changes ?? driftData.credentials_changed ?? 0;
+  const hasDrift = totalChanges > 0;
+  const narrative = !hasDrift
+    ? 'No drift detected since last scan — environment is stable.'
+    : totalChanges > 10
+    ? `${totalChanges} changes detected — significant drift requiring review.`
+    : `${totalChanges} change${totalChanges !== 1 ? 's' : ''} detected since last scan.`;
+  return { available: true, has_drift: hasDrift, total_changes: totalChanges, permission_changes: permChanges, role_changes: roleChanges, credential_changes: credChanges, narrative };
+}
+
+function buildSPNExposure(spnData: Record<string, any> | null): SPNExposure {
+  if (!spnData) {
+    return { available: false, total_custom: 0, critical: 0, expired_creds: 0, orphaned_privileged: 0, narrative: '' };
+  }
+  const totalCustom = spnData.total_custom ?? spnData.total ?? 0;
+  const critical = spnData.critical ?? spnData.critical_count ?? 0;
+  const expiredCreds = spnData.expired_credentials ?? spnData.expired_creds ?? 0;
+  const orphaned = spnData.orphaned_privileged ?? spnData.high_blast_radius ?? 0;
+  const narrative = critical > 0
+    ? `${critical} critical SPNs with expired or at-risk credentials — immediate rotation needed.`
+    : expiredCreds > 0
+    ? `${expiredCreds} service principals have expired credentials.`
+    : totalCustom > 0
+    ? `${totalCustom} custom service principals monitored — no critical issues.`
+    : '';
+  return { available: totalCustom > 0, total_custom: totalCustom, critical, expired_creds: expiredCreds, orphaned_privileged: orphaned, narrative };
+}
+
+function buildCompositionInsights(vm: CISOViewModel): string[] {
+  const insights: string[] = [];
+  const cats = vm.identity_categories;
+  const total = vm.total_identities;
+  if (total === 0) return insights;
+
+  const nhiCats = cats.filter(c => ['Non-Human / SPNs', 'System MSIs', 'User-Assigned MSIs'].includes(c.label));
+  const nhiCount = nhiCats.reduce((s, c) => s + c.count, 0);
+  const humanCat = cats.find(c => c.label === 'Human Identities');
+  const guestCat = cats.find(c => c.label === 'Guest Users');
+
+  if (nhiCount > 0 && humanCat && nhiCount > humanCat.count) {
+    insights.push(`Non-human identities outnumber humans ${nhiCount} to ${humanCat.count} — machine identity governance is critical.`);
+  }
+  if (guestCat && guestCat.pct > 10) {
+    insights.push(`${fmtPct(guestCat.pct)} of identities are external guests — review supply-chain exposure.`);
+  }
+  const critDrivers = vm.top_risk_drivers.filter(d => d.severity === 'critical');
+  if (critDrivers.length >= 2) {
+    insights.push(`${critDrivers.length} critical risk categories active simultaneously — compound risk scenario.`);
+  }
+  return insights;
+}
+
+/**
+ * Extends the base CISO view model with data from additional API endpoints.
+ * Each builder handles null gracefully — a failing endpoint never blocks the page.
+ */
+export function buildExtendedCISOViewModel(
+  riskData: Record<string, any> | null,
+  attackData: Record<string, any> | null,
+  trendsData: Record<string, any> | null,
+  anomaliesData: Array<Record<string, any>> | null,
+  anomalyStatsData: Record<string, any> | null,
+  remediationData: Record<string, any> | null,
+  driftData: Record<string, any> | null,
+  spnData: Record<string, any> | null,
+): CISOViewModel {
+  const vm = buildCISOViewModel(riskData, attackData);
+  vm.trend_history = buildTrendHistory(trendsData);
+  vm.anomaly_summary = buildAnomalySummary(anomaliesData, anomalyStatsData);
+  vm.remediation_progress = buildRemediationProgress(remediationData);
+  vm.drift_summary = buildDriftSummary(driftData);
+  vm.spn_exposure = buildSPNExposure(spnData);
+  vm.composition_insights = buildCompositionInsights(vm);
+  return vm;
+}
+
+/**
+ * Map the /api/ciso/summary response into a CISOViewModel.
+ *
+ * The backend provides `riskSummary` (structured risk data contract)
+ * plus secondary data sources (trends, anomalies, remediation, drift, spn).
+ *
+ * This function delegates to buildExtendedCISOViewModel — a pure
+ * transformation layer that generates display narratives and metrics.
+ * No API calls, no side effects.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function mapSummaryToViewModel(response: any): CISOViewModel {
+  // Debug: log raw API response (kept for SSOT tracing)
+  console.log('CISO SUMMARY RESPONSE:', response);
+
+  const data = response.data || {};
+  const { riskSummary, trends, anomalies, remediation, drift, spn } = data;
+
+  // SSOT: validate required fields from backend
+  const exposureSubs = riskSummary?.exposure?.subscriptions;
+  const exposureActiveSubs = riskSummary?.exposure?.active_subscriptions;
+  if (exposureSubs === undefined) {
+    console.error('SSOT violation: exposure.subscriptions missing from backend response');
+  }
+  console.log('CISO subscriptions mapping:', {
+    'exposure.subscriptions': exposureSubs,
+    'exposure.active_subscriptions': exposureActiveSubs,
+  });
+
+  // riskSummary is the typed risk data contract from the backend
+  const riskData = riskSummary ?? null;
+
+  const trendsData = trends?.available
+    ? { count: trends.runs?.length ?? 0, runs: (trends.runs ?? []).map((date: string, i: number) => ({
+        date,
+        posture_score: trends.postureScores?.[i] ?? 0,
+      }))}
+    : null;
+
+  const anomaliesData = anomalies?.topAnomalies ?? null;
+  const anomalyStatsData = anomalies?.available
+    ? { unresolved: anomalies.unresolved, by_severity: anomalies.bySeverity }
+    : null;
+
+  const remediationMapped = remediation?.available
+    ? { open: remediation.open, completed: remediation.completed, total: remediation.total, completion_pct: remediation.completionPct }
+    : null;
+
+  const driftMapped = drift?.available
+    ? { total_changes: drift.totalChanges, permission_changes_count: drift.permissionChanges,
+        risk_changes_count: drift.roleChanges, credential_changes_count: drift.credentialChanges,
+        has_drift_data: true }
+    : null;
+
+  const spnMapped = spn?.available
+    ? { custom: spn.totalCustom, critical: spn.critical, expired_credentials: spn.expiredCreds,
+        orphaned_privileged: spn.orphanedPrivileged }
+    : null;
+
+  const vm = buildExtendedCISOViewModel(
+    riskData, null, trendsData,
+    anomaliesData, anomalyStatsData,
+    remediationMapped, driftMapped, spnMapped,
+  );
+
+  // ── SSOT overrides from envelope (these fields come from the envelope,
+  //    not from attackData which is null in the /api/ciso/summary path) ──
+  vm.coverage_pct = response.coverage ?? 0;
+
+  // last_updated: prefer envelope lastUpdated → riskSummary computed_at → keep default
+  // Guard: reject empty strings, Python str(None)="None", and "null"
+  const INVALID_TIMESTAMPS = new Set(['', 'None', 'null', 'undefined']);
+  const envelopeLastUpdated = response.lastUpdated;
+  const riskComputedAt = riskSummary?.computed_at;
+  const lastScanRaw = (envelopeLastUpdated && !INVALID_TIMESTAMPS.has(envelopeLastUpdated))
+    ? envelopeLastUpdated
+    : (riskComputedAt && !INVALID_TIMESTAMPS.has(riskComputedAt))
+      ? riskComputedAt
+      : null;
+  console.log('CISO lastUpdated resolution:', {
+    envelopeLastUpdated, riskComputedAt, lastScanRaw,
+  });
+  if (lastScanRaw) {
+    const parsed = formatRelativeTime(lastScanRaw);
+    if (parsed !== 'Never') {
+      vm.last_updated = parsed;
+    } else {
+      console.warn('CISO: formatRelativeTime returned "Never" for raw:', lastScanRaw);
+    }
+  }
+
+  // data_confidence: envelope confidence is authoritative (computed from usable sources)
+  const envConfidence = response.confidence;
+  if (envConfidence === 'high' || envConfidence === 'medium' || envConfidence === 'low') {
+    vm.data_confidence = envConfidence;
+    vm.confidence_reason = buildConfidenceReason(vm);
+  }
+
+  return vm;
 }

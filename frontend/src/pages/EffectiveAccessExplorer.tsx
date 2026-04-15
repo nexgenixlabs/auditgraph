@@ -13,6 +13,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -142,7 +143,7 @@ export default function EffectiveAccessExplorer() {
         <div style={{ background: G.surface, border: `1px solid ${G.surfaceBorder}`, borderRadius: 12, padding: '20px 28px', textAlign: 'center' }}>
           <div style={{ fontSize: 40, fontWeight: 700, fontFamily: G.mono, color: gradeColor(data.grade) }}>{data.grade}</div>
           <div style={{ fontSize: 12, color: G.textSecondary, marginTop: 4 }}>Hygiene Grade</div>
-          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: G.mono, color: G.text, marginTop: 8 }}>{data.overall_score}/100</div>
+          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: G.mono, color: G.text, marginTop: 8 }}>{normalizeScore(data.overall_score, 10).toFixed(1)}/10</div>
           <div style={{ fontSize: 11, color: G.textMuted }}>{data.total_identities} identities · {data.total_findings} findings</div>
         </div>
 

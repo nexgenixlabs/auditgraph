@@ -9,6 +9,7 @@ import {
   type CloudConfig,
 } from '../../constants/pricing';
 import { api, ApiError } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface Tenant {
   id: number;
@@ -99,7 +100,7 @@ function formatDate(iso: string | null): string {
 function licenseStatus(t: Tenant): { label: string; color: string } {
   if (!t.license_activated_at) return { label: 'Not Activated', color: 'text-gray-400' };
   if (t.license_expires_at) {
-    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
+    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / TIME_MS.DAY);
     if (days < 0) return { label: 'Expired', color: 'text-red-600' };
     if (days < 30) return { label: `${days}d left`, color: 'text-yellow-600' };
   }

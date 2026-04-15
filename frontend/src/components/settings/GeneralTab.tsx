@@ -1,6 +1,7 @@
 import React from 'react';
 import { ACCOUNT_TIER_LABELS, getTermLabel, getTermDiscount } from '../../constants/pricing';
 import type { SettingsData } from './types';
+import { TIME_MS } from '../../constants/metrics';
 
 export interface GeneralTabProps {
   settings: SettingsData;
@@ -184,7 +185,7 @@ export function GeneralTab({
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Expires</div>
                 <div className={`text-sm font-semibold ${
                   currentOrg.license_expires_at
-                    ? (new Date(currentOrg.license_expires_at).getTime() - Date.now()) / 86400000 < 30
+                    ? (new Date(currentOrg.license_expires_at).getTime() - Date.now()) / TIME_MS.DAY < 30
                       ? 'text-yellow-600'
                       : (new Date(currentOrg.license_expires_at).getTime() - Date.now()) < 0
                         ? 'text-red-600'

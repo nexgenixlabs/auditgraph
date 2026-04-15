@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../services/apiClient';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { TIME_MS } from '../constants/metrics';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ function timeAgo(dateStr: string | null): string {
   if (!dateStr) return 'Never';
   const now = new Date();
   const date = new Date(dateStr);
-  const hours = Math.floor((now.getTime() - date.getTime()) / 3600000);
+  const hours = Math.floor((now.getTime() - date.getTime()) / TIME_MS.HOUR);
   if (hours < 1) return 'Just now';
   if (hours < 24) return `${hours}h ago`;
   if (hours < 72) return `${Math.floor(hours / 24)}d ago`;
@@ -57,7 +58,7 @@ function timeAgo(dateStr: string | null): string {
 
 function freshnessColor(dateStr: string | null): string {
   if (!dateStr) return 'text-gray-400';
-  const hours = (Date.now() - new Date(dateStr).getTime()) / 3600000;
+  const hours = (Date.now() - new Date(dateStr).getTime()) / TIME_MS.HOUR;
   if (hours < 24) return 'text-green-600';
   if (hours < 72) return 'text-yellow-600';
   return 'text-red-600';

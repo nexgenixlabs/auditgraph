@@ -7,6 +7,7 @@
  */
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { TIME_MS } from '../constants/metrics';
 
 // Extend jsPDF type for autotable
 declare module 'jspdf' {
@@ -169,7 +170,7 @@ function categoryLabel(cat: string): string {
 
 function daysUntilStr(iso: string | null): string {
   if (!iso) return 'N/A';
-  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / TIME_MS.DAY);
   if (d < 0) return `${Math.abs(d)}d ago`;
   if (d === 0) return 'Today';
   return `${d}d`;

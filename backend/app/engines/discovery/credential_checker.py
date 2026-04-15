@@ -161,5 +161,5 @@ class CredentialChecker:
                 return datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
             else:
                 return datetime.strptime(dt_string.replace('Z', ''), '%Y-%m-%dT%H:%M:%S')
-        except:
+        except Exception:
             return None

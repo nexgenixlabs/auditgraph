@@ -51,7 +51,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
               <span style={{ fontSize: 14, color: trendColor }}>{trendArrow}</span>
               <span style={{ fontSize: 10, fontWeight: 600, fontFamily: FONT.ui, color: trendColor, textTransform: 'capitalize' as const }}>{trendDir}</span>
-              <Tooltip text="Trend direction based on the last 3 snapshots. Improving means the AGIRS score is increasing (better posture). Declining means the score is dropping (worsening posture).">
+              <Tooltip text="Trend direction based on the last 3 snapshots. Improving means the posture score is increasing (better posture). Declining means the score is dropping (worsening posture).">
                 <span style={{ fontSize: 10, color: COLORS.textDim, cursor: 'help' }}>{'\u24D8'}</span>
               </Tooltip>
             </div>
@@ -90,7 +90,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
         <CISOCard>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
             <SectionTitle>Risk Movement</SectionTitle>
-            <Tooltip text="Compares identity risk metrics between the current and previous snapshots. Upward arrows indicate worsening risk (more critical identities, ghost accounts, etc.). Downward arrows indicate improvement.">
+            <Tooltip text="Compares identity risk metrics between the current and previous snapshots. Upward arrows indicate worsening risk (more critical identities, ghost identities, etc.). Downward arrows indicate improvement.">
               <span style={{ fontSize: 12, color: COLORS.textDim, cursor: 'help', marginBottom: 16 }}>{'\u24D8'}</span>
             </Tooltip>
           </div>
@@ -100,7 +100,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
               {(() => {
                 const chNav = ch.label === 'Critical Identities' ? '/identities?risk_level=critical' :
                   ch.label === 'High-Risk Identities' ? '/identities?risk_level=high' :
-                  ch.label === 'Ghost Accounts' ? '/identities?status=disabled&hasRoles=true' :
+                  ch.label === 'Ghost Identities' ? '/identities?status=disabled&hasRoles=true' :
                   ch.label === 'Zombie Personas' ? '/identity-correlation' :
                   ch.label === 'New Identities' ? '/identities' :
                   ch.label === 'Removed' ? '/identities?status=disabled' :
@@ -148,7 +148,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
               <DN navigateTo="/drift">
                 <span style={{ fontSize: 22, fontWeight: 700, fontFamily: FONT.mono, color: d.riskMovement.mostChanged.score === 0 ? COLORS.textMuted : COLORS.danger }}>{d.riskMovement.mostChanged.score}</span>
               </DN>
-              <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>/100 risk score</span>
+              <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>/10 risk score</span>
             </div>
             {d.riskMovement.mostChanged.score > 0 && (
               <div style={{
@@ -226,7 +226,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
         const changeMap: Record<string, { display: string; nav: string; riskDir: 'increase' | 'decrease' }> = {
           'Critical Identities': { display: 'New critical-risk identities', nav: '/identities?risk_level=critical', riskDir: 'increase' },
           'High-Risk Identities': { display: 'New high-risk identities', nav: '/identities?risk_level=high', riskDir: 'increase' },
-          'Ghost Accounts': { display: 'New ghost accounts (disabled + active roles)', nav: '/identities?agirs_factor=h1_ghost&show_deleted=true', riskDir: 'increase' },
+          'Ghost Identities': { display: 'New ghost identities (disabled + active roles)', nav: '/identities?agirs_factor=h1_ghost&show_deleted=true', riskDir: 'increase' },
           'Zombie Personas': { display: 'New zombie personas', nav: '/identity-correlation', riskDir: 'increase' },
           'New Identities': { display: 'New identities provisioned', nav: '/identities', riskDir: 'increase' },
           'Removed': { display: 'Identities removed / disabled', nav: '/identities?status=disabled', riskDir: 'decrease' },

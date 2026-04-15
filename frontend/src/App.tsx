@@ -336,7 +336,8 @@ function AppContent() {
                   {/* Legacy redirects for consolidated routes */}
                   <Route path="/rbac-hygiene" element={<Navigate to="/effective-access" replace />} />
                   <Route path="/data-security" element={<Navigate to="/sensitive-access" replace />} />
-                  <Route path="/subscriptions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Subscriptions /></ErrorBoundary>} />
+                  {/* Subscriptions must be accessible during onboarding (before first snapshot) */}
+                  <Route path="/subscriptions" element={<ErrorBoundary><Subscriptions /></ErrorBoundary>} />
                   <Route path="/billing" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ClientBilling /></ErrorBoundary>} />
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">

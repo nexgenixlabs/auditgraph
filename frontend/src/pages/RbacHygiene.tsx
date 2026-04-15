@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -702,7 +703,7 @@ export default function RbacHygiene() {
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                 <span style={{ fontSize: 11, color: G.textMuted, textTransform: 'uppercase' }}>Assignment Risk</span>
                 <span style={{ fontFamily: G.mono, fontSize: 13, fontWeight: 700, color: G.severity[selectedFinding.risk_level] }}>
-                  {selectedFinding.risk_score}/100
+                  {normalizeScore(selectedFinding.risk_score, 10).toFixed(1)}/10
                 </span>
               </div>
               <div style={{ height: 6, background: G.surfaceHover, borderRadius: 3, overflow: 'hidden' }}>

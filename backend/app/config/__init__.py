@@ -44,7 +44,7 @@ _ENV_FILE_MAP = {
     # prod: no file — env vars come from the container runtime
 }
 
-_backend_dir = Path(__file__).resolve().parent.parent  # backend/
+_backend_dir = Path(__file__).resolve().parent.parent.parent  # backend/
 _env_file = _ENV_FILE_MAP.get(APP_ENV)
 if _env_file:
     _env_path = _backend_dir / _env_file

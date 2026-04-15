@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getTermLabel } from '../../constants/pricing';
 import { api } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface TenantMetric {
   id: number;
@@ -49,7 +50,7 @@ function fmtDateTime(d: string | null): string {
 
 function expiryColor(expiresAt: string | null): string {
   if (!expiresAt) return 'text-gray-400';
-  const days = (new Date(expiresAt).getTime() - Date.now()) / 86400000;
+  const days = (new Date(expiresAt).getTime() - Date.now()) / TIME_MS.DAY;
   if (days < 0) return 'text-red-600';
   if (days < 30) return 'text-yellow-600';
   return 'text-gray-600';

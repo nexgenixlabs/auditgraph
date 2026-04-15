@@ -171,7 +171,7 @@ function useComplianceData(): { data: TenantData; loading: boolean } {
           ];
         }
 
-        // ── Ghost Accounts ──
+        // ── Ghost Identities ──
         const ghostTotal = attack?.ghost_count || 0;
         d.ghostAccounts.total = ghostTotal;
 
@@ -291,7 +291,7 @@ const GOV_METRIC_TOOLTIPS: Record<string, string> = {
   'Ownership Coverage': 'Percentage of service principals with a designated owner.',
   'PIM Enforcement': 'Percentage of privileged roles protected by PIM (just-in-time activation).',
   'Access Reviews': 'Completion of periodic access certifications for privileged identities.',
-  'Privileged Monitoring': 'Coverage of privileged identity monitoring via P2 telemetry.',
+  'Privileged Monitoring': 'Coverage of privileged identity activity monitoring.',
 };
 
 // ─── Main Component ────────────────────────────────────

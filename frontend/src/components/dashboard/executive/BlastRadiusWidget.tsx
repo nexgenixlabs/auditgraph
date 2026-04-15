@@ -108,10 +108,15 @@ export function BlastRadiusWidget({ identities, blastRadius, subscriptionCount }
           return (
             <div
               key={id.id}
-              onClick={() => drawerCtx?.openIdentity(id.identity_id || id.id, {
-                display_name: id.display_name,
-                identity_category: id.identity_category,
-              })}
+              onClick={() => {
+                const resolvedId = id.identity_id || id.id;
+                if (resolvedId != null && resolvedId !== undefined) {
+                  drawerCtx?.openIdentity(resolvedId, {
+                    display_name: id.display_name,
+                    identity_category: id.identity_category,
+                  });
+                }
+              }}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
                 padding: '10px', borderRadius: 6, cursor: 'pointer',

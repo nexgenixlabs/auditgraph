@@ -12,6 +12,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Theme-aware constants ───
 const G = {
@@ -145,7 +146,7 @@ export default function SensitiveDataAccess() {
         <div style={{ background: G.surface, border: `1px solid ${G.surfaceBorder}`, borderRadius: 12, padding: '20px 28px', textAlign: 'center' }}>
           <div style={{ fontSize: 40, fontWeight: 700, fontFamily: G.mono, color: gradeColor(data.overall_grade) }}>{data.overall_grade}</div>
           <div style={{ fontSize: 12, color: G.textSecondary, marginTop: 4 }}>Security Grade</div>
-          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: G.mono, color: G.text, marginTop: 8 }}>{data.overall_score}/100</div>
+          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: G.mono, color: G.text, marginTop: 8 }}>{normalizeScore(data.overall_score, 10).toFixed(1)}/10</div>
           <div style={{ fontSize: 11, color: G.textMuted }}>{data.total_resources} resources · {data.total_findings} findings</div>
         </div>
 

@@ -8,6 +8,7 @@ import {
   type IdentityCategory, type RiskLevel,
   RISK_BADGE, DATA_EXPLANATIONS,
   safeLower, normalizeCategoryFromBackend, getCategoryLabel,
+  TIME_MS,
 } from '../constants/metrics';
 import OverviewTab from '../components/identity-detail/OverviewTab';
 import { RolesTab } from '../components/identity-detail/RolesTab';
@@ -137,7 +138,6 @@ interface EffectiveAccessEntry {
   resource_type: string | null;
   risk_level: string;
   assigned_on: string | null;
-  usage_status: string;
   permissions: string[];
   why_critical: string | null;
 }
@@ -792,24 +792,19 @@ export default function IdentityDetail() {
                       NEW
                     </span>
                   )}
-                  {data?.trend?.risk_direction === 'worsened' && (
+                  {data?.trend?.risk_direction === 'worsened' && (data?.trend as any)?.score_delta_valid !== false && (
                     <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200" title={`Was ${data.trend.previous_risk_level || 'lower'} in previous snapshot`}>
                       ↑ WORSENED
                     </span>
                   )}
-                  {data?.trend?.risk_direction === 'improved' && (
+                  {data?.trend?.risk_direction === 'improved' && (data?.trend as any)?.score_delta_valid !== false && (
                     <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200" title={`Was ${data.trend.previous_risk_level || 'higher'} in previous snapshot`}>
                       ↓ IMPROVED
                     </span>
                   )}
                   {identity.risk_score !== undefined && (
                     <span className="px-2 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">
-                      {identity.risk_score} pts
-                      {data?.trend?.previous_risk_score != null && data.trend.risk_direction !== 'new' && (
-                        <span className="ml-1 opacity-70">
-                          (was {data.trend.previous_risk_score})
-                        </span>
-                      )}
+                      {((identity as any).risk_label || identity.risk_level || 'unknown').toUpperCase()}
                     </span>
                   )}
                   {(() => {
@@ -855,38 +850,42 @@ export default function IdentityDetail() {
                 <div className="text-gray-500">Last Used</div>
                 <div className="font-medium">
                   {(() => {
-                    // Demo safety: connector is always active
+                    // Canonical state from build_identity_state()
+                    const activityLabel = (identity as any).activity_label;
+                    const lastSeenDisplay = (identity as any).last_seen_display;
+                    const lastSeenSource = (identity as any).last_seen_source;
+                    const lastSeenAvailable = (identity as any).last_seen_available;
+                    const authActivity = (identity as any).auth_activity;
+
+                    if (lastSeenAvailable && lastSeenDisplay) {
+                      // Determine source badge
+                      let srcBadge: React.ReactNode = null;
+                      if (authActivity?.interactive_signin) {
+                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Sign-in</span>;
+                      } else if (authActivity?.arm_activity) {
+                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">ARM</span>;
+                      } else if (lastSeenSource) {
+                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-gray-100 text-gray-600">{lastSeenSource}</span>;
+                      }
+                      return (
+                        <span className="text-gray-900 inline-flex items-center gap-1">
+                          {lastSeenDisplay}
+                          {srcBadge}
+                        </span>
+                      );
+                    }
+
+                    // Legacy fallback
                     const isConnector = !!identity.is_discovery_connector;
                     const elu = isConnector
                       ? (identity.effective_last_used || new Date().toISOString())
                       : identity.effective_last_used;
-                    const eluSrc = isConnector
-                      ? (identity.effective_last_used_source || 'auditgraph')
-                      : identity.effective_last_used_source;
-
                     if (elu) {
-                      // Inferred federated: show "Likely active" instead of days ago
-                      if (eluSrc === 'inferred_federated') {
-                        return (
-                          <span className="text-gray-900 inline-flex items-center gap-1">
-                            Likely active
-                            <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-purple-100 text-purple-700">Inferred</span>
-                          </span>
-                        );
-                      }
                       const d = new Date(elu);
                       const now = new Date();
-                      const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+                      const diffDays = Math.floor((now.getTime() - d.getTime()) / TIME_MS.DAY);
                       const label = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Yesterday' : `${diffDays}d ago`;
-                      return (
-                        <span className="text-gray-900 inline-flex items-center gap-1">
-                          {label}
-                          {eluSrc === 'auditgraph'
-                            ? <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>
-                            : <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>
-                          }
-                        </span>
-                      );
+                      return <span className="text-gray-900">{label}</span>;
                     }
                     return <span className="text-gray-400 italic">No activity observed</span>;
                   })()}
@@ -1043,6 +1042,8 @@ export default function IdentityDetail() {
                   pimLoading={pimLoading}
                   data={data!}
                   identity={identity}
+                  riskLevel={identity.risk_level}
+                  identityCategory={identity.identity_category}
                 />
               )}
 
@@ -1109,10 +1110,10 @@ export default function IdentityDetail() {
               )}
 
               {/* ═══ ENTRA GROUPS TAB ═══ */}
-              {activeTab === 'entra_groups' && <EntraGroupsTab identityId={id!} />}
+              {activeTab === 'entra_groups' && <EntraGroupsTab identityId={id!} riskLevel={identity.risk_level} />}
 
               {/* ═══ SENSITIVE ACCESS TAB ═══ */}
-              {activeTab === 'sensitive_access' && <SensitiveAccessTab identityId={id!} />}
+              {activeTab === 'sensitive_access' && <SensitiveAccessTab identityId={id!} roleBasedFallback={(data as any)?.sensitive_access_from_roles} identityCategory={identity.identity_category} />}
 
               {/* ═══ ATTACK PATHS TAB ═══ */}
               {activeTab === 'attack_paths' && <AttackPathsTab identityId={id!} />}
@@ -1154,7 +1155,7 @@ const SENS_CLASS_COLORS: Record<string, { bg: string; fg: string }> = {
   PII: { bg: 'rgba(96,165,250,0.12)', fg: '#60A5FA' },
 };
 
-function SensitiveAccessTab({ identityId }: { identityId: string }) {
+function SensitiveAccessTab({ identityId, roleBasedFallback, identityCategory }: { identityId: string; roleBasedFallback?: Array<{ role: string; scope: string; description: string; sensitivity: string }>; identityCategory?: string }) {
   const { withConnection } = useConnection();
   const navigate = useNavigate();
   const [data, setData] = useState<any>(null);
@@ -1173,11 +1174,45 @@ function SensitiveAccessTab({ identityId }: { identityId: string }) {
 
   if (loading) return <div className="p-8 text-center text-gray-500">Loading sensitive access data...</div>;
   if (!data || !data.sensitive_resources || data.sensitive_resources.length === 0) {
+    // Role-based fallback: show sensitive roles even without classified resources
+    if (roleBasedFallback && roleBasedFallback.length > 0) {
+      const sensColor: Record<string, string> = {
+        High: 'bg-red-100 text-red-700',
+        Medium: 'bg-orange-100 text-orange-700',
+      };
+      return (
+        <div className="p-6">
+          <div className="text-xs text-gray-400 uppercase tracking-wider font-semibold mb-3">Sensitive Access (Role-Based Analysis)</div>
+          <div className="text-xs text-gray-500 mb-4">No classified resources found, but this identity holds roles that grant access to sensitive resource types.</div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Role</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Scope</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Implication</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Sensitivity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {roleBasedFallback.map((r, i) => (
+                <tr key={i} className="border-b">
+                  <td className="px-4 py-3 font-medium text-gray-900">{r.role}</td>
+                  <td className="px-4 py-3 text-gray-600 text-xs font-mono truncate max-w-[200px]" title={r.scope}>{r.scope || '—'}</td>
+                  <td className="px-4 py-3 text-gray-600 text-xs">{r.description}</td>
+                  <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded text-xs font-semibold ${sensColor[r.sensitivity] || 'bg-gray-100 text-gray-600'}`}>{r.sensitivity}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
     return (
       <div className="p-8 text-center">
         <div className="text-gray-400 text-lg mb-2">No Sensitive Access Detected</div>
         <div className="text-gray-500 text-sm">
-          This identity does not have RBAC access to any classified resources.
+          This identity does not have RBAC access to any classified resources and holds no roles matching sensitive patterns.
           <br />
           <button onClick={() => navigate('/data-security')} className="text-blue-500 mt-2 text-sm cursor-pointer hover:opacity-80">
             Classify resources in Data Security
@@ -1189,9 +1224,26 @@ function SensitiveAccessTab({ identityId }: { identityId: string }) {
 
   const br = data.blast_radius || {};
   const resources = data.sensitive_resources;
+  const isHuman = identityCategory === 'human_user' || identityCategory === 'guest';
+  const phiCount = (br.by_classification || {}).PHI || 0;
+  const pciCount = (br.by_classification || {}).PCI || 0;
+  const piiCount = (br.by_classification || {}).PII || 0;
 
   return (
     <div className="p-6">
+      {/* Human user summary callout */}
+      {isHuman && (br.total_sensitive || 0) > 0 && (
+        <div className="border-l-4 border-l-amber-400 bg-amber-50 rounded-r-lg p-4 mb-6">
+          <div className="text-sm text-amber-800">
+            This human user has direct access to <span className="font-bold">{br.total_sensitive}</span> sensitive resources
+            {(phiCount > 0 || pciCount > 0 || piiCount > 0) && (
+              <> including {phiCount > 0 && <><span className="font-bold">{phiCount}</span> PHI</>}{phiCount > 0 && (pciCount > 0 || piiCount > 0) ? ', ' : ''}{pciCount > 0 && <><span className="font-bold">{pciCount}</span> PCI</>}{pciCount > 0 && piiCount > 0 ? ', and ' : ''}{piiCount > 0 && <><span className="font-bold">{piiCount}</span> PII</>} classified assets</>
+            )}.
+            Per HIPAA §164.312, access should be reviewed quarterly.
+          </div>
+        </div>
+      )}
+
       {/* Blast Radius Summary */}
       <div className="grid grid-cols-4 gap-3 mb-6">
         <div className="rounded-lg p-4" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
@@ -1370,8 +1422,8 @@ function TimelineTab({ identityId }: { identityId: string }) {
       {/* Timeline */}
       {events.length === 0 ? (
         <div className="bg-gray-50 border rounded-xl p-8 text-center">
-          <div className="text-sm text-gray-500 font-medium">No events recorded for this identity</div>
-          <div className="text-xs text-gray-400 mt-1">Events will appear here as they are detected</div>
+          <div className="text-sm text-gray-500 font-medium">No timeline events detected yet</div>
+          <div className="text-xs text-gray-400 mt-1">Anomalies, PIM activations, risk changes, and drift events will appear here after the next discovery scan.</div>
         </div>
       ) : (
         <div className="relative">
@@ -1447,10 +1499,20 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
 
   useEffect(() => {
     fetch(`/api/identities/${identityId}/persisted-attack-paths?${withConnection('')}`)
-      .then(r => r.ok ? r.json() : { attack_paths: [] })
-      .then(d => setPaths(d.attack_paths || []))
+      .then(r => r.ok ? r.json() : { paths: [] })
+      .then(d => setPaths(d.paths || d.attack_paths || []))
       .finally(() => setLoading(false));
   }, [identityId, withConnection]);
+
+  // TEMP diagnostic — remove after field rendering is verified in the browser.
+  useEffect(() => {
+    if (paths.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log('ATTACK_PATH_KEYS:', Object.keys(paths[0]));
+      // eslint-disable-next-line no-console
+      console.log('ATTACK_PATH_SAMPLE:', JSON.stringify(paths[0], null, 2));
+    }
+  }, [paths]);
 
   if (loading) {
     return (
@@ -1476,34 +1538,105 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b text-left">
-            <th className="px-4 py-2 text-xs font-medium text-gray-500">Role</th>
-            <th className="px-4 py-2 text-xs font-medium text-gray-500">Scope</th>
-            <th className="px-4 py-2 text-xs font-medium text-gray-500">Tier</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Path</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Target</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Severity</th>
             <th className="px-4 py-2 text-xs font-medium text-gray-500">Score</th>
-            <th className="px-4 py-2 text-xs font-medium text-gray-500">Flags</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Indicators</th>
           </tr>
         </thead>
         <tbody>
-          {paths.map((p: any) => (
-            <tr key={p.id} onClick={() => navigate(`/attack-paths/${p.id}`)}
-              className="border-b cursor-pointer hover:bg-gray-50 transition-colors">
-              <td className="px-4 py-3 text-gray-900">{p.highest_role}</td>
-              <td className="px-4 py-3 text-gray-600">{p.highest_scope_level}</td>
-              <td className="px-4 py-3">
-                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${AP_TIER_BADGE[p.path_risk_tier] || 'bg-gray-100 text-gray-600'}`}>
-                  {p.path_risk_tier}
-                </span>
-              </td>
-              <td className="px-4 py-3 font-mono text-xs">{p.path_risk_score}</td>
-              <td className="px-4 py-3">
-                <div className="flex gap-1">
-                  {p.has_subscription_scope && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">Sub</span>}
-                  {p.has_keyvault_access && <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-700">KV</span>}
-                  {p.has_no_owner && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">No Owner</span>}
-                </div>
-              </td>
-            </tr>
-          ))}
+          {paths.map((p: any) => {
+            // Canonical field resolution — read keys defensively with fallback chains.
+            const pathSource =
+              p.source_entity_name ||
+              p.highest_role ||
+              p.source_entity_type ||
+              p.path_type ||
+              '—';
+
+            // target_resource_name is not a stored column; derive from
+            // path_nodes[-1].name/label/id or fall back to target_resource_id.
+            let pathTarget: string = '—';
+            if (p.target_resource_name) {
+              pathTarget = p.target_resource_name;
+            } else if (Array.isArray(p.path_nodes) && p.path_nodes.length > 0) {
+              const tail = p.path_nodes[p.path_nodes.length - 1] || {};
+              pathTarget = tail.name || tail.label || tail.id || p.target_resource_id || p.target_resource_type || p.highest_scope_level || '—';
+            } else {
+              pathTarget = p.target_resource_id || p.target_resource_type || p.highest_scope_level || '—';
+            }
+
+            const pathSeverity = (
+              p.path_risk_tier ||
+              p.risk_tier ||
+              p.severity ||
+              '—'
+            ).toUpperCase();
+
+            const pathScore =
+              (p.path_risk_score ?? p.risk_score ?? p.blast_radius_score ?? p.exploitability ?? 0) as number;
+
+            const pathFlags: string[] = [
+              p.has_keyvault_access && 'Key Vault',
+              p.has_subscription_scope && 'Subscription scope',
+              p.has_no_owner && 'No owner',
+              p.has_expired_credentials && 'Expired creds',
+            ].filter(Boolean) as string[];
+
+            // privilege_chain — may be array, string, or derived from path_nodes
+            let chainSteps: string | null = null;
+            if (Array.isArray(p.privilege_chain)) {
+              chainSteps = p.privilege_chain.join(' → ');
+            } else if (typeof p.privilege_chain === 'string' && p.privilege_chain) {
+              chainSteps = p.privilege_chain;
+            } else if (Array.isArray(p.path_nodes) && p.path_nodes.length > 1) {
+              chainSteps = p.path_nodes
+                .map((n: any) => n.name || n.label || n.id || n.type)
+                .filter(Boolean)
+                .join(' → ');
+            }
+
+            const pathDescription = p.description || chainSteps || null;
+
+            return (
+              <tr
+                key={p.id}
+                onClick={() => navigate(`/attack-paths/${p.id}`)}
+                className="border-b cursor-pointer hover:bg-gray-50 transition-colors"
+              >
+                <td className="px-4 py-3 text-gray-900 align-top">
+                  <div className="font-medium">{pathSource}</div>
+                  {pathDescription && (
+                    <div className="text-xs text-gray-500 mt-0.5 line-clamp-2">{pathDescription}</div>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-gray-600 align-top">{pathTarget}</td>
+                <td className="px-4 py-3 align-top">
+                  <span className={`px-2 py-0.5 rounded text-xs font-semibold ${AP_TIER_BADGE[pathSeverity] || 'bg-gray-100 text-gray-600'}`}>
+                    {pathSeverity}
+                  </span>
+                </td>
+                <td className="px-4 py-3 font-mono text-xs align-top">
+                  {pathScore > 0 ? pathScore : 'Computing'}
+                </td>
+                <td className="px-4 py-3 align-top">
+                  <div className="flex flex-wrap gap-1">
+                    {pathFlags.length > 0
+                      ? pathFlags.map((f) => (
+                          <span
+                            key={f}
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200"
+                          >
+                            {f}
+                          </span>
+                        ))
+                      : <span className="text-xs text-gray-400">—</span>}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

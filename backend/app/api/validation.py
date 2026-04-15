@@ -29,7 +29,6 @@ LOGIN_SCHEMA = {
 
 REFRESH_SCHEMA = {
     'type': 'object',
-    'required': ['refresh_token'],
     'properties': {
         'refresh_token': {'type': 'string', 'minLength': 1},
     },

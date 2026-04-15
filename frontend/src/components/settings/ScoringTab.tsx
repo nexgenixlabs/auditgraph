@@ -85,7 +85,7 @@ export function ScoringTab({
                     <span className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
                       rule.points_adjustment > 0 ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'
                     }`}>
-                      {rule.points_adjustment > 0 ? '+' : ''}{rule.points_adjustment} pts
+                      {rule.points_adjustment > 0 ? '+' : ''}{rule.points_adjustment}
                     </span>
                   )}
 

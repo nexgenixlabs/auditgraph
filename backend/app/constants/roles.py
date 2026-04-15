@@ -182,3 +182,70 @@ PRIVILEGED_ENTRA_ROLES:      frozenset[str] = T0_ENTRA_ROLES | T1_ENTRA_ROLES
 PRIVILEGED_RBAC_ROLES:       frozenset[str] = T2_RBAC_ROLES
 ALL_PRIVILEGED_ROLES:        frozenset[str] = PRIVILEGED_ENTRA_ROLES | PRIVILEGED_RBAC_ROLES
 ALL_PRIVILEGED_ROLES_LOWER:  frozenset[str] = _lower(ALL_PRIVILEGED_ROLES)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Role Usage Inference — activity-to-role correlation
+# ═══════════════════════════════════════════════════════════════════
+
+# Azure RBAC roles whose exercise is implied by ARM activity
+ARM_ACTIVITY_IMPLIES_USAGE: frozenset[str] = frozenset({
+    RBACRole.OWNER,
+    RBACRole.CONTRIBUTOR,
+    RBACRole.USER_ACCESS_ADMIN,
+    RBACRole.STORAGE_BLOB_DATA_CONTRIBUTOR,
+    RBACRole.STORAGE_ACCOUNT_CONTRIBUTOR,
+    RBACRole.STORAGE_BLOB_DATA_OWNER,
+    RBACRole.STORAGE_BLOB_DATA_READER,
+    RBACRole.VIRTUAL_MACHINE_CONTRIBUTOR,
+    RBACRole.NETWORK_CONTRIBUTOR,
+    RBACRole.KEY_VAULT_ADMIN,
+    RBACRole.KEY_VAULT_SECRETS_OFFICER,
+    RBACRole.KEY_VAULT_SECRETS_USER,
+    RBACRole.MONITORING_CONTRIBUTOR,
+    RBACRole.READER,
+    RBACRole.SECURITY_READER,
+    # String literals for roles not yet in RBACRole enum
+    "Log Analytics Contributor",
+    "Security Admin",
+})
+
+# Entra directory roles whose exercise is implied by Graph/directory activity
+GRAPH_ACTIVITY_IMPLIES_USAGE: frozenset[str] = frozenset({
+    EntraRole.GLOBAL_ADMIN,
+    EntraRole.USER_ADMIN,
+    EntraRole.APPLICATION_ADMIN,
+    EntraRole.CLOUD_APP_ADMIN,
+    EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.GROUPS_ADMIN,
+    EntraRole.DIRECTORY_READERS,
+    EntraRole.DIRECTORY_WRITERS,
+    EntraRole.AUTH_ADMIN,
+    EntraRole.CONDITIONAL_ACCESS_ADMIN,
+})
+
+# Roles that indicate high privilege — used by governance and risk scoring
+HIGH_PRIVILEGE_ROLES: frozenset[str] = frozenset({
+    RBACRole.OWNER,
+    RBACRole.CONTRIBUTOR,
+    RBACRole.USER_ACCESS_ADMIN,
+    EntraRole.GLOBAL_ADMIN,
+    EntraRole.PRIVILEGED_ROLE_ADMIN,
+})
+
+# Roles that grant sensitive data access — used by sensitive access analysis
+# Maps role name → (severity, explanation)
+SENSITIVE_ACCESS_ROLES: dict[str, tuple[str, str]] = {
+    str(RBACRole.OWNER):                        ("High",   "Full control — read, write, delete, manage access"),
+    str(RBACRole.CONTRIBUTOR):                   ("High",   "Read and write access to all resource types"),
+    str(RBACRole.USER_ACCESS_ADMIN):             ("High",   "Can grant any permission to any identity"),
+    str(RBACRole.STORAGE_BLOB_DATA_OWNER):       ("High",   "Full access to blob storage including set permissions"),
+    str(RBACRole.STORAGE_BLOB_DATA_CONTRIBUTOR): ("Medium", "Can read/write/delete blob containers and data"),
+    str(RBACRole.KEY_VAULT_ADMIN):               ("High",   "Full Key Vault management including secrets"),
+    str(RBACRole.KEY_VAULT_SECRETS_OFFICER):      ("High",   "Can set and delete Key Vault secrets"),
+    str(RBACRole.KEY_VAULT_SECRETS_USER):         ("Medium", "Can read Key Vault secrets"),
+    str(EntraRole.GLOBAL_ADMIN):                 ("High",   "Full tenant control including all services"),
+    str(EntraRole.SECURITY_ADMIN):               ("Medium", "Can manage security policies and read alerts"),
+    str(RBACRole.SQL_DB_CONTRIBUTOR):             ("Medium", "Can manage SQL databases — potential data access"),
+    str(RBACRole.SQL_SERVER_CONTRIBUTOR):         ("High",   "Full SQL server control"),
+}

@@ -36,8 +36,8 @@ export function LifecycleTab({
           <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <div className="text-sm font-medium text-gray-600">No lifecycle events</div>
-          <div className="text-xs text-gray-400 mt-1">Capture multiple snapshots to build a change timeline.</div>
+          <div className="text-sm font-medium text-gray-600">Insufficient snapshot history for lifecycle comparison.</div>
+          <div className="text-xs text-gray-400 mt-1">Lifecycle tab requires 2+ snapshots to build a change timeline.</div>
         </div>
       ) : (
         <>

@@ -108,23 +108,31 @@ export default function RemediationQueue() {
         )}
       </div>
 
-      {/* Error */}
-      {error && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 mb-4 text-sm text-red-700">
-          {error}
-        </div>
-      )}
-
-      {/* Loading */}
-      {loading && items.length === 0 && (
+      {/* State 1: Loading */}
+      {loading && items.length === 0 && !error && (
         <div className="rounded-xl border p-8 text-center" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
           <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
           <p className="text-xs mt-3" style={{ color: 'var(--text-tertiary)' }}>Loading queue...</p>
         </div>
       )}
 
-      {/* Empty State */}
-      {!loading && items.length === 0 && (
+      {/* State 2: Error (suppresses empty state) */}
+      {error && !loading && (
+        <div className="rounded-xl border p-12 text-center" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
+          <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Unable to load remediation queue</p>
+          <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>Please try again or contact support.</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-4 text-xs font-medium px-4 py-2 rounded-lg border transition-colors hover:bg-[var(--bg-elevated)]"
+            style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-default)' }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* State 3: Empty (only when no error) */}
+      {!loading && !error && items.length === 0 && (
         <div className="rounded-xl border p-12 text-center" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
           <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
             {filters.status || filters.severity ? 'No items match the current filters' : 'No items in the remediation queue'}
@@ -132,7 +140,7 @@ export default function RemediationQueue() {
           <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>
             {filters.status || filters.severity
               ? 'Try adjusting filters or clearing them.'
-              : 'Add attack paths to the remediation queue from the Attack Paths page.'}
+              : 'Priority actions from the Executive Posture dashboard will appear here when added.'}
           </p>
         </div>
       )}

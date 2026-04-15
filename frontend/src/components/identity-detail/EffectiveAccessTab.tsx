@@ -2,10 +2,9 @@ import React from 'react';
 import {
   type EffectiveAccessData,
   type IdentityDetailsResponse,
-  riskBadge,
-  usageStatusBadge,
   DataSource,
 } from './types';
+import { getRoleUsageBadge, type RoleUsageEntry } from '../../utils/roleUtils';
 
 interface EffectiveAccessTabProps {
   effectiveAccessData: EffectiveAccessData | null;
@@ -15,6 +14,7 @@ interface EffectiveAccessTabProps {
 }
 
 export function EffectiveAccessTab({ effectiveAccessData, effectiveAccessLoading, sensitiveAccessData, data }: EffectiveAccessTabProps) {
+  const roleUsage = (data as any)?.role_usage as Record<string, RoleUsageEntry> | undefined;
   return (
     <div className="space-y-4">
       {effectiveAccessLoading ? (
@@ -70,6 +70,7 @@ export function EffectiveAccessTab({ effectiveAccessData, effectiveAccessLoading
                 <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wider">
                   <th className="px-4 py-2.5">Access Level</th>
                   <th className="px-4 py-2.5">Role</th>
+                  <th className="px-4 py-2.5">Usage</th>
                   <th className="px-4 py-2.5">Source</th>
                   <th className="px-4 py-2.5">Scope</th>
                   <th className="px-4 py-2.5">Category</th>
@@ -95,6 +96,9 @@ export function EffectiveAccessTab({ effectiveAccessData, effectiveAccessLoading
                           {entry.why_critical}
                         </div>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {getRoleUsageBadge(entry.role_name, roleUsage)}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs font-medium ${entry.role_source === 'azure_rbac' ? 'text-blue-600' : 'text-purple-600'}`}>

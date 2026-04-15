@@ -56,7 +56,7 @@ const DETECTION_CATEGORIES = [
   { key: 'external_privileged', label: 'External Privileged', short: 'External', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857', color: 'text-red-400', desc: 'Guests with elevated roles' },
   { key: 'spn_secret_exposure', label: 'SPN Secret Exposure', short: 'SPN', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z', color: 'text-purple-400', desc: 'SPNs with exposed secrets' },
   { key: 'orphaned_identity', label: 'Orphaned Identities', short: 'Orphaned', icon: 'M18.364 18.364A9 9 0 005.636 5.636', color: 'text-amber-400', desc: 'Identities without owners' },
-  { key: 'disabled_with_access', label: 'Ghost Accounts', short: 'Ghost', icon: 'M15 12a3 3 0 11-6 0 3 3 0 016 0z', color: 'text-red-400', desc: 'Disabled accounts with active RBAC roles' },
+  { key: 'disabled_with_access', label: 'Ghost Identities', short: 'Ghost', icon: 'M15 12a3 3 0 11-6 0 3 3 0 016 0z', color: 'text-red-400', desc: 'Disabled identities with active RBAC roles' },
 ] as const;
 
 export default function IdentityExposures() {
