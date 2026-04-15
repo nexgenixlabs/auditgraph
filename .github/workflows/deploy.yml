@@ -172,14 +172,14 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Deploy backend
-        uses: azure/container-apps-deploy-action@v1
+        uses: azure/container-apps-deploy-action@v2
         with:
           containerAppName: auditgraph-api
           resourceGroup: ${{ env.RESOURCE_GROUP }}
           imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/auditgraph-backend:${{ github.sha }}
 
       - name: Deploy frontend
-        uses: azure/container-apps-deploy-action@v1
+        uses: azure/container-apps-deploy-action@v2
         with:
           containerAppName: auditgraph-web
           resourceGroup: ${{ env.RESOURCE_GROUP }}
