@@ -51,7 +51,8 @@ TERMINAL_STATES = frozenset({
 
 ALLOWED_TRANSITIONS = {
     'pending':          {'approved', 'rejected', 'cancelled'},
-    'approved':         {'queued', 'executing', 'cancelled'},
+    'approved':         {'fully_approved', 'queued', 'executing', 'cancelled'},
+    'fully_approved':   {'queued', 'executing', 'cancelled'},
     'queued':           {'executing', 'cancelled'},
     'executing':        {'executed', 'failed'},
     'failed':           {'queued', 'failed_permanent'},
@@ -65,13 +66,14 @@ ALLOWED_TRANSITIONS = {
 
 # Columns that transition_approval() auto-sets per target status
 _AUTO_TIMESTAMP_MAP = {
-    'approved':  'reviewed_at',
-    'rejected':  'reviewed_at',
-    'queued':    'queued_at',
-    'executing': 'execution_started_at',
-    'executed':  'execution_completed_at',
-    'failed':    'execution_completed_at',
-    'rolled_back': 'execution_completed_at',
+    'approved':       'reviewed_at',
+    'fully_approved': 'approval_level_2_at',
+    'rejected':       'reviewed_at',
+    'queued':         'queued_at',
+    'executing':      'execution_started_at',
+    'executed':       'execution_completed_at',
+    'failed':         'execution_completed_at',
+    'rolled_back':    'execution_completed_at',
 }
 
 
@@ -114,7 +116,8 @@ def _format_request(row: dict) -> dict:
     d = dict(row)
     for ts in ('requested_at', 'reviewed_at', 'created_at', 'updated_at',
                'queued_at', 'execution_started_at', 'execution_completed_at',
-               'last_retry_at'):
+               'last_retry_at', 'approval_level_2_at', 'script_generated_at',
+               'evidence_package_generated_at'):
         if d.get(ts):
             d[ts] = d[ts].isoformat()
     return d
@@ -245,6 +248,8 @@ def transition_approval(db, request_ref: str, org_id: int,
         'reviewed_by', 'review_note', 'queued_by',
         'execution_eta_minutes', 'projected_score_delta',
         'max_retries', 'execution_error',
+        'approval_level_2_by', 'approval_level_2_at',
+        'approval_level_2_note', 'change_ticket_ref',
     }
     for col, val in update_fields.items():
         if col in safe_cols:
@@ -348,6 +353,32 @@ def create_approval_request():
         # Deterministic payload for idempotency index
         normalized = json.dumps(action_payload, sort_keys=True, separators=(',', ':'))
 
+        # Snapshot pre-fix score and attack paths from live DB
+        pre_fix_score = None
+        attack_paths_before = 0
+        try:
+            cursor.execute(
+                "SELECT risk_score FROM identity_list "
+                "WHERE identity_id = %s AND organization_id = %s LIMIT 1",
+                (identity_id, org_id),
+            )
+            score_row = cursor.fetchone()
+            if score_row:
+                pre_fix_score = float(score_row['risk_score'] or 0)
+            cursor.execute(
+                "SELECT COUNT(*) AS cnt FROM attack_paths "
+                "WHERE source_entity_id = %s AND organization_id = %s",
+                (identity_id, org_id),
+            )
+            ap_row = cursor.fetchone()
+            attack_paths_before = int(ap_row['cnt']) if ap_row else 0
+        except Exception as snap_err:
+            logger.warning("pre_fix snapshot failed: %s", snap_err)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
         # Insert — catch duplicate via partial unique index
         try:
             cursor.execute("""
@@ -356,18 +387,20 @@ def create_approval_request():
                     identity_display_name, action_type, action_payload,
                     normalized_payload,
                     risk_reduction_score, status, priority,
-                    requested_by, requested_at, execution_eta_minutes
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)
+                    requested_by, requested_at, execution_eta_minutes,
+                    pre_fix_score, attack_paths_before
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s)
                 RETURNING id, request_ref, status, identity_id,
                           identity_display_name, action_type, action_payload,
                           priority, requested_at, risk_reduction_score,
-                          execution_eta_minutes
+                          execution_eta_minutes, pre_fix_score, attack_paths_before
             """, (
                 org_id, request_ref, identity_id,
                 display_name, action_type, json.dumps(action_payload),
                 normalized,
                 risk_reduction, priority,
                 _user_id(), now, eta,
+                pre_fix_score, attack_paths_before,
             ))
             row = cursor.fetchone()
             db.conn.commit()
@@ -606,6 +639,117 @@ def approve_request(request_ref):
 
     except Exception as e:
         logger.error("approve_request failed: %s", e)
+        try:
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+def approve_level2(request_ref):
+    """POST /api/approvals/<ref>/approve-level2 — IT Management / CAB approval.
+
+    Transitions approved → fully_approved.
+    Requires:
+      - change_ticket_ref (mandatory — e.g. CHG-1234)
+      - Cannot be the same user who did Level 1 approval (reviewed_by)
+      - Cannot be the original requester (requested_by)
+    """
+    body = request.get_json(silent=True) or {}
+    note = body.get('note', '')
+    change_ticket = (body.get('change_ticket_ref') or '').strip()
+
+    if not change_ticket:
+        return jsonify({
+            'error': 'change_ticket_ref is required for Level 2 approval',
+            'message': 'A change management ticket (e.g. CHG-1234) must be attached '
+                       'before IT Management can approve.',
+        }), 400
+
+    user = _user()
+    if _user_role() not in REVIEW_ROLES:
+        return jsonify({'error': 'Insufficient role for Level 2 approval'}), 403
+
+    org_id = _org_id()
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT requested_by, reviewed_by, status FROM approval_requests "
+            "WHERE organization_id = %s AND request_ref = %s",
+            (org_id, request_ref),
+        )
+        pre = cursor.fetchone()
+        cursor.close()
+
+        if not pre:
+            db.close()
+            return jsonify({'error': 'Approval not found'}), 404
+
+        if pre['status'] != 'approved':
+            db.close()
+            return jsonify({
+                'error': f"Level 2 requires Level 1 first — current status is '{pre['status']}'",
+                'next_step': 'POST /api/approvals/{ref}/approve' if pre['status'] == 'pending' else None,
+            }), 409
+
+        # Self-approval guard: cannot be the requester
+        if pre['requested_by'] == _user_id():
+            db.close()
+            return jsonify({'error': 'Requester cannot approve their own request'}), 403
+
+        # Separation of duties: cannot be the same person who did Level 1
+        if pre['reviewed_by'] == _user_id():
+            db.close()
+            return jsonify({
+                'error': 'Level 2 approver must differ from Level 1 approver',
+                'message': 'Separation of duties requires a different person for each approval level.',
+            }), 403
+
+        t = transition_approval(
+            db=db, request_ref=request_ref, org_id=org_id,
+            to_status='fully_approved',
+            approval_level_2_by=_user_id(),
+            approval_level_2_note=note,
+            change_ticket_ref=change_ticket,
+        )
+        updated = t['row']
+
+        result = _format_request(updated)
+
+        # Audit trail
+        audit = AuditService.from_request(db, request, user)
+        audit.log(
+            event_type='approval.level2_approved',
+            action=f'Level 2 approved: {request_ref}',
+            target_type='approval_request',
+            target_id=request_ref,
+            target_display_name=updated.get('identity_display_name'),
+            before_state={'status': 'approved'},
+            after_state={
+                'status': 'fully_approved',
+                'level2_by': _user_id(),
+                'change_ticket_ref': change_ticket,
+                'note': note,
+            },
+            request=request,
+        )
+
+        db.close()
+        return jsonify(result)
+
+    except ValueError as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        db.close()
+        msg = str(e)
+        code = 409 if ('not found' in msg or 'Concurrent' in msg or 'Invalid' in msg) else 400
+        return jsonify({'error': msg}), code
+
+    except Exception as e:
+        logger.error("approve_level2 failed: %s", e)
         try:
             db.close()
         except Exception:
@@ -1234,6 +1378,429 @@ def rollback_execution(request_ref):
 
     except Exception as e:
         logger.error("rollback_execution failed: %s", e)
+        try:
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+def confirm_executed(request_ref):
+    """POST /api/approvals/<ref>/confirm-executed — customer confirms script execution.
+
+    Recalculates the identity's risk score from the live DB, computes the
+    before/after delta, and transitions the approval to 'executed'.
+    AuditGraph does NOT execute changes — the customer runs their own script.
+    """
+    org_id = _org_id()
+    if not org_id or org_id < 0:
+        return jsonify({'error': 'Organization context required'}), 403
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # 1. Fetch the approval
+        cursor.execute(
+            "SELECT * FROM approval_requests "
+            "WHERE request_ref = %s AND organization_id = %s",
+            (request_ref, org_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close(); db.close()
+            return jsonify({'error': 'Approval not found'}), 404
+
+        # 2. Must be approved/fully_approved (or executing) — not pending/cancelled/rejected
+        if row['status'] not in ('approved', 'fully_approved', 'queued', 'executing'):
+            cursor.close(); db.close()
+            return jsonify({
+                'error': f"Cannot confirm execution — status is '{row['status']}'. "
+                         f"Approval must be in approved/fully_approved/queued/executing state.",
+            }), 409
+
+        identity_id = row['identity_id']
+        pre_fix_score = float(row['pre_fix_score']) if row.get('pre_fix_score') is not None else None
+        attack_paths_before = int(row['attack_paths_before'] or 0) if row.get('attack_paths_before') is not None else 0
+
+        # 3. Query current risk_score from identity_list
+        cursor.execute(
+            "SELECT risk_score, display_name FROM identity_list "
+            "WHERE identity_id = %s AND organization_id = %s LIMIT 1",
+            (identity_id, org_id),
+        )
+        ident_row = cursor.fetchone()
+        post_fix_score = float(ident_row['risk_score'] or 0) if ident_row else 0.0
+        display_name = ident_row['display_name'] if ident_row else row.get('identity_display_name', '')
+
+        # 4. Query current attack_paths count
+        cursor.execute(
+            "SELECT COUNT(*) AS cnt FROM attack_paths "
+            "WHERE source_entity_id = %s AND organization_id = %s",
+            (identity_id, org_id),
+        )
+        ap_row = cursor.fetchone()
+        attack_paths_after = int(ap_row['cnt']) if ap_row else 0
+
+        # 5. Compute deltas
+        if pre_fix_score is not None:
+            score_delta = round(pre_fix_score - post_fix_score, 2)
+            score_delta_pct = round((score_delta / pre_fix_score) * 100, 1) if pre_fix_score > 0 else 0.0
+        else:
+            score_delta = 0.0
+            score_delta_pct = 0.0
+
+        paths_eliminated = attack_paths_before - attack_paths_after
+
+        if score_delta > 0:
+            verdict = 'improved'
+        elif score_delta < 0:
+            verdict = 'regressed'
+        else:
+            verdict = 'no_change'
+
+        now = datetime.now(timezone.utc)
+
+        # 6. Update approval_requests with post-execution data
+        cursor.execute("""
+            UPDATE approval_requests
+            SET post_fix_score = %s,
+                score_delta = %s,
+                attack_paths_after = %s,
+                status = 'executed',
+                execution_completed_at = %s,
+                updated_at = %s
+            WHERE request_ref = %s AND organization_id = %s
+        """, (post_fix_score, score_delta, attack_paths_after, now, now,
+              request_ref, org_id))
+        db.conn.commit()
+
+        cursor.close()
+
+        # Audit trail
+        try:
+            audit = AuditService.from_request(db, request, _user())
+            audit.log(
+                event_type='remediation.confirmed',
+                action='Customer confirmed remediation execution',
+                target_type='identity',
+                target_id=identity_id,
+                target_display_name=display_name,
+                after_state={
+                    'request_ref': request_ref,
+                    'verdict': verdict,
+                    'score_delta': score_delta,
+                },
+                request=request,
+            )
+        except Exception:
+            pass
+
+        db.close()
+
+        return jsonify({
+            'ref': request_ref,
+            'identity_id': identity_id,
+            'identity_name': display_name,
+            'pre_fix_score': pre_fix_score,
+            'post_fix_score': post_fix_score,
+            'score_delta': score_delta,
+            'score_delta_pct': score_delta_pct,
+            'attack_paths_before': attack_paths_before,
+            'attack_paths_after': attack_paths_after,
+            'paths_eliminated': paths_eliminated,
+            'verdict': verdict,
+            'executed_at': now.isoformat(),
+        })
+
+    except Exception as e:
+        logger.error("confirm_executed failed: %s", e)
+        try:
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+def get_approval_script(request_ref):
+    """GET /api/approvals/<ref>/script — generate remediation script.
+
+    Query param: format=azure_cli|powershell|terraform (default: azure_cli)
+
+    Requires Level 1 approval (status must be 'approved' or later).
+    """
+    from app.services.script_generator import ScriptGenerator, SUPPORTED_FORMATS
+
+    fmt = request.args.get('format', 'azure_cli')
+    if fmt not in SUPPORTED_FORMATS:
+        return jsonify({'error': f"Invalid format. Use one of: {sorted(SUPPORTED_FORMATS)}"}), 400
+
+    org_id = _org_id()
+    if not org_id or org_id < 0:
+        return jsonify({'error': 'Organization context required'}), 403
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute(
+            "SELECT * FROM approval_requests "
+            "WHERE request_ref = %s AND organization_id = %s",
+            (request_ref, org_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close(); db.close()
+            return jsonify({'error': 'Approval not found'}), 404
+
+        # Must be fully_approved (both Level 1 + Level 2)
+        if row['status'] == 'pending':
+            cursor.close(); db.close()
+            return jsonify({
+                'error': 'Script requires Level 1 approval before it can be generated',
+                'next_step': 'POST /api/approvals/{ref}/approve',
+            }), 403
+        if row['status'] == 'approved':
+            cursor.close(); db.close()
+            return jsonify({
+                'error': 'Level 2 approval required',
+                'message': 'Script requires IT Management approval and a change ticket '
+                           'before it can be downloaded.',
+                'next_step': 'POST /api/approvals/{ref}/approve-level2',
+            }), 403
+        if row['status'] in ('rejected', 'cancelled'):
+            cursor.close(); db.close()
+            return jsonify({
+                'error': f"Cannot generate script — approval is {row['status']}",
+            }), 409
+
+        cursor.close()
+
+        gen = ScriptGenerator(db)
+        script = gen.generate(dict(row), fmt)
+        now = datetime.now(timezone.utc)
+
+        # Store generated script in DB
+        cur2 = db.conn.cursor()
+        try:
+            cur2.execute("""
+                UPDATE approval_requests
+                SET script_generated = %s,
+                    script_format = %s,
+                    script_generated_at = %s,
+                    updated_at = %s
+                WHERE request_ref = %s AND organization_id = %s
+            """, (script, fmt, now, now, request_ref, org_id))
+            db.conn.commit()
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        finally:
+            cur2.close()
+
+        db.close()
+
+        return jsonify({
+            'ref': request_ref,
+            'format': fmt,
+            'script': script,
+            'generated_at': now.isoformat(),
+            'identity_name': row.get('identity_display_name', ''),
+            'action_type': row.get('action_type', ''),
+            'pre_fix_score': float(row['pre_fix_score']) if row.get('pre_fix_score') is not None else None,
+            'warning': (
+                'This script modifies your Azure environment. '
+                'Verify contents before execution. '
+                'Ensure change ticket is attached.'
+            ),
+        })
+
+    except Exception as e:
+        logger.error("get_approval_script failed: %s", e)
+        try:
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+def get_evidence_package(request_ref):
+    """GET /api/approvals/<ref>/evidence-package — full audit evidence for Jira/ServiceNow.
+
+    Returns a JSON evidence package containing:
+    - Finding details (identity, action, risk)
+    - Recommendation + compliance controls
+    - Both approval levels with approver info
+    - Script hash (SHA-256) for integrity verification
+    - Execution status and posture impact
+    """
+    import hashlib
+
+    org_id = _org_id()
+    if not org_id or org_id < 0:
+        return jsonify({'error': 'Organization context required'}), 403
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute(
+            "SELECT * FROM approval_requests "
+            "WHERE request_ref = %s AND organization_id = %s",
+            (request_ref, org_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close(); db.close()
+            return jsonify({'error': 'Approval not found'}), 404
+
+        # Must be at least approved to generate evidence
+        if row['status'] == 'pending':
+            cursor.close(); db.close()
+            return jsonify({'error': 'Evidence package requires at least Level 1 approval'}), 403
+
+        # Resolve approver names from users table
+        l1_approver_name = None
+        l2_approver_name = None
+        requester_name = None
+        try:
+            if row.get('reviewed_by'):
+                cursor.execute("SELECT display_name FROM users WHERE id = %s", (row['reviewed_by'],))
+                u = cursor.fetchone()
+                l1_approver_name = u['display_name'] if u else str(row['reviewed_by'])
+            if row.get('approval_level_2_by'):
+                cursor.execute("SELECT display_name FROM users WHERE id = %s", (row['approval_level_2_by'],))
+                u = cursor.fetchone()
+                l2_approver_name = u['display_name'] if u else str(row['approval_level_2_by'])
+            if row.get('requested_by'):
+                cursor.execute("SELECT display_name FROM users WHERE id = %s", (row['requested_by'],))
+                u = cursor.fetchone()
+                requester_name = u['display_name'] if u else str(row['requested_by'])
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        # Compute script hash if script exists
+        script_hash = None
+        if row.get('script_generated'):
+            script_hash = hashlib.sha256(row['script_generated'].encode('utf-8')).hexdigest()
+
+        cursor.close()
+
+        now = datetime.now(timezone.utc)
+
+        # Update evidence generation timestamp
+        try:
+            cur2 = db.conn.cursor()
+            cur2.execute(
+                "UPDATE approval_requests SET evidence_package_generated_at = %s, updated_at = %s "
+                "WHERE request_ref = %s AND organization_id = %s",
+                (now, now, request_ref, org_id),
+            )
+            db.conn.commit()
+            cur2.close()
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        db.close()
+
+        pre_fix = float(row['pre_fix_score']) if row.get('pre_fix_score') is not None else None
+        post_fix = float(row['post_fix_score']) if row.get('post_fix_score') is not None else None
+        delta = float(row['score_delta']) if row.get('score_delta') is not None else None
+        ap_before = int(row['attack_paths_before'] or 0) if row.get('attack_paths_before') is not None else None
+        ap_after = int(row['attack_paths_after'] or 0) if row.get('attack_paths_after') is not None else None
+
+        package = {
+            'evidence_version': '1.0',
+            'generated_at': now.isoformat(),
+            'request_ref': request_ref,
+
+            # Finding
+            'finding': {
+                'identity_id': row.get('identity_id'),
+                'identity_name': row.get('identity_display_name', ''),
+                'action_type': row.get('action_type'),
+                'recommendation': row.get('recommendation', ''),
+                'risk_reduction_score': float(row['risk_reduction_score']) if row.get('risk_reduction_score') is not None else None,
+                'priority': row.get('priority'),
+            },
+
+            # Compliance controls
+            'compliance_controls': {
+                'frameworks': ['CIS Controls v8', 'NIST SP 800-53 Rev 5'],
+                'controls': [
+                    'CIS 6.1 — Establish Access Granting Process',
+                    'CIS 6.2 — Establish Access Revoking Process',
+                    'CIS 6.8 — Define and Maintain Role-Based Access Control',
+                    'NIST AC-2 — Account Management',
+                    'NIST AC-6 — Least Privilege',
+                ],
+                'mitre_techniques': ['T1078 — Valid Accounts', 'T1098 — Account Manipulation'],
+            },
+
+            # Approval chain
+            'approval_chain': {
+                'level_1': {
+                    'status': 'approved' if row.get('reviewed_by') else 'pending',
+                    'approver_id': row.get('reviewed_by'),
+                    'approver_name': l1_approver_name,
+                    'approved_at': row['reviewed_at'].isoformat() if row.get('reviewed_at') else None,
+                    'note': row.get('review_note', ''),
+                },
+                'level_2': {
+                    'status': 'approved' if row.get('approval_level_2_by') else 'pending',
+                    'approver_id': row.get('approval_level_2_by'),
+                    'approver_name': l2_approver_name,
+                    'approved_at': row['approval_level_2_at'].isoformat() if row.get('approval_level_2_at') else None,
+                    'note': row.get('approval_level_2_note', ''),
+                    'change_ticket_ref': row.get('change_ticket_ref'),
+                },
+            },
+
+            # Requester info
+            'requested_by': {
+                'user_id': row.get('requested_by'),
+                'user_name': requester_name,
+                'requested_at': row['requested_at'].isoformat() if row.get('requested_at') else None,
+            },
+
+            # Script integrity
+            'script_integrity': {
+                'format': row.get('script_format'),
+                'generated_at': row['script_generated_at'].isoformat() if row.get('script_generated_at') else None,
+                'sha256_hash': script_hash,
+            },
+
+            # Execution status
+            'execution': {
+                'status': row['status'],
+                'started_at': row['execution_started_at'].isoformat() if row.get('execution_started_at') else None,
+                'completed_at': row['execution_completed_at'].isoformat() if row.get('execution_completed_at') else None,
+            },
+
+            # Posture impact
+            'posture_impact': {
+                'pre_fix_score': pre_fix,
+                'post_fix_score': post_fix,
+                'score_delta': delta,
+                'score_delta_pct': round((delta / pre_fix) * 100, 1) if (delta and pre_fix and pre_fix > 0) else None,
+                'attack_paths_before': ap_before,
+                'attack_paths_after': ap_after,
+                'paths_eliminated': (ap_before - ap_after) if (ap_before is not None and ap_after is not None) else None,
+            },
+        }
+
+        return jsonify(package)
+
+    except Exception as e:
+        logger.error("get_evidence_package failed: %s", e)
         try:
             db.close()
         except Exception:

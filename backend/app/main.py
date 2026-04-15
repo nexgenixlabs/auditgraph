@@ -3921,6 +3921,10 @@ def create_app():
         execute_approval_request,
         get_execution_history,
         rollback_execution,
+        confirm_executed,
+        get_approval_script,
+        approve_level2,
+        get_evidence_package,
         get_execution_queue,
     )
 
@@ -3964,6 +3968,22 @@ def create_app():
     @app.post("/api/approvals/<request_ref>/rollback")
     def approvals_rollback(request_ref):
         return rollback_execution(request_ref)
+
+    @app.post("/api/approvals/<request_ref>/confirm-executed")
+    def approvals_confirm_executed(request_ref):
+        return confirm_executed(request_ref)
+
+    @app.post("/api/approvals/<request_ref>/approve-level2")
+    def approvals_approve_level2(request_ref):
+        return approve_level2(request_ref)
+
+    @app.get("/api/approvals/<request_ref>/script")
+    def approvals_get_script(request_ref):
+        return get_approval_script(request_ref)
+
+    @app.get("/api/approvals/<request_ref>/evidence-package")
+    def approvals_evidence_package(request_ref):
+        return get_evidence_package(request_ref)
 
     @app.get("/api/execution/queue")
     def execution_queue():

@@ -106,10 +106,15 @@ def derive_governance_state(row, privilege_tier,
     rec_action = (row.get('recommended_action') or '').upper() if hasattr(row, 'get') else ''
     activity = (row.get('activity_status') or 'unknown').lower() if hasattr(row, 'get') else 'unknown'
 
-    # 1. No owner in directory → Orphaned
-    #    Fires for most SPNs created via Terraform, Bicep, CLI, pipelines
+    # 1. No owner in directory — Orphaned only if also no activity.
+    #    Active identities without owners are Ungoverned (need owner
+    #    assignment), not Orphaned. Aligns with GovernanceEngine._classify.
     if owner_ct == 0:
-        return 'Orphaned'
+        last_seen_days = resolve_last_seen_days(row)
+        no_recent_activity = (last_seen_days is None or last_seen_days > 180)
+        if activity in ('never_used', 'unknown') and no_recent_activity:
+            return 'Orphaned'
+        return 'Ungoverned'
 
     # 2. Active risk / policy violation signal
     if rec_action == 'AT_RISK' or active_breach:

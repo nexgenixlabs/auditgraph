@@ -85,6 +85,7 @@ _db_logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 import re as _re
 from app.constants import Verdict
+from app.encryption import encrypt_field, decrypt_field
 
 # Patterns that suggest a SQL string was built via f-string or concatenation
 # rather than using parameterized queries (%s placeholders).
@@ -18256,6 +18257,10 @@ class Database:
         next_order = cursor.fetchone()['next_order']
         # external_id mirrors azure_directory_id (canonical cloud-agnostic identifier)
         external_id = azure_directory_id
+        # Encrypt client_secret before storing
+        if metadata and isinstance(metadata, dict) and metadata.get('client_secret'):
+            metadata = dict(metadata)  # don't mutate caller's dict
+            metadata['client_secret'] = encrypt_field(metadata['client_secret'])
         # Set credential_last_rotated if credentials are provided
         has_creds = bool((metadata or {}).get('client_secret'))
         cursor.execute("""
@@ -18366,6 +18371,11 @@ class Database:
                        'last_snapshot_started_at', 'last_snapshot_completed_at'):
                 if row.get(ts):
                     row[ts] = row[ts].isoformat()
+            # Decrypt client_secret from storage
+            meta = row.get('metadata') or {}
+            if isinstance(meta, dict) and meta.get('client_secret'):
+                meta['client_secret'] = decrypt_field(meta['client_secret'])
+                row['metadata'] = meta
             if not include_secrets:
                 # Strip sensitive metadata from response
                 meta = row.get('metadata') or {}
@@ -18387,6 +18397,11 @@ class Database:
         if not row:
             return None
         result = dict(row)
+        # Decrypt client_secret from storage
+        meta = result.get('metadata') or {}
+        if isinstance(meta, dict) and meta.get('client_secret'):
+            meta['client_secret'] = decrypt_field(meta['client_secret'])
+            result['metadata'] = meta
         for ts in ('created_at', 'updated_at', 'last_test_at', 'last_discovery_at',
                     'last_snapshot_started_at', 'last_snapshot_completed_at',
                     'credential_last_rotated', 'credential_expires_at'):
@@ -18403,6 +18418,12 @@ class Database:
                    'last_snapshot_started_at', 'last_snapshot_completed_at',
                    'credential_last_rotated', 'credential_expires_at'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
+        # Encrypt client_secret in metadata before storing
+        if 'metadata' in updates and isinstance(updates['metadata'], dict):
+            meta = dict(updates['metadata'])
+            if meta.get('client_secret'):
+                meta['client_secret'] = encrypt_field(meta['client_secret'])
+            updates['metadata'] = meta
         if not updates:
             return self.get_cloud_connection_by_id(connection_id)
         set_parts = []

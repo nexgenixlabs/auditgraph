@@ -965,7 +965,7 @@ def get_identities():
         lineage_verdict: Filter by lineage verdict (ORPHANED, UNUSED, STALE, AT_RISK, NEEDS_REVIEW, HEALTHY)
     """
     db = _db()
-    risk_filter = request.args.get("risk_level")
+    risk_filter = request.args.get("risk_level") or request.args.get("risk")
     type_filter = request.args.get("identity_type")
     category_filter = request.args.get("identity_category")
     cloud_filter = request.args.get("cloud")
@@ -981,6 +981,10 @@ def get_identities():
     activity_filter = request.args.get("activity_status")
     privilege_tier_filter = request.args.get("privilege_tier")
     agirs_factor = request.args.get("agirs_factor")
+    # CISO drawer flyout params (passed through from RISK_TYPE_ROUTES)
+    workload_filter = request.args.get("workload")
+    owner_param = request.args.get("owner")
+    privileged_param = request.args.get("privileged")
 
     cursor = db.conn.cursor()
 
@@ -1015,8 +1019,14 @@ def get_identities():
                 where_clauses += pillar_sql
 
         if risk_filter:
-            where_clauses += " AND i.risk_level = %s"
-            params.append(risk_filter)
+            risk_vals = [v.strip().lower() for v in risk_filter.split(',') if v.strip()]
+            if len(risk_vals) == 1:
+                where_clauses += " AND i.risk_level = %s"
+                params.append(risk_vals[0])
+            elif risk_vals:
+                placeholders = ','.join(['%s'] * len(risk_vals))
+                where_clauses += f" AND i.risk_level IN ({placeholders})"
+                params.extend(risk_vals)
 
         if category_filter:
             where_clauses += " AND COALESCE(i.identity_category, '') = %s"
@@ -1040,9 +1050,10 @@ def get_identities():
                 where_clauses += agirs_sql
 
         if status_filter:
-            if status_filter == 'disabled':
+            _sf = status_filter.lower()
+            if _sf == 'disabled':
                 where_clauses += " AND (i.enabled = FALSE OR i.status IN ('disabled', 'deleted'))"
-            elif status_filter == 'active':
+            elif _sf == 'active':
                 where_clauses += " AND COALESCE(i.enabled, TRUE) = TRUE AND COALESCE(i.status, 'active') NOT IN ('disabled', 'deleted')"
 
         if has_roles_filter and has_roles_filter.lower() == 'true':
@@ -1051,7 +1062,24 @@ def get_identities():
                 OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
             )"""
 
+        # CISO drawer: workload=true → service principals + managed identities
+        if workload_filter and workload_filter.lower() == 'true':
+            where_clauses += " AND COALESCE(i.identity_category, '') IN ('service_principal', 'managed_identity_system', 'managed_identity_user')"
+
+        # CISO drawer: owner=none/unowned → unowned identities (alias for has_owner=false)
+        if owner_param and owner_param.lower() in ('none', 'unowned'):
+            where_clauses += " AND COALESCE(i.owner_count, 0) = 0"
+
+        # CISO drawer: privileged=true → T0 + T1 privilege tiers
+        if privileged_param and privileged_param.lower() == 'true':
+            where_clauses += " AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')"
+
         if activity_filter:
+            # Expand frontend shorthand: dormant_strict → stale + never_used
+            if activity_filter.strip() == 'dormant_strict':
+                activity_filter = 'stale,never_used'
+            elif activity_filter.strip() == 'dormant':
+                activity_filter = 'stale,never_used,inactive'
             allowed = {'stale', 'never_used', 'inactive', 'active', 'recently_created', 'unknown'}
             vals = [v.strip() for v in activity_filter.split(',') if v.strip() in allowed]
             if vals:
@@ -1222,7 +1250,20 @@ def get_identity_details(identity_id: str):
                    i.last_noninteractive_signin,
                    COALESCE(i.is_discovery_connector, false) as is_discovery_connector,
                    i.federated_workload_type,
-                   i.owner_status
+                   i.owner_status,
+                   COALESCE(i.blast_radius_score,
+                       (SELECT MAX(ap.risk_score) FROM attack_paths ap
+                        WHERE ap.source_entity_id = i.identity_id
+                          AND ap.organization_id = i.organization_id),
+                       0) as blast_radius_score,
+                   GREATEST(
+                       (SELECT COUNT(*) FROM graph_attack_findings gaf
+                        WHERE gaf.identity_id = i.id
+                          AND gaf.status IN ('open', 'acknowledged', 'in_progress')),
+                       (SELECT COUNT(*) FROM attack_paths ap
+                        WHERE ap.source_entity_id = i.identity_id
+                          AND ap.organization_id = i.organization_id)
+                   ) as attack_path_count
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -1299,6 +1340,8 @@ def get_identity_details(identity_id: str):
             "is_microsoft_system": bool(row[35]),
             "is_discovery_connector": bool(row[38]) if len(row) > 38 else False,
             "owner_status": row[40] if len(row) > 40 else None,
+            "blast_radius_score": float(row[41]) if len(row) > 41 and row[41] is not None else 0,
+            "attack_path_count": int(row[42]) if len(row) > 42 and row[42] is not None else 0,
         }
 
         # Compute effective_last_used = MAX(observed, Azure sign-in)
@@ -3814,12 +3857,19 @@ def _identity_list_select():
             COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
             COALESCE(i.permission_plane, 'entra_id') as permission_plane,
             i.deleted_at,
-            (
-                SELECT COUNT(*)
-                FROM graph_attack_findings gaf
-                WHERE gaf.identity_id = i.id
-                  AND gaf.status IN ('open', 'acknowledged', 'in_progress')
+            GREATEST(
+                (SELECT COUNT(*) FROM graph_attack_findings gaf
+                 WHERE gaf.identity_id = i.id
+                   AND gaf.status IN ('open', 'acknowledged', 'in_progress')),
+                (SELECT COUNT(*) FROM attack_paths ap
+                 WHERE ap.source_entity_id = i.identity_id
+                   AND ap.organization_id = i.organization_id)
             ) as attack_path_count,
+            COALESCE(i.blast_radius_score,
+                (SELECT MAX(ap2.risk_score) FROM attack_paths ap2
+                 WHERE ap2.source_entity_id = i.identity_id
+                   AND ap2.organization_id = i.organization_id),
+                0) as blast_radius_score,
             EXTRACT(EPOCH FROM (NOW() - i.created_datetime)) / 86400 as identity_age_days,
             COALESCE(i.is_discovery_connector, false) as is_discovery_connector,
             i.app_registration_object_id,
@@ -3898,7 +3948,11 @@ def _derive_governance_state_from_row(row, privilege_tier):
     activity = (row.get('activity_status') or 'unknown').lower()
 
     if owner_ct == 0:
-        return 'Orphaned'
+        # Align with GovernanceEngine._classify: Orphaned requires no owner
+        # AND no activity. Active identities without owners are Ungoverned.
+        if activity in ('never_used', 'unknown'):
+            return 'Orphaned'
+        return 'Ungoverned'
     if rec_action == 'AT_RISK':
         return 'Policy Violation'
     if activity in ('stale', 'never_used'):
@@ -4002,6 +4056,7 @@ def _map_identity_row(row):
             else "ok"
         ),
         "attack_path_count": int(row.get('attack_path_count') or 0),
+        "blast_radius_score": float(row.get('blast_radius_score') or 0),
         "identity_age_days": int(row['identity_age_days']) if row.get('identity_age_days') is not None else None,
         "is_discovery_connector": bool(row.get('is_discovery_connector', False)),
         "app_registration_object_id": row.get('app_registration_object_id'),
@@ -5638,6 +5693,7 @@ def get_attack_path_count():
 
         if run_ids:
             # Primary: attack_paths table (canonical, matches risk_summary)
+            # Use org_id only — attack_paths may not be regenerated every run
             try:
                 cursor.execute("""
                     SELECT
@@ -5648,8 +5704,8 @@ def get_attack_path_count():
                         COUNT(*) FILTER (WHERE severity = 'low'),
                         COUNT(DISTINCT source_entity_id)
                     FROM attack_paths
-                    WHERE organization_id = %s AND discovery_run_id = ANY(%s)
-                """, (org_id, run_ids))
+                    WHERE organization_id = %s
+                """, (org_id,))
                 row = cursor.fetchone()
                 ap_total = row[0] or 0
                 ap_critical = row[1] or 0
@@ -5657,6 +5713,24 @@ def get_attack_path_count():
                 ap_medium = row[3] or 0
                 ap_low = row[4] or 0
                 ap_affected = row[5] or 0
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+
+            # Critical count: identities with risk_level='critical' that have attack paths
+            # (path severity != identity risk_level — a critical identity with medium paths is critical)
+            try:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT ap.source_entity_id)
+                    FROM attack_paths ap
+                    JOIN identities i ON i.identity_id = ap.source_entity_id
+                        AND i.discovery_run_id = ANY(%s)
+                    WHERE ap.organization_id = %s
+                        AND i.risk_level = 'critical'
+                """, (run_ids, org_id))
+                _crit_identity_count = _scalar(cursor, 0)
+                if _crit_identity_count > ap_critical:
+                    ap_critical = _crit_identity_count
             except Exception:
                 try: db.conn.rollback()
                 except Exception: pass
@@ -6774,15 +6848,328 @@ def get_dashboard_posture():
                               + previous_run["medium_count"])
             previous_posture_score = round(((prev_total - prev_high_risk) / prev_total) * 100, 1) if prev_total > 0 else 0.0
 
+        # ── v3.1 fields required by usePostureDashboard ──
+        org_id = _org_id()
+
+        posture_status = "good" if posture_score >= 90 else ("fair" if posture_score >= 70 else "at_risk")
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s AND monitored = true AND deleted = false",
+            (org_id,),
+        )
+        sub_count = _scalar(cursor, 0)
+
+        identity_count = total  # already computed above (customer identities from current run)
+
+        narrative_text = (
+            f"AuditGraph is monitoring {identity_count} identities across "
+            f"{sub_count} subscription{'s' if sub_count != 1 else ''} "
+            f"with an overall posture score of {posture_score}."
+        )
+
+        coverage = {
+            "subscriptions": sub_count,
+            "identities_scoped": identity_count,
+            "label": f"{sub_count} subscription{'s' if sub_count != 1 else ''} \u00b7 {identity_count} identities monitored",
+            "active_sources": 1 if sub_count > 0 else 0,
+            "total_sources": 1,
+            "sub_count": sub_count,
+            "cloud_label": "Azure",
+            "confidence_level": "high" if posture_score >= 90 else ("medium" if posture_score >= 70 else "low"),
+            "coverage_pct": 100 if sub_count > 0 else 0,
+        }
+
+        cursor.execute(
+            "SELECT status, completed_at FROM discovery_runs WHERE organization_id = %s ORDER BY id DESC LIMIT 1",
+            (org_id,),
+        )
+        dr_row = cursor.fetchone()
+        scan_metadata = {
+            "last_scan": dr_row[1].isoformat() if dr_row and dr_row[1] else None,
+            "status": dr_row[0] if dr_row else "unknown",
+        }
+
+        # v3.1 identity_risk: dormant / ghost / unowned_nhi / machine_pct
+        cursor.execute(get_metric_count_sql('ghost'), _mparams)
+        ghost_count = _scalar(cursor, 0)
+        cursor.execute(get_metric_count_sql('dormant_privileged'), _mparams)
+        dormant_priv_count = _scalar(cursor, 0)
+
+        cursor.execute(f"""
+            SELECT COUNT(*) FILTER (
+                WHERE i.identity_category IN ('service_principal','managed_identity_system','managed_identity_user')
+            )
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%(run_ids)s)
+            {HIDE_MICROSOFT_SQL}
+        """, _mparams)
+        machine_count = _scalar(cursor, 0)
+        machine_pct = round((machine_count / total) * 100) if total > 0 else 0
+
+        identity_risk = {
+            "critical": current_run["critical_count"],
+            "high": current_run["high_count"],
+            "medium": current_run["medium_count"],
+            "total": total,
+            "dormant": dormant_priv_count,
+            "ghost": ghost_count,
+            "unowned_nhi": no_owner_count,
+            "machine_pct": machine_pct,
+        }
+
+        # v3.1 blast_radius: single highest-risk identity object
+        blast_radius = None
+        try:
+            cursor.execute(f"""
+                SELECT
+                    i.id,
+                    i.display_name,
+                    i.identity_id,
+                    i.identity_category,
+                    COALESCE(i.risk_score, 0) AS risk_score,
+                    i.risk_level,
+                    (SELECT COUNT(*) FROM attack_paths ap
+                     WHERE ap.source_entity_id = i.identity_id
+                       AND ap.organization_id = %(org_id)s) AS path_count,
+                    (SELECT string_agg(DISTINCT ra.role_name, ', ' ORDER BY ra.role_name)
+                     FROM role_assignments ra WHERE ra.identity_db_id = i.id) AS roles,
+                    (SELECT COUNT(DISTINCT ra.scope)
+                     FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                       AND ra.scope ~ '^/subscriptions/[^/]+$') AS sub_count
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND i.risk_level IN ('critical', 'high')
+                  {HIDE_MICROSOFT_SQL}
+                ORDER BY COALESCE(i.risk_score, 0) DESC, path_count DESC
+                LIMIT 1
+            """, {'run_ids': run_ids, 'org_id': org_id})
+            br_row = cursor.fetchone()
+            if br_row and br_row[0]:
+                _br_name = br_row[1] or ''
+                _br_uuid = br_row[2] or ''
+                _br_cat = br_row[3] or ''
+                _br_score = br_row[4] or 0
+                _br_level = br_row[5] or ''
+                _br_paths = br_row[6] or 0
+                _br_roles = br_row[7] or ''
+                _br_subs = br_row[8] or 0
+
+                # Derive role tier from highest privilege role
+                _roles_lower = _br_roles.lower() if _br_roles else ''
+                if 'owner' in _roles_lower or 'user access administrator' in _roles_lower:
+                    _tier = 'T0'
+                elif 'contributor' in _roles_lower:
+                    _tier = 'T1'
+                elif _br_roles:
+                    _tier = 'T2'
+                else:
+                    _tier = 'T3'
+
+                # Build scope string
+                if _br_subs > 1:
+                    _scope = f"Full control of {_br_subs} subscriptions"
+                elif _br_subs == 1:
+                    _scope = "Full control of the entire subscription"
+                else:
+                    _scope = "Access to tenant-level resources"
+
+                # Build exploitation text
+                _actor = 'Service account' if 'service_principal' in _br_cat or 'managed_identity' in _br_cat else 'User'
+                _exploitation = (
+                    f"{_actor} with {_br_roles} — "
+                    f"{_br_paths} attack path{'s' if _br_paths != 1 else ''} detected"
+                ) if _br_paths > 0 else f"{_actor} with {_br_roles}"
+
+                blast_radius = {
+                    "identity_id": br_row[0],
+                    "identity_name": _br_name,
+                    "identity_string_id": _br_uuid,
+                    "scope_string": _scope,
+                    "role_tier": _tier,
+                    "exploitation_text": _exploitation,
+                    "impact_label": "Critical" if _br_level == 'critical' else "High",
+                }
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # Recent executed fixes with positive score delta
+        recent_fixes = []
+        try:
+            cursor.execute("""
+                SELECT ar.identity_id, ar.identity_display_name,
+                       ar.score_delta, ar.pre_fix_score,
+                       ar.attack_paths_before, ar.attack_paths_after,
+                       ar.execution_completed_at
+                FROM approval_requests ar
+                WHERE ar.organization_id = %s
+                  AND ar.score_delta IS NOT NULL
+                  AND ar.score_delta > 0
+                ORDER BY ar.execution_completed_at DESC
+                LIMIT 10
+            """, (org_id,))
+            for fix_row in cursor.fetchall():
+                pre = float(fix_row[3]) if fix_row[3] else 0
+                delta = float(fix_row[2]) if fix_row[2] else 0
+                paths_before = int(fix_row[4]) if fix_row[4] else 0
+                paths_after = int(fix_row[5]) if fix_row[5] else 0
+                recent_fixes.append({
+                    "identity_name": fix_row[1] or fix_row[0],
+                    "score_delta": delta,
+                    "score_delta_pct": round((delta / pre) * 100, 1) if pre > 0 else 0.0,
+                    "paths_eliminated": paths_before - paths_after,
+                    "executed_at": fix_row[6].isoformat() if fix_row[6] else None,
+                })
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # ── v3.1 priority_actions: top 3 remediations by risk_reduction ──
+        _VERB_MAP = {
+            'reduce_privilege': 'REVOKE',
+            'break_attack_path': 'MITIGATE',
+            'remove_identity': 'REMOVE',
+            'disable_identity': 'DISABLE',
+            'assign_owner': 'ASSIGN',
+            'scope_reduction': 'REDUCE',
+        }
+        _COMPLIANCE_MAP = {
+            'reduce_privilege': ['CIS 6.8', 'NIST'],
+            'break_attack_path': ['CIS 6.1', 'NIST'],
+            'remove_identity': ['CIS 5.3', 'NIST'],
+            'disable_identity': ['CIS 5.3', 'CIS 5.1'],
+        }
+        _ROUTE_MAP = {
+            'reduce_privilege': '/identities?risk=critical,high',
+            'break_attack_path': '/attack-paths',
+            'remove_identity': '/identities?filter=unowned_nhi',
+            'disable_identity': '/identities?activity_status=dormant_strict',
+        }
+        priority_actions = []
+        try:
+            cursor.execute("""
+                SELECT gr.action_type,
+                       MAX(gr.title) AS title,
+                       MAX(COALESCE(gr.risk_reduction, 0)) AS risk_reduction,
+                       MIN(gr.priority) AS priority,
+                       MAX(gr.blast_radius) AS blast_radius,
+                       COUNT(DISTINCT gr.identity_id) AS identity_count
+                FROM generated_remediations gr
+                WHERE gr.organization_id = %s
+                  AND gr.status IN ('new', 'pending')
+                GROUP BY gr.action_type
+                ORDER BY risk_reduction DESC, priority ASC
+                LIMIT 3
+            """, (org_id,))
+            for idx, pa_row in enumerate(cursor.fetchall(), 1):
+                _at = pa_row[0] or ''
+                _verb = _VERB_MAP.get(_at, _at.split('_')[0].upper())
+                _title = pa_row[1] or ''
+                _rr = int(pa_row[2]) if pa_row[2] else 0
+                _pri = pa_row[3] or 'medium'
+                _bl = pa_row[4] or ''
+                _ic = int(pa_row[5]) if pa_row[5] else 0
+                _desc = (
+                    f"{_ic} identit{'ies' if _ic != 1 else 'y'} with excessive "
+                    f"privileges \u2014 {_rr}% risk reduction"
+                )
+                priority_actions.append({
+                    "rank": idx,
+                    "action": f"{_verb} {_title}" if _title else _verb,
+                    "title": _title,
+                    "description": _desc,
+                    "risk_reduction_pct": _rr,
+                    "affected_count": _ic,
+                    "compliance_tags": _COMPLIANCE_MAP.get(_at, []),
+                    "impact_level": "HIGH" if _pri == 'critical' or _bl == 'high' else "MEDIUM",
+                    "is_quick_win": _ic <= 3 and _rr >= 50,
+                    "action_type": _at,
+                    "route": _ROUTE_MAP.get(_at, '/identities'),
+                })
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # ── v3.1 immediate_risks: reuse already-computed metric counts ──
+        _risk_items = [
+            {
+                "type": "dormant_privileged",
+                "label": "Dormant Privileged Accounts",
+                "count": dormant_priv_count,
+                "severity": "high",
+            },
+            {
+                "type": "ghost_accounts",
+                "label": "Ghost Identities (access not revoked)",
+                "count": ghost_count,
+                "severity": "critical",
+            },
+            {
+                "type": "unowned_nhi",
+                "label": "Unowned Service Principals",
+                "count": no_owner_count,
+                "severity": "high",
+            },
+        ]
+        immediate_risks = [r for r in _risk_items if r["count"] > 0]
+        immediate_risks.sort(key=lambda r: r["count"], reverse=True)
+
+        # Top risk narrative + highest type
+        if_unaddressed_count = sum(r["count"] for r in immediate_risks)
+        highest_risk_type = immediate_risks[0]["type"] if immediate_risks else None
+        _NARRATIVE_MAP = {
+            "dormant_privileged": lambda c, p: (
+                f"{c} account{'s' if c != 1 else ''} ({p}% of all identities) with admin "
+                f"access have been dormant \u2014 removing them eliminates most misuse risk"
+            ),
+            "ghost_accounts": lambda c, p: (
+                f"{c} disabled or deleted identit{'ies' if c != 1 else 'y'} ({p}%) still "
+                f"hold active RBAC roles \u2014 access not revoked"
+            ),
+            "unowned_nhi": lambda c, p: (
+                f"{c} service principal{'s' if c != 1 else ''} ({p}%) operate without "
+                f"an owner \u2014 creates blind spots for attackers"
+            ),
+        }
+        top_risk_narrative = None
+        if highest_risk_type:
+            _hr = next((r for r in immediate_risks if r["type"] == highest_risk_type), None)
+            if _hr:
+                _pct = round((_hr["count"] / total) * 100, 1) if total > 0 else 0
+                _fn = _NARRATIVE_MAP.get(highest_risk_type)
+                top_risk_narrative = _fn(_hr["count"], _pct) if _fn else None
+
+        # Check for overlapping identities across risk categories
+        has_overlapping = (dormant_priv_count + ghost_count + no_owner_count) > if_unaddressed_count if if_unaddressed_count > 0 else False
+
         return jsonify({
             "current_run": current_run,
             "previous_run": previous_run,
             "posture_score": posture_score,
+            "posture_status": posture_status,
+            "narrative_text": narrative_text,
+            "identity_risk": identity_risk,
+            "coverage": coverage,
+            "scan_metadata": scan_metadata,
             "previous_posture_score": previous_posture_score,
             "credential_health": credential_health,
             "dormant_count": dormant_count,
             "no_owner_count": no_owner_count,
             "expiring_credentials_count": credential_health["expiring_soon"],
+            "blast_radius": blast_radius,
+            "recent_fixes": recent_fixes,
+            "priority_actions": priority_actions,
+            "immediate_risks": immediate_risks,
+            "top_risk_narrative": top_risk_narrative,
+            "highest_risk_type": highest_risk_type,
+            "if_unaddressed_count": if_unaddressed_count,
+            "has_overlapping_identities": has_overlapping,
         })
 
     finally:
