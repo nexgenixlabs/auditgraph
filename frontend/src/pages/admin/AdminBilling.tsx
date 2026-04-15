@@ -7,27 +7,32 @@ import {
   formatCentsExact,
 } from '../../constants/pricing';
 import { generateInvoicePdf, type Invoice } from '../../utils/invoicePdfGenerator';
+import { api } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface BillingSummary {
   total_mrr_cents: number;
   projected_arr_cents: number;
-  total_tenants: number;
-  active_tenants: number;
+  total_orgs: number;
+  active_orgs: number;
   by_plan: Record<string, { count: number; mrr_cents: number }>;
   by_cloud: Record<string, { count: number; revenue_cents: number }>;
-  tenants: Array<{
-    tenant_id: number;
-    tenant_name: string;
+  organizations: Array<{
+    organization_id: number;
+    org_name: string;
     plan: string;
     active_subs: number;
     net_monthly_cents: number;
+    platform_fee_cents: number;
+    subscription_total_cents: number;
+    discount_pct: number;
   }>;
 }
 
 interface BillingEvent {
   id: number;
-  tenant_id: number;
-  tenant_name: string;
+  organization_id: number;
+  org_name: string;
   event_type: string;
   field_changed: string | null;
   old_value: string | null;
@@ -69,7 +74,7 @@ function formatDate(iso: string | null): string {
 function licenseLabel(t: TenantRow): { text: string; color: string } {
   if (!t.license_activated_at) return { text: 'Not Activated', color: 'text-gray-400' };
   if (t.license_expires_at) {
-    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
+    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / TIME_MS.DAY);
     if (days < 0) return { text: 'Expired', color: 'text-red-600' };
     if (days < 30) return { text: `${days}d left`, color: 'text-yellow-600' };
   }
@@ -109,7 +114,7 @@ export default function AdminBilling() {
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [events, setEvents] = useState<BillingEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [expandedTenant, setExpandedTenant] = useState<number | null>(null);
+  const [expandedOrg, setExpandedOrg] = useState<number | null>(null);
   const [expandedBilling, setExpandedBilling] = useState<TenantBillingDetail | null>(null);
   const [expandLoading, setExpandLoading] = useState(false);
   // Invoice state
@@ -133,24 +138,23 @@ export default function AdminBilling() {
   function fetchInvoices() {
     const params = new URLSearchParams();
     if (invoiceFilter) params.set('status', invoiceFilter);
-    fetch(`/api/admin/invoices?${params}`).then(r => r.ok ? r.json() : { invoices: [] })
-      .then(d => setInvoices(d.invoices || []))
+    api.get(`/admin/invoices?${params}`).then(d => setInvoices(d.invoices || []))
       .catch(() => {});
   }
 
   function fetchPlatformSettings() {
-    fetch('/api/admin/platform-settings').then(r => r.ok ? r.json() : null)
+    api.get('/admin/platform-settings')
       .then(d => { if (d) { setPlatformSettings(d); setSettingsForm(prev => ({ ...prev, ...d })); } })
       .catch(() => {});
   }
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/admin/billing/summary').then(r => r.ok ? r.json() : null),
-      fetch('/api/clients').then(r => r.ok ? r.json() : { tenants: [] }),
-      fetch('/api/admin/billing/events?limit=20').then(r => r.ok ? r.json() : { events: [] }),
+      api.get('/admin/billing/summary').catch(() => null),
+      api.get('/clients').catch(() => ({ tenants: [] })),
+      api.get('/admin/billing/events?limit=20').catch(() => ({ events: [] })),
     ])
-      .then(([summaryData, tenantsData, eventsData]) => {
+      .then(([summaryData, tenantsData, eventsData]: any[]) => {
         if (summaryData) setSummary(summaryData);
         setTenants(tenantsData.tenants || []);
         setEvents(eventsData.events || []);
@@ -168,12 +172,7 @@ export default function AdminBilling() {
     if (!genTenantId || !genPeriodStart || !genPeriodEnd) return;
     setGenerating(true);
     try {
-      const res = await fetch(`/api/admin/tenants/${genTenantId}/invoices`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ period_start: genPeriodStart, period_end: genPeriodEnd, notes: genNotes }),
-      });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
+      await api.post(`/admin/tenants/${genTenantId}/invoices`, { period_start: genPeriodStart, period_end: genPeriodEnd, notes: genNotes });
       setShowGenerate(false);
       setGenTenantId(''); setGenPeriodStart(''); setGenPeriodEnd(''); setGenNotes('');
       fetchInvoices();
@@ -191,32 +190,21 @@ export default function AdminBilling() {
       return;
     }
     if (action === 'send') {
-      await fetch(`/api/admin/invoices/${invoiceId}/send`, { method: 'POST' });
+      await api.post(`/admin/invoices/${invoiceId}/send`);
       fetchInvoices();
       return;
     }
     // status change (paid, void)
-    await fetch(`/api/admin/invoices/${invoiceId}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: action }),
-    });
+    await api.patch(`/admin/invoices/${invoiceId}/status`, { status: action });
     fetchInvoices();
   }
 
   async function handleSavePlatformSettings() {
     setSavingSettings(true);
     try {
-      const res = await fetch('/api/admin/platform-settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settingsForm),
-      });
-      if (res.ok) {
-        const d = await res.json();
-        setPlatformSettings(d);
-        setEditingSettings(false);
-      }
+      const d = await api.post('/admin/platform-settings', settingsForm);
+      setPlatformSettings(d);
+      setEditingSettings(false);
     } catch {
       // error silently handled
     } finally {
@@ -224,16 +212,16 @@ export default function AdminBilling() {
     }
   }
 
-  function toggleTenantExpand(tenantId: number) {
-    if (expandedTenant === tenantId) {
-      setExpandedTenant(null);
+  function toggleOrgExpand(orgId: number) {
+    if (expandedOrg === orgId) {
+      setExpandedOrg(null);
       setExpandedBilling(null);
       return;
     }
-    setExpandedTenant(tenantId);
+    setExpandedOrg(orgId);
     setExpandedBilling(null);
     setExpandLoading(true);
-    fetch(`/api/admin/clients/${tenantId}/billing`)
+    fetch(`/api/admin/clients/${orgId}/billing`)
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setExpandedBilling(data); })
       .catch(() => {})
@@ -252,7 +240,7 @@ export default function AdminBilling() {
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading billing data...</div>;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Billing & Revenue</h2>
         <p className="text-sm text-gray-500 mt-0.5">Per-subscription billing model &mdash; platform fee + per-sub rates</p>
@@ -261,7 +249,7 @@ export default function AdminBilling() {
       {/* Summary cards */}
       <div className="grid grid-cols-6 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-gray-900">{summary?.total_tenants ?? tenants.length}</div>
+          <div className="text-2xl font-bold text-gray-900">{summary?.total_orgs ?? tenants.length}</div>
           <div className="text-xs text-gray-500 mt-1">Total Organizations</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -269,12 +257,12 @@ export default function AdminBilling() {
           <div className="text-xs text-gray-500 mt-1">Total Users</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-gray-900">{summary?.active_tenants ?? tenants.filter(t => t.enabled).length}</div>
+          <div className="text-2xl font-bold text-gray-900">{summary?.active_orgs ?? tenants.filter(t => t.enabled).length}</div>
           <div className="text-xs text-gray-500 mt-1">Active Clients</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-2xl font-bold text-purple-700">{planCounts.enterprise || 0}</div>
-          <div className="text-xs text-gray-500 mt-1">Enterprise Licenses</div>
+          <div className="text-2xl font-bold text-blue-700">{planCounts.pro || 0}</div>
+          <div className="text-xs text-gray-500 mt-1">Pro Licenses</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="text-2xl font-bold text-green-700">{formatCents(totalMrr)}</div>
@@ -290,11 +278,11 @@ export default function AdminBilling() {
       <div className="bg-white border border-gray-200 rounded-lg p-6">
         <h3 className="text-sm font-semibold text-gray-800 mb-4">Plan Distribution</h3>
         <div className="flex gap-6">
-          {['free', 'trial', 'pro', 'enterprise'].map(plan => {
+          {['free', 'trial', 'pro'].map(plan => {
             const count = planCounts[plan] || 0;
             const pct = tenants.length > 0 ? Math.round((count / tenants.length) * 100) : 0;
             const cfg = PLAN_LABELS[plan] || PLAN_LABELS.free;
-            const barColor = plan === 'enterprise' ? 'bg-purple-500' : plan === 'pro' ? 'bg-blue-500' : plan === 'trial' ? 'bg-amber-500' : 'bg-gray-400';
+            const barColor = plan === 'pro' ? 'bg-blue-500' : plan === 'trial' ? 'bg-amber-500' : 'bg-gray-400';
             const planMrr = summary?.by_plan?.[plan]?.mrr_cents ?? 0;
             return (
               <div key={plan} className="flex-1">
@@ -382,22 +370,25 @@ export default function AdminBilling() {
               <th className="px-4 py-2.5">Activated</th>
               <th className="px-4 py-2.5">Expires</th>
               <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5 text-right">Platform Fee</th>
+              <th className="px-4 py-2.5 text-right">Sub Revenue</th>
+              <th className="px-4 py-2.5 text-right">Discount</th>
               <th className="px-4 py-2.5 text-right">MRR</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {tenants.map(t => {
-              const tb = summary?.tenants?.find(tb => tb.tenant_id === t.id);
+              const tb = summary?.organizations?.find(tb => tb.organization_id === t.id);
               const mrr = tb?.net_monthly_cents ?? 0;
               const activeSubs = tb?.active_subs ?? 0;
               const planCfg = PLAN_LABELS[t.plan] || PLAN_LABELS.free;
               const ls = licenseLabel(t);
-              const isExpanded = expandedTenant === t.id;
+              const isExpanded = expandedOrg === t.id;
               return (
                 <React.Fragment key={t.id}>
                   <tr
                     className={`hover:bg-gray-50/60 cursor-pointer ${isExpanded ? 'bg-blue-50/40' : ''}`}
-                    onClick={() => toggleTenantExpand(t.id)}
+                    onClick={() => toggleOrgExpand(t.id)}
                   >
                     <td className="px-4 py-2.5 font-medium text-gray-900">
                       <div className="flex items-center gap-1.5">
@@ -427,11 +418,20 @@ export default function AdminBilling() {
                         {t.enabled ? 'Active' : 'Disabled'}
                       </span>
                     </td>
+                    <td className="px-4 py-2.5 text-right text-gray-700">{formatCents(tb?.platform_fee_cents ?? 0)}</td>
+                    <td className="px-4 py-2.5 text-right text-gray-700">{formatCents(tb?.subscription_total_cents ?? 0)}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      {(tb?.discount_pct ?? 0) > 0 ? (
+                        <span className="text-green-600 font-semibold">-{tb!.discount_pct}%</span>
+                      ) : (
+                        <span className="text-gray-400">&mdash;</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatCents(mrr)}</td>
                   </tr>
                   {isExpanded && (
                     <tr>
-                      <td colSpan={10} className="px-4 py-3 bg-gray-50/80 border-t border-b border-gray-200">
+                      <td colSpan={13} className="px-4 py-3 bg-gray-50/80 border-t border-b border-gray-200">
                         {expandLoading ? (
                           <div className="text-xs text-gray-400 py-2">Loading billing breakdown...</div>
                         ) : expandedBilling ? (
@@ -521,7 +521,7 @@ export default function AdminBilling() {
                     <td className="px-4 py-2.5">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${badge.bg} ${badge.color}`}>{badge.text}</span>
                     </td>
-                    <td className="px-4 py-2.5 font-medium text-gray-900">{ev.tenant_name}</td>
+                    <td className="px-4 py-2.5 font-medium text-gray-900">{ev.org_name}</td>
                     <td className="px-4 py-2.5 text-gray-600 font-mono">{ev.field_changed || '\u2014'}</td>
                     <td className="px-4 py-2.5">
                       {ev.old_value || ev.new_value ? (
@@ -634,7 +634,7 @@ export default function AdminBilling() {
                 return (
                   <tr key={inv.id} className="hover:bg-gray-50/60">
                     <td className="px-4 py-2.5 font-mono font-medium text-gray-900">{inv.invoice_number}</td>
-                    <td className="px-4 py-2.5 text-gray-700">{inv.tenant_name || `Tenant #${inv.tenant_id}`}</td>
+                    <td className="px-4 py-2.5 text-gray-700">{inv.org_name || `Organization #${inv.organization_id}`}</td>
                     <td className="px-4 py-2.5 text-gray-600">
                       {formatDate(inv.period_start)} — {formatDate(inv.period_end)}
                     </td>

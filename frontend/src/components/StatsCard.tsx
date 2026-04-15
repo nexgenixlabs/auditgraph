@@ -69,15 +69,20 @@ const StatsCard: React.FC<StatsCardProps> = ({
 
   const Tag = onClick ? 'button' : 'div';
 
+  // Zero-value rule: 0/null values always use muted color, never severity
+  const isZero = value === 0 || value === '0' || value === null || value === undefined;
+  const valueStyle: React.CSSProperties = isZero ? { color: 'var(--text-muted)', width: 'fit-content' } : { width: 'fit-content' };
+
   return (
     <Tag
       onClick={onClick}
-      className={`border rounded-lg p-6 ${colorClasses[color]} text-left w-full ${onClick ? 'hover:shadow-md cursor-pointer transition' : ''}`}
+      className={`border rounded-lg p-6 ${isZero ? 'bg-gray-50 text-gray-600 border-gray-200' : colorClasses[color]} text-left w-full ${onClick ? 'hover:shadow-md cursor-pointer transition' : ''}`}
     >
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium opacity-75">{title}</p>
-          <p className="text-3xl font-bold mt-2">{value}</p>
+          <p className={`text-3xl font-bold mt-2${onClick ? ' border-b border-dashed border-current' : ''}`}
+             style={valueStyle}>{typeof value === 'number' ? value.toLocaleString() : (value ?? '—')}</p>
         </div>
         {icon && (
           <div className="text-4xl opacity-50">
@@ -89,15 +94,15 @@ const StatsCard: React.FC<StatsCardProps> = ({
         <div className="mt-3 flex items-center text-xs font-medium">
           {trend === 'up' && (
             <span className={trendNeutral ? 'text-gray-500' : 'text-red-600'}>
-              ↑ {trendDelta != null ? `+${Math.abs(trendDelta)} from last run` : 'Increased'}
+              ↑ {trendDelta != null ? `+${Math.abs(trendDelta)} from last snapshot` : 'Increased'}
             </span>
           )}
           {trend === 'down' && (
             <span className={trendNeutral ? 'text-gray-500' : 'text-green-600'}>
-              ↓ {trendDelta != null ? `${Math.abs(trendDelta)} fewer than last run` : 'Decreased'}
+              ↓ {trendDelta != null ? `${Math.abs(trendDelta)} fewer than last snapshot` : 'Decreased'}
             </span>
           )}
-          {trend === 'neutral' && <span className="opacity-50">→ No change from last run</span>}
+          {trend === 'neutral' && <span className="opacity-50">→ No change from last snapshot</span>}
         </div>
       )}
     </Tag>

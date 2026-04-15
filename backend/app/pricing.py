@@ -4,46 +4,63 @@ AuditGraph Billing Engine — Pure pricing logic (no DB access).
 All monetary values are in integer cents to avoid floating-point issues.
 """
 
-# ── Platform fees by account plan (cents/month) ─────────────────────────────
-PLATFORM_FEES = {
-    'free': 0,
-    'trial': 0,
-    'pro': 20_000,        # $200/mo
-    'enterprise': 50_000,  # $500/mo
-}
+import hashlib
+import json
 
-# ── Default per-subscription rates by cloud (cents/month) ───────────────────
-DEFAULT_SUB_RATES = {
-    'azure': 6_900,   # $69/mo
-    'aws': 7_900,     # $79/mo
-    'gcp': 7_400,     # $74/mo
-}
+from app.billing.config import (
+    PRICING_VERSION,
+    PLATFORM_FEE_CENTS,
+    PLAN_PLATFORM_FEES,
+    CLOUD_SUB_RATES,
+    COMMITMENT_DISCOUNTS,
+    PLAN_LIMITS,
+)
 
-# ── Commitment discounts (term_years → fraction off) ────────────────────────
-COMMITMENT_DISCOUNTS = {
-    0: 0.0,
-    1: 0.15,
-    3: 0.25,
-    5: 0.35,
-}
 
-# ── Plan limits ─────────────────────────────────────────────────────────────
-PLAN_LIMITS = {
-    'free': {'max_active_subs': 1, 'max_identities': 50},
-    'trial': {'max_active_subs': 5, 'max_identities': 500},
-    'pro': {'max_active_subs': None, 'max_identities': None},
-    'enterprise': {'max_active_subs': None, 'max_identities': None},
-}
+def compute_invoice_hash(invoice_data: dict) -> str:
+    """Compute SHA-256 hash of immutable invoice financial fields.
+
+    Uses canonical JSON (sort_keys, compact separators) for deterministic output.
+    Excludes mutable fields (status, paid_at, voided_at, notes).
+    """
+    canonical = json.dumps({
+        'invoice_number': invoice_data['invoice_number'],
+        'tenant_id': invoice_data['tenant_id'],
+        'period_start': str(invoice_data['period_start']),
+        'period_end': str(invoice_data['period_end']),
+        'subtotal_cents': invoice_data['subtotal_cents'],
+        'tax_amount_cents': invoice_data['tax_amount_cents'],
+        'discount_cents': invoice_data['discount_cents'],
+        'total_cents': invoice_data['total_cents'],
+        'line_items': invoice_data['line_items'],
+        'seller_snapshot': invoice_data['seller_snapshot'],
+        'buyer_snapshot': invoice_data['buyer_snapshot'],
+    }, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+# ── Backward-compatible aliases (imported from billing.config) ───────────────
+PLATFORM_FEES = PLAN_PLATFORM_FEES
+DEFAULT_SUB_RATES = CLOUD_SUB_RATES
 
 
 def get_default_platform_fee(plan: str) -> int:
     """Return default platform fee in cents for a plan tier."""
-    return PLATFORM_FEES.get(plan, PLATFORM_FEES['pro'])
+    return PLAN_PLATFORM_FEES.get(plan, PLAN_PLATFORM_FEES['pro'])
+
+
+def get_real_platform_fee(plan: str) -> int:
+    """Return the REAL platform fee (ignoring trial waiver).
+
+    Trial plans show $500 as their real fee but waive it.
+    """
+    if plan == 'trial':
+        return PLATFORM_FEE_CENTS  # $500 — full fee, waived at billing time
+    return PLAN_PLATFORM_FEES.get(plan, PLAN_PLATFORM_FEES['pro'])
 
 
 def get_default_sub_rate(cloud: str) -> int:
     """Return default per-subscription rate in cents for a cloud provider."""
-    return DEFAULT_SUB_RATES.get(cloud, DEFAULT_SUB_RATES['azure'])
+    return CLOUD_SUB_RATES.get(cloud, CLOUD_SUB_RATES['azure'])
 
 
 def calculate_billing(tenant_dict: dict, subscription_list: list) -> dict:
@@ -56,12 +73,25 @@ def calculate_billing(tenant_dict: dict, subscription_list: list) -> dict:
                           monitored, rate_cents fields.
 
     Returns dict with:
-        platform_fee_cents, subscription_total_cents, gross_monthly_cents,
+        platform_fee_cents, platform_fee_waiver_cents, trial_active,
+        subscription_total_cents, gross_monthly_cents,
         discount_pct, net_monthly_cents, projected_arr_cents,
         active_count, subscriptions_by_cloud, line_items
     """
     plan = tenant_dict.get('plan', 'free')
-    platform_fee = tenant_dict.get('platform_fee_cents', get_default_platform_fee(plan))
+    is_trial = (plan == 'trial')
+
+    # Platform fee: always show the REAL fee (even for trial)
+    # For trial: use the full $500 fee (will be waived below)
+    # For other plans: use org override or plan default
+    if is_trial:
+        platform_fee = get_real_platform_fee('trial')
+    else:
+        platform_fee = tenant_dict.get('platform_fee_cents', get_default_platform_fee(plan))
+
+    # Trial waiver: full platform fee waived during trial
+    waiver = platform_fee if is_trial else 0
+
     discount_pct = float(tenant_dict.get('discount_pct', 0))
 
     # Only count monitored (active) subscriptions
@@ -91,6 +121,14 @@ def calculate_billing(tenant_dict: dict, subscription_list: list) -> dict:
             'type': 'platform',
         })
 
+    # Trial waiver line item (negative, cancels platform fee)
+    if waiver > 0:
+        line_items.append({
+            'label': 'Trial Waiver \u2014 Platform Fee',
+            'amount_cents': -waiver,
+            'type': 'trial_waiver',
+        })
+
     for cloud, info in sorted(by_cloud.items()):
         line_items.append({
             'label': f'{cloud.upper()} Subscriptions ({info["count"]})',
@@ -102,20 +140,25 @@ def calculate_billing(tenant_dict: dict, subscription_list: list) -> dict:
 
     gross = platform_fee + sub_total
 
-    # Apply discount
+    # Subtract trial waiver before discount
+    effective_gross = gross - waiver
+
+    # Apply discount on post-waiver amount
     if discount_pct > 0:
-        discount_amount = int(gross * discount_pct / 100)
-        net = gross - discount_amount
+        discount_amount = int(effective_gross * discount_pct / 100)
+        net = effective_gross - discount_amount
         line_items.append({
             'label': f'Commitment Discount ({discount_pct}%)',
             'amount_cents': -discount_amount,
             'type': 'discount',
         })
     else:
-        net = gross
+        net = effective_gross
 
     return {
         'platform_fee_cents': platform_fee,
+        'platform_fee_waiver_cents': waiver,
+        'trial_active': is_trial,
         'subscription_total_cents': sub_total,
         'gross_monthly_cents': gross,
         'discount_pct': discount_pct,

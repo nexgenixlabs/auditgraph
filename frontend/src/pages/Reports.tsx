@@ -1,19 +1,63 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { generateReport, generateExecutiveReport, generateComplianceReport } from '../utils/pdfGenerator';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
+import { EXPORT_SCHEMA_VERSION } from '../utils/exportUtils';
 
 type ReportType = 'full' | 'executive' | 'compliance';
+
+const TYPE_MAP: Record<string, ReportType> = {
+  executive: 'executive',
+  audit: 'full',
+  full: 'full',
+  compliance: 'compliance',
+  scheduled: 'full', // scheduled tab defaults to full, handled below
+};
+
+interface SnapshotInfo {
+  id: number;
+  completed_at: string | null;
+}
 
 export default function Reports() {
   const { addToast } = useToast();
   const { withConnection } = useConnection();
+  const { user, activeOrgId, activeOrgName } = useAuth();
+  const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientName, setClientName] = useState('');
   const [lastGenerated, setLastGenerated] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<any>(null);
-  const [reportType, setReportType] = useState<ReportType>('full');
+  const [latestSnapshot, setLatestSnapshot] = useState<SnapshotInfo | null>(null);
+  const typeParam = searchParams.get('type');
+  const [reportType, setReportType] = useState<ReportType>(
+    TYPE_MAP[typeParam || ''] || 'full'
+  );
+
+  const orgId = activeOrgId ?? user?.organization_id ?? null;
+  const orgName = activeOrgName ?? user?.org_name ?? null;
+
+  // Sync report type when URL param changes
+  useEffect(() => {
+    const t = searchParams.get('type');
+    if (t && TYPE_MAP[t]) setReportType(TYPE_MAP[t]);
+  }, [searchParams]);
+
+  // Fetch latest snapshot for metadata display
+  useEffect(() => {
+    fetch(withConnection('/api/runs'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const runs = data?.runs || data || [];
+        if (Array.isArray(runs) && runs.length > 0) {
+          setLatestSnapshot({ id: runs[0].id, completed_at: runs[0].completed_at });
+        }
+      })
+      .catch(() => {});
+  }, [withConnection]);
 
   async function handleGenerate() {
     setLoading(true);
@@ -44,7 +88,7 @@ export default function Reports() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Reports</h2>
@@ -81,8 +125,17 @@ export default function Reports() {
         </button>
       </div>
 
+      {/* Export Metadata Strip */}
+      <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50">
+        <span className="font-semibold uppercase tracking-wide text-gray-400">Report Metadata</span>
+        <span>Snapshot: <span className="font-mono font-semibold text-gray-700">{latestSnapshot ? `#${latestSnapshot.id}` : 'Loading...'}</span></span>
+        <span>Captured: <span className="font-mono font-semibold text-gray-700">{latestSnapshot?.completed_at ? new Date(latestSnapshot.completed_at).toLocaleString() : '...'}</span></span>
+        <span>Organization: <span className="font-mono font-semibold text-gray-700">{orgId ?? 'N/A'}{orgName ? ` (${orgName})` : ''}</span></span>
+        <span>Schema: <span className="font-mono font-semibold text-gray-700">v{EXPORT_SCHEMA_VERSION}</span></span>
+      </div>
+
       {/* Report Configuration */}
-      <div className="bg-white rounded-xl border shadow-sm p-6 space-y-6">
+      <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
         <div className="text-lg font-semibold text-gray-900">
           {reportType === 'executive' ? 'Executive Posture Report' : reportType === 'compliance' ? 'Compliance Report' : 'Generate Security Report'}
         </div>
@@ -121,7 +174,7 @@ export default function Reports() {
               Report Scope
             </label>
             <div className="px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 text-sm text-gray-600">
-              Latest discovery run (all identities)
+              Latest snapshot (all identities)
             </div>
             <p className="text-xs text-gray-400 mt-1">
               Includes all critical and high risk identities with remediations
@@ -233,7 +286,7 @@ export default function Reports() {
               <div>
                 <div className="text-sm font-medium text-gray-700 mb-2">By Category</div>
                 <div className="space-y-1.5">
-                  {Object.entries(previewData.remediation_summary.by_category as Record<string, number>).map(([cat, count]) => (
+                  {Object.entries((previewData.remediation_summary.by_category || {}) as Record<string, number>).map(([cat, count]) => (
                     <div key={cat} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
                       <span className="text-xs text-gray-700 capitalize">{cat.replace(/_/g, ' ')}</span>
                       <span className="text-xs font-semibold text-gray-900">{count}</span>
@@ -244,7 +297,7 @@ export default function Reports() {
               <div>
                 <div className="text-sm font-medium text-gray-700 mb-2">By Impact</div>
                 <div className="space-y-1.5">
-                  {Object.entries(previewData.remediation_summary.by_impact as Record<string, number>).map(([impact, count]) => {
+                  {Object.entries((previewData.remediation_summary.by_impact || {}) as Record<string, number>).map(([impact, count]) => {
                     const colors: Record<string, string> = {
                       critical: 'bg-red-50 text-red-700',
                       high: 'bg-orange-50 text-orange-700',

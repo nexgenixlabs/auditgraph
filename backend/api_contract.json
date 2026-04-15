@@ -1,0 +1,207 @@
+{
+  "version": "1.0",
+  "generated_by": "export_api_contract.py",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v1/identities",
+      "response_model": "PaginatedResponse[IdentityListRowDTO]",
+      "response_fields": {
+        "items": "list[IdentityListRowDTO]",
+        "total": "int",
+        "offset": "int",
+        "limit": "int",
+        "data_context": "DataContextDTO"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/global/{global_identity_id}",
+      "response_model": "PaginatedResponse[IdentityListRowDTO]",
+      "response_fields": {
+        "items": "list[IdentityListRowDTO]",
+        "total": "int",
+        "offset": "int",
+        "limit": "int",
+        "data_context": "DataContextDTO"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/{identity_id}",
+      "response_model": "IdentityState",
+      "response_fields": {
+        "organization_id": "str",
+        "profile": "IdentityProfile",
+        "activity": "ActivityState",
+        "ownership": "OwnershipBlock",
+        "governance": "GovernanceBlock",
+        "privilege": "PrivilegeBlock",
+        "risk": "RiskScoreBlock",
+        "roles": "RolesBlock",
+        "attack_paths": "AttackPathsBlock",
+        "blast_radius": "Optional[BlastRadiusResult]",
+        "remediation": "RemediationBlock",
+        "data_context": "DataContext"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/{identity_id}/attack-paths",
+      "response_model": "AttackPathsBlock",
+      "response_fields": {
+        "organization_id": "str",
+        "paths": "list[AttackPath]"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/{identity_id}/remediation",
+      "response_model": "RemediationBlock",
+      "response_fields": {
+        "organization_id": "str",
+        "p0_count": "int",
+        "p1_count": "int",
+        "p2_count": "int",
+        "actions": "list[RemediationAction]"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/identities/{identity_id}/remediation/{action_id}/execute",
+      "response_model": "ExecuteRemediationResult",
+      "response_fields": {
+        "success": "bool",
+        "command_executed": "Optional[str]",
+        "output": "Optional[str]",
+        "error": "Optional[str]",
+        "data_context": "DataContextDTO"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/{identity_id}/roles",
+      "response_model": "RolesBlock",
+      "response_fields": {
+        "organization_id": "str",
+        "roles": "list[RoleAssignment]"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/identities/{identity_id}/simulate",
+      "response_model": "WhatIfResult",
+      "response_fields": {
+        "simulation_id": "Optional[str]",
+        "simulation_type": "Literal['ROLE_REMOVAL', 'PRIVILEGE_REDUCTION', 'OWNERSHIP_ASSIGNMENT']",
+        "organization_id": "int",
+        "identity_id": "str",
+        "identity_display_name": "str",
+        "before": "WhatIfSnapshot",
+        "after": "WhatIfSnapshot",
+        "blast_radius_before": "int",
+        "blast_radius_after": "int",
+        "score_delta": "float",
+        "narrative": "str",
+        "simulated_at": "datetime",
+        "engine_version": "str"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/{identity_id}/simulations",
+      "response_model": "WhatIfSimulationListResponse",
+      "response_fields": {
+        "identity_id": "str",
+        "organization_id": "int",
+        "total": "int",
+        "items": "list[WhatIfSimulationListItem]"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/identities/{identity_id}/simulations/{simulation_id}/export",
+      "response_model": "SimulationFindingArtifact",
+      "response_fields": {
+        "finding_type": "str",
+        "generated_at": "datetime",
+        "generated_by": "str",
+        "organization_id": "int",
+        "identity": "dict[str, typing.Any]",
+        "simulation": "dict[str, typing.Any]",
+        "recommendation": "str",
+        "evidence_references": "list[str]"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/posture/actions",
+      "response_model": "PriorityActionsResponse",
+      "response_fields": {
+        "organization_id": "int",
+        "actions": "list[PriorityActionItem]"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/posture/score",
+      "response_model": "PostureScoreResponse",
+      "response_fields": {
+        "organization_id": "int",
+        "score_date": "datetime",
+        "overall_score": "float",
+        "dimension_scores": "DimensionScores",
+        "identity_count": "int",
+        "governed_count": "int",
+        "orphaned_count": "int",
+        "stale_count": "int",
+        "at_risk_count": "int",
+        "computed_by": "str",
+        "data_freshness": "Literal['live', 'stale']"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/posture/score/history",
+      "response_model": "PostureScoreHistoryResponse",
+      "response_fields": {
+        "organization_id": "int",
+        "days": "int",
+        "engine_version": "str",
+        "items": "list[PostureScoreHistoryRow]"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/posture/score/recompute",
+      "response_model": "PostureScoreResponse",
+      "response_fields": {
+        "organization_id": "int",
+        "score_date": "datetime",
+        "overall_score": "float",
+        "dimension_scores": "DimensionScores",
+        "identity_count": "int",
+        "governed_count": "int",
+        "orphaned_count": "int",
+        "stale_count": "int",
+        "at_risk_count": "int",
+        "computed_by": "str",
+        "data_freshness": "Literal['live', 'stale']"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/posture/simulate/bulk",
+      "response_model": "BulkSimulationResult",
+      "response_fields": {
+        "total": "int",
+        "completed": "int",
+        "failed": "int",
+        "aggregate_score_delta": "float",
+        "aggregate_blast_radius_delta": "int",
+        "simulation_ids": "list[str]",
+        "failures": "list[dict[str, str]]"
+      }
+    }
+  ]
+}

@@ -26,20 +26,36 @@ const NODE_STYLES: Record<string, { bg: string; border: string; text: string }> 
   target:    { bg: '#FEF2F2', border: '#EF4444', text: '#991B1B' },
 };
 
+const CLOUD_ICONS: Record<string, { label: string; bg: string; text: string }> = {
+  azure: { label: 'AZ', bg: '#DBEAFE', text: '#1D4ED8' },
+  aws:   { label: 'AWS', bg: '#FEF3C7', text: '#92400E' },
+  gcp:   { label: 'GCP', bg: '#FEE2E2', text: '#991B1B' },
+};
+
 function AttackNode({ data }: { data: Record<string, unknown> }) {
   const nodeType = (data.nodeType as string) || 'identity';
   const style = NODE_STYLES[nodeType] || NODE_STYLES.identity;
   const isTarget = nodeType === 'target';
+  const cloud = (data.cloud as string) || 'azure';
+  const cloudIcon = CLOUD_ICONS[cloud] || CLOUD_ICONS.azure;
 
   return (
     <div
       className={`rounded-xl shadow-md border-2 px-4 py-3 min-w-[160px] max-w-[220px] ${isTarget ? 'animate-pulse' : ''}`}
       style={{ backgroundColor: style.bg, borderColor: style.border }}
     >
-      <div className="text-xs font-bold truncate" style={{ color: style.text }}>
-        {data.label as string}
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <span
+          className="px-1 py-px rounded text-[8px] font-bold uppercase"
+          style={{ backgroundColor: cloudIcon.bg, color: cloudIcon.text }}
+        >
+          {cloudIcon.label}
+        </span>
+        <span className="text-xs font-bold truncate flex-1" style={{ color: style.text }}>
+          {data.label as string}
+        </span>
       </div>
-      <div className="text-[10px] text-gray-600 mt-0.5 line-clamp-2">
+      <div className="text-[10px] text-gray-600 line-clamp-2">
         {data.description as string}
       </div>
     </div>
@@ -61,6 +77,9 @@ const TYPE_LABELS: Record<string, string> = {
   pim_abuse: 'PIM Abuse',
   lateral_movement: 'Lateral Movement',
   credential_exposure: 'Credential Exposure',
+  CROSS_CLOUD_ESCALATION: 'Cross-Cloud Escalation',
+  AWS_TRUST_ABUSE: 'AWS Trust Abuse',
+  GCP_SA_IMPERSONATION: 'GCP SA Impersonation',
 };
 
 export default function AttackPathView({
@@ -86,6 +105,7 @@ export default function AttackPathView({
           label: step.node_label,
           description: step.description,
           nodeType: step.node_type,
+          cloud: (step as any).cloud || 'azure',
         },
       })),
       edges: selectedPath.steps.slice(0, -1).map((_, i) => ({

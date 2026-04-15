@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { RISK_LEVELS, RISK_SOLID, getCategoryLabel } from '../../constants/metrics';
+import { RISK_LEVELS, RISK_SOLID, CLOUD_BADGE, getCategoryLabel, getCategoryCloud } from '../../constants/metrics';
 
 interface CategoryRiskData {
   key: string;
@@ -59,7 +59,14 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
             {categories.map(cat => (
               <tr key={cat.key} className="hover:bg-gray-50">
                 <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                  {getCategoryLabel(cat.key)}
+                  <span className="flex items-center gap-1.5">
+                    {getCategoryLabel(cat.key)}
+                    {getCategoryCloud(cat.key) && (
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${CLOUD_BADGE[getCategoryCloud(cat.key)!] || 'bg-gray-100 text-gray-600'}`}>
+                        {getCategoryCloud(cat.key)!.toUpperCase()}
+                      </span>
+                    )}
+                  </span>
                 </td>
                 {RISK_LEVELS.map(level => {
                   const count = cat[level as keyof CategoryRiskData] as number;
@@ -89,7 +96,12 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
                   );
                 })}
                 <td className="px-3 py-3 text-center">
-                  <span className="text-sm font-bold text-gray-900">{cat.total}</span>
+                  <button
+                    onClick={() => navigate(`/identities?identity_category=${encodeURIComponent(cat.key)}`)}
+                    className="text-sm font-bold text-gray-900 hover:text-blue-600 transition cursor-pointer"
+                  >
+                    {cat.total}
+                  </button>
                 </td>
               </tr>
             ))}
@@ -102,16 +114,22 @@ export default function RiskHeatMap({ categories }: RiskHeatMapProps) {
                 const colors = RISK_SOLID[level];
                 return (
                   <td key={level} className="px-3 py-3 text-center">
-                    <span className={`inline-flex items-center justify-center min-w-[40px] px-2 py-1 rounded-lg text-sm font-bold ${colors.bg} ${colors.text}`}>
+                    <button
+                      onClick={() => navigate(`/identities?risk_level=${encodeURIComponent(level)}`)}
+                      className={`inline-flex items-center justify-center min-w-[40px] px-2 py-1 rounded-lg text-sm font-bold ${colors.bg} ${colors.text} ${colors.hoverBg} transition cursor-pointer`}
+                    >
                       {total}
-                    </span>
+                    </button>
                   </td>
                 );
               })}
               <td className="px-3 py-3 text-center">
-                <span className="text-lg font-bold text-gray-900">
+                <button
+                  onClick={() => navigate('/identities')}
+                  className="text-lg font-bold text-gray-900 hover:text-blue-600 transition cursor-pointer"
+                >
                   {categories.reduce((sum, c) => sum + c.total, 0)}
-                </span>
+                </button>
               </td>
             </tr>
           </tfoot>

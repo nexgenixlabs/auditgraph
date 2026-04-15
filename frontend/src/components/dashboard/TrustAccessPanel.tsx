@@ -73,7 +73,7 @@ export default function TrustAccessPanel() {
   if (!data) {
     return (
       <div className="bg-white rounded-xl p-8 text-center" style={{ border: `1px solid ${COLORS.border}` }}>
-        <p className="text-sm" style={{ color: COLORS.textMuted }}>No trust data available. Run a discovery scan first.</p>
+        <p className="text-sm" style={{ color: COLORS.textMuted }}>No trust data available. Capture a snapshot first.</p>
       </div>
     );
   }

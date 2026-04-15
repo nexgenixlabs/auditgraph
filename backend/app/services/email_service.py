@@ -22,8 +22,6 @@ import logging
 import asyncio
 from datetime import datetime
 from typing import Dict, List
-from dotenv import load_dotenv
-
 from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
 from msgraph.generated.users.item.send_mail.send_mail_post_request_body import SendMailPostRequestBody
@@ -32,8 +30,6 @@ from msgraph.generated.models.item_body import ItemBody
 from msgraph.generated.models.body_type import BodyType
 from msgraph.generated.models.recipient import Recipient
 from msgraph.generated.models.email_address import EmailAddress
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +77,7 @@ class EmailService:
         self.tenant_id = os.getenv('AZURE_TENANT_ID')
         self.client_id = os.getenv('AZURE_CLIENT_ID')
         self.client_secret = os.getenv('AZURE_CLIENT_SECRET')
-        self.from_email = os.getenv('EMAIL_FROM', 'bhupathireddys@nexgenixlabs.com')
+        self.from_email = os.getenv('EMAIL_FROM', 'noreply@auditgraph.ai')
         self.to_email = os.getenv('EMAIL_TO', 'info@nexgenixlabs.com')
 
         # Check if credentials are configured
@@ -475,6 +471,111 @@ class EmailService:
 """
 
     # ====================================================================
+    # Phase 2 (AI Agent Governance): Orphaned Agent Alert
+    # ====================================================================
+
+    def send_orphan_agent_alert(self, findings: List[Dict], run_id: int,
+                                organization_id: int = None) -> bool:
+        """Send critical alert email for orphaned AI agent SPN findings.
+
+        Args:
+            findings: List of finding dicts from AgentOrphanDetector.
+            run_id: Discovery run ID.
+            organization_id: Tenant org ID.
+
+        Returns:
+            True if email sent, False otherwise.
+        """
+        if not findings:
+            return True
+
+        count = len(findings)
+        if count == 1:
+            name = findings[0].get('identity_name') or findings[0].get('metadata', {}).get('display_name', 'Unknown')
+            subject = f"[AuditGraph] Critical: Orphaned AI Agent SPN Detected — {name}"
+        else:
+            subject = f"[AuditGraph] Critical: {count} Orphaned AI Agent SPNs Detected"
+
+        # Build HTML table rows
+        rows_html = ""
+        for f in findings:
+            meta = f.get('metadata', {})
+            name = meta.get('display_name', f.get('identity_name', 'Unknown'))
+            platform = meta.get('detected_platform', 'unknown')
+            days = meta.get('days_inactive', '?')
+            days_str = f'{days} days' if days != 999 else 'Never signed in'
+            roles = ', '.join(meta.get('rbac_roles', [])[:3]) or 'elevated roles'
+            rows_html += f"""
+                <tr>
+                    <td style="padding:8px;border:1px solid #ddd;">{name}</td>
+                    <td style="padding:8px;border:1px solid #ddd;">{platform}</td>
+                    <td style="padding:8px;border:1px solid #ddd;">{days_str}</td>
+                    <td style="padding:8px;border:1px solid #ddd;">{roles}</td>
+                    <td style="padding:8px;border:1px solid #ddd;color:#dc2626;font-weight:bold;">Critical</td>
+                </tr>"""
+
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head><style>{self._get_css_styles()}</style></head>
+<body>
+    <div class="header" style="background:#dc2626;">
+        <h1>Orphaned AI Agent SPN Alert</h1>
+        <p>Run #{run_id} &bull; {timestamp}</p>
+    </div>
+    <div class="section">
+        <h2 class="section-title">Finding: IASM-AG-001</h2>
+        <p><strong>{count}</strong> AI agent service principal(s) detected as orphaned —
+           inactive but still enabled with elevated RBAC permissions.</p>
+        <table style="width:100%;border-collapse:collapse;margin-top:12px;">
+            <thead>
+                <tr style="background:#f1f5f9;">
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Agent Name</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Platform</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Inactive</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Elevated Roles</th>
+                    <th style="padding:8px;border:1px solid #ddd;text-align:left;">Severity</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+    </div>
+    <div class="section">
+        <h2 class="section-title">Recommended Actions</h2>
+        <ul>
+            <li>Disable the service principal in Entra ID immediately</li>
+            <li>Remove elevated RBAC role assignments (Owner, Contributor, UAA)</li>
+            <li>Investigate whether the agent platform has been decommissioned</li>
+            <li>If confirmed decommissioned, delete the SPN and associated app registration</li>
+            <li>An AGIRS penalty of +15 has been applied to affected identities</li>
+        </ul>
+    </div>
+    <div class="footer">
+        <p>AuditGraph — AI Agent Governance &bull; NexGenix Labs</p>
+    </div>
+</body>
+</html>
+"""
+        to_email = self.to_email
+        try:
+            from app.database import Database
+            db = Database()
+            db_email = db.get_system_setting('email_to')
+            if db_email and '@' in db_email:
+                to_email = db_email
+            db.close()
+        except Exception:
+            pass
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        finally:
+            loop.close()
+
+    # ====================================================================
     # Phase 18: Test Email & Scheduled Report
     # ====================================================================
 
@@ -524,10 +625,10 @@ class EmailService:
         finally:
             loop.close()
 
-    def send_scheduled_report(self) -> bool:
+    def send_scheduled_report(self, organization_id=None) -> bool:
         """Generate and send a scheduled executive summary report email."""
         from app.database import Database
-        db = Database()
+        db = Database(organization_id=organization_id) if organization_id else Database()
         try:
             report_data = db.get_report_data()
             if report_data is None:
@@ -560,6 +661,100 @@ class EmailService:
         asyncio.set_event_loop(loop)
         try:
             return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        finally:
+            loop.close()
+
+    def send_welcome_email(self, to_email: str, org_name: str, portal_url: str, username: str) -> bool:
+        """Send welcome email to newly onboarded tenant admin."""
+        if not self.credentials_configured:
+            logger.warning("Email credentials not configured - cannot send welcome email")
+            return False
+
+        subject = f"Welcome to AuditGraph - {org_name}"
+        html_body = f"""
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: linear-gradient(135deg, #0B1220, #1E3A5F); padding: 40px 30px; border-radius: 12px 12px 0 0; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 28px;">Welcome to AuditGraph</h1>
+                <p style="color: #94A3B8; margin: 8px 0 0; font-size: 14px;">Identity Risk Operating System</p>
+            </div>
+            <div style="background: #ffffff; padding: 30px; border: 1px solid #E2E8F0; border-top: none;">
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">Hello,</p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.6;">
+                    Your organization <strong>{org_name}</strong> has been set up on AuditGraph.
+                    You can access your portal and begin configuring your identity security audit.
+                </p>
+                <div style="background: #F1F5F9; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                    <p style="margin: 0 0 8px; font-size: 13px; color: #64748B;"><strong>Portal URL:</strong> <a href="{portal_url}" style="color: #3B82F6;">{portal_url}</a></p>
+                    <p style="margin: 0; font-size: 13px; color: #64748B;"><strong>Username:</strong> {username}</p>
+                </div>
+                <p style="color: #64748B; font-size: 13px;">You will be prompted to change your password on first login.</p>
+                <h3 style="color: #1E293B; font-size: 16px; margin-top: 24px;">Getting Started</h3>
+                <ol style="color: #334155; font-size: 14px; line-height: 1.8; padding-left: 20px;">
+                    <li>Log in and change your password</li>
+                    <li>Connect your Azure AD environment</li>
+                    <li>Run your first discovery scan</li>
+                    <li>Review your identity risk posture</li>
+                </ol>
+                <div style="text-align: center; margin-top: 24px;">
+                    <a href="{portal_url}" style="display: inline-block; padding: 12px 32px; background: #3B82F6; color: #ffffff; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600;">
+                        Go to Portal
+                    </a>
+                </div>
+            </div>
+            <div style="text-align: center; padding: 16px; color: #94A3B8; font-size: 11px;">
+                AuditGraph Identity Risk Platform &mdash; <a href="https://auditgraph.ai" style="color: #94A3B8;">auditgraph.ai</a>
+            </div>
+        </div>
+        """
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        except Exception as e:
+            logger.error(f"Failed to send welcome email: {e}")
+            return False
+        finally:
+            loop.close()
+
+    def send_invitation_email(self, to_email, org_name, inviter_name, role, accept_url):
+        """Send a user invitation email."""
+        subject = f"You've been invited to join {org_name} on AuditGraph"
+        html_body = f"""
+        <div style="max-width:600px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;background:#0F172A;color:#E2E8F0;padding:32px;border-radius:12px;">
+            <div style="text-align:center;margin-bottom:24px;">
+                <h1 style="color:#60A5FA;margin:0;">AuditGraph</h1>
+            </div>
+            <div style="background:#1E293B;border-radius:8px;padding:24px;margin-bottom:24px;">
+                <h2 style="color:#F1F5F9;margin-top:0;">You're invited!</h2>
+                <p style="color:#94A3B8;line-height:1.6;">
+                    <strong style="color:#E2E8F0;">{inviter_name}</strong> has invited you to join
+                    <strong style="color:#E2E8F0;">{org_name}</strong> on AuditGraph as a
+                    <strong style="color:#60A5FA;">{role}</strong>.
+                </p>
+                <div style="text-align:center;margin:24px 0;">
+                    <a href="{accept_url}" style="display:inline-block;background:#2563EB;color:#FFFFFF;
+                       padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:600;">
+                        Accept Invitation
+                    </a>
+                </div>
+                <p style="color:#64748B;font-size:13px;">
+                    This invitation expires in 7 days. If you didn't expect this, you can ignore this email.
+                </p>
+            </div>
+            <div style="text-align:center;color:#475569;font-size:12px;">
+                AuditGraph Identity Risk Platform &mdash; <a href="https://auditgraph.ai" style="color:#94A3B8;">auditgraph.ai</a>
+            </div>
+        </div>
+        """
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._send_email_graph(subject, html_body, to_email))
+        except Exception as e:
+            logger.error(f"Failed to send invitation email: {e}")
+            return False
         finally:
             loop.close()
 

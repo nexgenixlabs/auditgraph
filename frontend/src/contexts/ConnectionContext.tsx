@@ -1,12 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
+import { api } from '../services/apiClient';
+import { isAdminHost } from '../utils/hostDetection';
 
 interface CloudConnection {
   id: number;
   label: string;
   cloud: string;
-  entra_tenant_id: string;
+  azure_directory_id: string;
   status: string;
+  metadata?: {
+    auto_discovered?: boolean;
+    discovered_via?: string;
+    discovered_via_label?: string;
+    [key: string]: unknown;
+  };
 }
 
 interface ConnectionContextType {
@@ -15,6 +23,8 @@ interface ConnectionContextType {
   setSelectedConnectionId: (id: number | null) => void;
   connectionParam: string; // ready-to-append query param string
   loading: boolean;
+  refreshConnections: () => void;
+  onConnectionDeleted: (deletedId: number) => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextType>({
@@ -23,6 +33,8 @@ const ConnectionContext = createContext<ConnectionContextType>({
   setSelectedConnectionId: () => {},
   connectionParam: '',
   loading: true,
+  refreshConnections: () => {},
+  onConnectionDeleted: () => {},
 });
 
 export function ConnectionProvider({ children }: { children: React.ReactNode }) {
@@ -31,22 +43,42 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const [selectedConnectionId, setSelectedConnectionId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const fetchConnections = useCallback(() => {
     if (!user) {
       setConnections([]);
       setLoading(false);
       return;
     }
-    fetch('/api/client/connections')
-      .then(r => r.ok ? r.json() : { connections: [] })
+    const isAdmin = window.location.pathname.startsWith('/admin')
+      || isAdminHost();
+    if (isAdmin) {
+      setConnections([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    api.get<{ connections: CloudConnection[] }>('/client/connections')
       .then(data => {
         setConnections(
           (data.connections || []).filter((c: CloudConnection) => c.status === 'connected')
         );
       })
-      .catch(() => {})
+      .catch(() => setConnections([]))
       .finally(() => setLoading(false));
   }, [user]);
+
+  useEffect(() => {
+    fetchConnections();
+  }, [fetchConnections]);
+
+  const onConnectionDeleted = useCallback((deletedId: number) => {
+    // Reset selection if the deleted connection was selected
+    if (selectedConnectionId === deletedId) {
+      setSelectedConnectionId(null);
+    }
+    // Refresh the list to remove it
+    fetchConnections();
+  }, [selectedConnectionId, fetchConnections]);
 
   const connectionParam = selectedConnectionId
     ? `connection_id=${selectedConnectionId}`
@@ -54,7 +86,9 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
   return (
     <ConnectionContext.Provider value={{
-      connections, selectedConnectionId, setSelectedConnectionId, connectionParam, loading,
+      connections, selectedConnectionId, setSelectedConnectionId,
+      connectionParam, loading, refreshConnections: fetchConnections,
+      onConnectionDeleted,
     }}>
       {children}
     </ConnectionContext.Provider>

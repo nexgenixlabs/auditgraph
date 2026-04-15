@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { SUBSCRIPTION_TERMS } from '../../constants/pricing';
+import { api, ApiError } from '../../services/apiClient';
 
 const RESERVED_SLUGS = new Set([
   'admin', 'api', 'www', 'app', 'portal', 'login', 'auth', 'sso',
@@ -75,17 +76,11 @@ export default function AdminOnboarding() {
     setError(null);
     setProcessing(true);
     try {
-      const res = await fetch('/api/clients', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create client');
+      const data = await api.post('/clients', form);
       setCreatedSlug(data.tenant.slug);
       setSuccess(true);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create client');
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Failed to create client');
     } finally {
       setProcessing(false);
     }
@@ -114,7 +109,7 @@ export default function AdminOnboarding() {
   // Success state
   if (success) {
     return (
-      <div className="max-w-2xl mx-auto space-y-6">
+      <div className="max-w-2xl mx-auto space-y-4">
         <div className="bg-gray-900 border border-green-700 rounded-xl p-8 text-center">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-900/50 text-green-400 text-2xl mb-4">{'\u2713'}</div>
           <h3 className="text-lg font-bold text-white mb-2">Organization Created!</h3>
@@ -140,7 +135,7 @@ export default function AdminOnboarding() {
 
           <button
             onClick={handleCopyCredentials}
-            className="px-5 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-medium rounded-lg hover:from-blue-600 hover:to-cyan-600 transition"
+            className="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
           >
             {copied ? 'Copied!' : 'Copy Credentials'}
           </button>
@@ -159,7 +154,7 @@ export default function AdminOnboarding() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-2xl mx-auto space-y-4">
       <div>
         <h2 className="text-xl font-bold text-white">Client Onboarding</h2>
         <p className="text-sm text-gray-400 mt-0.5">Create a new organization with a single form</p>
@@ -213,7 +208,7 @@ export default function AdminOnboarding() {
         <div className="p-6 space-y-4">
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Plan</h3>
           <div className="flex gap-3">
-            {['free', 'trial', 'pro', 'enterprise'].map(p => (
+            {['free', 'trial', 'pro'].map(p => (
               <label key={p} className={`flex items-center gap-2 px-5 py-2.5 border rounded-lg cursor-pointer transition ${
                 form.plan === p ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-600 text-gray-300 hover:border-gray-500'
               }`}>
@@ -225,7 +220,7 @@ export default function AdminOnboarding() {
         </div>
 
         {/* Section 3: Subscription Term */}
-        {(form.plan === 'pro' || form.plan === 'enterprise') && (
+        {form.plan === 'pro' && (
           <div className="p-6 space-y-4">
             <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Subscription Term</h3>
             <div className="flex gap-3">
@@ -424,7 +419,7 @@ export default function AdminOnboarding() {
           <button
             type="submit"
             disabled={!canSubmit || processing}
-            className="px-8 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-medium rounded-lg hover:from-blue-600 hover:to-cyan-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            className="px-8 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
             {processing ? 'Creating Organization...' : 'Create Organization'}
           </button>

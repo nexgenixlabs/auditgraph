@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 interface RecentChangesProps {
   hasData: boolean;
@@ -26,6 +26,8 @@ export default function RecentChanges({
   totalChanges,
   createdAt,
 }: RecentChangesProps) {
+  const navigate = useNavigate();
+
   if (!hasData) {
     return (
       <div className="bg-white border rounded-xl p-5">
@@ -36,18 +38,18 @@ export default function RecentChanges({
           <div className="text-sm font-semibold text-gray-900">Recent Changes</div>
         </div>
         <div className="text-sm text-gray-400 italic">
-          Change tracking available after 2+ discovery runs
+          Change tracking available after 2+ snapshots
         </div>
       </div>
     );
   }
 
   const changeTypes = [
-    { label: 'New Identities', count: newIdentities, color: 'text-green-600', bg: 'bg-green-50', icon: '+' },
-    { label: 'Removed', count: removedIdentities, color: 'text-red-600', bg: 'bg-red-50', icon: '-' },
-    { label: 'Permission Changes', count: permissionChanges, color: 'text-orange-600', bg: 'bg-orange-50', icon: '~' },
-    { label: 'Risk Escalations', count: riskChanges, color: 'text-purple-600', bg: 'bg-purple-50', icon: '!' },
-    { label: 'Credential Changes', count: credentialChanges, color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '*' },
+    { label: 'New Identities', count: newIdentities, color: 'text-green-600', bg: 'bg-green-50', icon: '+', link: '/drift' },
+    { label: 'Removed', count: removedIdentities, color: 'text-red-600', bg: 'bg-red-50', icon: '-', link: '/drift' },
+    { label: 'Permission Changes', count: permissionChanges, color: 'text-orange-600', bg: 'bg-orange-50', icon: '~', link: '/drift' },
+    { label: 'Risk Escalations', count: riskChanges, color: 'text-purple-600', bg: 'bg-purple-50', icon: '!', link: '/identities?risk_level=critical' },
+    { label: 'Credential Changes', count: credentialChanges, color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '*', link: '/identities?credential_status=expiring_soon' },
   ];
 
   return (
@@ -60,7 +62,7 @@ export default function RecentChanges({
           <div className="text-sm font-semibold text-gray-900">Recent Changes</div>
         </div>
         <span className="text-[10px] text-gray-400">
-          Run #{currentRunId} vs #{previousRunId}
+          Snapshot #{currentRunId} vs #{previousRunId}
         </span>
       </div>
 
@@ -80,13 +82,13 @@ export default function RecentChanges({
           </div>
           <div className="space-y-1.5">
             {changeTypes.filter(ct => ct.count > 0).map(ct => (
-              <div key={ct.label} className={`flex items-center justify-between p-2 rounded-lg ${ct.bg}`}>
+              <button key={ct.label} onClick={() => navigate(ct.link)} className={`flex items-center justify-between p-2 rounded-lg ${ct.bg} w-full text-left hover:opacity-80 transition cursor-pointer`}>
                 <div className="flex items-center gap-2">
                   <span className={`text-xs font-mono font-bold ${ct.color}`}>{ct.icon}</span>
                   <span className="text-xs text-gray-700">{ct.label}</span>
                 </div>
                 <span className={`text-sm font-bold ${ct.color}`}>{ct.count}</span>
-              </div>
+              </button>
             ))}
           </div>
         </>

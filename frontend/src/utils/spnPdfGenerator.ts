@@ -1,12 +1,13 @@
 /**
- * AuditGraph SPN Privilege Report PDF Generator
+ * AuditGraph SPN Exposure Intelligence PDF Report
  *
- * Generates a focused service principal security audit report
- * using jsPDF + autotable. Called from SPNDashboard with data
- * fetched from /api/spns and /api/spns/stats.
+ * Generates an exposure-focused workload identity security audit report
+ * using jsPDF + autotable. Uses 5-component exposure scoring (0-100),
+ * findings, and activity inference data.
  */
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { TIME_MS } from '../constants/metrics';
 
 // Extend jsPDF type for autotable
 declare module 'jspdf' {
@@ -20,6 +21,7 @@ declare module 'jspdf' {
 interface SPNRow {
   display_name: string;
   identity_category: string;
+  identity_type?: string;
   risk_level: string;
   risk_score: number;
   blast_radius: string;
@@ -33,6 +35,13 @@ interface SPNRow {
   entra_role_count: number;
   owner_display_name: string | null;
   identity_id: string;
+  exposure_score?: number;
+  privilege_score?: number;
+  credential_risk_score?: number;
+  lifecycle_state?: string;
+  owner_status?: string;
+  effective_scope_flag?: string;
+  can_escalate?: boolean;
 }
 
 interface SPNStats {
@@ -46,6 +55,23 @@ interface SPNStats {
   no_credentials: number;
   by_blast_radius: Record<string, number>;
   by_activity: Record<string, number>;
+  exposure_critical?: number;
+  can_escalate_count?: number;
+  orphaned_privileged?: number;
+  blind_count?: number;
+  cross_sub_count?: number;
+  avg_exposure_score?: number;
+  by_type?: { spn?: number; managed_identity?: number; app_registration?: number };
+}
+
+interface ExposureFinding {
+  finding_type: string;
+  severity: string;
+  title: string;
+  description: string;
+  remediation: string;
+  component: string;
+  score_impact: number;
 }
 
 interface SPNDetail {
@@ -59,6 +85,22 @@ interface SPNDetail {
   recommendations: Array<{ priority: string; action: string; reason: string }>;
   attacker_narrative: string[];
   auditor_questions: string[];
+  exposure?: {
+    total: number;
+    privilege: number;
+    credential_risk: number;
+    exposure: number;
+    lifecycle: number;
+    visibility: number;
+    can_escalate: boolean;
+    effective_scope_flag: string;
+    lifecycle_state: string;
+    owner_status: string;
+    credential_age_days: number;
+    critical_overrides: Array<{ type: string; description: string }>;
+  };
+  findings?: ExposureFinding[];
+  activity_inference?: { confidence: number; classification: string };
 }
 
 // ─── Colors ───────────────────────────────────────────────────────
@@ -72,20 +114,18 @@ const ORANGE: RGB = [234, 88, 12];
 const GREEN: RGB = [22, 163, 74];
 const PURPLE: RGB = [124, 58, 237];
 
-function riskColor(level: string): RGB {
+function exposureColor(score: number): RGB {
+  if (score >= 80) return RED;
+  if (score >= 60) return ORANGE;
+  if (score >= 35) return [202, 138, 4];
+  return GREEN;
+}
+
+function severityColor(level: string): RGB {
   switch (level?.toLowerCase()) {
     case 'critical': return RED;
     case 'high': return ORANGE;
     case 'medium': return [202, 138, 4];
-    case 'low': return GREEN;
-    default: return GRAY;
-  }
-}
-
-function blastColor(level: string): RGB {
-  switch (level?.toLowerCase()) {
-    case 'high': return RED;
-    case 'medium': return ORANGE;
     case 'low': return GREEN;
     default: return GRAY;
   }
@@ -115,7 +155,7 @@ function addFooter(doc: jsPDF, pageNum: number): void {
   const pageHeight = doc.internal.pageSize.getHeight();
   doc.setFontSize(7);
   txt(doc, GRAY);
-  doc.text('AuditGraph SPN Privilege Report', 20, pageHeight - 10);
+  doc.text('AuditGraph Exposure Intelligence Report', 20, pageHeight - 10);
   doc.text(`Page ${pageNum}`, pageWidth - 35, pageHeight - 10);
   doc.text('CONFIDENTIAL', pageWidth / 2, pageHeight - 10, { align: 'center' });
 }
@@ -124,15 +164,23 @@ function categoryLabel(cat: string): string {
   if (cat === 'service_principal') return 'SPN';
   if (cat === 'managed_identity_user') return 'MI (User)';
   if (cat === 'managed_identity_system') return 'MI (System)';
+  if (cat === 'app_registration') return 'App Reg';
   return cat;
 }
 
 function daysUntilStr(iso: string | null): string {
   if (!iso) return 'N/A';
-  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+  const d = Math.ceil((new Date(iso).getTime() - Date.now()) / TIME_MS.DAY);
   if (d < 0) return `${Math.abs(d)}d ago`;
   if (d === 0) return 'Today';
   return `${d}d`;
+}
+
+function exposureLabel(score: number): string {
+  if (score >= 80) return 'CRITICAL';
+  if (score >= 60) return 'HIGH';
+  if (score >= 35) return 'MEDIUM';
+  return 'LOW';
 }
 
 // ─── Main Export ──────────────────────────────────────────────────
@@ -163,16 +211,16 @@ export function generateSPNReport(
 
   doc.setFontSize(11);
   doc.setFont('helvetica', 'normal');
-  doc.text('Service Principal Privilege Report', margin, 48);
+  doc.text('Workload Identity Exposure Report', margin, 48);
 
   doc.setFontSize(9);
-  doc.text('Non-human identity security assessment', margin, 58);
+  doc.text('Attack-based exposure scoring for non-human identities', margin, 58);
 
   // Client info
   txt(doc, DARK);
   doc.setFontSize(14);
   doc.setFont('helvetica', 'bold');
-  doc.text(clientName || 'SPN Privilege Report', margin, 105);
+  doc.text(clientName || 'Exposure Intelligence Report', margin, 105);
 
   doc.setFontSize(10);
   doc.setFont('helvetica', 'normal');
@@ -181,23 +229,33 @@ export function generateSPNReport(
     year: 'numeric', month: 'long', day: 'numeric',
   });
   doc.text(`Generated: ${reportDate}`, margin, 115);
-  doc.text(`Total Service Principals: ${stats.total} (${stats.custom} custom, ${stats.microsoft} Microsoft)`, margin, 122);
+  doc.text(`Total Workload Identities: ${stats.total} (${stats.custom} custom, ${stats.microsoft} Microsoft)`, margin, 122);
 
-  // Key findings on cover
+  // Type breakdown
+  if (stats.by_type) {
+    const bt = stats.by_type;
+    doc.text(
+      `SPNs: ${bt.spn ?? 0}  |  App Registrations: ${bt.app_registration ?? 0}  |  Managed Identities: ${bt.managed_identity ?? 0}`,
+      margin, 129
+    );
+  }
+
+  // Key findings — exposure-focused
   const findingsY = 140;
   doc.setFontSize(11);
   doc.setFont('helvetica', 'bold');
   txt(doc, DARK);
-  doc.text('Key Findings', margin, findingsY);
+  doc.text('Exposure Summary', margin, findingsY);
 
   const findings = [
-    ['Critical Risk SPNs', String(stats.critical)],
-    ['High Risk SPNs', String(stats.high_risk)],
+    ['Critical Exposure (\u226580)', String(stats.exposure_critical ?? 0)],
+    ['Can Escalate Privileges', String(stats.can_escalate_count ?? 0)],
+    ['Orphaned & Privileged', String(stats.orphaned_privileged ?? 0)],
+    ['Visibility Gap (No Telemetry)', String(stats.blind_count ?? 0)],
+    ['Cross-Subscription Access', String(stats.cross_sub_count ?? 0)],
+    ['Average Exposure Score', String(stats.avg_exposure_score ?? 0)],
     ['Expired Credentials', String(stats.expired_credentials)],
-    ['Credentials Expiring < 30d', String(stats.expiring_soon)],
-    ['No Credentials', String(stats.no_credentials)],
-    ['High Blast Radius', String(stats.by_blast_radius?.high || 0)],
-    ['Medium Blast Radius', String(stats.by_blast_radius?.medium || 0)],
+    ['Expiring < 30d', String(stats.expiring_soon)],
   ];
 
   autoTable(doc, {
@@ -207,26 +265,19 @@ export function generateSPNReport(
     theme: 'grid',
     headStyles: { fillColor: PURPLE, textColor: [255, 255, 255], fontSize: 9 },
     bodyStyles: { fontSize: 9, textColor: DARK },
-    columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 30, halign: 'center' } },
+    columnStyles: { 0: { cellWidth: 65 }, 1: { cellWidth: 30, halign: 'center' } },
     margin: { left: margin, right: margin },
-    tableWidth: 100,
+    tableWidth: 105,
     didParseCell(hookData) {
       if (hookData.section === 'body' && hookData.column.index === 1) {
         const val = parseInt(hookData.cell.raw as string, 10);
-        if (val > 0 && hookData.row.index < 3) {
+        if (val > 0 && hookData.row.index < 5) {
           hookData.cell.styles.textColor = RED;
           hookData.cell.styles.fontStyle = 'bold';
         }
       }
     },
   });
-
-  // Blast radius distribution
-  const brY = (doc as any).lastAutoTable.finalY + 10;
-  doc.setFontSize(9);
-  txt(doc, GRAY);
-  const br = stats.by_blast_radius || {};
-  doc.text(`Blast Radius Distribution: High=${br.high || 0}  Medium=${br.medium || 0}  Low=${br.low || 0}  None=${br.none || 0}`, margin, brY);
 
   addFooter(doc, pageNum);
 
@@ -235,86 +286,84 @@ export function generateSPNReport(
   // ═══════════════════════════════════════════
   doc.addPage();
   pageNum++;
-  let y = addHeader(doc, 'Executive Summary', margin);
+  let y = addHeader(doc, 'Exposure Assessment', margin);
 
-  // Posture score for SPNs
-  const critHighCount = stats.critical + stats.high_risk;
+  // Exposure score distribution
+  const expCritical = stats.exposure_critical ?? 0;
   const customTotal = stats.custom || 1;
-  const posture = Math.round(((customTotal - critHighCount) / customTotal) * 100);
+  const postureScore = Math.round(((customTotal - expCritical) / customTotal) * 100);
 
   doc.setFontSize(10);
   doc.setFont('helvetica', 'bold');
   txt(doc, DARK);
-  doc.text('SPN Security Posture', margin, y);
+  doc.text('Exposure Posture', margin, y);
   y += 8;
 
   // Score bar
   doc.setFillColor(229, 231, 235);
   doc.roundedRect(margin, y, contentWidth, 8, 2, 2, 'F');
-  const scoreColor = posture >= 70 ? GREEN : posture >= 40 ? ORANGE : RED;
+  const scoreColor = postureScore >= 70 ? GREEN : postureScore >= 40 ? ORANGE : RED;
   fill(doc, scoreColor);
-  doc.roundedRect(margin, y, contentWidth * (posture / 100), 8, 2, 2, 'F');
+  doc.roundedRect(margin, y, contentWidth * (postureScore / 100), 8, 2, 2, 'F');
   doc.setFontSize(8);
   doc.setTextColor(255, 255, 255);
-  doc.text(`${posture}%`, margin + 4, y + 5.5);
+  doc.text(`${postureScore}% secure`, margin + 4, y + 5.5);
   y += 16;
 
-  // Credential health summary
+  // Component breakdown for fleet average
   txt(doc, DARK);
   doc.setFontSize(10);
   doc.setFont('helvetica', 'bold');
-  doc.text('Credential Health', margin, y);
+  doc.text('Scoring Components (0-100 scale)', margin, y);
   y += 5;
 
-  const credRows = [
-    ['Expired', String(stats.expired_credentials), stats.expired_credentials > 0 ? 'ACTION NEEDED' : 'OK'],
-    ['Expiring < 30d', String(stats.expiring_soon), stats.expiring_soon > 0 ? 'MONITOR' : 'OK'],
-    ['No Credentials', String(stats.no_credentials), stats.no_credentials > 0 ? 'VERIFY' : 'OK'],
+  const componentRows = [
+    ['Privilege', '40', 'Tenant-admin roles, subscription Owner/Contributor, high-risk API permissions, PIM eligible'],
+    ['Credential Risk', '25', 'Expired credentials, aged secrets, multiple active secrets, no certificate auth'],
+    ['Exposure', '20', 'Cross-subscription access, management group scope, multi-tenant apps, broad RG access'],
+    ['Lifecycle', '10', 'Orphaned SPNs, dormant identities, aging without credential rotation'],
+    ['Visibility', '5', 'No sign-in telemetry, no Conditional Access coverage'],
   ];
 
   autoTable(doc, {
     startY: y,
-    head: [['Status', 'Count', 'Action']],
-    body: credRows,
+    head: [['Component', 'Max', 'Key Factors']],
+    body: componentRows,
     theme: 'striped',
     headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 9 },
-    bodyStyles: { fontSize: 9 },
+    bodyStyles: { fontSize: 8 },
+    columnStyles: { 0: { cellWidth: 28, fontStyle: 'bold' }, 1: { cellWidth: 12, halign: 'center' }, 2: { cellWidth: contentWidth - 40 } },
     margin: { left: margin, right: margin },
-    tableWidth: 130,
-    didParseCell(hookData) {
-      if (hookData.section === 'body' && hookData.column.index === 2) {
-        const action = hookData.cell.raw as string;
-        if (action === 'ACTION NEEDED') hookData.cell.styles.textColor = RED;
-        else if (action === 'MONITOR') hookData.cell.styles.textColor = ORANGE;
-      }
-    },
+    tableWidth: contentWidth,
   });
 
   y = (doc as any).lastAutoTable.finalY + 12;
 
   // Activity breakdown
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'bold');
-  txt(doc, DARK);
-  doc.text('Activity Status', margin, y);
-  y += 5;
+  if (y < pageHeight - 60) {
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    txt(doc, DARK);
+    doc.text('Activity Status', margin, y);
+    y += 5;
 
-  const actRows = Object.entries(stats.by_activity || {}).map(([status, count]) => [
-    status.replace(/_/g, ' '),
-    String(count),
-    `${Math.round((count / customTotal) * 100)}%`,
-  ]);
+    const actRows = Object.entries(stats.by_activity || {}).map(([status, count]) => [
+      status.replace(/_/g, ' '),
+      String(count),
+      `${Math.round((count / customTotal) * 100)}%`,
+    ]);
 
-  autoTable(doc, {
-    startY: y,
-    head: [['Status', 'Count', '% of Custom']],
-    body: actRows,
-    theme: 'striped',
-    headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 9 },
-    bodyStyles: { fontSize: 9 },
-    margin: { left: margin, right: margin },
-    tableWidth: 120,
-  });
+    autoTable(doc, {
+      startY: y,
+      head: [['Status', 'Count', '% of Custom']],
+      body: actRows,
+      theme: 'striped',
+      headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 9 },
+      bodyStyles: { fontSize: 9 },
+      margin: { left: margin, right: margin },
+      tableWidth: 120,
+    });
+  }
 
   addFooter(doc, pageNum);
 
@@ -323,51 +372,50 @@ export function generateSPNReport(
   // ═══════════════════════════════════════════
   doc.addPage();
   pageNum++;
-  y = addHeader(doc, 'SPN Inventory', margin);
+  y = addHeader(doc, 'Workload Identity Inventory', margin);
 
   const inventoryData = spns.map(s => [
-    s.display_name.length > 25 ? s.display_name.substring(0, 22) + '...' : s.display_name,
+    s.display_name.length > 22 ? s.display_name.substring(0, 19) + '...' : s.display_name,
     categoryLabel(s.identity_category),
-    (s.risk_level || '').toUpperCase(),
-    String(s.risk_score),
-    (s.blast_radius || 'none').toUpperCase(),
-    (s.critical_roles || []).slice(0, 2).join(', ') || '—',
-    (s.credential_risk || 'unknown').replace('_', ' '),
-    daysUntilStr(s.next_expiry),
-    (s.activity_status || 'unknown').replace('_', ' '),
-    `${s.rbac_role_count}R ${s.entra_role_count}E`,
+    String(s.exposure_score ?? 0),
+    exposureLabel(s.exposure_score ?? 0),
+    String(s.privilege_score ?? 0),
+    String(s.credential_risk_score ?? 0),
+    (s.lifecycle_state || 'blind').replace('_', ' '),
+    (s.owner_status || 'unknown').replace('_', ' '),
+    s.can_escalate ? 'YES' : '',
     s.owner_display_name || 'None',
   ]);
 
   autoTable(doc, {
     startY: y,
-    head: [['Name', 'Type', 'Risk', 'Score', 'Blast', 'Critical Roles', 'Cred Risk', 'Expiry', 'Activity', 'Roles', 'Owner']],
+    head: [['Name', 'Type', 'Score', 'Level', 'Priv', 'Cred', 'Lifecycle', 'Owner', 'Esc', 'Owner Name']],
     body: inventoryData,
     theme: 'striped',
     headStyles: { fillColor: PURPLE, textColor: [255, 255, 255], fontSize: 6.5 },
     bodyStyles: { fontSize: 6 },
     columnStyles: {
-      0: { cellWidth: 24 },
-      1: { cellWidth: 13 },
-      2: { cellWidth: 11, halign: 'center' },
-      3: { cellWidth: 9, halign: 'center' },
-      4: { cellWidth: 11, halign: 'center' },
-      5: { cellWidth: 25 },
-      6: { cellWidth: 16 },
-      7: { cellWidth: 14, halign: 'center' },
-      8: { cellWidth: 16 },
-      9: { cellWidth: 13, halign: 'center' },
-      10: { cellWidth: 18 },
+      0: { cellWidth: 22 },
+      1: { cellWidth: 12 },
+      2: { cellWidth: 10, halign: 'center' },
+      3: { cellWidth: 14, halign: 'center' },
+      4: { cellWidth: 10, halign: 'center' },
+      5: { cellWidth: 10, halign: 'center' },
+      6: { cellWidth: 18 },
+      7: { cellWidth: 16 },
+      8: { cellWidth: 8, halign: 'center' },
+      9: { cellWidth: 20 },
     },
     margin: { left: margin, right: margin },
     didParseCell(hookData) {
       if (hookData.section === 'body') {
-        if (hookData.column.index === 2) {
-          hookData.cell.styles.textColor = riskColor((hookData.cell.raw as string).toLowerCase());
+        if (hookData.column.index === 3) {
+          const lvl = (hookData.cell.raw as string).toLowerCase();
+          hookData.cell.styles.textColor = severityColor(lvl);
           hookData.cell.styles.fontStyle = 'bold';
         }
-        if (hookData.column.index === 4) {
-          hookData.cell.styles.textColor = blastColor((hookData.cell.raw as string).toLowerCase());
+        if (hookData.column.index === 8 && hookData.cell.raw === 'YES') {
+          hookData.cell.styles.textColor = RED;
           hookData.cell.styles.fontStyle = 'bold';
         }
       }
@@ -378,16 +426,17 @@ export function generateSPNReport(
   });
 
   // ═══════════════════════════════════════════
-  // PER-CRITICAL-SPN DETAIL PAGES
+  // PER-SPN DETAIL PAGES (top 10 by exposure)
   // ═══════════════════════════════════════════
   for (const spnDetail of criticalDetails) {
     const identity = spnDetail.identity;
     const spnName = (identity.display_name as string) || 'Unknown';
+    const exp = spnDetail.exposure;
 
     doc.addPage();
     pageNum++;
 
-    // Detail header with risk + blast badges
+    // Header
     fill(doc, PURPLE);
     doc.rect(0, 0, pageWidth, 3, 'F');
 
@@ -399,15 +448,109 @@ export function generateSPNReport(
 
     doc.setFontSize(8);
     txt(doc, GRAY);
-    doc.text(`${categoryLabel(identity.identity_category as string)}  |  Risk: ${((identity.risk_level as string) || '').toUpperCase()}  |  Blast Radius: ${(spnDetail.blast_radius || 'none').toUpperCase()}`, margin, 25);
+    const expScore = exp?.total ?? 0;
+    doc.text(
+      `${categoryLabel(identity.identity_category as string)}  |  Exposure: ${expScore}/100 (${exposureLabel(expScore)})  |  Lifecycle: ${(exp?.lifecycle_state || 'blind').replace('_', ' ')}`,
+      margin, 25
+    );
 
     doc.setDrawColor(229, 231, 235);
     doc.setLineWidth(0.5);
     doc.line(margin, 28, pageWidth - margin, 28);
     y = 35;
 
-    // Risk Summary
+    // Component breakdown table
+    if (exp) {
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'bold');
+      txt(doc, DARK);
+      doc.text('EXPOSURE COMPONENTS', margin, y);
+      y += 3;
+
+      autoTable(doc, {
+        startY: y,
+        head: [['Component', 'Score', 'Max']],
+        body: [
+          ['Privilege', String(exp.privilege), '40'],
+          ['Credential Risk', String(exp.credential_risk), '25'],
+          ['Exposure', String(exp.exposure), '20'],
+          ['Lifecycle', String(exp.lifecycle), '10'],
+          ['Visibility', String(exp.visibility), '5'],
+          ['TOTAL', String(exp.total), '100'],
+        ],
+        theme: 'striped',
+        headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 8 },
+        bodyStyles: { fontSize: 7 },
+        columnStyles: { 0: { fontStyle: 'bold' }, 1: { halign: 'center' }, 2: { halign: 'center' } },
+        margin: { left: margin, right: margin },
+        tableWidth: 80,
+        didParseCell(hookData) {
+          if (hookData.section === 'body' && hookData.row.index === 5) {
+            hookData.cell.styles.fontStyle = 'bold';
+            const total = parseInt(hookData.cell.raw as string, 10);
+            if (hookData.column.index === 1) {
+              hookData.cell.styles.textColor = exposureColor(total || exp.total);
+            }
+          }
+        },
+      });
+      y = (doc as any).lastAutoTable.finalY + 5;
+
+      // Activity inference
+      if (spnDetail.activity_inference) {
+        doc.setFontSize(8);
+        txt(doc, GRAY);
+        doc.text(
+          `Activity Inference: ${spnDetail.activity_inference.confidence}% confidence \u2014 ${(spnDetail.activity_inference.classification || 'blind').replace('_', ' ')}`,
+          margin, y
+        );
+        y += 6;
+      }
+    }
+
+    // Findings
+    if (spnDetail.findings && spnDetail.findings.length > 0) {
+      if (y > pageHeight - 50) { doc.addPage(); pageNum++; y = addHeader(doc, `${truncName} (cont.)`, margin); }
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'bold');
+      txt(doc, RED);
+      doc.text(`FINDINGS (${spnDetail.findings.length})`, margin, y);
+      y += 3;
+
+      const findingsData = spnDetail.findings.slice(0, 10).map(f => [
+        f.severity.toUpperCase(),
+        f.title,
+        f.remediation.substring(0, 55),
+        `+${f.score_impact}`,
+      ]);
+
+      autoTable(doc, {
+        startY: y,
+        head: [['Severity', 'Finding', 'Remediation', 'Impact']],
+        body: findingsData,
+        theme: 'striped',
+        headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 7.5 },
+        bodyStyles: { fontSize: 7 },
+        columnStyles: {
+          0: { cellWidth: 16, halign: 'center' },
+          1: { cellWidth: 50 },
+          2: { cellWidth: contentWidth - 80 },
+          3: { cellWidth: 14, halign: 'center' },
+        },
+        margin: { left: margin, right: margin },
+        didParseCell(hookData) {
+          if (hookData.section === 'body' && hookData.column.index === 0) {
+            hookData.cell.styles.textColor = severityColor((hookData.cell.raw as string).toLowerCase());
+            hookData.cell.styles.fontStyle = 'bold';
+          }
+        },
+      });
+      y = (doc as any).lastAutoTable.finalY + 5;
+    }
+
+    // Risk Summary (legacy, still useful)
     if (spnDetail.risk_summary.length > 0) {
+      if (y > pageHeight - 50) { doc.addPage(); pageNum++; y = addHeader(doc, `${truncName} (cont.)`, margin); }
       doc.setFontSize(9);
       doc.setFont('helvetica', 'bold');
       txt(doc, RED);
@@ -423,118 +566,6 @@ export function generateSPNReport(
         y += wrapped.length * 4;
       }
       y += 3;
-    }
-
-    // Attacker Narrative
-    if (spnDetail.attacker_narrative.length > 0) {
-      if (y > pageHeight - 50) { doc.addPage(); pageNum++; y = addHeader(doc, `${truncName} (cont.)`, margin); }
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      txt(doc, [127, 29, 29]); // red-900
-      doc.text('WHAT AN ATTACKER COULD DO', margin, y);
-      y += 5;
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      txt(doc, DARK);
-      for (const point of spnDetail.attacker_narrative) {
-        const wrapped = doc.splitTextToSize(`  \u25B8  ${point}`, contentWidth);
-        doc.text(wrapped, margin, y);
-        y += wrapped.length * 4;
-      }
-      y += 3;
-    }
-
-    // Auditor Questions
-    if (spnDetail.auditor_questions.length > 0) {
-      if (y > pageHeight - 50) { doc.addPage(); pageNum++; y = addHeader(doc, `${truncName} (cont.)`, margin); }
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      txt(doc, BRAND);
-      doc.text('WHAT AUDITORS WILL QUESTION', margin, y);
-      y += 5;
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      txt(doc, DARK);
-      for (const q of spnDetail.auditor_questions) {
-        const wrapped = doc.splitTextToSize(`  ?  ${q}`, contentWidth);
-        doc.text(wrapped, margin, y);
-        y += wrapped.length * 4;
-      }
-      y += 3;
-    }
-
-    // Credentials table
-    if (spnDetail.credentials.length > 0) {
-      if (y > pageHeight - 50) { doc.addPage(); pageNum++; y = addHeader(doc, `${truncName} (cont.)`, margin); }
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      txt(doc, DARK);
-      doc.text(`CREDENTIALS (${spnDetail.credentials.length})`, margin, y);
-      y += 3;
-
-      const credData = spnDetail.credentials.map(c => {
-        const endDate = c.end_datetime as string | null;
-        const isExpired = endDate ? new Date(endDate) < new Date() : false;
-        return [
-          (c.credential_type as string) || '?',
-          (c.display_name as string)?.substring(0, 25) || '—',
-          endDate ? new Date(endDate).toLocaleDateString() : 'N/A',
-          isExpired ? 'EXPIRED' : daysUntilStr(endDate),
-        ];
-      });
-
-      autoTable(doc, {
-        startY: y,
-        head: [['Type', 'Name', 'Expiry Date', 'Status']],
-        body: credData,
-        theme: 'striped',
-        headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 8 },
-        bodyStyles: { fontSize: 7 },
-        margin: { left: margin, right: margin },
-        tableWidth: contentWidth,
-        didParseCell(hookData) {
-          if (hookData.section === 'body' && hookData.column.index === 3) {
-            const val = hookData.cell.raw as string;
-            if (val === 'EXPIRED') {
-              hookData.cell.styles.textColor = RED;
-              hookData.cell.styles.fontStyle = 'bold';
-            }
-          }
-        },
-      });
-      y = (doc as any).lastAutoTable.finalY + 5;
-    }
-
-    // Roles table
-    const allRoles = [
-      ...spnDetail.roles.map(r => ({ name: r.role_name as string, type: 'RBAC', scope: r.scope as string })),
-      ...spnDetail.entra_roles.map(r => ({ name: r.role_name as string, type: 'Entra', scope: 'Directory' })),
-    ];
-    if (allRoles.length > 0) {
-      if (y > pageHeight - 40) { doc.addPage(); pageNum++; y = addHeader(doc, `${truncName} (cont.)`, margin); }
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      txt(doc, DARK);
-      doc.text(`ROLES (${allRoles.length})`, margin, y);
-      y += 3;
-
-      autoTable(doc, {
-        startY: y,
-        head: [['Role', 'Type', 'Scope']],
-        body: allRoles.map(r => [
-          r.name?.substring(0, 35) || '—',
-          r.type,
-          (r.scope || '—').length > 50 ? (r.scope || '').substring(0, 47) + '...' : (r.scope || '—'),
-        ]),
-        theme: 'striped',
-        headStyles: { fillColor: DARK, textColor: [255, 255, 255], fontSize: 8 },
-        bodyStyles: { fontSize: 7 },
-        margin: { left: margin, right: margin },
-        tableWidth: contentWidth,
-      });
-      y = (doc as any).lastAutoTable.finalY + 5;
     }
 
     // Recommendations
@@ -565,8 +596,7 @@ export function generateSPNReport(
         margin: { left: margin, right: margin },
         didParseCell(hookData) {
           if (hookData.section === 'body' && hookData.column.index === 0) {
-            const p = (hookData.cell.raw as string).toLowerCase();
-            hookData.cell.styles.textColor = riskColor(p);
+            hookData.cell.styles.textColor = severityColor((hookData.cell.raw as string).toLowerCase());
             hookData.cell.styles.fontStyle = 'bold';
           }
         },
@@ -586,18 +616,22 @@ export function generateSPNReport(
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
   txt(doc, DARK);
-  doc.text('This report covers non-human identities discovered via the Microsoft Graph API and Azure Resource Manager:', margin, y);
+  doc.text('This report uses attack-based exposure scoring (0-100) across 5 weighted components:', margin, y);
   y += 8;
 
   const methodLines = [
-    '1. SPN Discovery: Enumerate all service principals, managed identities, and app registrations via Microsoft Graph.',
-    '2. Credential Audit: Analyze key and certificate credentials for expiry, rotation compliance, and hygiene.',
-    '3. Blast Radius Assessment: Classify SPNs by scope of Azure RBAC access (subscription/RG/resource level).',
-    '4. Critical Role Detection: Flag SPNs with Owner, Contributor, User Access Administrator, or Global Admin roles.',
-    '5. Activity Correlation: Cross-reference sign-in logs to identify dormant, stale, or never-used SPNs.',
-    '6. Risk Scoring: Points-based scoring incorporating role criticality, credential health, activity, and ownership.',
-    '7. Threat Modeling: Generate attacker narratives showing exploitation paths for high-risk SPNs.',
-    '8. Compliance Mapping: Surface audit questions aligned to SOC 2, HIPAA, and NIST 800-53 controls.',
+    '1. Privilege (max 40): Entra directory roles, Azure RBAC roles, Graph API permissions, PIM eligibility.',
+    '2. Credential Risk (max 25): Expired credentials, secret age, multiple active secrets, certificate usage.',
+    '3. Exposure (max 20): Cross-subscription access, management group scope, multi-tenant apps, broad RG access.',
+    '4. Lifecycle (max 10): Orphaned identities, dormancy detection, creation age without rotation.',
+    '5. Visibility (max 5): Sign-in telemetry gaps, Conditional Access coverage.',
+    '',
+    'Activity Inference: P2-independent confidence score (0-100%) using credential modification dates,',
+    '  role assignment changes, sign-in data, and PIM activations. Classifies identities as Active,',
+    '  Possibly Active, Likely Dormant, or Visibility Gap (blind) — framed as exposure finding, not limitation.',
+    '',
+    'Critical Overrides force score to 100/100 for combinations like: tenant-admin + expired credentials,',
+    '  orphaned + subscription Owner, cross-subscription + no audit logging, can-escalate + blind lifecycle.',
   ];
 
   doc.setFontSize(8);
@@ -618,5 +652,8 @@ export function generateSPNReport(
   // Save
   const dateStr = new Date().toISOString().split('T')[0];
   const safeName = (clientName || 'AuditGraph').replace(/[^a-zA-Z0-9]/g, '_');
-  doc.save(`${safeName}_SPN_Privilege_Report_${dateStr}.pdf`);
+  doc.save(`${safeName}_Exposure_Intelligence_Report_${dateStr}.pdf`);
 }
+
+// Backward compat alias
+export { generateSPNReport as generateWorkloadReport };

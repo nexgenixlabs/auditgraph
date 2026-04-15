@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { toPermissionPlane, PERMISSION_PLANE_CONFIG } from '../constants/metrics';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { normalizeScore } from '../utils/identityRiskScore';
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -153,7 +155,7 @@ const RISK_COLORS: Record<string, string> = {
   critical: 'text-red-600 bg-red-50 border-red-200',
   high: 'text-orange-600 bg-orange-50 border-orange-200',
   medium: 'text-yellow-700 bg-yellow-50 border-yellow-200',
-  low: 'text-blue-600 bg-blue-50 border-blue-200',
+  low: 'text-green-600 bg-green-50 border-green-200',
   unknown: 'text-gray-500 bg-gray-50 border-gray-200',
 };
 
@@ -256,7 +258,7 @@ export default function RoleMining() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-72" />
           <div className="grid grid-cols-6 gap-4">
             {[...Array(6)].map((_, i) => <div key={i} className="h-20 bg-gray-100 rounded-xl" />)}
@@ -282,12 +284,13 @@ export default function RoleMining() {
   const { summary, role_frequency, role_bundles, toxic_combos, unused_findings } = data;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Role Mining & Optimization</h2>
           <p className="text-sm text-gray-600 mt-1">Toxic combinations, unused roles, redundancy, and access optimization</p>
+          <SnapshotContextHeader />
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-500">Window:</label>
@@ -306,14 +309,14 @@ export default function RoleMining() {
 
       {/* Summary Cards — 6 cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-        <SummaryCard label="Total Roles" value={summary.total_roles} bg="bg-white" text="text-gray-900" />
+        <SummaryCard label="Total Roles" value={summary.total_roles} bg="bg-white" text="text-gray-900" onClick={() => setActiveTab('bundles')} />
         <SummaryCard label="Toxic Combos" value={summary.toxic_combos} bg="bg-red-50" text="text-red-700" border="border-red-200"
-          sub={summary.toxic_combos > 0 ? 'Requires immediate review' : undefined} />
-        <SummaryCard label="Unused" value={summary.unused} bg="bg-orange-50" text="text-orange-700" border="border-orange-200" />
-        <SummaryCard label="Redundant" value={summary.redundant} bg="bg-yellow-50" text="text-yellow-700" border="border-yellow-200" />
-        <SummaryCard label="Orphaned" value={summary.orphaned} bg="bg-purple-50" text="text-purple-700" border="border-purple-200" />
+          sub={summary.toxic_combos > 0 ? 'Requires immediate review' : undefined} onClick={() => setActiveTab('toxic')} />
+        <SummaryCard label="Unused" value={summary.unused} bg="bg-orange-50" text="text-orange-700" border="border-orange-200" onClick={() => setActiveTab('findings')} />
+        <SummaryCard label="Redundant" value={summary.redundant} bg="bg-yellow-50" text="text-yellow-700" border="border-yellow-200" onClick={() => setActiveTab('findings')} />
+        <SummaryCard label="Orphaned" value={summary.orphaned} bg="bg-purple-50" text="text-purple-700" border="border-purple-200" onClick={() => setActiveTab('findings')} />
         <SummaryCard label="Optimization" value={`${summary.optimization_pct}%`} bg="bg-blue-50" text="text-blue-700" border="border-blue-200"
-          sub="of roles actionable" />
+          sub="of roles actionable" onClick={() => setActiveTab('findings')} />
       </div>
 
       {/* Tab Bar */}
@@ -433,7 +436,7 @@ export default function RoleMining() {
                           <p className="text-sm text-blue-800">{t.recommendation}</p>
                         </div>
                         <div className="flex items-center gap-4 text-xs text-gray-500">
-                          <span>Score: <span className="font-semibold text-gray-700">{t.risk_score}/100</span></span>
+                          <span>Score: <span className="font-semibold text-gray-700">{normalizeScore(t.risk_score, 10).toFixed(1)}/10</span></span>
                           <span>Assignment: {t.assignment_methods.join(', ')}</span>
                           <span>Scope: {t.scope_type}</span>
                         </div>
@@ -803,14 +806,21 @@ export default function RoleMining() {
 
 // ── Summary Card ──────────────────────────────────────────────
 
-function SummaryCard({ label, value, bg, text, border, sub }: {
-  label: string; value: string | number; bg: string; text: string; border?: string; sub?: string;
+function SummaryCard({ label, value, bg, text, border, sub, onClick }: {
+  label: string; value: string | number; bg: string; text: string; border?: string; sub?: string; onClick?: () => void;
 }) {
+  const Tag = onClick ? 'button' : 'div';
+  const isZero = value === 0 || value === '0' || value === '0%';
+  const effectiveBg = isZero ? 'bg-white' : bg;
+  const effectiveText = isZero ? 'text-gray-400' : text;
+  const effectiveBorder = isZero ? 'border-gray-200' : (border || 'border-gray-200');
   return (
-    <div className={`${bg} border ${border || 'border-gray-200'} rounded-xl p-4`}>
-      <div className={`text-xs font-medium ${text}`}>{label}</div>
-      <div className={`text-2xl font-bold ${text} mt-1`}>{value}</div>
+    <Tag onClick={onClick} className={`${effectiveBg} border ${effectiveBorder} rounded-xl p-4 text-left ${onClick ? 'cursor-pointer hover:shadow-sm transition-shadow' : ''}`}>
+      <div className={`text-xs font-medium ${effectiveText}`}>{label}</div>
+      <div className={`text-2xl font-bold ${effectiveText} mt-1`} style={onClick ? { width: 'fit-content', borderBottom: '1px dashed currentColor' } : undefined}>
+        {typeof value === 'number' ? value.toLocaleString() : value}
+      </div>
       {sub && <div className={`text-[10px] text-gray-500 mt-0.5`}>{sub}</div>}
-    </div>
+    </Tag>
   );
 }

@@ -15,9 +15,11 @@ azure-mgmt-resource==23.0.1
 azure-mgmt-storage>=21.0.0
 azure-mgmt-keyvault>=10.0.0
 azure-mgmt-monitor>=6.0.0
+azure-mgmt-resourcegraph>=8.0.0
 azure-keyvault-secrets>=4.7.0
 azure-keyvault-keys>=4.8.0
 azure-keyvault-certificates>=4.7.0
+boto3>=1.34.0
 certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4
@@ -71,6 +73,7 @@ urllib3==2.6.3
 uvicorn==0.24.0
 yarl==1.22.0
 zipp==3.23.0
+boto3
 
 # Database
 psycopg2-binary>=2.9.9
@@ -79,6 +82,7 @@ flask-cors>=4.0.0
 # Authentication (Phase 31)
 bcrypt>=4.0.0
 python3-saml>=1.16.0
+authlib>=1.3.0
 
 # Monitoring (Phase 68)
 psutil>=5.9.0
@@ -86,3 +90,14 @@ gunicorn
 Flask>=3.0.0
 APScheduler>=3.10.0
 sendgrid>=6.10.0
+
+# API Security & Validation
+jsonschema>=4.20.0
+tenacity>=8.2.0
+
+# Phase 3 async layer (FastAPI routes under app/api/routes/*) —
+# additive, does not replace the sync psycopg2 Flask stack.
+asyncpg>=0.29.0
+greenlet>=3.0.0
+# A3: ASGI → WSGI bridge for mounting FastAPI under Flask.
+a2wsgi>=1.10.0

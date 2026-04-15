@@ -8,8 +8,9 @@ and compliance references.
 Run: cd backend && ./venv/bin/python tools/patches/seed_remediations.py
 """
 import sys
+import os
 import json
-sys.path.insert(0, '/Users/sangabattula/projects/auditgraph/backend')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from app.database import Database
 

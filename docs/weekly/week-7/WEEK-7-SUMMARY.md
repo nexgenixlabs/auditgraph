@@ -639,7 +639,7 @@ Low Risks: 0 → 4 (after Reader fix)
 
 ### **Identity Detail View**
 ```
-Bhupathi Reddy Sangabattula
+AuditGraph Team
 ├── Risk Level: CRITICAL (red badge)
 ├── Activity Status: recently_created (yellow badge)
 ├── Created: 1/21/2026 8:44 PM

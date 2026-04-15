@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getTermLabel } from '../../constants/pricing';
+import { api } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface TenantMetric {
   id: number;
@@ -14,6 +16,10 @@ interface TenantMetric {
   license_expires_at: string | null;
   subscription_term: number;
   clouds_enabled: string[];
+  risk_score?: number;
+  critical_count?: number;
+  high_count?: number;
+  health_status?: string;
 }
 
 interface GlobalMetrics {
@@ -30,7 +36,6 @@ const PLAN_COLORS: Record<string, { bg: string; fill: string; text: string; labe
   free:       { bg: 'bg-gray-100',   fill: 'bg-gray-400',   text: 'text-gray-700',   label: 'Free' },
   trial:      { bg: 'bg-amber-100',  fill: 'bg-amber-500',  text: 'text-amber-700',  label: 'Trial' },
   pro:        { bg: 'bg-blue-100',   fill: 'bg-blue-500',   text: 'text-blue-700',   label: 'Pro' },
-  enterprise: { bg: 'bg-purple-100', fill: 'bg-purple-500', text: 'text-purple-700', label: 'Enterprise' },
 };
 
 function fmtDate(d: string | null): string {
@@ -45,10 +50,16 @@ function fmtDateTime(d: string | null): string {
 
 function expiryColor(expiresAt: string | null): string {
   if (!expiresAt) return 'text-gray-400';
-  const days = (new Date(expiresAt).getTime() - Date.now()) / 86400000;
+  const days = (new Date(expiresAt).getTime() - Date.now()) / TIME_MS.DAY;
   if (days < 0) return 'text-red-600';
   if (days < 30) return 'text-yellow-600';
   return 'text-gray-600';
+}
+
+function riskScoreColor(score: number): { bg: string; text: string } {
+  if (score <= 30) return { bg: 'bg-green-100', text: 'text-green-700' };
+  if (score <= 60) return { bg: 'bg-yellow-100', text: 'text-yellow-700' };
+  return { bg: 'bg-red-100', text: 'text-red-700' };
 }
 
 export default function AdminOverview() {
@@ -56,11 +67,7 @@ export default function AdminOverview() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/analytics/clients')
-      .then(r => {
-        if (!r.ok) throw new Error('Forbidden');
-        return r.json();
-      })
+    api.get<AnalyticsData>('/analytics/clients')
       .then(setData)
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -76,21 +83,19 @@ export default function AdminOverview() {
   const inactiveTenants = tenants.filter(t => !t.enabled).length;
 
   // Donut chart segments for plan distribution
-  const planOrder = ['free', 'trial', 'pro', 'enterprise'];
+  const planOrder = ['free', 'trial', 'pro'];
   const donutSegments: { plan: string; count: number; pct: number; color: string }[] = [];
-  let cumulativePct = 0;
   for (const plan of planOrder) {
     const count = planCounts[plan] || 0;
     const pct = tenants.length > 0 ? (count / tenants.length) * 100 : 0;
     donutSegments.push({ plan, count, pct, color: PLAN_COLORS[plan]?.fill.replace('bg-', '') || 'gray-400' });
-    cumulativePct += pct;
   }
 
   // Build conic-gradient for donut
   const gradientStops: string[] = [];
   let angle = 0;
   const cssColors: Record<string, string> = {
-    'gray-400': '#9ca3af', 'amber-500': '#f59e0b', 'blue-500': '#3b82f6', 'purple-500': '#a855f7',
+    'gray-400': '#9ca3af', 'amber-500': '#f59e0b', 'blue-500': '#3b82f6',
   };
   for (const seg of donutSegments) {
     const startAngle = angle;
@@ -103,7 +108,7 @@ export default function AdminOverview() {
   const conicGradient = `conic-gradient(${gradientStops.join(', ')})`;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">Platform Overview</h2>
         <p className="text-sm text-gray-500 mt-0.5">Cross-client health and activity summary</p>
@@ -114,7 +119,7 @@ export default function AdminOverview() {
         <StatCard label="Total Clients" value={g.total_tenants} color="blue" />
         <StatCard label="Active Clients" value={g.active_tenants} color="green" />
         <StatCard label="Pro" value={planCounts.pro || 0} color="pro" />
-        <StatCard label="Enterprise" value={planCounts.enterprise || 0} color="purple" />
+        <StatCard label="Trial" value={planCounts.trial || 0} color="amber" />
         <StatCard label="Total Users" value={totalUsers} color="gray" />
       </div>
 
@@ -222,7 +227,7 @@ export default function AdminOverview() {
               </div>
               <div className="text-center">
                 <div className="text-lg font-bold text-gray-900">{tenants.filter(t => !t.last_discovery).length}</div>
-                <div className="text-[10px] text-gray-500">Never Scanned</div>
+                <div className="text-[10px] text-gray-500">No Snapshot</div>
               </div>
             </div>
           </div>
@@ -240,16 +245,22 @@ export default function AdminOverview() {
               <th className="px-4 py-2.5">Client</th>
               <th className="px-4 py-2.5">Users</th>
               <th className="px-4 py-2.5">License Model</th>
+              <th className="px-4 py-2.5">Health</th>
+              <th className="px-4 py-2.5">Risk Score</th>
+              <th className="px-4 py-2.5">Findings</th>
               <th className="px-4 py-2.5">Term</th>
               <th className="px-4 py-2.5">Cloud Providers</th>
               <th className="px-4 py-2.5">Status</th>
-              <th className="px-4 py-2.5">Last Scan</th>
+              <th className="px-4 py-2.5">Last Snapshot</th>
               <th className="px-4 py-2.5">License Activated</th>
               <th className="px-4 py-2.5">License Expiry</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {tenants.map(t => (
+            {tenants.map(t => {
+                const rs = t.risk_score ?? 0;
+                const rsColor = riskScoreColor(rs);
+                return (
                 <tr key={t.id} className={`hover:bg-gray-50 ${!t.enabled ? 'opacity-60' : ''}`}>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
@@ -265,11 +276,45 @@ export default function AdminOverview() {
                   <td className="px-4 py-2.5 text-sm font-bold text-gray-800">{t.user_count}</td>
                   <td className="px-4 py-2.5">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold capitalize ${
-                      t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
                       t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
                       t.plan === 'trial' ? 'bg-amber-100 text-amber-700' :
                       'bg-gray-100 text-gray-600'
                     }`}>{t.plan}</span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {(() => {
+                      const hs = t.health_status || (t.last_discovery ? 'healthy' : 'stale');
+                      return (
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          hs === 'healthy' ? 'bg-green-100 text-green-700' :
+                          hs === 'warning' ? 'bg-yellow-100 text-yellow-700' :
+                          hs === 'critical' ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-500'
+                        }`}>{hs}</span>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${rsColor.bg} ${rsColor.text}`}>
+                      {rs}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-1">
+                      {(t.critical_count ?? 0) > 0 && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-100 text-red-700">
+                          {t.critical_count} C
+                        </span>
+                      )}
+                      {(t.high_count ?? 0) > 0 && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-100 text-orange-700">
+                          {t.high_count} H
+                        </span>
+                      )}
+                      {!(t.critical_count ?? 0) && !(t.high_count ?? 0) && (
+                        <span className="text-[10px] text-gray-400">&mdash;</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2.5 text-xs text-gray-600">{getTermLabel(t.subscription_term || 0)}</td>
                   <td className="px-4 py-2.5">
@@ -294,7 +339,8 @@ export default function AdminOverview() {
                     <span className={`text-xs ${expiryColor(t.license_expires_at)}`}>{fmtDate(t.license_expires_at)}</span>
                   </td>
                 </tr>
-              ))}
+              );
+              })}
           </tbody>
         </table>
       </div>
@@ -307,7 +353,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
     blue: 'bg-blue-50 border-blue-200 text-blue-700',
     green: 'bg-green-50 border-green-200 text-green-700',
     pro: 'bg-blue-50 border-blue-200 text-blue-700',
-    purple: 'bg-purple-50 border-purple-200 text-purple-700',
+    amber: 'bg-amber-50 border-amber-200 text-amber-700',
     gray: 'bg-gray-50 border-gray-200 text-gray-700',
   };
   return (

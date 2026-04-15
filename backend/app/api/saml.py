@@ -32,11 +32,11 @@ ATTR_GROUPS = [
 ]
 
 
-def get_sso_config_for_tenant(db, tenant_id):
-    """Load SSO settings from the settings table for a tenant. Returns dict or None."""
+def get_sso_config_for_org(db, organization_id):
+    """Load SSO settings from the settings table for an organization. Returns dict or None."""
     config = {}
     for key in SSO_SETTING_KEYS:
-        val = db.get_setting(key, '', tenant_id=tenant_id)
+        val = db.get_setting(key, '', organization_id=organization_id)
         config[key] = val
     if config.get('sso_enabled') != 'true':
         return None
@@ -77,7 +77,7 @@ def build_saml_settings(sso_config, base_url):
             'x509cert': sso_config.get('sso_idp_x509_cert', ''),
         },
         'security': {
-            'authnRequestsSigned': False,
+            'authnRequestsSigned': True,
             'wantAssertionsSigned': True,
             'wantNameIdEncrypted': False,
         },

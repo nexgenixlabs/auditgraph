@@ -20,19 +20,23 @@ export default function ConnectionSwitcher() {
       >
         All
       </button>
-      {connections.map(c => (
-        <button
-          key={c.id}
-          onClick={() => setSelectedConnectionId(c.id)}
-          className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-            selectedConnectionId === c.id
-              ? 'bg-blue-600 text-white'
-              : 'bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-600 text-gray-700 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700'
-          }`}
-        >
-          {c.label}
-        </button>
-      ))}
+      {connections.map(c => {
+        const isCross = !!(c.metadata?.auto_discovered);
+        return (
+          <button
+            key={c.id}
+            onClick={() => setSelectedConnectionId(c.id)}
+            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors flex items-center ${
+              selectedConnectionId === c.id
+                ? (isCross ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white')
+                : 'bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-600 text-gray-700 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700'
+            }`}
+          >
+            {isCross && <span className="inline-block w-1.5 h-1.5 rounded-full bg-purple-400 mr-1.5" />}
+            {c.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

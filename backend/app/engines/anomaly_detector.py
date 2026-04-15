@@ -12,6 +12,7 @@ Anomaly Types:
     - credential_surge: Credential count jumps significantly between runs
     - off_hours_pim: PIM activations outside business hours
     - excessive_pim_usage: Unusual PIM activation frequency or always-active pattern
+    - excessive_api_permission: SPN has dangerous Application permissions (Mail.Send, etc.)
 
 Usage:
     detector = AnomalyDetector(db)
@@ -20,24 +21,25 @@ Usage:
 import logging
 from typing import Dict, List, Optional
 from app.database import Database
+from app.constants.roles import EntraRole, RBACRole
 
 logger = logging.getLogger(__name__)
 
 # Roles considered critical for escalation detection
-CRITICAL_ROLES = {
-    'Global Administrator', 'Privileged Role Administrator',
-    'Privileged Authentication Administrator', 'Exchange Administrator',
-    'SharePoint Administrator', 'User Access Administrator',
-    'Application Administrator', 'Cloud Application Administrator',
-    'Owner', 'Contributor',
-}
+CRITICAL_ROLES: frozenset[str] = frozenset({
+    EntraRole.GLOBAL_ADMIN, EntraRole.PRIVILEGED_ROLE_ADMIN,
+    EntraRole.PRIVILEGED_AUTH_ADMIN, EntraRole.EXCHANGE_ADMIN,
+    EntraRole.SHAREPOINT_ADMIN, EntraRole.APPLICATION_ADMIN,
+    EntraRole.CLOUD_APP_ADMIN,
+    RBACRole.USER_ACCESS_ADMIN, RBACRole.OWNER, RBACRole.CONTRIBUTOR,
+})
 
-HIGH_RISK_ROLES = {
-    'Security Administrator', 'Compliance Administrator',
-    'Conditional Access Administrator', 'Authentication Administrator',
-    'Groups Administrator', 'Directory Writers',
-    'Intune Administrator', 'Azure Information Protection Administrator',
-}
+HIGH_RISK_ROLES: frozenset[str] = frozenset({
+    EntraRole.SECURITY_ADMIN, EntraRole.COMPLIANCE_ADMIN,
+    EntraRole.CONDITIONAL_ACCESS_ADMIN, EntraRole.AUTH_ADMIN,
+    EntraRole.GROUPS_ADMIN, EntraRole.DIRECTORY_WRITERS,
+    EntraRole.INTUNE_ADMIN, EntraRole.AZURE_INFO_PROTECTION_ADMIN,
+})
 
 RISK_LEVEL_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0}
 
@@ -71,11 +73,13 @@ class AnomalyDetector:
             ('credential_surge', self._detect_credential_surge),
             ('off_hours_pim', self._detect_off_hours_pim),
             ('excessive_pim_usage', self._detect_excessive_pim_usage),
+            ('excessive_api_permission', self._detect_excessive_api_permissions),
         ]
 
         for name, detector in detectors:
             try:
-                if name in ('off_hours_pim', 'excessive_pim_usage'):
+                if name in ('off_hours_pim', 'excessive_pim_usage',
+                            'excessive_api_permission'):
                     results = detector(current_run_id, settings)
                 else:
                     results = detector(current_run_id, previous_run_id)
@@ -417,6 +421,103 @@ class AnomalyDetector:
                     'role_name': role_name,
                     'activation_frequency_30d': freq,
                     'threshold': threshold,
+                },
+            })
+
+        return anomalies
+
+    # ── Excessive API Permissions ────────────────────────────────────────
+
+    # Application permissions that are excessive for automation/workload SPNs.
+    # These grant tenant-wide capabilities rarely needed for their classified
+    # function and represent a high-risk attack surface if compromised.
+    EXCESSIVE_SPN_PERMISSIONS = {
+        'Mail.Send': {
+            'severity': 'high',
+            'description': (
+                'Mail.Send (Application) permission grants the ability to send '
+                'email as any user in the tenant without a mailbox. If this '
+                'service principal is compromised, an attacker can send phishing '
+                'emails from any organizational address. Remove per CIS v8 §5.5 '
+                'least privilege for service accounts.'
+            ),
+            'standards': 'CIS v8 §5.5, NIST SP 800-207 §3.3',
+            'mitre': 'T1566 (Phishing via compromised service account)',
+        },
+        'Mail.ReadWrite': {
+            'severity': 'high',
+            'description': (
+                'Mail.ReadWrite (Application) permission grants read/write access '
+                'to all mailboxes in the tenant. Not required for standard workload '
+                'identities. Remove per CIS v8 §5.5 least privilege.'
+            ),
+            'standards': 'CIS v8 §5.5, NIST SP 800-207 §3.3',
+            'mitre': 'T1114 (Email Collection)',
+        },
+        'Exchange.ManageAsApp': {
+            'severity': 'critical',
+            'description': (
+                'Exchange.ManageAsApp grants full Exchange Online administration. '
+                'This is an extremely high-privilege permission rarely needed by '
+                'automation workloads. Remove immediately per CIS v8 §5.5.'
+            ),
+            'standards': 'CIS v8 §5.5, NIST SP 800-207 §3.3',
+            'mitre': 'T1098 (Account Manipulation)',
+        },
+    }
+
+    def _detect_excessive_api_permissions(self, current_run_id: int,
+                                          settings: Optional[Dict] = None) -> List[Dict]:
+        """Detect service principals with excessive API permissions.
+
+        Checks graph_api_permissions for dangerous Application permissions
+        on service principal identities that indicate over-privileging.
+        """
+        anomalies = []
+        perm_names = tuple(self.EXCESSIVE_SPN_PERMISSIONS.keys())
+        if not perm_names:
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        placeholders = ','.join(['%s'] * len(perm_names))
+        cursor.execute(f"""
+            SELECT i.identity_id, i.display_name, i.identity_category,
+                   gp.permission_name
+            FROM graph_api_permissions gp
+            JOIN identities i ON i.id = gp.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+              AND gp.permission_name IN ({placeholders})
+        """, (current_run_id, *perm_names))
+        rows = cursor.fetchall()
+        cursor.close()
+
+        # Deduplicate: one anomaly per (identity_id, permission_name)
+        seen = set()
+        for identity_id, display_name, category, perm_name in rows:
+            key = (identity_id, perm_name)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            rule = self.EXCESSIVE_SPN_PERMISSIONS.get(perm_name, {})
+            severity = rule.get('severity', 'high')
+            desc = rule.get('description', f'{perm_name} is excessive for this workload identity.')
+            standards = rule.get('standards', '')
+            mitre = rule.get('mitre', '')
+
+            anomalies.append({
+                'anomaly_type': 'excessive_api_permission',
+                'severity': severity,
+                'identity_id': identity_id,
+                'identity_name': display_name,
+                'title': f"Excessive API permission: {perm_name} on {display_name}",
+                'description': desc,
+                'details': {
+                    'permission_name': perm_name,
+                    'identity_category': category,
+                    'standards': standards,
+                    'mitre_technique': mitre,
                 },
             })
 

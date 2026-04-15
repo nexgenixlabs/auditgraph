@@ -1,0 +1,206 @@
+"""
+Security Findings Engine (connection-scoped)
+
+Generates security findings from role_assignments + identities for a given
+cloud connection. Complements the run-scoped SecurityFindingsEngine by
+providing a connection-level entry point for the post-discovery pipeline.
+
+Rules:
+  1) High Privilege Identity — Owner / User Access Administrator / Global Administrator
+  2) Guest with Privileged Role — guest + Owner or Contributor
+  3) Service Principal Owner — service_principal + Owner
+"""
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Roles that constitute high-privilege access
+HIGH_PRIVILEGE_ROLES = {'Owner', 'User Access Administrator', 'Global Administrator'}
+
+# Roles that are dangerous for guest identities
+GUEST_DANGEROUS_ROLES = {'Owner', 'Contributor'}
+
+
+def generate_security_findings(connection_id, db):
+    """Generate security findings for a cloud connection.
+
+    1. Resolve latest completed discovery run for this connection.
+    2. Query role_assignments JOIN identities.
+    3. Apply 3 detection rules.
+    4. Insert findings into security_findings table.
+
+    Returns dict with findings_count.
+    """
+    from psycopg2.extras import RealDictCursor
+
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+    # Find latest completed run for this connection
+    cursor.execute("""
+        SELECT id FROM discovery_runs
+        WHERE cloud_connection_id = %s AND status = 'completed'
+        ORDER BY id DESC LIMIT 1
+    """, (connection_id,))
+    row = cursor.fetchone()
+    run_id = row['id'] if row else None
+
+    if run_id:
+        # Fetch role assignments for this specific run
+        cursor.execute("""
+            SELECT i.identity_id,
+                   i.display_name,
+                   i.identity_category,
+                   ra.role_name,
+                   ra.scope
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND i.is_microsoft_system = FALSE
+        """, (run_id,))
+    else:
+        # Fallback: get ALL role assignments regardless of run
+        logger.info(f"No run for connection {connection_id}, using org-wide role assignments")
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id, ra.role_name, ra.scope)
+                   i.identity_id,
+                   i.display_name,
+                   i.identity_category,
+                   ra.role_name,
+                   ra.scope
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.is_microsoft_system = FALSE
+            ORDER BY i.identity_id, ra.role_name, ra.scope, i.discovery_run_id DESC NULLS LAST
+        """)
+    assignments = cursor.fetchall()
+
+    # If no run_id, try to find one for org_id lookup
+    if not run_id:
+        cursor.execute("SELECT id FROM discovery_runs WHERE status = 'completed' ORDER BY id DESC LIMIT 1")
+        r = cursor.fetchone()
+        run_id = r['id'] if r else 0
+
+    if not assignments:
+        cursor.close()
+        logger.info(f"No role assignments for run #{run_id}, skipping findings")
+        return {'findings_count': 0}
+
+    # Get organization_id from the run
+    cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
+    run_row = cursor.fetchone()
+    org_id = run_row['organization_id'] if run_row else None
+
+    # Build a set of valid identity_ids for reference validation
+    valid_identity_ids = set()
+    try:
+        cursor.execute("SELECT identity_id FROM identities WHERE discovery_run_id = %s", (run_id,))
+        valid_identity_ids = {r['identity_id'] for r in cursor.fetchall()}
+        logger.info(f"Loaded {len(valid_identity_ids)} valid identity_ids for run #{run_id}")
+    except Exception as e:
+        logger.warning(f"Failed to load identity_ids for validation: {e}")
+
+    findings = []
+    seen = set()  # Deduplicate by (identity_id, finding_type)
+    skipped_invalid = 0
+
+    for ra in assignments:
+        identity_id = ra['identity_id']
+        display_name = ra['display_name'] or 'Unknown'
+        category = ra['identity_category'] or ''
+        role_name = ra['role_name'] or ''
+        scope = ra['scope'] or ''
+
+        # Rule 1: High Privilege Identity
+        if role_name in HIGH_PRIVILEGE_ROLES:
+            key = (identity_id, 'high_privilege_identity')
+            if key not in seen:
+                seen.add(key)
+                findings.append({
+                    'identity_id': identity_id,
+                    'finding_type': 'high_privilege_identity',
+                    'severity': 'high',
+                    'description': (
+                        f'{display_name} has high-privilege role "{role_name}" '
+                        f'at scope {scope}. Review whether this level of access is justified.'
+                    ),
+                })
+
+        # Rule 2: Guest with Privileged Role
+        if category == 'guest' and role_name in GUEST_DANGEROUS_ROLES:
+            key = (identity_id, 'guest_privilege')
+            if key not in seen:
+                seen.add(key)
+                findings.append({
+                    'identity_id': identity_id,
+                    'finding_type': 'guest_privilege',
+                    'severity': 'high',
+                    'description': (
+                        f'Guest user {display_name} holds "{role_name}" role '
+                        f'at scope {scope}. External guests with privileged '
+                        f'access pose significant risk.'
+                    ),
+                })
+
+        # Rule 3: Service Principal Owner
+        if category == 'service_principal' and role_name == 'Owner':
+            key = (identity_id, 'spn_high_privilege')
+            if key not in seen:
+                seen.add(key)
+                findings.append({
+                    'identity_id': identity_id,
+                    'finding_type': 'spn_high_privilege',
+                    'severity': 'high',
+                    'description': (
+                        f'Service principal {display_name} has Owner role '
+                        f'at scope {scope}. Service principals with Owner '
+                        f'access can modify all resources including RBAC.'
+                    ),
+                })
+
+    # Validate: drop findings that reference invalid identity_ids
+    if valid_identity_ids:
+        pre_count = len(findings)
+        findings = [f for f in findings if f['identity_id'] in valid_identity_ids]
+        skipped_invalid = pre_count - len(findings)
+        if skipped_invalid > 0:
+            logger.warning(f"Dropped {skipped_invalid} finding(s) referencing invalid identity_ids")
+
+    # Delete existing findings from this engine for this connection
+    cursor.execute("""
+        DELETE FROM security_findings
+        WHERE discovery_run_id = %s
+          AND finding_type IN ('high_privilege_identity', 'guest_privilege', 'spn_high_privilege')
+    """, (run_id,))
+
+    # Insert new findings
+    inserted = 0
+    for f in findings:
+        try:
+            cursor.execute("""
+                INSERT INTO security_findings
+                    (discovery_run_id, organization_id, entity_type, entity_id,
+                     finding_type, severity, risk_score, title, description)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                run_id,
+                org_id,
+                'identity',
+                f['identity_id'],
+                f['finding_type'],
+                f['severity'],
+                80 if f['severity'] == 'high' else 50,
+                f'{f["finding_type"].replace("_", " ").title()}: {f["identity_id"][:40]}',
+                f['description'],
+            ))
+            inserted += 1
+        except Exception as e:
+            logger.warning(f"Failed to insert finding: {e}")
+
+    db._commit()
+    cursor.close()
+
+    logger.info(f"Security findings engine: {inserted} finding(s) for connection {connection_id} "
+                f"(run #{run_id}, {skipped_invalid} invalid refs dropped)")
+
+    return {'findings_count': inserted, 'skipped_invalid_refs': skipped_invalid}

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { ReactFlow, Controls, Background, MiniMap } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { nodeTypes } from './nodes';
+import { useConnection } from '../../contexts/ConnectionContext';
 
 import AttackPathView from './AttackPathView';
 
@@ -12,8 +13,8 @@ interface GraphDataResponse {
   display_name: string;
   risk_level: string;
   risk_score: number;
-  trust_relationships: {
-    federated_trusts: Array<{
+  trust_relationships?: {
+    federated_trusts?: Array<{
       credential_id: number;
       issuer: string;
       subject: string;
@@ -21,23 +22,22 @@ interface GraphDataResponse {
       trust_risk: string;
       trust_reason: string;
     }>;
-    ownership_edges: Array<{
+    ownership_edges?: Array<{
       owner_object_id: string;
       owner_display_name: string;
       owner_upn?: string;
       owner_type: string;
       is_primary_owner: boolean;
     }>;
-    role_edges: Array<{
+    role_edges?: Array<{
       role_name: string;
       role_type: string;
       scope: string;
       scope_type: string;
       risk_level: string;
-      usage_status: string;
     }>;
   };
-  effective_scope: {
+  effective_scope?: {
     subscription_count: number;
     resource_group_count: number;
     resource_count: number;
@@ -58,7 +58,7 @@ interface GraphDataResponse {
     }>;
     blast_radius_label: string;
   };
-  secret_exposure: Array<{
+  secret_exposure?: Array<{
     credential_id: number;
     credential_type: string;
     display_name?: string;
@@ -114,8 +114,8 @@ function CollapsiblePanel({ title, count, defaultOpen, children }: { title: stri
 
 // ── Trust Relationships Panel ─────────────────────────────────
 function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }) {
-  const hasFed = data.federated_trusts.length > 0;
-  const hasOwners = data.ownership_edges.length > 0;
+  const hasFed = (data?.federated_trusts?.length ?? 0) > 0;
+  const hasOwners = (data?.ownership_edges?.length ?? 0) > 0;
 
   if (!hasFed && !hasOwners) {
     return <div className="text-sm text-gray-500">No federated trusts or ownership data found.</div>;
@@ -135,7 +135,7 @@ function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }
                 <th className="pb-1.5">Reason</th>
               </tr></thead>
               <tbody>
-                {data.federated_trusts.map((ft, i) => (
+                {(data?.federated_trusts ?? []).map((ft, i) => (
                   <tr key={i} className="border-b border-gray-100">
                     <td className="py-2 pr-4 font-medium text-gray-900">{ft.issuer_label}</td>
                     <td className="py-2 pr-4 text-gray-600 max-w-[200px] truncate" title={ft.subject}>{ft.subject}</td>
@@ -152,7 +152,7 @@ function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }
         <div>
           <h4 className="text-xs font-semibold text-gray-700 uppercase mb-2">Ownership</h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {data.ownership_edges.map((o, i) => (
+            {(data?.ownership_edges ?? []).map((o, i) => (
               <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-50 border border-green-200">
                 <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -172,6 +172,9 @@ function TrustPanel({ data }: { data: GraphDataResponse['trust_relationships'] }
 
 // ── Effective Scope Panel ─────────────────────────────────────
 function ScopePanel({ data }: { data: GraphDataResponse['effective_scope'] }) {
+  if (!data) {
+    return <div className="text-sm text-gray-500">No scope data available.</div>;
+  }
   return (
     <div className="space-y-4">
       {/* Blast radius summary bar */}
@@ -276,7 +279,7 @@ function ScopePanel({ data }: { data: GraphDataResponse['effective_scope'] }) {
 
 // ── Secret Exposure Panel ─────────────────────────────────────
 function ExposurePanel({ data }: { data: GraphDataResponse['secret_exposure'] }) {
-  if (data.length === 0) {
+  if (!data || data.length === 0) {
     return <div className="text-sm text-gray-500">No credentials found for this identity.</div>;
   }
 
@@ -335,53 +338,248 @@ function ExposurePanel({ data }: { data: GraphDataResponse['secret_exposure'] })
   );
 }
 
+// ── Key Vault Access Types ────────────────────────────────────
+interface KvItem {
+  item_type: string;
+  item_name: string;
+  enabled?: boolean;
+  expires_on?: string;
+  days_until_expiry: number | null;
+  expiry_risk_tier: string;
+}
+interface KvVault {
+  vault_name: string;
+  vault_resource_id: string;
+  roles: string[];
+  items: KvItem[];
+}
+interface KvAccessResponse {
+  vaults: KvVault[];
+}
+
+// ── Key Vault Access Panel ───────────────────────────────────
+const kvTierBadge: Record<string, string> = {
+  CRITICAL: 'bg-red-100 text-red-700',
+  WARNING: 'bg-amber-100 text-amber-700',
+  INFO: 'bg-blue-100 text-blue-700',
+  HEALTHY: 'bg-green-100 text-green-700',
+  NONE: 'bg-gray-100 text-gray-500',
+};
+
+function KeyVaultPanel({ data }: { data: KvAccessResponse | null }) {
+  if (!data || data.vaults.length === 0) {
+    return <div className="text-sm text-gray-500">No Key Vault access found for this identity.</div>;
+  }
+  return (
+    <div className="space-y-4">
+      {data.vaults.map((vault, vi) => {
+        const critCount = vault.items.filter(i => i.expiry_risk_tier === 'CRITICAL').length;
+        const warnCount = vault.items.filter(i => i.expiry_risk_tier === 'WARNING').length;
+        return (
+          <div key={vi} className="border rounded-lg overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 bg-gray-50">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span className="text-xs font-semibold text-gray-900">{vault.vault_name}</span>
+                <span className="text-[10px] text-gray-500">{vault.roles.join(', ')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {critCount > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-100 text-red-700">{critCount} CRITICAL</span>}
+                {warnCount > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700">{warnCount} WARNING</span>}
+                <span className="text-[10px] text-gray-500">{vault.items.length} item{vault.items.length !== 1 ? 's' : ''}</span>
+              </div>
+            </div>
+            {vault.items.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="text-left text-gray-500 border-b bg-white">
+                    <th className="px-4 py-1.5">Type</th>
+                    <th className="px-4 py-1.5">Name</th>
+                    <th className="px-4 py-1.5">Expiry</th>
+                    <th className="px-4 py-1.5">Tier</th>
+                  </tr></thead>
+                  <tbody>
+                    {vault.items.map((item, ii) => {
+                      const rowBg = item.expiry_risk_tier === 'CRITICAL' ? 'bg-red-50' :
+                                    item.expiry_risk_tier === 'WARNING' ? 'bg-amber-50' : '';
+                      return (
+                        <tr key={ii} className={`border-b border-gray-100 ${rowBg}`}>
+                          <td className="px-4 py-2">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-200 text-gray-700">
+                              {item.item_type === 'secret' ? 'Secret' : item.item_type === 'key' ? 'Key' : 'Cert'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 font-medium text-gray-900 max-w-[200px] truncate">{item.item_name}</td>
+                          <td className="px-4 py-2 text-gray-600">
+                            {item.days_until_expiry != null
+                              ? item.days_until_expiry < 0
+                                ? <span className="text-red-600 font-semibold">Expired</span>
+                                : `${item.days_until_expiry}d`
+                              : 'No expiry'}
+                          </td>
+                          <td className="px-4 py-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${kvTierBadge[item.expiry_risk_tier] || kvTierBadge.NONE}`}>
+                              {item.expiry_risk_tier}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Main Access Graph Tab ─────────────────────────────────────
 export default function AccessGraphTab({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
   const [data, setData] = useState<GraphDataResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('technical');
   const [attackPaths, setAttackPaths] = useState<any>(null);
   const [attackPathsLoading, setAttackPathsLoading] = useState(false);
+  const [kvData, setKvData] = useState<KvAccessResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError('');
-    fetch(`/api/identities/${encodeURIComponent(identityId)}/graph-data`)
-      .then(res => {
-        if (!res.ok) throw new Error(`API error: ${res.status}`);
-        return res.json();
+    // Fetch graph data + KV access in parallel
+    Promise.all([
+      fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/graph-data`))
+        .then(res => { if (!res.ok) throw new Error(`API error: ${res.status}`); return res.json(); }),
+      fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/keyvault-access`))
+        .then(res => res.ok ? res.json() : { vaults: [] })
+        .catch(() => ({ vaults: [] })),
+    ])
+      .then(([graphJson, kvJson]) => {
+        if (!cancelled) {
+          setData(graphJson);
+          setKvData(kvJson);
+        }
       })
-      .then(json => { if (!cancelled) setData(json); })
       .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load graph data'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [identityId]);
+  }, [identityId, withConnection]);
 
   useEffect(() => {
     if (viewMode !== 'attack_paths' || attackPaths) return;
     setAttackPathsLoading(true);
-    fetch(`/api/identities/${encodeURIComponent(identityId)}/attack-paths`)
+    fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/attack-paths`))
       .then(r => r.ok ? r.json() : { paths: [], summary: { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' } })
       .then(d => setAttackPaths(d))
       .catch(() => setAttackPaths({ paths: [], summary: { total_paths: 0, critical_paths: 0, max_blast_radius: 'none' } }))
       .finally(() => setAttackPathsLoading(false));
   }, [viewMode, identityId, attackPaths]);
 
+  // Inject KV nodes/edges into technical graph
   const nodes = useMemo(() => {
     if (!data) return [];
-    return viewMode === 'executive' ? data.graph.executive_nodes : data.graph.technical_nodes;
-  }, [data, viewMode]);
+    const base = viewMode === 'executive' ? data.graph.executive_nodes : [...data.graph.technical_nodes];
+    if (viewMode !== 'technical' || !kvData?.vaults?.length) return base;
+
+    // Find the rightmost x position to place KV nodes
+    let maxX = 0;
+    for (const n of base) {
+      if (n.position?.x > maxX) maxX = n.position.x;
+    }
+    const kvStartX = maxX + 300;
+    let yOffset = 0;
+
+    for (const vault of kvData.vaults) {
+      const worstTier = vault.items.reduce((worst: string, item: KvItem) => {
+        const rank: Record<string, number> = { CRITICAL: 4, WARNING: 3, INFO: 2, HEALTHY: 1, NONE: 0 };
+        return (rank[item.expiry_risk_tier] || 0) > (rank[worst] || 0) ? item.expiry_risk_tier : worst;
+      }, 'NONE');
+
+      const vaultNodeId = `kv_${vault.vault_resource_id}`;
+      base.push({
+        id: vaultNodeId,
+        type: 'keyvault',
+        position: { x: kvStartX, y: yOffset },
+        data: {
+          label: vault.vault_name,
+          roles: vault.roles,
+          item_count: vault.items.length,
+          worst_tier: worstTier,
+        },
+      });
+
+      // Add item nodes to the right of the vault
+      vault.items.forEach((item, idx) => {
+        base.push({
+          id: `kvi_${vault.vault_resource_id}_${item.item_type}_${item.item_name}`,
+          type: 'keyvault_item',
+          position: { x: kvStartX + 280, y: yOffset + idx * 55 },
+          data: {
+            label: item.item_name,
+            item_type: item.item_type,
+            days_until_expiry: item.days_until_expiry,
+            expiry_risk_tier: item.expiry_risk_tier,
+          },
+        });
+      });
+
+      yOffset += Math.max(vault.items.length * 55, 80) + 40;
+    }
+    return base;
+  }, [data, viewMode, kvData]);
 
   const edges = useMemo(() => {
     if (!data) return [];
-    return viewMode === 'executive' ? data.graph.executive_edges : data.graph.technical_edges;
-  }, [data, viewMode]);
+    const base = viewMode === 'executive' ? data.graph.executive_edges : [...data.graph.technical_edges];
+    if (viewMode !== 'technical' || !kvData?.vaults?.length) return base;
 
-  const trustCount = (data?.trust_relationships.federated_trusts.length ?? 0) +
-                     (data?.trust_relationships.ownership_edges.length ?? 0);
-  const exposureCount = data?.secret_exposure.filter(s => s.exposure_flags.length > 0).length ?? 0;
+    // Find identity node id (first node of type 'identity')
+    const identityNodeId = data.graph.technical_nodes.find((n: any) => n.type === 'identity')?.id;
+
+    for (const vault of kvData.vaults) {
+      const vaultNodeId = `kv_${vault.vault_resource_id}`;
+
+      // Edge: identity → vault
+      if (identityNodeId) {
+        base.push({
+          id: `e_${identityNodeId}_${vaultNodeId}`,
+          source: identityNodeId,
+          target: vaultNodeId,
+          label: vault.roles.join(', '),
+          type: 'smoothstep',
+          style: { stroke: '#6b7280', strokeWidth: 1.5 },
+          labelStyle: { fontSize: 9, fill: '#6b7280' },
+        });
+      }
+
+      // Edges: vault → items
+      for (const item of vault.items) {
+        const itemNodeId = `kvi_${vault.vault_resource_id}_${item.item_type}_${item.item_name}`;
+        const edgeColor = item.expiry_risk_tier === 'CRITICAL' ? '#ef4444' :
+                          item.expiry_risk_tier === 'WARNING' ? '#f59e0b' : '#94a3b8';
+        base.push({
+          id: `e_${vaultNodeId}_${itemNodeId}`,
+          source: vaultNodeId,
+          target: itemNodeId,
+          type: 'smoothstep',
+          style: { stroke: edgeColor, strokeWidth: 1.5 },
+        });
+      }
+    }
+    return base;
+  }, [data, viewMode, kvData]);
+
+  const trustCount = (data?.trust_relationships?.federated_trusts?.length ?? 0) +
+                     (data?.trust_relationships?.ownership_edges?.length ?? 0);
+  const exposureCount = data?.secret_exposure?.filter(s => (s.exposure_flags?.length ?? 0) > 0).length ?? 0;
+  const kvItemCount = kvData?.vaults?.reduce((sum, v) => sum + v.items.length, 0) ?? 0;
 
   if (loading) {
     return (
@@ -477,16 +675,22 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
 
       {/* Detail Panels */}
       <CollapsiblePanel title="Trust Relationships" count={trustCount} defaultOpen={trustCount > 0}>
-        <TrustPanel data={data.trust_relationships} />
+        <TrustPanel data={data?.trust_relationships} />
       </CollapsiblePanel>
 
-      <CollapsiblePanel title="Effective Scope" count={data.effective_scope.subscription_count + data.effective_scope.entra_scopes.length}>
-        <ScopePanel data={data.effective_scope} />
+      <CollapsiblePanel title="Effective Scope" count={(data?.effective_scope?.subscription_count ?? 0) + (data?.effective_scope?.entra_scopes?.length ?? 0)}>
+        <ScopePanel data={data?.effective_scope} />
       </CollapsiblePanel>
 
       <CollapsiblePanel title="Secret Exposure Intelligence" count={exposureCount} defaultOpen={exposureCount > 0}>
-        <ExposurePanel data={data.secret_exposure} />
+        <ExposurePanel data={data?.secret_exposure} />
       </CollapsiblePanel>
+
+      {(kvData?.vaults?.length ?? 0) > 0 && (
+        <CollapsiblePanel title="Key Vault Access" count={kvItemCount} defaultOpen={kvItemCount > 0}>
+          <KeyVaultPanel data={kvData} />
+        </CollapsiblePanel>
+      )}
     </div>
   );
 }

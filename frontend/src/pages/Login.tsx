@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { useTenant } from '../contexts/TenantContext';
+import { useOrganization } from '../contexts/TenantContext';
 
-interface TenantOption {
+interface OrgOption {
   id: number;
   name: string;
   slug: string;
@@ -12,18 +12,20 @@ interface TenantOption {
 
 export default function Login() {
   const { login } = useAuth();
-  const { resolvedTenant, isPortal, tenantSlug } = useTenant();
+  const { resolvedOrganization: resolvedOrg, isPortal, orgSlug } = useOrganization();
   const navigate = useNavigate();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showTenantPicker, setShowTenantPicker] = useState(false);
-  const [userTenants, setUserTenants] = useState<TenantOption[]>([]);
+  const [showOrgPicker, setShowOrgPicker] = useState(false);
+  const [userOrgs, setUserOrgs] = useState<OrgOption[]>([]);
 
   // Phase 54: SSO status
   const [ssoEnabled, setSsoEnabled] = useState(false);
   const [ssoForced, setSsoForced] = useState(false);
+  // Phase 17: OIDC status
+  const [oidcEnabled, setOidcEnabled] = useState(false);
 
   // Phase 78: Forced password change
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
@@ -31,11 +33,11 @@ export default function Login() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
 
-  // Phase 85: Tenant branding for login page
+  // Phase 85: Organization branding for login page
   const [branding, setBranding] = useState<{ company_name: string; slug: string; logo_url: string | null } | null>(null);
 
   useEffect(() => {
-    const slug = tenantSlug || resolvedTenant?.slug;
+    const slug = orgSlug || resolvedOrg?.slug;
     if (!slug) return;
     fetch(`/api/auth/sso-status?tenant_slug=${encodeURIComponent(slug)}`)
       .then(r => r.ok ? r.json() : null)
@@ -43,30 +45,31 @@ export default function Login() {
         if (data) {
           setSsoEnabled(data.sso_enabled === true);
           setSsoForced(data.sso_force_sso === true);
+          setOidcEnabled(data.oidc_enabled === true);
         }
       })
       .catch(() => {});
-    // Phase 85: Fetch tenant branding
-    fetch(`/api/auth/tenant-branding?slug=${encodeURIComponent(slug)}`)
+    // Phase 85: Fetch org branding
+    fetch(`/api/auth/org-branding?slug=${encodeURIComponent(slug)}`)
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data) setBranding(data);
       })
       .catch(() => {});
-  }, [tenantSlug, resolvedTenant]);
+  }, [orgSlug, resolvedOrg]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      // Subdomain mode: scope login to detected tenant
-      // Dev mode: no tenant scoping
-      const userData = await login(username, password, tenantSlug || undefined);
+      // Subdomain mode: scope login to detected org
+      // Dev mode: no org scoping
+      const userData = await login(username, password, orgSlug || undefined);
 
-      // Clear stale admin tenant context on client login
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
+      // Clear stale admin org context on client login
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
 
       // Phase 78: Check if password change is required
       if (userData?.force_password_change) {
@@ -83,23 +86,23 @@ export default function Login() {
           return;
         }
 
-        // Non-superadmin portal login: check tenants
+        // Non-superadmin portal login: check organizations
         try {
-          const res = await fetch('/api/auth/tenants');
+          const res = await fetch('/api/auth/organizations');
           if (res.ok) {
             const data = await res.json();
-            const tenants: TenantOption[] = data.tenants || [];
+            const orgs: OrgOption[] = data.organizations || [];
 
-            if (tenants.length <= 1) {
+            if (orgs.length <= 1) {
               navigate('/');
             } else {
-              setUserTenants(tenants);
-              setShowTenantPicker(true);
+              setUserOrgs(orgs);
+              setShowOrgPicker(true);
             }
             return;
           }
         } catch {
-          // If tenant fetch fails, just navigate normally
+          // If org fetch fails, just navigate normally
         }
       }
 
@@ -131,16 +134,16 @@ export default function Login() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ current_password: password, new_password: newPassword }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to change password');
 
       // Re-login with new password
-      const userData = await login(username, newPassword, tenantSlug || undefined);
+      const userData = await login(username, newPassword, orgSlug || undefined);
       setForcePasswordChange(false);
 
-      // Clear stale admin tenant context
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
+      // Clear stale admin org context
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
 
       if (isPortal) {
         const portalRole = userData?.portal_role;
@@ -151,13 +154,13 @@ export default function Login() {
       }
       // Phase 85: Transition onboarding stage to 'locked' after password change
       try {
-        await fetch('/api/tenant/stage', {
+        await fetch('/api/organization/stage', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ stage: 'locked' }),
         });
       } catch { /* ignore */ }
-      navigate('/settings#cloud-connections');
+      navigate('/settings/connections');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to change password');
     } finally {
@@ -165,24 +168,24 @@ export default function Login() {
     }
   }
 
-  function handleTenantSelect(tenant: TenantOption) {
+  function handleOrgSelect(org: OrgOption) {
     // In production, this would redirect to the subdomain
-    // For now, store the selected tenant and navigate
+    // For now, store the selected org and navigate
     const hostname = window.location.hostname;
     const isDev = hostname === 'localhost' || hostname === '127.0.0.1';
 
     if (isDev) {
-      // Dev mode: just navigate to dashboard (tenant already in JWT)
+      // Dev mode: just navigate to dashboard (org already in JWT)
       navigate('/');
     } else {
-      // Production: redirect to tenant subdomain
+      // Production: redirect to org subdomain
       const baseDomain = hostname.split('.').slice(1).join('.') || hostname;
-      window.location.href = `${window.location.protocol}//${tenant.slug}.${baseDomain}`;
+      window.location.href = `${window.location.protocol}//${org.slug}.${baseDomain}`;
     }
   }
 
-  // Tenant picker view (after successful portal login for superadmins)
-  if (showTenantPicker) {
+  // Organization picker view (after successful portal login for superadmins)
+  if (showOrgPicker) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-lg px-4">
@@ -195,10 +198,10 @@ export default function Login() {
           </div>
 
           <div className="space-y-2">
-            {userTenants.map(t => (
+            {userOrgs.map(t => (
               <button
                 key={t.id}
-                onClick={() => handleTenantSelect(t)}
+                onClick={() => handleOrgSelect(t)}
                 className="w-full flex items-center justify-between p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl hover:border-blue-400 hover:shadow-sm transition group"
               >
                 <div className="flex items-center gap-3">
@@ -212,8 +215,8 @@ export default function Login() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                    t.plan === 'enterprise' ? 'bg-purple-100 text-purple-700' :
                     t.plan === 'pro' ? 'bg-blue-100 text-blue-700' :
+                    t.plan === 'trial' ? 'bg-amber-100 text-amber-700' :
                     'bg-gray-100 text-gray-600'
                   }`}>{t.plan}</span>
                   <span className="text-gray-400 group-hover:text-blue-600 transition">{'\u2192'}</span>
@@ -246,7 +249,7 @@ export default function Login() {
               <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
             ) : (
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-                {(branding?.company_name || resolvedTenant?.name || 'AG').substring(0, 2).toUpperCase()}
+                {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
               </div>
             )}
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Set New Password</h1>
@@ -321,13 +324,13 @@ export default function Login() {
             <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
           ) : (
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              {(branding?.company_name || resolvedTenant?.name || 'AG').substring(0, 2).toUpperCase()}
+              {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
             </div>
           )}
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            {branding?.company_name || resolvedTenant?.name || 'AuditGraph'}
+            {branding?.company_name || resolvedOrg?.name || 'AuditGraph'}
           </h1>
-          {resolvedTenant ? (
+          {resolvedOrg ? (
             <p className="text-sm text-gray-500 mt-1">Sign in to your organization's portal</p>
           ) : (
             <p className="text-sm text-gray-500 mt-1">Welcome</p>
@@ -341,22 +344,62 @@ export default function Login() {
             </div>
           )}
 
-          {/* Phase 54: SSO Button */}
-          {ssoEnabled && (
+          {/* Phase 54 + Phase 17: SSO Buttons (SAML and/or OIDC) */}
+          {(ssoEnabled || oidcEnabled) && (
             <>
-              <button
-                type="button"
-                onClick={() => {
-                  const slug = tenantSlug || resolvedTenant?.slug;
-                  if (slug) window.location.href = `/api/auth/saml/login?tenant_slug=${encodeURIComponent(slug)}`;
-                }}
-                className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-blue-600 text-blue-600 hover:bg-blue-50 transition flex items-center justify-center gap-2"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-                Sign in with SSO
-              </button>
+              {ssoEnabled && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const slug = orgSlug || resolvedOrg?.slug;
+                    if (slug) window.location.href = `/api/auth/saml/login?tenant_slug=${encodeURIComponent(slug)}`;
+                  }}
+                  className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-blue-600 text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                  {oidcEnabled ? 'Sign in with SAML' : 'Sign in with SSO'}
+                </button>
+              )}
+              {oidcEnabled && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const slug = orgSlug || resolvedOrg?.slug;
+                    if (!slug) return;
+                    try {
+                      const res = await fetch(`/api/auth/oidc/login?org_slug=${encodeURIComponent(slug)}`);
+                      const data = await res.json();
+                      if (data.redirect_url) {
+                        // Validate redirect URL: only allow relative paths starting with /
+                        // Reject absolute URLs and cross-origin targets to prevent open redirect
+                        const url = data.redirect_url;
+                        if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//')) {
+                          window.location.href = url;
+                        } else if (typeof url === 'string') {
+                          try {
+                            const parsed = new URL(url);
+                            if (parsed.origin === window.location.origin) {
+                              window.location.href = url;
+                            } else {
+                              window.location.href = '/dashboard';
+                            }
+                          } catch {
+                            window.location.href = '/dashboard';
+                          }
+                        }
+                      }
+                    } catch { /* ignore */ }
+                  }}
+                  className="w-full py-2.5 rounded-lg text-sm font-medium border-2 border-indigo-600 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                  </svg>
+                  {ssoEnabled ? 'Sign in with SSO' : 'Sign in with SSO'}
+                </button>
+              )}
               {!ssoForced && (
                 <div className="flex items-center gap-3 text-xs text-gray-400">
                   <div className="flex-1 h-px bg-gray-200 dark:bg-slate-700" />
@@ -424,7 +467,14 @@ export default function Login() {
           )}
         </div>
 
-        <p className="text-center text-xs text-gray-400 mt-6">
+        <div className="text-center mt-6">
+          <span className="text-xs text-gray-500 dark:text-gray-400">Don't have an account? </span>
+          <button onClick={() => navigate('/signup')} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+            Sign up free
+          </button>
+        </div>
+
+        <p className="text-center text-xs text-gray-400 mt-3">
           Powered by AuditGraph
         </p>
       </div>

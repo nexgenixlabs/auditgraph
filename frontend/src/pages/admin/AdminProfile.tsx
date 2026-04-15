@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
+import { api, ApiError } from '../../services/apiClient';
 
 type PortalRole = 'superadmin' | 'poweradmin' | 'billing' | 'reader';
 
@@ -75,19 +76,13 @@ export default function AdminProfile() {
 
     setChangingPw(true);
     try {
-      const res = await fetch('/api/auth/password', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to change password');
+      await api.put('/auth/password', { current_password: currentPassword, new_password: newPassword });
       setPwMsg({ type: 'success', text: 'Password changed successfully' });
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-    } catch (err: unknown) {
-      setPwMsg({ type: 'error', text: err instanceof Error ? err.message : 'Failed to change password' });
+    } catch (err: any) {
+      setPwMsg({ type: 'error', text: err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Failed to change password' });
     } finally {
       setChangingPw(false);
     }
@@ -99,7 +94,7 @@ export default function AdminProfile() {
   const badgeColor = ROLE_BADGE_COLORS[portalRole] || ROLE_BADGE_COLORS.reader;
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-2xl mx-auto space-y-4">
       <div>
         <h2 className="text-xl font-bold text-gray-900">My Profile</h2>
         <p className="text-sm text-gray-500 mt-1">Manage your account details and security</p>

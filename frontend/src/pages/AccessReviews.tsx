@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { TIME_MS } from '../constants/metrics';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -148,6 +151,7 @@ const ALL_DECISIONS = [
 /* ------------------------------------------------------------------ */
 
 export default function AccessReviews() {
+  const navigate = useNavigate();
   const { addToast } = useToast();
   const { user } = useAuth();
   const { withConnection, selectedConnectionId } = useConnection();
@@ -156,6 +160,7 @@ export default function AccessReviews() {
   // Campaigns
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [metrics, setMetrics] = useState<Metrics | null>(null);
 
@@ -192,6 +197,7 @@ export default function AccessReviews() {
 
   const loadCampaigns = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const url = statusFilter ? `/api/access-reviews?status=${statusFilter}` : '/api/access-reviews';
       const res = await fetch(withConnection(url));
@@ -199,11 +205,11 @@ export default function AccessReviews() {
       const data = await res.json();
       setCampaigns(data.campaigns || []);
     } catch {
-      addToast('Failed to load campaigns', 'error');
+      setLoadError('Failed to load access review campaigns. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, addToast, withConnection]);
+  }, [statusFilter, withConnection]);
 
   const loadMetrics = useCallback(async () => {
     try {
@@ -409,7 +415,7 @@ export default function AccessReviews() {
 
   function daysUntil(deadline: string | null): string {
     if (!deadline) return '';
-    const diff = Math.ceil((new Date(deadline).getTime() - Date.now()) / 86400000);
+    const diff = Math.ceil((new Date(deadline).getTime() - Date.now()) / TIME_MS.DAY);
     if (diff < 0) return 'Overdue';
     if (diff === 0) return 'Due today';
     return `${diff}d left`;
@@ -439,7 +445,7 @@ export default function AccessReviews() {
   ];
 
   return (
-    <div style={{ background: AR.bg, color: AR.text, fontFamily: "'DM Sans', sans-serif" }}
+    <div style={{ background: AR.bg, color: AR.text, fontFamily: "'Inter', sans-serif" }}
          className="min-h-screen -m-4 -mt-4 p-8">
       <style>{`
         @keyframes ar-fade-up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
@@ -471,6 +477,7 @@ export default function AccessReviews() {
           <p style={{ color: AR.textMuted, fontSize: 13 }}>
             Risk-aware access certification with AI-powered recommendations
           </p>
+          <SnapshotContextHeader />
         </div>
         {isAdmin && (
           <button
@@ -490,22 +497,28 @@ export default function AccessReviews() {
       {metrics && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 16, marginBottom: 28 }}>
           {[
-            { label: 'Active Campaigns', value: metrics.active_count, color: '#4ADE80' },
-            { label: 'Overdue', value: metrics.overdue_count, color: metrics.overdue_count > 0 ? '#FF1744' : AR.textMuted },
-            { label: 'Completion Rate', value: `${metrics.completion_rate}%`, color: '#60A5FA' },
-            { label: 'High Risk Pending', value: metrics.high_risk_pending, color: '#FF6D00' },
-            { label: 'Revocation Rate', value: `${metrics.revocation_rate}%`, color: '#FF1744' },
-            { label: 'NHI Coverage', value: `${metrics.nhi_percentage}%`, color: '#A78BFA' },
+            { label: 'Active Campaigns', value: metrics.active_count, color: '#4ADE80', to: '/access-reviews?status=active' },
+            { label: 'Overdue', value: metrics.overdue_count, color: metrics.overdue_count > 0 ? '#FF1744' : AR.textMuted, to: '/access-reviews?status=overdue' },
+            { label: 'Completion Rate', value: `${metrics.completion_rate}%`, color: '#60A5FA', to: '' },
+            { label: 'High Risk Pending', value: metrics.high_risk_pending, color: '#FF6D00', to: '/identities?risk_level=high' },
+            { label: 'Revocation Rate', value: `${metrics.revocation_rate}%`, color: '#FF1744', to: '' },
+            { label: 'NHI Coverage', value: `${metrics.nhi_percentage}%`, color: '#A78BFA', to: '/workload-identities' },
           ].map((card, i) => (
             <div key={i} className="ar-card" style={{
               background: AR.surface, border: `1px solid ${AR.surfaceBorder}`, borderRadius: 12,
               padding: '20px 16px', textAlign: 'center',
-            }}>
+              cursor: card.to ? 'pointer' : 'default',
+            }}
+            onClick={card.to ? () => navigate(card.to) : undefined}
+            >
               <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 1.5, color: AR.textMuted,
                             textTransform: 'uppercase', marginBottom: 8, fontFamily: AR.mono }}>
                 {card.label}
               </div>
-              <div style={{ fontSize: 28, fontWeight: 700, color: card.color, fontFamily: AR.mono }}>
+              <div style={{
+                fontSize: 28, fontWeight: 700, color: card.color, fontFamily: AR.mono,
+                ...(card.to ? { borderBottom: '1px dashed currentColor', display: 'inline-block' } : {}),
+              }}>
                 {card.value}
               </div>
             </div>
@@ -533,12 +546,25 @@ export default function AccessReviews() {
       </div>
 
       {/* Loading */}
-      {loading && campaigns.length === 0 && (
+      {loading && campaigns.length === 0 && !loadError && (
         <div style={{ textAlign: 'center', padding: 60, color: AR.textMuted }}>Loading campaigns...</div>
       )}
 
+      {/* Error State */}
+      {!loading && loadError && (
+        <div style={{ background: AR.surface, border: '1px solid rgba(220,38,38,0.3)', borderRadius: 12,
+                      padding: 60, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: '#dc2626', fontWeight: 600, marginBottom: 8 }}>Unable to load campaigns</div>
+          <div style={{ color: AR.textMuted, fontSize: 13, marginBottom: 16 }}>{loadError}</div>
+          <button onClick={loadCampaigns} style={{
+            padding: '8px 20px', borderRadius: 8, border: `1px solid ${AR.surfaceBorder}`,
+            background: AR.surface, color: AR.text, fontSize: 13, cursor: 'pointer',
+          }}>Retry</button>
+        </div>
+      )}
+
       {/* Empty State */}
-      {!loading && campaigns.length === 0 && (
+      {!loading && !loadError && campaigns.length === 0 && (
         <div style={{ background: AR.surface, border: `1px solid ${AR.surfaceBorder}`, borderRadius: 12,
                       padding: 60, textAlign: 'center' }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>&#128203;</div>

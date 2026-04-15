@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { api } from '../../services/apiClient';
 
 interface HealthData {
   status: string;
@@ -22,15 +23,9 @@ export default function PlatformHealth() {
   const [data, setData] = useState<HealthData | null>(null);
 
   useEffect(() => {
-    fetch('/api/health')
-      .then(r => r.ok ? r.json() : null)
-      .then(setData)
-      .catch(() => {});
+    api.get<HealthData>('/health').then(setData).catch(() => {});
     const iv = setInterval(() => {
-      fetch('/api/health')
-        .then(r => r.ok ? r.json() : null)
-        .then(setData)
-        .catch(() => {});
+      api.get<HealthData>('/health').then(setData).catch(() => {});
     }, 30000);
     return () => clearInterval(iv);
   }, []);

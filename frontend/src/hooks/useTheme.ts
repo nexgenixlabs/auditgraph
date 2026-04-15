@@ -1,21 +1,16 @@
-import { useThemeContext, ThemeName } from '../contexts/ThemeContext';
+import { useThemeContext } from '../contexts/ThemeContext';
 
 /**
- * Thin wrapper around ThemeContext for backward compatibility.
- * `dark` is always true (we only have dark themes).
- * `toggle` cycles between obsidian and carbon.
+ * Obsidian Command — dark-only theme.
+ * `dark` is always true. `toggle` is a no-op.
  */
 export function useTheme() {
   const { theme, setTheme } = useThemeContext();
 
-  const toggle = () => {
-    setTheme(theme === 'obsidian' ? 'carbon' : 'obsidian');
-  };
-
   return {
     theme,
-    dark: true as const,
+    dark: true,
     setTheme,
-    toggle,
+    toggle: () => {},
   };
 }

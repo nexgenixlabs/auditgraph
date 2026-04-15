@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 
-interface ResolvedTenant {
+interface ResolvedOrganization {
   id: number;
   name: string;
   slug: string;
@@ -8,32 +8,38 @@ interface ResolvedTenant {
   enabled: boolean;
 }
 
-interface TenantContextValue {
-  tenantSlug: string | null;
-  resolvedTenant: ResolvedTenant | null;
+interface OrganizationContextValue {
+  orgSlug: string | null;
+  resolvedOrganization: ResolvedOrganization | null;
   loading: boolean;
   error: string | null;
   isPortal: boolean;
+  /** @deprecated Use orgSlug instead */
+  tenantSlug: string | null;
+  /** @deprecated Use resolvedOrganization instead */
+  resolvedTenant: ResolvedOrganization | null;
 }
 
-const TenantContext = createContext<TenantContextValue>({
-  tenantSlug: null,
-  resolvedTenant: null,
+const OrganizationContext = createContext<OrganizationContextValue>({
+  orgSlug: null,
+  resolvedOrganization: null,
   loading: false,
   error: null,
   isPortal: false,
+  tenantSlug: null,
+  resolvedTenant: null,
 });
 
 const RESERVED_PREFIXES = ['app', 'www', 'api', 'admin', 'mail', 'smtp', 'dev', 'qa', 'stage', 'staging', 'prod'];
 
-function extractTenantSlug(): string | null {
+function extractOrgSlug(): string | null {
   // Dev override via env var
   const envSlug = process.env.REACT_APP_DEV_TENANT_SLUG;
   if (envSlug) return envSlug;
 
   const hostname = window.location.hostname;
 
-  // Dev mode or platform hostnames: no tenant scoping
+  // Dev mode or platform hostnames: no organization scoping
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.')
       || hostname.endsWith('.azurewebsites.net')) {
     return null;
@@ -48,34 +54,42 @@ function extractTenantSlug(): string | null {
   return null;
 }
 
-export function TenantProvider({ children }: { children: React.ReactNode }) {
-  const [tenantSlug] = useState<string | null>(() => extractTenantSlug());
-  const [resolvedTenant, setResolvedTenant] = useState<ResolvedTenant | null>(null);
-  const [loading, setLoading] = useState<boolean>(!!tenantSlug);
+export function OrganizationProvider({ children }: { children: React.ReactNode }) {
+  const [orgSlug] = useState<string | null>(() => extractOrgSlug());
+  const [resolvedOrganization, setResolvedOrganization] = useState<ResolvedOrganization | null>(null);
+  const [loading, setLoading] = useState<boolean>(!!orgSlug);
   const [error, setError] = useState<string | null>(null);
 
-  const isPortal = !tenantSlug;
+  const isPortal = !orgSlug;
 
   useEffect(() => {
-    if (!tenantSlug) return;
+    if (!orgSlug) return;
 
     let mounted = true;
     setLoading(true);
 
-    // Use the raw fetch (not the intercepted one) since this is pre-auth
-    const origFetch = window.fetch;
-    origFetch(`/api/clients/by-slug/${encodeURIComponent(tenantSlug)}`)
+    // Validate slug via POST (rate-limited, prevents tenant enumeration via URL path)
+    fetch('/api/tenants/validate-slug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: orgSlug }),
+    })
       .then(res => {
-        if (!res.ok) throw new Error(res.status === 404 ? 'Organization not found' : 'Failed to resolve organization');
+        if (!res.ok) throw new Error('Failed to validate organization');
         return res.json();
       })
       .then(data => {
         if (!mounted) return;
-        const t = data.tenant;
-        if (!t.enabled) {
+        if (!data.valid) {
+          setError('Organization not found');
+          setLoading(false);
+          return;
+        }
+        const org = data.org;
+        if (!org.enabled) {
           setError('This organization is currently disabled. Please contact your administrator.');
         } else {
-          setResolvedTenant(t);
+          setResolvedOrganization(org);
         }
         setLoading(false);
       })
@@ -86,15 +100,32 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
       });
 
     return () => { mounted = false; };
-  }, [tenantSlug]);
+  }, [orgSlug]);
+
+  const value: OrganizationContextValue = {
+    orgSlug,
+    resolvedOrganization,
+    loading,
+    error,
+    isPortal,
+    // Deprecated aliases for backward compatibility during migration
+    tenantSlug: orgSlug,
+    resolvedTenant: resolvedOrganization,
+  };
 
   return (
-    <TenantContext.Provider value={{ tenantSlug, resolvedTenant, loading, error, isPortal }}>
+    <OrganizationContext.Provider value={value}>
       {children}
-    </TenantContext.Provider>
+    </OrganizationContext.Provider>
   );
 }
 
-export function useTenant(): TenantContextValue {
-  return useContext(TenantContext);
+export function useOrganization(): OrganizationContextValue {
+  return useContext(OrganizationContext);
 }
+
+/** @deprecated Use OrganizationProvider instead */
+export const TenantProvider = OrganizationProvider;
+
+/** @deprecated Use useOrganization instead */
+export const useTenant = useOrganization;

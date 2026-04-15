@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { COLORS, RISK_COLORS } from '../../constants/design';
 import { useConnection } from '../../contexts/ConnectionContext';
 
@@ -32,6 +33,7 @@ const METHOD_COLORS: Record<string, string> = {
 };
 
 export default function CredentialIntelligence() {
+  const navigate = useNavigate();
   const { withConnection, selectedConnectionId } = useConnection();
   const [data, setData] = useState<CredentialIntelData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -77,7 +79,7 @@ export default function CredentialIntelligence() {
           <div className="text-[11px] uppercase tracking-wider mb-2" style={{ color: COLORS.textMuted }}>Secret Age Distribution</div>
           <div className="space-y-1.5">
             {Object.entries(age).map(([bucket, count]) => (
-              <div key={bucket} className="flex items-center gap-2">
+              <button key={bucket} className="flex items-center gap-2 w-full cursor-pointer hover:opacity-70 transition" onClick={() => navigate('/spns')}>
                 <span className="text-[11px] w-14 text-right font-medium" style={{ color: COLORS.textSecondary }}>{bucket}</span>
                 <div className="flex-1 h-3 rounded-full overflow-hidden" style={{ backgroundColor: COLORS.borderLight }}>
                   <div className="h-full rounded-full transition-all duration-500" style={{
@@ -86,7 +88,7 @@ export default function CredentialIntelligence() {
                   }} />
                 </div>
                 <span className="text-[11px] w-7 font-bold" style={{ color: COLORS.textPrimary }}>{count}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -96,7 +98,7 @@ export default function CredentialIntelligence() {
           <div className="text-[11px] uppercase tracking-wider mb-2" style={{ color: COLORS.textMuted }}>Auth Method Breakdown</div>
           <div className="space-y-1.5">
             {Object.entries(methods).map(([method, count]) => (
-              <div key={method} className="flex items-center gap-2">
+              <button key={method} className="flex items-center gap-2 w-full cursor-pointer hover:opacity-70 transition" onClick={() => navigate('/spns')}>
                 <span className="text-[11px] w-14 text-right font-medium capitalize" style={{ color: COLORS.textSecondary }}>{method}</span>
                 <div className="flex-1 h-3 rounded-full overflow-hidden" style={{ backgroundColor: COLORS.borderLight }}>
                   <div className="h-full rounded-full transition-all duration-500" style={{
@@ -105,7 +107,7 @@ export default function CredentialIntelligence() {
                   }} />
                 </div>
                 <span className="text-[11px] w-7 font-bold" style={{ color: COLORS.textPrimary }}>{count}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -126,10 +128,10 @@ export default function CredentialIntelligence() {
             </div>
           </div>
           <div className="space-y-1">
-            <Stat label="Rotation Overdue" value={rot.overdue} color={rot.overdue > 0 ? RISK_COLORS.critical.color : COLORS.textMuted} />
-            <Stat label="Due Within 30d" value={rot.due_soon} color={rot.due_soon > 0 ? RISK_COLORS.high.color : COLORS.textMuted} />
-            <Stat label="Stale Passwords" value={rot.stale_passwords} color={rot.stale_passwords > 0 ? RISK_COLORS.high.color : COLORS.textMuted} />
-            <Stat label="Multi-Active Secrets" value={rot.multi_active_secrets} color={rot.multi_active_secrets > 0 ? RISK_COLORS.medium.color : COLORS.textMuted} />
+            <Stat label="Rotation Overdue" value={rot.overdue} color={rot.overdue > 0 ? RISK_COLORS.critical.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_status=expired')} />
+            <Stat label="Due Within 30d" value={rot.due_soon} color={rot.due_soon > 0 ? RISK_COLORS.high.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_status=expiring_soon')} />
+            <Stat label="Stale Passwords" value={rot.stale_passwords} color={rot.stale_passwords > 0 ? RISK_COLORS.high.color : COLORS.textMuted} onClick={() => navigate('/identities?credential_status=expired')} />
+            <Stat label="Multi-Active Secrets" value={rot.multi_active_secrets} color={rot.multi_active_secrets > 0 ? RISK_COLORS.medium.color : COLORS.textMuted} onClick={() => navigate('/spns?credential_filter=multi_active')} />
           </div>
         </div>
       </div>
@@ -137,11 +139,11 @@ export default function CredentialIntelligence() {
   );
 }
 
-function Stat({ label, value, color }: { label: string; value: number; color: string }) {
+function Stat({ label, value, color, onClick }: { label: string; value: number; color: string; onClick?: () => void }) {
   return (
-    <div className="flex items-center justify-between">
+    <button onClick={onClick} className={`flex items-center justify-between w-full${onClick ? ' cursor-pointer hover:bg-gray-50 rounded px-1 -mx-1 transition' : ''}`}>
       <span className="text-[11px]" style={{ color: COLORS.textSecondary }}>{label}</span>
       <span className="text-[12px] font-bold" style={{ color }}>{value}</span>
-    </div>
+    </button>
   );
 }

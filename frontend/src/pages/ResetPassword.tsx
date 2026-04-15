@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { api, ApiError } from '../services/apiClient';
 
 export default function ResetPassword() {
   const navigate = useNavigate();
@@ -20,8 +21,7 @@ export default function ResetPassword() {
       setValidating(false);
       return;
     }
-    fetch(`/api/auth/validate-reset-token?token=${encodeURIComponent(token)}`)
-      .then(r => r.json())
+    api.get(`/auth/validate-reset-token?token=${encodeURIComponent(token)}`)
       .then(data => {
         setValid(data.valid === true);
         setMaskedEmail(data.email || '');
@@ -45,16 +45,10 @@ export default function ResetPassword() {
 
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/reset-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, new_password: newPassword }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Reset failed');
+      await api.post('/auth/reset-password', { token, new_password: newPassword });
       setSuccess(true);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Reset failed');
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Reset failed');
     } finally {
       setLoading(false);
     }

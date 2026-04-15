@@ -245,24 +245,24 @@ if len(identity_roles) == 0 and len(identity_entra_roles) == 0:
 ```
 | Name      | Type | Risk | Activity Status  | Roles |
 |-----------|------|------|------------------|-------|
-| Bhupathi  | user | CRIT | recently_created | 32    |
+| Admin User  | user | CRIT | recently_created | 32    |
 ```
 
 **After:**
 ```
 | Name      | Type | Source | Risk | Last Login | Created    | Roles |
 |-----------|------|--------|------|------------|------------|-------|
-| Bhupathi  | user | AZURE  | CRIT | Never      | Apr 18, 25 | 32    |
+| Admin User  | user | AZURE  | CRIT | Never      | Apr 18, 25 | 32    |
 ```
 
 ### **Creation Dates:**
 
 **Before (WRONG):**
-- Bhupathi: Jan 21, 2026 (first discovery date)
+- Admin User: Jan 21, 2026 (first discovery date)
 - SPNs: Changing on every run
 
 **After (CORRECT):**
-- Bhupathi: April 18, 2025 (actual Azure AD creation)
+- Admin User: April 18, 2025 (actual Azure AD creation)
 - SPNs: Jan 21-24, 2026 (actual Azure AD creation)
 - **Stability:** Dates remain constant across runs ✅
 
@@ -298,7 +298,7 @@ WHERE r46.discovery_run_id = 46 AND r47.discovery_run_id = 47;
 
 ### **Test 2: Graph API Data Retrieval**
 ```python
-DEBUG: Got created_date_time: 2025-04-18T21:25:25+00:00  # Bhupathi
+DEBUG: Got created_date_time: 2025-04-18T21:25:25+00:00  # Admin User
 DEBUG: Got createdDateTime from additional_data: 2026-01-21 21:08:50+00:00  # SPN
 ```
 

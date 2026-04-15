@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AuditGraph — Executive Posture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --navy: #15306A;
+  --navy-mid: #1e3f8a;
+  --teal: #24A2A1;
+  --teal-dim: #1a7a79;
+  --orange: #FF7216;
+  --gray: #7A838A;
+  --surface: #0d1829;
+  --surface2: #111f35;
+  --surface3: #162540;
+  --surface4: #1c2d4a;
+  --border: rgba(36,162,161,0.15);
+  --border-bright: rgba(36,162,161,0.35);
+  --text-primary: #e8eef8;
+  --text-secondary: #8fa3bf;
+  --text-muted: #4a6080;
+  --red: #e8465a;
+  --amber: #f59e0b;
+  --green: #22c55e;
+  --font: 'DM Sans', sans-serif;
+  --mono: 'DM Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  text-decoration: none !important;
+}
+
+a, a:visited, a:hover, a:active {
+  text-decoration: none !important;
+  color: inherit;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 52px 1fr;
+  height: 100vh;
+  background: var(--surface);
+  font-family: var(--font);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ═══ TOPBAR ═══ */
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 16px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+}
+.logo-mark {
+  width: 28px;
+  height: 28px;
+  background: linear-gradient(135deg, #1e3f8a, #24A2A1);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.topbar-search {
+  flex: 1;
+  max-width: 440px;
+  margin-left: 24px;
+  position: relative;
+}
+.topbar-search input {
+  width: 100%;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 12px 7px 34px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  outline: none;
+}
+.topbar-search input::placeholder { color: var(--text-muted); }
+.topbar-search input:focus { border-color: var(--border-bright); }
+.search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tenant-badge {
+  background: var(--surface4);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tenant-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 6px var(--teal);
+  flex-shrink: 0;
+}
+.topbar-time {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1e3f8a, #1a7a79);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+  flex-shrink: 0;
+}
+
+/* ═══ SIDEBAR ═══ */
+.sidebar {
+  background: var(--surface2);
+  border-right: 1px solid var(--border);
+  padding: 16px 0;
+  overflow-y: auto;
+}
+.nav-section { padding: 0 12px; margin-bottom: 20px; }
+.nav-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0 8px;
+  margin-bottom: 6px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-bottom: 1px;
+  position: relative;
+}
+.nav-item:hover {
+  background: var(--surface3);
+  color: var(--text-primary);
+}
+.nav-item.active {
+  background: rgba(36,162,161,0.12);
+  color: var(--teal);
+  font-weight: 500;
+}
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--teal);
+  border-radius: 2px;
+}
+.nav-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  font-size: 9px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.nav-badge {
+  margin-left: auto;
+  background: rgba(232,70,90,0.2);
+  color: var(--red);
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  font-family: var(--mono);
+}
+.nav-badge.amber {
+  background: rgba(245,158,11,0.15);
+  color: var(--amber);
+}
+
+/* ═══ MAIN ═══ */
+.main {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+/* ═══ PAGE HEADER ═══ */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.page-title {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.4px;
+  color: var(--text-primary);
+}
+.page-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.btn-group { display: flex; gap: 8px; flex-shrink: 0; }
+.btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  border: none;
+}
+.btn-ghost {
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover { border-color: var(--border-bright); }
+.btn-primary {
+  background: var(--teal);
+  border: none;
+  color: white;
+}
+
+/* ═══ RISK HERO ═══ */
+.risk-hero {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 24px;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 24px;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+}
+.risk-hero::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #24A2A1, #1e3f8a);
+}
+.risk-label {
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+.risk-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.risk-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(34,197,94,0.2);
+  flex-shrink: 0;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(34,197,94,0.2); }
+  50% { box-shadow: 0 0 0 8px rgba(34,197,94,0.05); }
+}
+.risk-status-text {
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--green);
+  letter-spacing: -1px;
+}
+.risk-sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.risk-stat {
+  border-left: 1px solid var(--border);
+  padding-left: 24px;
+}
+.risk-stat-num {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -1px;
+  color: var(--text-primary);
+}
+.risk-stat-num span {
+  font-size: 14px;
+  color: var(--text-muted);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.risk-stat-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+.tag-green  { background: rgba(34,197,94,0.15);  color: var(--green); }
+.tag-teal   { background: rgba(36,162,161,0.15); color: var(--teal); }
+.tag-red    { background: rgba(232,70,90,0.15);  color: var(--red); }
+.tag-orange { background: rgba(255,114,22,0.15); color: var(--orange); }
+.tag-amber  { background: rgba(245,158,11,0.15); color: var(--amber); }
+.agirs-badge {
+  background: rgba(36,162,161,0.1);
+  border: 1px solid var(--border-bright);
+  border-radius: 10px;
+  padding: 12px 20px;
+  text-align: center;
+  min-width: 120px;
+}
+.agirs-score {
+  font-family: var(--mono);
+  font-size: 32px;
+  font-weight: 500;
+  color: var(--teal);
+  letter-spacing: -1px;
+  line-height: 1.1;
+}
+.agirs-label {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--teal-dim);
+  margin-top: 3px;
+}
+.agirs-formula {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* ═══ RISK COMPOSITION BAR ═══ */
+.risk-bar-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+}
+.risk-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.risk-bar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.risk-bar-counts {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+.risk-bar-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface4);
+  display: flex;
+  overflow: hidden;
+  gap: 1px;
+}
+.risk-seg { height: 100%; min-width: 2px; }
+.risk-bar-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* ═══ METRIC CARDS ═══ */
+.metric-cards {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+}
+.metric-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+.metric-card:hover { border-color: var(--border-bright); }
+.metric-card::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 2px;
+  border-radius: 0 0 12px 12px;
+}
+.mc-red::after    { background: var(--red); }
+.mc-orange::after { background: var(--orange); }
+.mc-amber::after  { background: var(--amber); }
+.mc-green::after  { background: var(--green); }
+.mc-teal::after   { background: var(--teal); }
+.mc-label {
+  font-size: 10px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.mc-value {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -1.5px;
+  color: var(--text-primary);
+  line-height: 1;
+}
+.mc-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 5px;
+  line-height: 1.3;
+}
+
+/* ═══ CONTENT GRID ═══ */
+.content-grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+}
+
+/* ═══ PANELS ═══ */
+.panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.panel-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.panel-action {
+  font-size: 11px;
+  color: var(--teal);
+  font-weight: 500;
+  cursor: pointer;
+}
+.panel-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  background: rgba(255,114,22,0.15);
+  color: var(--orange);
+}
+
+/* ═══ FINDING ROWS ═══ */
+.finding-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 130px 100px 70px;
+  gap: 12px;
+  padding: 13px 20px;
+  border-bottom: 1px solid rgba(36,162,161,0.07);
+  align-items: center;
+  cursor: pointer;
+}
+.finding-row:hover { background: var(--surface3); }
+.finding-row:last-child { border-bottom: none; }
+.finding-idx {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.finding-info { min-width: 0; }
+.finding-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.finding-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.verdict {
+  display: inline-flex;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.v-orphaned  { background: rgba(232,70,90,0.15);  color: var(--red); }
+.v-at-risk   { background: rgba(255,114,22,0.15); color: var(--orange); }
+.v-federated { background: rgba(255,114,22,0.15); color: var(--orange); }
+.v-stale     { background: rgba(245,158,11,0.15); color: var(--amber); }
+.v-ghost     { background: rgba(120,100,200,0.15); color: #a78bfa; }
+.v-review    { background: rgba(36,162,161,0.12);  color: var(--teal); }
+.blast-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.blast-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface4);
+  position: relative;
+  overflow: hidden;
+}
+.blast-fill {
+  height: 100%;
+  border-radius: 2px;
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+.blast-lbl {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.action-btn {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(36,162,161,0.1);
+  color: var(--teal);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-family: var(--font);
+  white-space: nowrap;
+}
+.action-btn:hover { border-color: var(--border-bright); }
+
+/* ═══ DONUT / IDENTITY LIST ═══ */
+.right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.donut-wrap {
+  position: relative;
+  width: 100%;
+  height: 170px;
+  padding: 10px;
+}
+.donut-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+}
+.donut-num {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -1px;
+  color: var(--text-primary);
+}
+.donut-lbl {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+.ident-list { padding: 0 16px 14px; }
+.ident-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(36,162,161,0.06);
+}
+.ident-row:last-child { border-bottom: none; }
+.ident-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.ident-name {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  flex: 1;
+}
+.ident-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.ident-pct {
+  font-size: 10px;
+  color: var(--text-muted);
+  width: 32px;
+  text-align: right;
+}
+
+/* ═══ BLAST RADIUS ═══ */
+.blast-item {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(36,162,161,0.07);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.blast-item:last-child { border-bottom: none; }
+.blast-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--surface4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.blast-body { flex: 1; }
+.blast-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.blast-desc {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+.severity-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 5px;
+}
+.sb-high { background: rgba(232,70,90,0.15); color: var(--red); }
+.sb-med  { background: rgba(245,158,11,0.12); color: var(--amber); }
+
+/* ═══ REMEDIATION ═══ */
+.remed-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 16px;
+  border-bottom: 1px solid rgba(36,162,161,0.07);
+}
+.remed-item:last-child { border-bottom: none; }
+.remed-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(36,162,161,0.12);
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+  font-family: var(--mono);
+}
+.remed-body { flex: 1; }
+.remed-action {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.remed-action strong {
+  color: var(--orange);
+  font-weight: 600;
+}
+.remed-detail {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.remed-effort {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap;
+  padding-top: 2px;
+  font-family: var(--mono);
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="logo">
+      <div class="logo-mark">
+        <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+          <circle cx="8" cy="8" r="5" stroke="white" stroke-width="1.5" fill="none"/>
+          <circle cx="8" cy="8" r="2" fill="white"/>
+          <line x1="8" y1="1" x2="8" y2="4" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="8" y1="12" x2="8" y2="15" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="1" y1="8" x2="4" y2="8" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="12" y1="8" x2="15" y2="8" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+      AuditGraph
+    </div>
+    <div class="topbar-search">
+      <span class="search-icon">⌕</span>
+      <input placeholder="Search identities, findings, principals…">
+    </div>
+    <div class="topbar-right">
+      <div class="tenant-badge">
+        <span class="tenant-dot"></span>
+        contoso.onmicrosoft.com
+      </div>
+      <span class="topbar-time" id="live-time">--:--:-- UTC</span>
+      <div class="avatar">BS</div>
+    </div>
+  </div>
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="nav-section">
+      <div class="nav-label">Command</div>
+      <div class="nav-item active"><span class="nav-dot">⊕</span> Executive Posture</div>
+      <div class="nav-item"><span class="nav-dot">◫</span> Command Center</div>
+      <div class="nav-item"><span class="nav-dot">◌</span> Risk Monitoring <span class="nav-badge amber">3</span></div>
+      <div class="nav-item"><span class="nav-dot">⚑</span> Security Findings <span class="nav-badge">12</span></div>
+      <div class="nav-item"><span class="nav-dot">↺</span> Remediation Plan</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Identity Fabric</div>
+      <div class="nav-item"><span class="nav-dot">◎</span> Identity Inventory</div>
+      <div class="nav-item"><span class="nav-dot">⬡</span> Non-Human Identities</div>
+      <div class="nav-item"><span class="nav-dot">△</span> AI Agents</div>
+      <div class="nav-item"><span class="nav-dot">⋈</span> Privileged Access</div>
+      <div class="nav-item"><span class="nav-dot">◈</span> Identity Graph</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Access Explainability</div>
+      <div class="nav-item"><span class="nav-dot">◧</span> Access Graph</div>
+      <div class="nav-item"><span class="nav-dot">▤</span> Effective Access</div>
+      <div class="nav-item"><span class="nav-dot">⬟</span> Sensitive Data Access</div>
+      <div class="nav-item"><span class="nav-dot">◰</span> Role Optimization</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Strike Surface</div>
+      <div class="nav-item"><span class="nav-dot">◉</span> Identity Exposures</div>
+      <div class="nav-item"><span class="nav-dot">⊗</span> Attack Paths <span class="nav-badge">5</span></div>
+      <div class="nav-item"><span class="nav-dot">◬</span> Remediation Queue</div>
+      <div class="nav-item"><span class="nav-dot">▣</span> Attack Simulator</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Compliance</div>
+      <div class="nav-item"><span class="nav-dot">◼</span> Compliance Posture</div>
+      <div class="nav-item"><span class="nav-dot">◻</span> Access Reviews</div>
+      <div class="nav-item"><span class="nav-dot">⊞</span> Export Center</div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- A. PAGE HEADER -->
+    <div class="page-header">
+      <div>
+        <div class="page-title">Executive Posture</div>
+        <div class="page-sub">Identity attack surface · Last scan 4 minutes ago · Azure tenant: contoso.onmicrosoft.com</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-ghost">⬇ Export CISO Report</button>
+        <button class="btn btn-ghost">⟳ Rescan</button>
+        <button class="btn btn-primary">+ Remediation</button>
+      </div>
+    </div>
+
+    <!-- B. RISK HERO BANNER -->
+    <div class="risk-hero">
+      <div>
+        <div class="risk-label">Overall Posture</div>
+        <div class="risk-status-row">
+          <div class="risk-pulse"></div>
+          <span class="risk-status-text">LOW RISK</span>
+        </div>
+        <div class="risk-sub">2 critical · 3 high-risk exposures detected<br>7 identities (2.2%) at risk across 320 principals</div>
+      </div>
+      <div class="risk-stat">
+        <div class="risk-label">Risk Exposure Rate</div>
+        <div class="risk-stat-num">2.2<span>%</span></div>
+        <div class="risk-stat-sub">of 320 total identities</div>
+        <span class="tag tag-green">↓ Within threshold</span>
+      </div>
+      <div class="risk-stat">
+        <div class="risk-label">Assessment Confidence</div>
+        <div class="risk-stat-num" style="color:var(--teal)">High</div>
+        <div class="risk-stat-sub">Static lineage · No log dependency</div>
+        <span class="tag tag-teal">Architecture-derived</span>
+      </div>
+      <div class="agirs-badge">
+        <div class="agirs-score">2.25</div>
+        <div class="agirs-label">AGIRS Score</div>
+        <div class="agirs-formula">0.40×HIRI + 0.40×NHIRI<br>+ 0.20×GEI</div>
+      </div>
+    </div>
+
+    <!-- C. RISK COMPOSITION BAR -->
+    <div class="risk-bar-panel">
+      <div class="risk-bar-header">
+        <span class="risk-bar-title">Risk Composition · 320 Identities</span>
+        <span class="risk-bar-counts">CRITICAL 2 · HIGH 3 · MEDIUM 8 · LOW 307</span>
+      </div>
+      <div class="risk-bar-track">
+        <div class="risk-seg" style="width:0.6%;background:var(--red)"></div>
+        <div class="risk-seg" style="width:0.9%;background:var(--orange)"></div>
+        <div class="risk-seg" style="width:2.5%;background:var(--amber)"></div>
+        <div class="risk-seg" style="width:96%;background:var(--green)"></div>
+      </div>
+      <div class="risk-bar-legend">
+        <span class="legend-item"><span class="legend-dot" style="background:var(--red)"></span> Critical (2)</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--orange)"></span> High (3)</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--amber)"></span> Medium (8)</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--green)"></span> Low (307)</span>
+      </div>
+    </div>
+
+    <!-- D. FIVE METRIC CARDS -->
+    <div class="metric-cards">
+      <div class="metric-card mc-red">
+        <div class="mc-label">Human Identities</div>
+        <div class="mc-value">225</div>
+        <div class="mc-sub">2 dormant privileged<br>1 orphaned admin</div>
+        <span class="tag tag-red">2 critical</span>
+      </div>
+      <div class="metric-card mc-orange">
+        <div class="mc-label">Non-Human / SPNs</div>
+        <div class="mc-value">63</div>
+        <div class="mc-sub">3 unregistered SPNs<br>5 stale secrets</div>
+        <span class="tag tag-orange">3 at-risk</span>
+      </div>
+      <div class="metric-card mc-amber">
+        <div class="mc-label">System MSIs</div>
+        <div class="mc-value">18</div>
+        <div class="mc-sub">2 Ghost MSIs detected<br>4 over-permissioned</div>
+        <span class="tag tag-orange">2 ghost MSI</span>
+      </div>
+      <div class="metric-card mc-green">
+        <div class="mc-label">User-Assigned MSIs</div>
+        <div class="mc-value">9</div>
+        <div class="mc-sub">All UAMIs scoped correctly<br>0 cross-sub issues</div>
+        <span class="tag tag-green">Healthy</span>
+      </div>
+      <div class="metric-card mc-teal">
+        <div class="mc-label">Guest Users</div>
+        <div class="mc-value">5</div>
+        <div class="mc-sub">1 unreviewed external<br>supply chain risk</div>
+        <span class="tag tag-orange">1 review needed</span>
+      </div>
+    </div>
+
+    <!-- E. CONTENT GRID -->
+    <div class="content-grid">
+
+      <!-- LEFT: KEY RISK FINDINGS -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Key Risk Findings</span>
+          <span class="panel-action">View all 12 →</span>
+        </div>
+        <div class="finding-row">
+          <span class="finding-idx">01</span>
+          <div class="finding-info">
+            <div class="finding-name">github-cicd-nexgenixci</div>
+            <div class="finding-sub">SPN · App Registration · Sub: prod-east-01</div>
+          </div>
+          <div><span class="verdict v-orphaned">ORPHANED</span></div>
+          <div class="blast-col">
+            <div class="blast-track"><div class="blast-fill" style="width:90%;background:var(--red)"></div></div>
+            <div class="blast-lbl">Blast: Sub-wide</div>
+          </div>
+          <button class="action-btn">REVOKE</button>
+        </div>
+        <div class="finding-row">
+          <span class="finding-idx">02</span>
+          <div class="finding-info">
+            <div class="finding-name">azure-devops-agent-sp</div>
+            <div class="finding-sub">SPN · DevOps · Owner on 2 subs</div>
+          </div>
+          <div><span class="verdict v-at-risk">AT_RISK</span></div>
+          <div class="blast-col">
+            <div class="blast-track"><div class="blast-fill" style="width:75%;background:var(--orange)"></div></div>
+            <div class="blast-lbl">Blast: 2 subs</div>
+          </div>
+          <button class="action-btn">SCOPE</button>
+        </div>
+        <div class="finding-row">
+          <span class="finding-idx">03</span>
+          <div class="finding-info">
+            <div class="finding-name">user: jsmith@contoso.com</div>
+            <div class="finding-sub">Human · Dormant 94 days · Global Admin</div>
+          </div>
+          <div><span class="verdict v-stale">STALE</span></div>
+          <div class="blast-col">
+            <div class="blast-track"><div class="blast-fill" style="width:85%;background:var(--red)"></div></div>
+            <div class="blast-lbl">Blast: Tenant-wide</div>
+          </div>
+          <button class="action-btn">DISABLE</button>
+        </div>
+        <div class="finding-row">
+          <span class="finding-idx">04</span>
+          <div class="finding-info">
+            <div class="finding-name">vm-sys-msi/aks-prod-eastus</div>
+            <div class="finding-sub">System MSI · Ghost · AKS node pool</div>
+          </div>
+          <div><span class="verdict v-ghost">GHOST_MSI</span></div>
+          <div class="blast-col">
+            <div class="blast-track"><div class="blast-fill" style="width:45%;background:var(--amber)"></div></div>
+            <div class="blast-lbl">Blast: RG scope</div>
+          </div>
+          <button class="action-btn">REVIEW</button>
+        </div>
+        <div class="finding-row">
+          <span class="finding-idx">05</span>
+          <div class="finding-info">
+            <div class="finding-name">ext-guest: vendor@fabrikam.com</div>
+            <div class="finding-sub">Guest · Unreviewed 180+ days</div>
+          </div>
+          <div><span class="verdict v-review">NEEDS_REVIEW</span></div>
+          <div class="blast-col">
+            <div class="blast-track"><div class="blast-fill" style="width:30%;background:var(--amber)"></div></div>
+            <div class="blast-lbl">Blast: 3 RGs</div>
+          </div>
+          <button class="action-btn">REVIEW</button>
+        </div>
+        <div class="finding-row">
+          <span class="finding-idx">06</span>
+          <div class="finding-info">
+            <div class="finding-name">copilot-studio-bot-01</div>
+            <div class="finding-sub">AI Agent · SPN · Federated credential gap</div>
+          </div>
+          <div><span class="verdict v-federated">FEDERATED_MISCONFIG</span></div>
+          <div class="blast-col">
+            <div class="blast-track"><div class="blast-fill" style="width:60%;background:var(--orange)"></div></div>
+            <div class="blast-lbl">Blast: Sub scope</div>
+          </div>
+          <button class="action-btn">FIX</button>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN -->
+      <div class="right-col">
+
+        <!-- Identity Composition -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Identity Composition</span>
+            <span style="font-size:11px;font-family:var(--mono);color:var(--text-muted)">320 total</span>
+          </div>
+          <div class="donut-wrap">
+            <canvas id="donutChart"></canvas>
+            <div class="donut-center">
+              <div class="donut-num">320</div>
+              <div class="donut-lbl">identities</div>
+            </div>
+          </div>
+          <div class="ident-list">
+            <div class="ident-row">
+              <span class="ident-dot" style="background:#4f9de8"></span>
+              <span class="ident-name">Human</span>
+              <span class="ident-count">225</span>
+              <span class="ident-pct">70.3%</span>
+            </div>
+            <div class="ident-row">
+              <span class="ident-dot" style="background:#24A2A1"></span>
+              <span class="ident-name">NHI/SPNs</span>
+              <span class="ident-count">63</span>
+              <span class="ident-pct">19.7%</span>
+            </div>
+            <div class="ident-row">
+              <span class="ident-dot" style="background:#FF7216"></span>
+              <span class="ident-name">System MSIs</span>
+              <span class="ident-count">18</span>
+              <span class="ident-pct">5.6%</span>
+            </div>
+            <div class="ident-row">
+              <span class="ident-dot" style="background:#f59e0b"></span>
+              <span class="ident-name">UAMIs</span>
+              <span class="ident-count">9</span>
+              <span class="ident-pct">2.8%</span>
+            </div>
+            <div class="ident-row">
+              <span class="ident-dot" style="background:#a78bfa"></span>
+              <span class="ident-name">Guest Users</span>
+              <span class="ident-count">5</span>
+              <span class="ident-pct">1.6%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Worst-Case Blast Radius -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Worst-Case Blast Radius</span>
+            <span class="panel-badge">IMPACT: MEDIUM</span>
+          </div>
+          <div class="blast-item">
+            <div class="blast-icon">⛓</div>
+            <div class="blast-body">
+              <div class="blast-title">github-cicd-nexgenixci compromised</div>
+              <div class="blast-desc">Attacker controls 1 of 1 Azure subscription</div>
+            </div>
+            <span class="severity-badge sb-high">HIGH</span>
+          </div>
+          <div class="blast-item">
+            <div class="blast-icon">⚡</div>
+            <div class="blast-body">
+              <div class="blast-title">jsmith dormant admin exploited</div>
+              <div class="blast-desc">Tenant-wide lateral movement possible</div>
+            </div>
+            <span class="severity-badge sb-high">CRIT</span>
+          </div>
+          <div class="blast-item">
+            <div class="blast-icon">◌</div>
+            <div class="blast-body">
+              <div class="blast-title">3 external guests supply chain risk</div>
+              <div class="blast-desc">Access to 5 resource groups unreviewed</div>
+            </div>
+            <span class="severity-badge sb-med">MED</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- F. REMEDIATION QUEUE -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Recommended Remediation · Priority Queue</span>
+        <span class="panel-action">View full plan →</span>
+      </div>
+      <div class="remed-item">
+        <div class="remed-num">1</div>
+        <div class="remed-body">
+          <div class="remed-action"><strong>REVOKE</strong> admin roles from 2 dormant accounts (0.6%)</div>
+          <div class="remed-detail">jsmith@contoso.com · svc-legacy-backup · Global Admin · Contributor on prod sub</div>
+        </div>
+        <div class="remed-effort">15 min</div>
+      </div>
+      <div class="remed-item">
+        <div class="remed-num">2</div>
+        <div class="remed-body">
+          <div class="remed-action"><strong>REMOVE</strong> subscription-level Owner from DevOps SPN</div>
+          <div class="remed-detail">azure-devops-agent-sp · Scope down to RG level · 2 subscriptions affected</div>
+        </div>
+        <div class="remed-effort">30 min</div>
+      </div>
+      <div class="remed-item">
+        <div class="remed-num">3</div>
+        <div class="remed-body">
+          <div class="remed-action"><strong>ASSIGN</strong> owner to 3 unparented service principals (0.3%)</div>
+          <div class="remed-detail">github-cicd-nexgenixci · copilot-bot-01 · analytics-etl-sp · No registered owner</div>
+        </div>
+        <div class="remed-effort">20 min</div>
+      </div>
+      <div class="remed-item">
+        <div class="remed-num">4</div>
+        <div class="remed-body">
+          <div class="remed-action"><strong>REVOKE</strong> unused roles from 2 over-privileged identities (0.6%)</div>
+          <div class="remed-detail">vm-sys-msi/aks-prod · Guest vendor@fabrikam.com · Roles exceed actual usage scope</div>
+        </div>
+        <div class="remed-effort">45 min</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  function tick() {
+    document.getElementById('live-time').textContent = new Date().toUTCString().split(' ')[4] + ' UTC';
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  var ctx = document.getElementById('donutChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Human', 'NHI/SPNs', 'System MSIs', 'UAMIs', 'Guests'],
+      datasets: [{
+        data: [225, 63, 18, 9, 5],
+        backgroundColor: ['#4f9de8', '#24A2A1', '#FF7216', '#f59e0b', '#a78bfa'],
+        borderColor: '#111f35',
+        borderWidth: 2,
+        hoverOffset: 4
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '68%',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: function(c) {
+              return ' ' + c.label + ': ' + c.raw + ' (' + (c.raw / 320 * 100).toFixed(1) + '%)';
+            }
+          }
+        }
+      }
+    }
+  });
+});
+</script>
+</body>
+</html>

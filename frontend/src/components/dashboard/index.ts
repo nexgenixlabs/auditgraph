@@ -1,7 +1,6 @@
 export { default as RiskHeatMap } from './RiskHeatMap';
 export { default as QuickActions } from './QuickActions';
 export { default as RiskDonutChart } from './RiskDonutChart';
-export { default as PostureScore } from './PostureScore';
 export { default as CredentialHealth } from './CredentialHealth';
 export { default as ComplianceScorecard } from './ComplianceScorecard';
 export { default as ConditionalAccessCard } from './ConditionalAccessCard';
@@ -16,3 +15,4 @@ export { default as SOARActivity } from './SOARActivity';
 export { default as ServiceAccountGovernance } from './ServiceAccountGovernance';
 export { default as PlatformHealth } from './PlatformHealth';
 export { default as CustomizePanel } from './CustomizePanel';
+export { default as IdentityCorrelationWidget } from './IdentityCorrelationWidget';

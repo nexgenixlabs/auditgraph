@@ -241,7 +241,7 @@ psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "select count(*)
 psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "select count(*) from role_assignments;"
 psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "select count(*) from entra_role_assignments;"
 11) Contact / Owner notes
-Owner: Bhupathi
+Owner: (configured per tenant)
 Project: AuditGraph (MVP Demo)
 
 If you’re an agent working on a feature, keep changes minimal, isolated, and aligned to this file.

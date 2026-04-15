@@ -12,14 +12,14 @@ interface ActivityEntry {
   user_id: number | null;
   user_username: string | null;
   user_display_name: string | null;
-  tenant_id: number | null;
+  organization_id: number | null;
 }
 
 // ── Action type display config ─────────────────────────────────
 
 const ACTION_CONFIG: Record<string, { label: string; shortLabel: string; color: string; bg: string; icon: string }> = {
-  discovery_triggered: { label: 'Discovery Triggered', shortLabel: 'Triggered', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
-  discovery_completed: { label: 'Discovery Completed', shortLabel: 'Completed', color: 'text-green-700', bg: 'bg-green-50', icon: 'V' },
+  discovery_triggered: { label: 'Snapshot Triggered', shortLabel: 'Triggered', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
+  discovery_completed: { label: 'Snapshot Completed', shortLabel: 'Completed', color: 'text-green-700', bg: 'bg-green-50', icon: 'V' },
   settings_updated: { label: 'Settings Updated', shortLabel: 'Settings', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
   report_generated: { label: 'Report Generated', shortLabel: 'Report', color: 'text-orange-700', bg: 'bg-orange-50', icon: 'D' },
   drift_reviewed: { label: 'Drift Reviewed', shortLabel: 'Drift', color: 'text-yellow-700', bg: 'bg-yellow-50', icon: '~' },
@@ -35,6 +35,16 @@ const ACTION_CONFIG: Record<string, { label: string; shortLabel: string; color: 
   soar_playbook_deleted: { label: 'SOAR Playbook Deleted', shortLabel: 'SOAR Del', color: 'text-gray-700', bg: 'bg-gray-50', icon: '-' },
   soar_playbook_tested: { label: 'SOAR Playbook Tested', shortLabel: 'SOAR Test', color: 'text-amber-700', bg: 'bg-amber-50', icon: 'T' },
   soar_action_manual: { label: 'SOAR Manual Trigger', shortLabel: 'SOAR Man', color: 'text-cyan-700', bg: 'bg-cyan-50', icon: '!' },
+  auth_login: { label: 'Login', shortLabel: 'Login', color: 'text-blue-700', bg: 'bg-blue-50', icon: '>' },
+  auth_logout: { label: 'Logout', shortLabel: 'Logout', color: 'text-gray-700', bg: 'bg-gray-50', icon: '<' },
+  connection_deleted: { label: 'Connection Deleted', shortLabel: 'Conn Del', color: 'text-red-700', bg: 'bg-red-50', icon: '-' },
+  correlation_config: { label: 'Correlation Config', shortLabel: 'Correlation', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
+  export: { label: 'Data Exported', shortLabel: 'Export', color: 'text-blue-700', bg: 'bg-blue-50', icon: 'E' },
+  governance_decision: { label: 'Governance Decision', shortLabel: 'Governance', color: 'text-indigo-700', bg: 'bg-indigo-50', icon: 'G' },
+  settings: { label: 'Settings Changed', shortLabel: 'Settings', color: 'text-purple-700', bg: 'bg-purple-50', icon: '*' },
+  user_created: { label: 'User Created', shortLabel: 'User New', color: 'text-green-700', bg: 'bg-green-50', icon: '+' },
+  user_deleted: { label: 'User Deleted', shortLabel: 'User Del', color: 'text-red-700', bg: 'bg-red-50', icon: '-' },
+  user_updated: { label: 'User Updated', shortLabel: 'User Edit', color: 'text-orange-700', bg: 'bg-orange-50', icon: '*' },
 };
 
 function getActionConfig(type: string) {
@@ -55,25 +65,54 @@ function timeAgo(dateStr: string): string {
 
 // ── Component ──────────────────────────────────────────────────
 
+// ── Filter categories (2-tier) ──────────────────────────────────
+
+const FILTER_CATEGORIES: Record<string, { label: string; types: string[] }> = {
+  security: {
+    label: 'Security',
+    types: ['auth_login', 'auth_logout', 'remediation_updated'],
+  },
+  operations: {
+    label: 'Operations',
+    types: ['discovery_triggered', 'discovery_completed', 'drift_reviewed', 'report_generated', 'report_emailed', 'report_email_failed', 'export'],
+  },
+  integrations: {
+    label: 'Integrations',
+    types: ['soar_action_executed', 'soar_action_failed', 'soar_playbook_created', 'soar_playbook_updated', 'soar_playbook_deleted', 'soar_playbook_tested', 'soar_action_manual', 'test_email_sent', 'test_email_failed', 'connection_deleted'],
+  },
+  system: {
+    label: 'System',
+    types: ['settings_updated', 'settings', 'user_created', 'user_deleted', 'user_updated', 'correlation_config', 'governance_decision'],
+  },
+};
+
 export default function ActivityLog() {
   const { addToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [filter, setFilter] = useState<string>('');
+  const [activeCategory, setActiveCategory] = useState<string>('');
 
   useEffect(() => {
     async function load() {
       setLoading(true);
       setError(null);
       try {
+        // If a specific sub-type is selected, use API filter
         const url = filter
           ? `/api/activity?limit=100&type=${encodeURIComponent(filter)}`
           : '/api/activity?limit=100';
         const res = await fetch(url);
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const data = await res.json();
-        setEntries(data.entries || []);
+        let result: ActivityEntry[] = data.entries || [];
+        // If category is active but no specific sub-type, filter client-side
+        if (!filter && activeCategory && FILTER_CATEGORIES[activeCategory]) {
+          const catTypes = FILTER_CATEGORIES[activeCategory].types;
+          result = result.filter(e => catTypes.includes(e.action_type));
+        }
+        setEntries(result);
       } catch (e: any) {
         setError(e?.message || 'Failed to load activity log');
       } finally {
@@ -81,13 +120,13 @@ export default function ActivityLog() {
       }
     }
     load();
-  }, [filter]);
+  }, [filter, activeCategory]);
 
   // ── Loading ────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-48" />
           <div className="h-12 bg-gray-100 rounded-xl" />
           <div className="h-96 bg-gray-100 rounded-xl" />
@@ -107,8 +146,6 @@ export default function ActivityLog() {
       </div>
     );
   }
-
-  const actionTypes = Object.keys(ACTION_CONFIG);
 
   function exportCsv() {
     const header = ['ID', 'Action Type', 'User', 'Description', 'Metadata', 'Timestamp'];
@@ -132,7 +169,7 @@ export default function ActivityLog() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Activity Log</h2>
@@ -142,45 +179,82 @@ export default function ActivityLog() {
       </div>
 
       {/* Summary + Filter bar */}
-      <div className="flex items-center justify-between bg-white border rounded-xl px-6 py-4">
-        <div>
-          <div className="text-2xl font-bold text-gray-900">{entries.length}</div>
-          <div className="text-xs text-gray-500">
-            {filter ? `Filtered entries` : 'Recent entries'}
+      <div className="bg-white border rounded-xl px-6 py-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-2xl font-bold text-gray-900">{entries.length}</div>
+            <div className="text-xs text-gray-500">
+              {filter ? `Filtered entries` : 'Recent entries'}
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
           <button
             onClick={exportCsv}
             disabled={entries.length === 0}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition disabled:opacity-40 disabled:cursor-not-allowed mr-2"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Export CSV
           </button>
+        </div>
+
+        {/* Row 1: Category buttons */}
+        <div className="flex items-center gap-2">
           <span className="text-xs text-gray-500 mr-1">Filter:</span>
           <button
-            onClick={() => setFilter('')}
+            onClick={() => { setFilter(''); setActiveCategory(''); }}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-              !filter ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              !filter && !activeCategory ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
             All
           </button>
-          {actionTypes.map(type => {
-            const cfg = getActionConfig(type);
-            return (
-              <button
-                key={type}
-                onClick={() => setFilter(type)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                  filter === type ? 'bg-blue-600 text-white' : `${cfg.bg} ${cfg.color} hover:opacity-80`
-                }`}
-              >
-                {cfg.shortLabel}
-              </button>
-            );
-          })}
+          {Object.entries(FILTER_CATEGORIES).map(([key, cat]) => (
+            <button
+              key={key}
+              onClick={() => {
+                if (activeCategory === key) {
+                  setActiveCategory('');
+                  setFilter('');
+                } else {
+                  setActiveCategory(key);
+                  setFilter('');
+                }
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                activeCategory === key ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
         </div>
+
+        {/* Row 2: Sub-type buttons (shown when a category is selected) */}
+        {activeCategory && FILTER_CATEGORIES[activeCategory] && (
+          <div className="flex items-center gap-1.5 flex-wrap pl-[52px]">
+            <button
+              onClick={() => setFilter('')}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
+                !filter ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+              }`}
+            >
+              All {FILTER_CATEGORIES[activeCategory].label}
+            </button>
+            {FILTER_CATEGORIES[activeCategory].types.map(type => {
+              const cfg = getActionConfig(type);
+              return (
+                <button
+                  key={type}
+                  onClick={() => setFilter(type)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
+                    filter === type ? 'bg-blue-100 text-blue-700' : `${cfg.bg} ${cfg.color} hover:opacity-80`
+                  }`}
+                >
+                  {cfg.shortLabel}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Empty state */}
@@ -191,19 +265,19 @@ export default function ActivityLog() {
           </svg>
           <div className="text-gray-500 font-medium">No activity recorded yet</div>
           <div className="text-sm text-gray-400 mt-1">
-            Actions like discovery runs, settings changes, and report generation will appear here
+            Actions like snapshots, settings changes, and report generation will appear here
           </div>
         </div>
       ) : (
         /* Activity table */
         <div className="bg-white border rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+          <table className="w-full text-xs">
             <thead>
               <tr className="bg-gray-50 border-b text-left">
-                <th className="px-4 py-3 font-medium text-gray-600 w-48">Action</th>
-                <th className="px-4 py-3 font-medium text-gray-600 w-36">User</th>
-                <th className="px-4 py-3 font-medium text-gray-600">Description</th>
-                <th className="px-4 py-3 font-medium text-gray-600 w-44 text-right">Time</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-48">Action</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-36">User</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600">Description</th>
+                <th className="px-3 py-2.5 font-medium uppercase text-gray-600 w-44 text-right">Time</th>
               </tr>
             </thead>
             <tbody>
@@ -211,13 +285,13 @@ export default function ActivityLog() {
                 const cfg = getActionConfig(entry.action_type);
                 return (
                   <tr key={entry.id} className="border-b hover:bg-gray-50 transition">
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-2">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.bg} ${cfg.color}`}>
                         <span className="font-mono">{cfg.icon}</span>
                         {cfg.label}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-2">
                       {entry.user_display_name ? (
                         <div>
                           <div className="text-xs font-medium text-gray-700">{entry.user_display_name}</div>
@@ -227,7 +301,7 @@ export default function ActivityLog() {
                         <span className="text-xs text-gray-400 italic">System</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-gray-700">
+                    <td className="px-3 py-2 text-gray-700">
                       {entry.description}
                       {entry.metadata && Object.keys(entry.metadata).length > 0 && (
                         <span className="ml-2 text-[10px] text-gray-400 font-mono">
@@ -239,7 +313,7 @@ export default function ActivityLog() {
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-3 py-2 text-right">
                       <div className="text-xs text-gray-500">{timeAgo(entry.created_at)}</div>
                       <div className="text-[10px] text-gray-400">
                         {new Date(entry.created_at).toLocaleString()}

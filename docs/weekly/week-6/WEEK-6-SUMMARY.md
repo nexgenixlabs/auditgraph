@@ -2,7 +2,7 @@
 
 **Week:** 6  
 **Dates:** January 25-27, 2026  
-**Owner:** Bhupathi Reddy Sangabattula  
+**Owner:** Admin User  
 **Status:** ✅ COMPLETE
 
 ---
@@ -51,7 +51,7 @@ role_hipaa_mappings       -- Compliance violations
 **Role Coverage:**
 - **34 total roles** with intelligence
 - **2 Azure RBAC roles:** Owner, User Access Administrator
-- **30 Entra ID roles:** All of Bhupathi's directory roles
+- **30 Entra ID roles:** All of the admin's directory roles
 - **2 extra Azure RBAC roles:** Contributor, Reader (for future use)
 
 **Risk Classification:**
@@ -329,7 +329,7 @@ role_hipaa_mappings (8 columns)     -- NEW: Compliance
 
 ### **Before Week 6 (Like Competitors):**
 ```
-User: Bhupathi Reddy Sangabattula
+User: Admin User
 Roles:
 ├─ Owner
 ├─ Global Administrator
@@ -338,7 +338,7 @@ Roles:
 
 ### **After Week 6 (AuditGraph Differentiation):**
 ```
-User: Bhupathi Reddy Sangabattula
+User: Admin User
 Roles:
 ├─ Owner (🔴 CRITICAL)
 │  ├─ Can delete all resources, access all data
@@ -472,7 +472,7 @@ identity_roles (for future use)
 
 ## 🎓 LESSONS LEARNED
 
-### **1. Bhupathi's Working Style is Optimal**
+### **1. the admin's Working Style is Optimal**
 **Observation:** Step-by-step validation catches issues immediately  
 **Learning:** Test after every change, don't batch changes  
 **Application:** Continue this methodology for all future weeks
@@ -527,7 +527,7 @@ identity_roles (for future use)
 - ✅ API tested
 
 **Status:** COMPLETE ✅  
-**Validator:** Bhupathi Reddy Sangabattula  
+**Validator:** Admin User  
 **Date:** January 27, 2026
 
 ---
@@ -549,4 +549,4 @@ identity_roles (for future use)
 
 ---
 
-*This summary follows "Bhupathi's style of work": comprehensive, validated, and ready for reference.*
+*This summary follows "the admin's style of work": comprehensive, validated, and ready for reference.*

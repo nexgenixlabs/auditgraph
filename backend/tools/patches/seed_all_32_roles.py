@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Seed ALL role intelligence for Bhupathi's 32 roles
+Seed ALL role intelligence for discovered roles
 Includes risk levels, descriptions, attack patterns, and HIPAA violations
 """
 import sys
 import os
-sys.path.insert(0, '/Users/sangabattula/projects/auditgraph/backend')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from app.database import Database
 

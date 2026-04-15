@@ -1,13 +1,13 @@
 # AuditGraph - Weeks 1-6 Validation Report
 **Date:** January 27, 2026  
-**Validator:** Bhupathi Reddy Sangabattula  
+**Validator:** Admin User  
 **Status:** ✅ COMPLETE
 
 ---
 
 ## 📋 VALIDATION METHODOLOGY
 
-Following "Bhupathi's style of work":
+Following "the admin's style of work":
 - ✅ Step-by-step testing
 - ✅ Verify output after each change
 - ✅ No assumptions - confirm everything works
@@ -99,7 +99,7 @@ curl -s http://localhost:5001/api/identities | jq '.identities[0] | {display_nam
 **Output:**
 ```json
 {
-  "display_name": "Bhupathi Reddy Sangabattula",
+  "display_name": "Admin User",
   "credential_status": "Valid"
 }
 ```
@@ -154,7 +154,7 @@ curl -s http://localhost:5001/api/identities | jq '.identities[0:2] | .[] | {dis
 **Output:**
 ```json
 {
-  "display_name": "Bhupathi Reddy Sangabattula",
+  "display_name": "Admin User",
   "role_count": 32,
   "risk_level": "critical"
 }
@@ -167,7 +167,7 @@ curl -s http://localhost:5001/api/identities | jq '.identities[0:2] | .[] | {dis
 
 **✅ VALIDATED:** 
 - Identity list showing correct role counts
-- Bhupathi has 32 roles (2 Azure RBAC + 30 Entra)
+- Admin User has 32 roles (2 Azure RBAC + 30 Entra)
 
 ---
 
@@ -202,7 +202,7 @@ SQL
 ```
 
 **✅ VALIDATED:** 
-- 34 roles with intelligence (all of Bhupathi's 32 + extras)
+- 34 roles with intelligence (all of the admin's 32 + extras)
 - 9 real-world breach examples
 - 8 HIPAA violation mappings
 
@@ -225,7 +225,7 @@ curl -s http://localhost:5001/api/identities/ad4c84e4-05f9-482a-bb70-5ce5db53aa7
 **Output:**
 ```json
 {
-  "identity": "Bhupathi Reddy Sangabattula",
+  "identity": "Admin User",
   "total_roles": 32,
   "sample_roles": {
     "role_name": "Owner",
@@ -236,7 +236,7 @@ curl -s http://localhost:5001/api/identities/ad4c84e4-05f9-482a-bb70-5ce5db53aa7
   }
 }
 {
-  "identity": "Bhupathi Reddy Sangabattula",
+  "identity": "Admin User",
   "total_roles": 32,
   "sample_roles": {
     "role_name": "User Access Administrator",
@@ -247,7 +247,7 @@ curl -s http://localhost:5001/api/identities/ad4c84e4-05f9-482a-bb70-5ce5db53aa7
   }
 }
 {
-  "identity": "Bhupathi Reddy Sangabattula",
+  "identity": "Admin User",
   "total_roles": 32,
   "sample_roles": {
     "role_name": "Global Administrator",
@@ -267,17 +267,17 @@ curl -s http://localhost:5001/api/identities/ad4c84e4-05f9-482a-bb70-5ce5db53aa7
 
 ---
 
-### **TEST 9: Bhupathi's Complete Role List**
+### **TEST 9: the admin's Complete Role List**
 **Command:**
 ```bash
 psql "..." << 'SQL'
 SELECT DISTINCT role_name, 'entra' as type
 FROM entra_role_assignments
-WHERE identity_db_id IN (SELECT id FROM identities WHERE display_name LIKE '%Bhupathi%')
+WHERE identity_db_id IN (SELECT id FROM identities WHERE display_name LIKE '%Admin%')
 UNION
 SELECT DISTINCT role_name, 'azure' as type
 FROM role_assignments
-WHERE identity_db_id IN (SELECT id FROM identities WHERE display_name LIKE '%Bhupathi%')
+WHERE identity_db_id IN (SELECT id FROM identities WHERE display_name LIKE '%Admin%')
 ORDER BY type, role_name;
 SQL
 ```
@@ -475,7 +475,7 @@ Risk Level Breakdown:
    - Impact: None (MVP requirement is single subscription)
 
 3. **AWS/GCP:** Not yet implemented
-   - Status: Weeks 9-12 feature (BACKLOG per Bhupathi's decision)
+   - Status: Weeks 9-12 feature (BACKLOG per the admin's decision)
    - Impact: None (Azure-first strategy)
 
 ### **Performance:**
@@ -489,7 +489,7 @@ Risk Level Breakdown:
 
 **ALL WEEK 1-6 DELIVERABLES VALIDATED WITH EVIDENCE**
 
-**Validator:** Bhupathi Reddy Sangabattula  
+**Validator:** Admin User  
 **Date:** January 27, 2026  
 **Status:** COMPLETE ✅
 
@@ -502,4 +502,4 @@ Risk Level Breakdown:
 
 ---
 
-*This validation follows "Bhupathi's style of work": step-by-step, verify everything, no assumptions.*
+*This validation follows "the admin's style of work": step-by-step, verify everything, no assumptions.*

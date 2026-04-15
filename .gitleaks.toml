@@ -1,0 +1,30 @@
+# Gitleaks configuration for AuditGraph
+# https://github.com/gitleaks/gitleaks
+
+title = "AuditGraph Gitleaks Config"
+
+[allowlist]
+  description = "Global allowlist"
+
+  # Example / placeholder values that are not real secrets
+  regexTarget = "match"
+  regexes = [
+    '''your-tenant-id''',
+    '''your-client-id''',
+    '''your-client-secret''',
+    '''your-subscription-id''',
+    '''changeme''',
+    '''password123''',
+    '''auditgraph_test''',
+    '''sk-ant-api03-xxxx''',
+    '''EXAMPLE_AWS_ACCESS_KEY''',
+    '''your AWS access key''',
+  ]
+
+  paths = [
+    '''.env\.example$''',
+    '''\.md$''',
+    '''docs/''',
+    '''package-lock\.json$''',
+    '''\.sarif$''',
+  ]

@@ -1,17 +1,28 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine,
-} from 'recharts';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useCopilot } from '../contexts/CopilotContext';
 import { AccessGraphTab } from '../components/graph';
 import {
   type IdentityCategory, type RiskLevel,
-  RISK_BADGE, DATA_EXPLANATIONS, DORMANT_LABELS,
-  safeLower, normalizeCategoryFromBackend, getCategoryLabel, getDormantStatus as getDormantStatusFromActivity,
+  RISK_BADGE, DATA_EXPLANATIONS,
+  safeLower, normalizeCategoryFromBackend, getCategoryLabel,
+  TIME_MS,
 } from '../constants/metrics';
+import OverviewTab from '../components/identity-detail/OverviewTab';
+import { RolesTab } from '../components/identity-detail/RolesTab';
+import { PermissionsTab } from '../components/identity-detail/PermissionsTab';
+import { CredentialsTab } from '../components/identity-detail/CredentialsTab';
+import { OwnershipTab } from '../components/identity-detail/OwnershipTab';
+import { EffectiveAccessTab } from '../components/identity-detail/EffectiveAccessTab';
+import { AnomaliesTab } from '../components/identity-detail/AnomaliesTab';
+import { PimTab } from '../components/identity-detail/PimTab';
+import { IdentityComplianceTab } from '../components/identity-detail/ComplianceTab';
+import { RemediationTab } from '../components/identity-detail/RemediationTab';
+import { LifecycleTab } from '../components/identity-detail/LifecycleTab';
+import { SimulateTab } from '../components/identity-detail/SimulateTab';
+import { EntraGroupsTab } from '../components/identity-detail/EntraGroupsTab';
 
 interface Owner {
   owner_object_id: string;
@@ -79,6 +90,11 @@ interface IdentityDetailsResponse {
 
     enabled?: boolean;
     is_microsoft_system?: boolean;
+    is_discovery_connector?: boolean;
+
+    // Effective last used (MAX of observed + Azure sign-in)
+    effective_last_used?: string | null;
+    effective_last_used_source?: 'auditgraph' | 'azure_signin' | 'inferred_federated' | null;
 
     object_id?: string | null;
     app_id?: string | null;
@@ -94,8 +110,11 @@ interface IdentityDetailsResponse {
     api_permission_count?: number;
     app_role_count?: number;
     status?: string;
+    status_display?: { label: string; badge_class: string };
+    deleted_at?: string | null;
     ca_coverage_status?: string | null;
     ca_mfa_enforced?: boolean;
+    group_count?: number;
   };
   roles: any[];
   graph_permissions: any[];
@@ -106,7 +125,36 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups' | 'attack_paths';
+
+interface EffectiveAccessEntry {
+  role_name: string;
+  role_source: 'azure_rbac' | 'entra_directory';
+  access_level: 'Admin' | 'Write' | 'Read';
+  category: string;
+  scope: string;
+  scope_display: string;
+  scope_type: string;
+  resource_type: string | null;
+  risk_level: string;
+  assigned_on: string | null;
+  permissions: string[];
+  why_critical: string | null;
+}
+
+interface EffectiveAccessData {
+  identity_id: string;
+  display_name: string;
+  effective_access: EffectiveAccessEntry[];
+  summary: {
+    admin_scopes: number;
+    write_scopes: number;
+    read_scopes: number;
+    total_roles: number;
+    total_permissions: number;
+    categories: string[];
+  };
+}
 
 interface RemediationItem {
   id: number;
@@ -196,59 +244,10 @@ function formatDate(iso?: string | null) {
   }
 }
 
-function daysUntil(iso?: string | null): number | null {
-  if (!iso) return null;
-  try {
-    const diff = new Date(iso).getTime() - Date.now();
-    return Math.ceil(diff / 86400000);
-  } catch { return null; }
-}
-
-function credentialCountdown(iso?: string | null): React.ReactNode {
-  const days = daysUntil(iso);
-  if (days == null) return null;
-  if (days < 0) return <span className="text-xs font-semibold text-red-600">Expired {Math.abs(days)}d ago</span>;
-  if (days === 0) return <span className="text-xs font-semibold text-red-600">Expires today</span>;
-  if (days <= 7) return <span className="text-xs font-semibold text-red-600">{days}d remaining</span>;
-  if (days <= 30) return <span className="text-xs font-semibold text-orange-600">{days}d remaining</span>;
-  if (days <= 90) return <span className="text-xs font-semibold text-yellow-600">{days}d remaining</span>;
-  return <span className="text-xs text-green-600">{days}d remaining</span>;
-}
-
-function formatUsd(n?: number): string {
-  if (n == null || n === 0) return '—';
-  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
-  return `$${n.toLocaleString()}`;
-}
-
-function violationRiskColor(risk?: string): string {
-  return RISK_BADGE[safeLower(risk)] || 'bg-gray-100 text-gray-600';
-}
-
 function riskBadge(level?: string) {
   const v = safeLower(level);
   const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
   return <span className={`${base} ${RISK_BADGE[v] || 'bg-gray-100 text-gray-700'}`}>{(v || 'unknown').toUpperCase()}</span>;
-}
-
-function usageStatusBadge(status?: string, redundantWith?: string) {
-  const v = safeLower(status);
-  const base = 'px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center';
-
-  if (v === 'orphaned') return <span className={`${base} bg-red-100 text-red-700`}>Orphaned</span>;
-  if (v === 'definitely_unused') return <span className={`${base} bg-red-100 text-red-700`}>Unused</span>;
-  if (v === 'likely_unused') return <span className={`${base} bg-orange-100 text-orange-700`}>Likely Unused</span>;
-  if (v === 'possibly_overprivileged') {
-    return (
-      <span className={`${base} bg-yellow-100 text-yellow-700`} title={redundantWith ? `Redundant with: ${redundantWith}` : ''}>
-        Over-Privileged
-      </span>
-    );
-  }
-  if (v === 'assumed_active') return <span className={`${base} bg-green-100 text-green-700`}>Active</span>;
-  return <span className={`${base} bg-gray-100 text-gray-500`}>Unknown</span>;
 }
 
 function categoryLabel(catRaw?: any, typeRaw?: any) {
@@ -256,23 +255,6 @@ function categoryLabel(catRaw?: any, typeRaw?: any) {
   if (cat !== 'unknown') return getCategoryLabel(cat);
   // Fallback to type-based lookup
   return getCategoryLabel(safeLower(typeRaw)) || 'Unknown';
-}
-
-// ─── Evidence / Data Source component (Pillar 5) ──────────────────
-
-function DataSource({ label, apiSource, collectedAt }: { label: string; apiSource?: string; collectedAt?: string | null }) {
-  return (
-    <div className="flex items-center gap-2 text-[10px] text-gray-400 mt-1">
-      <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-      <span>
-        Source: <span className="text-gray-500 font-medium">{label}</span>
-        {apiSource && <span className="ml-1 font-mono">{apiSource}</span>}
-        {collectedAt && <span className="ml-1">· Collected {new Date(collectedAt).toLocaleDateString()}</span>}
-      </span>
-    </div>
-  );
 }
 
 // ─── Privilege tier / Effective access helpers ─────────────────────
@@ -372,13 +354,17 @@ function TabBar({ activeTab, onTabChange, counts }: {
     { id: 'permissions', label: 'Permissions', icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z' },
     { id: 'credentials', label: 'Credentials', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
     { id: 'ownership', label: 'Ownership', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
+    { id: 'entra_groups' as TabId, label: 'Groups', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
+    { id: 'effective_access' as TabId, label: 'Effective Access', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
     { id: 'access_graph' as TabId, label: 'Access Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
     { id: 'anomalies' as TabId, label: 'Anomalies', icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z' },
     { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
     { id: 'lifecycle' as TabId, label: 'Lifecycle', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
+    { id: 'sensitive_access' as TabId, label: 'Sensitive Access', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
     { id: 'simulate' as TabId, label: 'What If', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+    { id: 'attack_paths' as TabId, label: 'Attack Paths', icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z' },
     { id: 'timeline' as TabId, label: 'Timeline', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
@@ -423,6 +409,7 @@ export default function IdentityDetail() {
   const { id } = useParams<{ id: string }>();
   const { addToast } = useToast();
   const { withConnection } = useConnection();
+  const { openCopilot } = useCopilot();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -440,7 +427,15 @@ export default function IdentityDetail() {
   const [identityGroups, setIdentityGroups] = useState<{id: number; name: string; color: string; group_type: string}[]>([]);
   const [anomalyData, setAnomalyData] = useState<{anomalies: any[]; count: number} | null>(null);
   const [anomalyLoading, setAnomalyLoading] = useState(false);
+  const [effectiveAccessData, setEffectiveAccessData] = useState<EffectiveAccessData | null>(null);
+  const [effectiveAccessLoading, setEffectiveAccessLoading] = useState(false);
+  const [sensitiveAccessData, setSensitiveAccessData] = useState<any>(null);
   const [riskHistory, setRiskHistory] = useState<{run_id: number; date: string; risk_score: number; risk_level: string}[]>([]);
+  const [correlatedAccounts, setCorrelatedAccounts] = useState<{
+    human_identity: { id: number; display_name: string } | null;
+    accounts: { id: number; identity_id?: string; object_id: string; display_name: string; upn: string; account_type: string; enabled: boolean; deleted: boolean; is_zombie: boolean; risk_score: number; risk_level: string; privilege_tier: string; link_method: string; link_confidence: number; verified: boolean }[];
+    zombie_persona: boolean;
+  } | null>(null);
 
   // Simulation state (What If tab)
   const [simRemovedRoles, setSimRemovedRoles] = useState<Set<string>>(new Set());
@@ -524,6 +519,17 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [id]);
 
+  // Fetch correlated accounts (non-blocking)
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    fetch(withConnection(`/api/correlation/accounts?identity_id=${encodeURIComponent(id)}`))
+      .then(res => res.ok ? res.json() : null)
+      .then(json => { if (!cancelled && json) setCorrelatedAccounts(json); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [id]);
+
   // Lazy-load PIM data when tab is selected
   useEffect(() => {
     if (activeTab !== 'pim' || pimData || pimLoading || !id) return;
@@ -587,6 +593,28 @@ export default function IdentityDetail() {
       .finally(() => { if (!cancelled) setAnomalyLoading(false); });
     return () => { cancelled = true; };
   }, [activeTab, id, anomalyData, anomalyLoading]);
+
+  // Lazy-load Effective Access data when tab is selected
+  useEffect(() => {
+    if (activeTab !== 'effective_access' || effectiveAccessData || effectiveAccessLoading || !id) return;
+    let cancelled = false;
+    setEffectiveAccessLoading(true);
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/effective-access`))
+      .then(res => res.ok ? res.json() : Promise.reject('Effective access fetch failed'))
+      .then(json => { if (!cancelled) setEffectiveAccessData(json); })
+      .catch(() => { if (!cancelled) setEffectiveAccessData({ identity_id: id, display_name: '', effective_access: [], summary: { admin_scopes: 0, write_scopes: 0, read_scopes: 0, total_roles: 0, total_permissions: 0, categories: [] } }); })
+      .finally(() => { if (!cancelled) setEffectiveAccessLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, effectiveAccessData]); // effectiveAccessLoading intentionally excluded — including it causes a dep-change re-run that cancels the in-flight fetch before .finally() can clear loading
+
+  // Fetch sensitive access data for effective_access and sensitive_access tabs
+  useEffect(() => {
+    if ((activeTab !== 'effective_access' && activeTab !== 'sensitive_access') || sensitiveAccessData || !id) return;
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/sensitive-access`))
+      .then(res => res.ok ? res.json() : null)
+      .then(json => { if (json) setSensitiveAccessData(json); })
+      .catch(() => {});
+  }, [activeTab, id, sensitiveAccessData, withConnection]);
 
   // Load identity groups
   useEffect(() => {
@@ -697,13 +725,17 @@ export default function IdentityDetail() {
     permissions: (data?.graph_permissions || []).length + (data?.app_roles || []).length,
     credentials: identity?.credential_count ?? 0,
     ownership: (data?.owners || []).length,
+    effective_access: effectiveAccessData?.summary?.total_roles ?? (data?.roles || []).length,
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
     anomalies: anomalyData?.count ?? 0,
     pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
     remediation: remediationData?.summary?.total ?? 0,
     lifecycle: lifecycleData?.total_events ?? 0,
+    entra_groups: identity?.group_count ?? 0,
+    sensitive_access: 0,
     simulate: 0,
+    attack_paths: 0,
     timeline: 0,
   };
 
@@ -716,6 +748,21 @@ export default function IdentityDetail() {
           </div>
           <h2 className="text-2xl font-bold text-gray-900 mt-1">Identity Details</h2>
         </div>
+        {identity && (
+          <button
+            onClick={() => openCopilot({
+              contextType: 'identity',
+              contextId: String(id),
+              contextLabel: identity.display_name,
+            })}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg border border-indigo-200 transition"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+            Investigate with Copilot
+          </button>
+        )}
       </div>
 
       {loading ? (
@@ -745,24 +792,19 @@ export default function IdentityDetail() {
                       NEW
                     </span>
                   )}
-                  {data?.trend?.risk_direction === 'worsened' && (
-                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200" title={`Was ${data.trend.previous_risk_level || 'lower'} in previous run`}>
+                  {data?.trend?.risk_direction === 'worsened' && (data?.trend as any)?.score_delta_valid !== false && (
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200" title={`Was ${data.trend.previous_risk_level || 'lower'} in previous snapshot`}>
                       ↑ WORSENED
                     </span>
                   )}
-                  {data?.trend?.risk_direction === 'improved' && (
-                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200" title={`Was ${data.trend.previous_risk_level || 'higher'} in previous run`}>
+                  {data?.trend?.risk_direction === 'improved' && (data?.trend as any)?.score_delta_valid !== false && (
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200" title={`Was ${data.trend.previous_risk_level || 'higher'} in previous snapshot`}>
                       ↓ IMPROVED
                     </span>
                   )}
                   {identity.risk_score !== undefined && (
                     <span className="px-2 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">
-                      {identity.risk_score} pts
-                      {data?.trend?.previous_risk_score != null && data.trend.risk_direction !== 'new' && (
-                        <span className="ml-1 opacity-70">
-                          (was {data.trend.previous_risk_score})
-                        </span>
-                      )}
+                      {((identity as any).risk_label || identity.risk_level || 'unknown').toUpperCase()}
                     </span>
                   )}
                   {(() => {
@@ -805,23 +847,60 @@ export default function IdentityDetail() {
                   }
                 </div>
 
-                <div className="text-gray-500">Last Sign-in</div>
+                <div className="text-gray-500">Last Used</div>
                 <div className="font-medium">
-                  {identity.last_sign_in ? (
-                    <span className="text-gray-900">{formatDate(identity.last_sign_in)}</span>
-                  ) : (
-                    <span className="text-gray-400 italic" title={DATA_EXPLANATIONS.SIGN_IN}>Unknown — P1/P2 required</span>
-                  )}
+                  {(() => {
+                    // Canonical state from build_identity_state()
+                    const activityLabel = (identity as any).activity_label;
+                    const lastSeenDisplay = (identity as any).last_seen_display;
+                    const lastSeenSource = (identity as any).last_seen_source;
+                    const lastSeenAvailable = (identity as any).last_seen_available;
+                    const authActivity = (identity as any).auth_activity;
+
+                    if (lastSeenAvailable && lastSeenDisplay) {
+                      // Determine source badge
+                      let srcBadge: React.ReactNode = null;
+                      if (authActivity?.interactive_signin) {
+                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Sign-in</span>;
+                      } else if (authActivity?.arm_activity) {
+                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">ARM</span>;
+                      } else if (lastSeenSource) {
+                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-gray-100 text-gray-600">{lastSeenSource}</span>;
+                      }
+                      return (
+                        <span className="text-gray-900 inline-flex items-center gap-1">
+                          {lastSeenDisplay}
+                          {srcBadge}
+                        </span>
+                      );
+                    }
+
+                    // Legacy fallback
+                    const isConnector = !!identity.is_discovery_connector;
+                    const elu = isConnector
+                      ? (identity.effective_last_used || new Date().toISOString())
+                      : identity.effective_last_used;
+                    if (elu) {
+                      const d = new Date(elu);
+                      const now = new Date();
+                      const diffDays = Math.floor((now.getTime() - d.getTime()) / TIME_MS.DAY);
+                      const label = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Yesterday' : `${diffDays}d ago`;
+                      return <span className="text-gray-900">{label}</span>;
+                    }
+                    return <span className="text-gray-400 italic">No activity observed</span>;
+                  })()}
                 </div>
 
                 <div className="text-gray-500">Status</div>
                 <div>
                   <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    identity.status === 'active' || identity.enabled !== false
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-red-100 text-red-700'
+                    identity.status_display?.badge_class ||
+                    (identity.status === 'active' ? 'bg-green-100 text-green-700' :
+                     identity.status === 'disabled' ? 'bg-red-100 text-red-700' :
+                     identity.status === 'deleted' ? 'bg-gray-100 text-gray-500' :
+                     'bg-yellow-100 text-yellow-700')
                   }`}>
-                    {identity.status === 'active' || identity.enabled !== false ? 'Active' : 'Disabled'}
+                    {identity.status_display?.label || identity.status || 'Unknown'}
                   </span>
                 </div>
 
@@ -842,7 +921,7 @@ export default function IdentityDetail() {
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
-                  Run #{data.evidence.run_id}
+                  Snapshot #{data.evidence.run_id}
                 </div>
                 {data.evidence.collected_at && (
                   <div className="flex items-center gap-1.5">
@@ -886,1822 +965,165 @@ export default function IdentityDetail() {
             <TabBar activeTab={activeTab} onTabChange={setActiveTab} counts={tabCounts} />
 
             <div className="p-6">
-              {/* Overview Tab */}
+              {/* ═══ OVERVIEW TAB ═══ */}
               {activeTab === 'overview' && (
-                <div className="space-y-6">
-                  {/* Identity Security Posture — 4-quadrant view */}
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      {/* Activity */}
-                      {(() => {
-                        const dormant = getDormantStatusFromActivity(identity.activity_status || undefined);
-                        const dcfg = DORMANT_LABELS[dormant];
-                        return (
-                          <div className="border rounded-xl p-4" title={dcfg.tooltip}>
-                            <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
-                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${dcfg.color}`}>{dcfg.label}</span>
-                            <div className="text-[10px] text-gray-500 mt-2">
-                              {identity.last_sign_in
-                                ? `Last sign-in: ${formatDate(identity.last_sign_in)}`
-                                : DATA_EXPLANATIONS.SIGN_IN
-                              }
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      {/* Credentials */}
-                      <div className="border rounded-xl p-4">
-                        <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Credentials</div>
-                        {(identity.identity_category === 'human_user' || identity.identity_category === 'guest') ? (
-                          <span className="text-xs text-gray-400 italic">N/A (Entra ID auth)</span>
-                        ) : (
-                          <>
-                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                              safeLower(identity.credential_status) === 'expired' ? 'bg-red-100 text-red-700' :
-                              safeLower(identity.credential_status) === 'expiring_soon' ? 'bg-orange-100 text-orange-700' :
-                              safeLower(identity.credential_status) === 'valid' ? 'bg-green-100 text-green-700' :
-                              'bg-gray-100 text-gray-500'
-                            }`}>
-                              {identity.credential_status || 'No credentials'}
-                            </span>
-                            <div className="text-[10px] text-gray-500 mt-2">
-                              {(identity.credential_count ?? 0)} secret{(identity.credential_count ?? 0) !== 1 ? 's' : ''}/cert{(identity.credential_count ?? 0) !== 1 ? 's' : ''}
-                              {identity.credential_expiration && (
-                                <span className="ml-1">· {credentialCountdown(identity.credential_expiration)}</span>
-                              )}
-                            </div>
-                          </>
-                        )}
-                      </div>
-
-                      {/* Conditional Access */}
-                      <div className="border rounded-xl p-4">
-                        <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">CA Coverage</div>
-                        {identity.ca_coverage_status ? (
-                          <>
-                            <div className="flex items-center gap-2">
-                              <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                                identity.ca_coverage_status === 'covered' ? 'bg-green-100 text-green-700' :
-                                identity.ca_coverage_status === 'partial' ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-red-100 text-red-700'
-                              }`}>
-                                {identity.ca_coverage_status === 'covered' ? 'Covered' :
-                                 identity.ca_coverage_status === 'partial' ? 'Partial' : 'Not Covered'}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-gray-500 mt-2">
-                              {identity.ca_mfa_enforced ? 'MFA enforced' : 'No MFA requirement'}
-                            </div>
-                          </>
-                        ) : (
-                          <span className="text-xs text-gray-400 italic" title={DATA_EXPLANATIONS.CA_POLICY}>Unknown</span>
-                        )}
-                      </div>
-
-                      {/* PIM */}
-                      <div className="border rounded-xl p-4">
-                        <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">PIM</div>
-                        {pimData ? (
-                          <>
-                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                              pimData.eligible_assignments.length > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
-                            }`}>
-                              {pimData.eligible_assignments.length > 0 ? `${pimData.eligible_assignments.length} eligible` : 'None'}
-                            </span>
-                            {pimData.overuse_metrics.always_active_pattern && (
-                              <div className="text-[10px] text-red-600 mt-2 font-medium">Always-active pattern detected</div>
-                            )}
-                          </>
-                        ) : (
-                          <button
-                            onClick={() => setActiveTab('pim')}
-                            className="text-xs text-blue-600 hover:underline"
-                          >
-                            Load PIM data
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Risk Score Trajectory */}
-                  {riskHistory.length >= 2 && (
-                    <div className="border border-gray-200 rounded-xl p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <div>
-                          <div className="text-sm font-semibold text-gray-900">Risk Score Trajectory</div>
-                          <div className="text-[10px] text-gray-500">Score trend across discovery runs</div>
-                        </div>
-                        <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                          <span>{riskHistory.length} runs</span>
-                          <span className="text-gray-300">|</span>
-                          <span>
-                            {riskHistory[0].risk_score} pts → {riskHistory[riskHistory.length - 1].risk_score} pts
-                            {riskHistory[riskHistory.length - 1].risk_score > riskHistory[0].risk_score
-                              ? <span className="text-red-500 ml-1">↑</span>
-                              : riskHistory[riskHistory.length - 1].risk_score < riskHistory[0].risk_score
-                                ? <span className="text-green-500 ml-1">↓</span>
-                                : <span className="text-gray-400 ml-1">→</span>
-                            }
-                          </span>
-                        </div>
-                      </div>
-                      <ResponsiveContainer width="100%" height={160}>
-                        <LineChart data={riskHistory} margin={{ top: 5, right: 10, left: -15, bottom: 0 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                          <XAxis
-                            dataKey="date"
-                            tick={{ fontSize: 9, fill: '#9ca3af' }}
-                            tickFormatter={(d: string) => {
-                              try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { return ''; }
-                            }}
-                          />
-                          <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} domain={[0, 'auto']} allowDecimals={false} />
-                          <ReferenceLine y={70} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.4} label={{ value: 'Critical', fontSize: 8, fill: '#ef4444' }} />
-                          <Tooltip
-                            content={({ active, payload }) => {
-                              if (!active || !payload?.length) return null;
-                              const p = payload[0]?.payload as {date: string; risk_score: number; risk_level: string} | undefined;
-                              if (!p) return null;
-                              const levelColor: Record<string, string> = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#22c55e' };
-                              return (
-                                <div className="bg-white border rounded-lg shadow-lg px-3 py-2 text-xs">
-                                  <div className="text-gray-500 mb-1">
-                                    {(() => { try { return new Date(p.date).toLocaleDateString(); } catch { return p.date; } })()}
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: levelColor[p.risk_level] || '#6b7280' }} />
-                                    <span className="font-semibold">{p.risk_score}</span>
-                                    <span className="capitalize text-gray-400">{p.risk_level}</span>
-                                  </div>
-                                </div>
-                              );
-                            }}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey="risk_score"
-                            stroke="#7c3aed"
-                            strokeWidth={2}
-                            dot={{ r: 3, fill: '#7c3aed', strokeWidth: 0 }}
-                            activeDot={{ r: 5, fill: '#7c3aed' }}
-                          />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-                  )}
-
-                  {/* Privilege Tier Explanation */}
-                  {(() => {
-                    const tc = TIER_CONFIG[privilegeTier.tier];
-                    return (
-                      <div className={`border rounded-xl p-4 ${tc.borderColor}`}>
-                        <div className="flex items-center gap-3 mb-2">
-                          <span className={`px-2.5 py-1 rounded-full border text-sm font-bold ${tc.color}`}>{tc.label}</span>
-                          <div>
-                            <div className="text-sm font-semibold text-gray-900">{tc.name}</div>
-                            <div className="text-xs text-gray-500">{tc.description}</div>
-                          </div>
-                        </div>
-                        {privilegeTier.reasons.length > 0 && (
-                          <div className="mt-2 space-y-1">
-                            <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider">Classification reasons</div>
-                            {privilegeTier.reasons.map((r, i) => (
-                              <div key={i} className="text-xs text-gray-600 flex items-center gap-1.5">
-                                <span className="w-1 h-1 rounded-full bg-gray-400 flex-shrink-0" />
-                                {r}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {/* Effective Access Scope */}
-                  {(effectiveScope.subscriptions.length > 0 || effectiveScope.entraScopes.length > 0 || (data?.roles || []).length > 0) && (
-                    <div>
-                      <div className="text-sm font-semibold text-gray-900 mb-3">Effective Access Scope</div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        {/* Entra Directory */}
-                        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
-                          <div className="text-[10px] uppercase font-semibold text-indigo-400 tracking-wider mb-2">Entra Directory</div>
-                          <div className="text-lg font-bold text-indigo-700">{groupedRoles.entra.length} role{groupedRoles.entra.length !== 1 ? 's' : ''}</div>
-                          <div className="text-[10px] text-gray-500 mt-1">
-                            {effectiveScope.tenantWide
-                              ? <span className="text-red-600 font-medium">Tenant-wide scope</span>
-                              : effectiveScope.entraScopes.length > 0
-                                ? `${effectiveScope.entraScopes.length} scoped`
-                                : 'No Entra roles'
-                            }
-                          </div>
-                        </div>
-
-                        {/* Azure RBAC */}
-                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                          <div className="text-[10px] uppercase font-semibold text-blue-400 tracking-wider mb-2">Azure RBAC</div>
-                          <div className="text-lg font-bold text-blue-700">{groupedRoles.azure.length} role{groupedRoles.azure.length !== 1 ? 's' : ''}</div>
-                          <div className="text-[10px] text-gray-500 mt-1">
-                            {effectiveScope.subscriptions.length > 0
-                              ? `${effectiveScope.subscriptions.length} sub${effectiveScope.subscriptions.length !== 1 ? 's' : ''}, ${effectiveScope.resourceGroups.length} RG${effectiveScope.resourceGroups.length !== 1 ? 's' : ''}`
-                              : 'No RBAC roles'
-                            }
-                          </div>
-                        </div>
-
-                        {/* Graph API */}
-                        <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
-                          <div className="text-[10px] uppercase font-semibold text-purple-400 tracking-wider mb-2">Graph API</div>
-                          <div className="text-lg font-bold text-purple-700">{identity.api_permission_count ?? 0} perm{(identity.api_permission_count ?? 0) !== 1 ? 's' : ''}</div>
-                          <div className="text-[10px] text-gray-500 mt-1">
-                            {(identity.app_role_count ?? 0) > 0 ? `+ ${identity.app_role_count} app role${(identity.app_role_count ?? 0) !== 1 ? 's' : ''}` : 'Application-level access'}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Scope details */}
-                      {effectiveScope.subscriptions.length > 0 && (
-                        <div className="mt-3 text-xs text-gray-500">
-                          <span className="font-medium text-gray-700">Subscriptions:</span>{' '}
-                          {effectiveScope.subscriptions.map((s, i) => (
-                            <span key={s}>
-                              <span className="font-mono text-gray-600">{s.substring(0, 8)}...</span>
-                              {i < effectiveScope.subscriptions.length - 1 && ', '}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Quick stats grid */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <button onClick={() => setActiveTab('roles')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
-                      <div className="text-2xl font-bold text-gray-900">{(data?.roles || []).length}</div>
-                      <div className="text-xs text-gray-500 mt-1">Total Roles</div>
-                    </button>
-                    <button onClick={() => setActiveTab('permissions')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
-                      <div className="text-2xl font-bold text-purple-700">{identity.api_permission_count ?? 0}</div>
-                      <div className="text-xs text-gray-500 mt-1">API Permissions</div>
-                    </button>
-                    <button onClick={() => setActiveTab('credentials')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
-                      <div className="text-2xl font-bold text-gray-900">{identity.credential_count ?? 0}</div>
-                      <div className="text-xs text-gray-500 mt-1">Credentials</div>
-                    </button>
-                    <button onClick={() => setActiveTab('ownership')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
-                      <div className="text-2xl font-bold text-gray-900">{(data?.owners || []).length}</div>
-                      <div className="text-xs text-gray-500 mt-1">Owners</div>
-                    </button>
-                  </div>
-
-                  {/* Risk reasons */}
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 mb-2">Risk Reasons</div>
-                    {identity.risk_reasons && identity.risk_reasons.length > 0 ? (
-                      <ul className="space-y-2">
-                        {identity.risk_reasons.map((r, idx) => (
-                          <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
-                            <span className="text-red-500 mt-0.5">
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                              </svg>
-                            </span>
-                            {r}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <div className="text-sm text-gray-500">No risk reasons recorded.</div>
-                    )}
-                  </div>
-                </div>
+                <OverviewTab
+                  identity={identity}
+                  data={data!}
+                  roles={data?.roles || []}
+                  graphPermissions={data?.graph_permissions || []}
+                  appRoles={data?.app_roles || []}
+                  owners={data?.owners || []}
+                  groupedRoles={groupedRoles}
+                  privilegeTier={privilegeTier}
+                  effectiveScope={effectiveScope}
+                  riskHistory={riskHistory}
+                  correlatedAccounts={correlatedAccounts}
+                  roleIntel={roleIntel}
+                  pimData={pimData}
+                  onTabChange={setActiveTab}
+                />
               )}
 
-              {/* Roles Tab */}
+              {/* ═══ ROLES TAB ═══ */}
               {activeTab === 'roles' && (
-                <div>
-                  <DataSource label="Azure Resource Manager + Microsoft Graph API" apiSource="/roleAssignments, /roleManagement/directory" collectedAt={data?.evidence?.collected_at} />
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-3">
-                  {/* Azure RBAC */}
-                  <div>
-                    <div className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      Azure RBAC Roles
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-blue-100 text-blue-700">
-                        {groupedRoles.azure.length}
-                      </span>
-                    </div>
-                    {groupedRoles.azure.length === 0 ? (
-                      <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No Azure RBAC roles assigned.</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {groupedRoles.azure.map((r: any, idx: number) => {
-                          const intel = intelByRole[r.role_name];
-                          return (
-                          <div key={idx} className="border rounded-xl p-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="font-semibold text-gray-900 text-sm">{r.role_name}</div>
-                              <div className="flex items-center gap-1">
-                                {usageStatusBadge(r.usage_status, r.redundant_with)}
-                                {riskBadge(r.risk_level)}
-                              </div>
-                            </div>
-                            <div className="text-xs text-gray-500 mt-1 break-all">{r.scope}</div>
-                            <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
-                              {r.days_since_assigned != null && (
-                                <span>Assigned {r.days_since_assigned}d ago</span>
-                              )}
-                              {r.resource_type && <span>| {r.resource_type}</span>}
-                              {!r.scope_exists && <span className="text-red-600">| Resource deleted</span>}
-                              {r.redundant_with && <span className="text-yellow-600">| Redundant with {r.redundant_with}</span>}
-                            </div>
-                            {r.why_critical && (
-                              <div className="text-xs text-gray-700 mt-2 bg-red-50 p-2 rounded">{r.why_critical}</div>
-                            )}
-                            {intel && (
-                              <div className="flex items-center gap-2 mt-2">
-                                {intel.attack_patterns.length > 0 && (
-                                  <button onClick={() => setActiveTab('compliance')} className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-50 text-red-700 hover:bg-red-100 transition">
-                                    {intel.attack_patterns.length} incident{intel.attack_patterns.length > 1 ? 's' : ''}
-                                  </button>
-                                )}
-                                {intel.hipaa_violations.length > 0 && (
-                                  <button onClick={() => setActiveTab('compliance')} className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-50 text-purple-700 hover:bg-purple-100 transition">
-                                    {intel.hipaa_violations.length} HIPAA
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Entra Directory Roles */}
-                  <div>
-                    <div className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      Entra Directory Roles
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">
-                        {groupedRoles.entra.length}
-                      </span>
-                    </div>
-                    {groupedRoles.entra.length === 0 ? (
-                      <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No Entra directory roles assigned.</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {groupedRoles.entra.map((r: any, idx: number) => {
-                          const intel = intelByRole[r.role_name];
-                          return (
-                          <div key={idx} className="border rounded-xl p-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="font-semibold text-gray-900 text-sm">{r.role_name}</div>
-                              <div className="flex items-center gap-1">
-                                {usageStatusBadge(r.usage_status, r.redundant_with)}
-                                {riskBadge(r.risk_level)}
-                              </div>
-                            </div>
-                            <div className="text-xs text-gray-500 mt-1 break-all">{r.scope}</div>
-                            <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
-                              {r.days_since_assigned != null && (
-                                <span>Assigned {r.days_since_assigned}d ago</span>
-                              )}
-                              {r.redundant_with && <span className="text-yellow-600">| Redundant with {r.redundant_with}</span>}
-                            </div>
-                            {r.why_critical && (
-                              <div className="text-xs text-gray-700 mt-2 bg-red-50 p-2 rounded">{r.why_critical}</div>
-                            )}
-                            {intel && (
-                              <div className="flex items-center gap-2 mt-2">
-                                {intel.attack_patterns.length > 0 && (
-                                  <button onClick={() => setActiveTab('compliance')} className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-50 text-red-700 hover:bg-red-100 transition">
-                                    {intel.attack_patterns.length} incident{intel.attack_patterns.length > 1 ? 's' : ''}
-                                  </button>
-                                )}
-                                {intel.hipaa_violations.length > 0 && (
-                                  <button onClick={() => setActiveTab('compliance')} className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-50 text-purple-700 hover:bg-purple-100 transition">
-                                    {intel.hipaa_violations.length} HIPAA
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                </div>
+                <RolesTab
+                  identity={identity}
+                  data={data!}
+                  groupedRoles={groupedRoles}
+                  intelByRole={intelByRole}
+                  setActiveTab={setActiveTab}
+                />
               )}
 
-              {/* Permissions Tab */}
+              {/* ═══ PERMISSIONS TAB ═══ */}
               {activeTab === 'permissions' && (
-                <div className="space-y-6">
-                  <DataSource label="Microsoft Graph API" apiSource="/servicePrincipals/{id}/appRoleAssignments" collectedAt={data?.evidence?.collected_at} />
-                  {/* Graph API Permissions */}
-                  <div>
-                    <div className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      Microsoft Graph API Permissions
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-purple-100 text-purple-700">
-                        {(data?.graph_permissions || []).length}
-                      </span>
-                    </div>
-                    {(data?.graph_permissions || []).length === 0 ? (
-                      <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No Graph API permissions discovered.</div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {data!.graph_permissions.map((p: any, idx: number) => (
-                          <div key={idx} className="border rounded-xl p-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="font-semibold text-gray-900 text-sm">{p.permission_name}</div>
-                              {riskBadge(p.risk_level)}
-                            </div>
-                            {p.permission_description && (
-                              <div className="text-xs text-gray-600 mt-1">{p.permission_description}</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* App Role Assignments */}
-                  <div>
-                    <div className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      Application Role Assignments
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">
-                        {(data?.app_roles || []).length}
-                      </span>
-                    </div>
-                    {(data?.app_roles || []).length === 0 ? (
-                      <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No custom app role assignments discovered.</div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {data!.app_roles.map((r: any, idx: number) => (
-                          <div key={idx} className="border rounded-xl p-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="font-semibold text-gray-900 text-sm">{r.resource_display_name || 'App'}</div>
-                              {riskBadge(r.risk_level)}
-                            </div>
-                            <div className="text-xs text-gray-500 mt-1 break-all">{r.resource_id}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <PermissionsTab data={data!} />
               )}
 
-              {/* Credentials Tab */}
+              {/* ═══ CREDENTIALS TAB ═══ */}
               {activeTab === 'credentials' && (
-                <div className="space-y-4">
-                  <DataSource label="Microsoft Graph API" apiSource="/applications/{id}/passwordCredentials + keyCredentials" collectedAt={data?.evidence?.collected_at} />
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-gray-50 rounded-xl p-4">
-                      <div className="text-xs text-gray-500 mb-1">Credential Count</div>
-                      {(identity.identity_category === 'human_user' || identity.identity_category === 'guest') ? (
-                        <div className="text-sm text-gray-400 italic mt-1" title={DATA_EXPLANATIONS.CREDENTIAL_NA}>N/A — Entra ID auth</div>
-                      ) : (identity.credential_count ?? 0) > 0 ? (
-                        <div className="text-2xl font-bold text-gray-900">{identity.credential_count}</div>
-                      ) : (
-                        <div>
-                          <div className="text-2xl font-bold text-gray-900">0</div>
-                          <div className="text-[10px] text-gray-400">No secrets or certificates registered</div>
-                        </div>
-                      )}
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-4">
-                      <div className="text-xs text-gray-500 mb-1">Status</div>
-                      <div className="text-sm font-semibold">
-                        {identity.credential_status ? (
-                          <span className={
-                            safeLower(identity.credential_status) === 'valid' ? 'text-green-700' :
-                            safeLower(identity.credential_status) === 'expired' ? 'text-red-700' :
-                            safeLower(identity.credential_status) === 'expiring_soon' ? 'text-orange-700' :
-                            'text-gray-700'
-                          }>
-                            {identity.credential_status}
-                          </span>
-                        ) : (identity.identity_category === 'human_user' || identity.identity_category === 'guest') ? (
-                          <span className="text-gray-400 italic">N/A</span>
-                        ) : (
-                          <span className="text-gray-400 italic" title="No credentials registered for this identity">No credentials</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-4">
-                      <div className="text-xs text-gray-500 mb-1">Next Expiration</div>
-                      <div className="text-sm font-semibold text-gray-900">
-                        {identity.credential_expiration ? (
-                          <div>
-                            <span className={
-                              new Date(identity.credential_expiration) < new Date() ? 'text-red-700' :
-                              new Date(identity.credential_expiration) < new Date(Date.now() + 30 * 86400000) ? 'text-orange-700' :
-                              'text-green-700'
-                            }>
-                              {formatDate(identity.credential_expiration)}
-                            </span>
-                            <div className="mt-1">{credentialCountdown(identity.credential_expiration)}</div>
-                          </div>
-                        ) : (identity.credential_count ?? 0) > 0 ? (
-                          <span className="text-yellow-600" title="Credentials exist but have no expiration set">No expiration set</span>
-                        ) : (
-                          <span className="text-gray-400 italic">N/A</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {(identity.identity_category === 'human_user' || identity.identity_category === 'guest') && (
-                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-700">
-                      {DATA_EXPLANATIONS.CREDENTIAL_NA}.
-                      Secret/certificate tracking applies to service principals and managed identities.
-                    </div>
-                  )}
-                </div>
+                <CredentialsTab identity={identity} data={data!} />
               )}
 
-              {/* Ownership Tab */}
+              {/* ═══ OWNERSHIP TAB ═══ */}
               {activeTab === 'ownership' && (
-                <div>
-                  {(data?.owners || []).length === 0 ? (
-                    <div className="text-center py-8">
-                      <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-                      </svg>
-                      <div className="text-sm text-gray-500">No owners discovered for this identity.</div>
-                      <div className="text-xs text-gray-400 mt-1">
-                        Assigning owners ensures accountability and faster incident response.
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {data!.owners.map((o: Owner, idx: number) => (
-                        <div key={idx} className="border rounded-xl p-4 flex items-center justify-between">
-                          <div>
-                            <div className="font-semibold text-gray-900">
-                              {o.owner_display_name || o.owner_upn || o.owner_object_id}
-                            </div>
-                            {o.owner_upn && (
-                              <div className="text-xs text-gray-500 mt-0.5">{o.owner_upn}</div>
-                            )}
-                            <div className="text-xs text-gray-400 mt-0.5">Type: {o.owner_type || 'user'}</div>
-                          </div>
-                          {o.is_primary_owner && (
-                            <span className="px-2 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
-                              Primary Owner
-                            </span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <DataSource label="Microsoft Graph API" apiSource="/servicePrincipals/{id}/owners" collectedAt={data?.evidence?.collected_at} />
-                </div>
+                <OwnershipTab data={data!} identity={identity} />
               )}
 
-              {/* Access Graph Tab */}
+              {/* ═══ EFFECTIVE ACCESS TAB ═══ */}
+              {activeTab === 'effective_access' && (
+                <EffectiveAccessTab
+                  effectiveAccessData={effectiveAccessData}
+                  effectiveAccessLoading={effectiveAccessLoading}
+                  sensitiveAccessData={sensitiveAccessData}
+                  data={data!}
+                />
+              )}
+
+              {/* ═══ ACCESS GRAPH TAB ═══ */}
               {activeTab === 'access_graph' && identity && (
                 <AccessGraphTab identityId={identity.identity_id} />
               )}
 
-              {/* Anomalies Tab */}
+              {/* ═══ ANOMALIES TAB ═══ */}
               {activeTab === 'anomalies' && (
-                <div className="space-y-4">
-                  {anomalyLoading ? (
-                    <div className="animate-pulse space-y-3">
-                      <div className="h-16 bg-gray-100 rounded-xl" />
-                      <div className="h-16 bg-gray-100 rounded-xl" />
-                      <div className="h-16 bg-gray-100 rounded-xl" />
-                    </div>
-                  ) : !anomalyData || anomalyData.anomalies.length === 0 ? (
-                    <div className="text-center py-8">
-                      <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      <p className="text-gray-500">No anomalies detected for this identity</p>
-                    </div>
-                  ) : (
-                    anomalyData.anomalies.map((a: any) => {
-                      const severityColors: Record<string, string> = {
-                        critical: 'border-red-300 bg-red-50',
-                        high: 'border-orange-300 bg-orange-50',
-                        medium: 'border-yellow-300 bg-yellow-50',
-                        low: 'border-blue-300 bg-blue-50',
-                      };
-                      const dotColors: Record<string, string> = {
-                        critical: 'bg-red-500',
-                        high: 'bg-orange-500',
-                        medium: 'bg-yellow-400',
-                        low: 'bg-blue-400',
-                      };
-                      const typeLabels: Record<string, string> = {
-                        permission_escalation: 'Permission Escalation',
-                        risk_score_spike: 'Risk Spike',
-                        dormant_reactivation: 'Dormant Reactivation',
-                        credential_surge: 'Credential Surge',
-                        off_hours_pim: 'Off-Hours PIM',
-                        excessive_pim_usage: 'Excessive PIM',
-                      };
-                      return (
-                        <div key={a.id} className={`rounded-xl border p-4 ${severityColors[a.severity] || 'border-gray-200 bg-gray-50'}`}>
-                          <div className="flex items-start gap-3">
-                            <span className={`w-3 h-3 rounded-full mt-1 flex-shrink-0 ${dotColors[a.severity] || 'bg-gray-400'}`} />
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-xs font-semibold uppercase text-gray-500">
-                                  {typeLabels[a.anomaly_type] || a.anomaly_type}
-                                </span>
-                                <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                                  a.severity === 'critical' ? 'bg-red-200 text-red-800' :
-                                  a.severity === 'high' ? 'bg-orange-200 text-orange-800' :
-                                  a.severity === 'medium' ? 'bg-yellow-200 text-yellow-800' :
-                                  'bg-blue-200 text-blue-800'
-                                }`}>
-                                  {a.severity}
-                                </span>
-                                {!!a.resolved && (
-                                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-100 text-green-700">Resolved</span>
-                                )}
-                              </div>
-                              <h4 className="text-sm font-medium text-gray-900">{a.title}</h4>
-                              <p className="text-xs text-gray-600 mt-1">{a.description}</p>
-                              {!!a.details && (
-                                <details className="mt-2">
-                                  <summary className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700">View details</summary>
-                                  <pre className="mt-1 text-[10px] text-gray-500 bg-white/70 rounded p-2 overflow-auto max-h-32">
-                                    {JSON.stringify(a.details, null, 2)}
-                                  </pre>
-                                </details>
-                              )}
-                              {!!a.created_at && (
-                                <p className="text-[10px] text-gray-400 mt-2">
-                                  Detected: {new Date(a.created_at).toLocaleString()}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+                <AnomaliesTab
+                  anomalyData={anomalyData}
+                  anomalyLoading={anomalyLoading}
+                  data={data!}
+                />
               )}
 
-              {/* PIM Tab */}
+              {/* ═══ PIM TAB ═══ */}
               {activeTab === 'pim' && (
-                <div className="space-y-6">
-                  {pimLoading ? (
-                    <div className="animate-pulse space-y-4">
-                      <div className="h-20 bg-gray-100 rounded-xl" />
-                      <div className="h-40 bg-gray-100 rounded-xl" />
-                    </div>
-                  ) : !pimData || (pimData.eligible_assignments.length === 0 && pimData.activations.length === 0) ? (
-                    <div className="text-center py-8">
-                      <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                      <div className="text-sm text-gray-500">No PIM data available for this identity.</div>
-                      <div className="text-xs text-gray-400 mt-1">
-                        {DATA_EXPLANATIONS.PIM}. Eligible roles and activations will appear here when available.
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      {/* Overuse Metrics */}
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900 mb-3">Overuse Metrics (Last 30 Days)</div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                          <div className="bg-gray-50 rounded-xl p-4">
-                            <div className="text-xs text-gray-500 mb-1">Activations</div>
-                            <div className={`text-2xl font-bold ${pimData.overuse_metrics.activation_frequency_30d > 10 ? 'text-orange-600' : 'text-gray-900'}`}>
-                              {pimData.overuse_metrics.activation_frequency_30d}
-                            </div>
-                          </div>
-                          <div className="bg-gray-50 rounded-xl p-4">
-                            <div className="text-xs text-gray-500 mb-1">Total Active Hours</div>
-                            <div className="text-2xl font-bold text-gray-900">
-                              {pimData.overuse_metrics.total_active_hours_30d}h
-                            </div>
-                          </div>
-                          <div className="bg-gray-50 rounded-xl p-4">
-                            <div className="text-xs text-gray-500 mb-1">Always-Active Pattern</div>
-                            <div className="text-sm font-semibold mt-1">
-                              {pimData.overuse_metrics.always_active_pattern ? (
-                                <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-700">Detected</span>
-                              ) : (
-                                <span className="px-2 py-1 rounded-full text-xs bg-green-100 text-green-700">Not Detected</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        {pimData.overuse_metrics.always_active_pattern && (
-                          <div className="mt-3 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                            This identity is active &gt;80% of the time via PIM. Consider converting to a permanent (non-PIM) assignment or reviewing if JIT governance is being bypassed.
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Eligible Roles */}
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                          Eligible Roles
-                          <span className="px-2 py-0.5 rounded-full text-xs bg-emerald-100 text-emerald-700">
-                            {pimData.eligible_assignments.length}
-                          </span>
-                        </div>
-                        {pimData.eligible_assignments.length === 0 ? (
-                          <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No PIM eligible roles.</div>
-                        ) : (
-                          <div className="overflow-x-auto">
-                            <table className="min-w-full text-sm">
-                              <thead>
-                                <tr className="border-b text-gray-500 text-xs">
-                                  <th className="text-left py-2 pr-4 font-medium">Role Name</th>
-                                  <th className="text-left py-2 pr-4 font-medium">Scope</th>
-                                  <th className="text-left py-2 pr-4 font-medium">Type</th>
-                                  <th className="text-left py-2 pr-4 font-medium">Member</th>
-                                  <th className="text-left py-2 font-medium">Expiration</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-100">
-                                {pimData.eligible_assignments.map((ea, idx) => (
-                                  <tr key={idx}>
-                                    <td className="py-2.5 pr-4 font-medium text-gray-900">{ea.role_name}</td>
-                                    <td className="py-2.5 pr-4 text-gray-600 text-xs font-mono">{ea.directory_scope || '/'}</td>
-                                    <td className="py-2.5 pr-4">
-                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                        ea.assignment_type === 'permanent_eligible'
-                                          ? 'bg-red-100 text-red-700'
-                                          : 'bg-blue-100 text-blue-700'
-                                      }`}>
-                                        {ea.assignment_type === 'permanent_eligible' ? 'Permanent' : 'Time-Bound'}
-                                      </span>
-                                    </td>
-                                    <td className="py-2.5 pr-4 text-gray-600 text-xs">{ea.member_type || '—'}</td>
-                                    <td className="py-2.5 text-gray-600 text-xs">
-                                      {ea.end_datetime ? formatDate(ea.end_datetime) : <span className="text-red-600 font-medium">No expiry</span>}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Activation History */}
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                          Activation History
-                          <span className="px-2 py-0.5 rounded-full text-xs bg-purple-100 text-purple-700">
-                            {pimData.activations.length}
-                          </span>
-                        </div>
-                        {pimData.activations.length === 0 ? (
-                          <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4">No PIM activation records.</div>
-                        ) : (
-                          <div className="overflow-x-auto">
-                            <table className="min-w-full text-sm">
-                              <thead>
-                                <tr className="border-b text-gray-500 text-xs">
-                                  <th className="text-left py-2 pr-4 font-medium">Role</th>
-                                  <th className="text-left py-2 pr-4 font-medium">Status</th>
-                                  <th className="text-left py-2 pr-4 font-medium">Start</th>
-                                  <th className="text-left py-2 pr-4 font-medium">End</th>
-                                  <th className="text-left py-2 pr-4 font-medium">Justification</th>
-                                  <th className="text-left py-2 font-medium">Ticket</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-100">
-                                {pimData.activations.map((act, idx) => (
-                                  <tr key={idx}>
-                                    <td className="py-2.5 pr-4 font-medium text-gray-900">{act.role_name}</td>
-                                    <td className="py-2.5 pr-4">
-                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                        act.status === 'Active' ? 'bg-green-100 text-green-700' :
-                                        act.status === 'Expired' ? 'bg-gray-100 text-gray-600' :
-                                        'bg-red-100 text-red-700'
-                                      }`}>{act.status || '—'}</span>
-                                    </td>
-                                    <td className="py-2.5 pr-4 text-gray-600 text-xs">{formatDate(act.activation_start)}</td>
-                                    <td className="py-2.5 pr-4 text-gray-600 text-xs">{formatDate(act.activation_end)}</td>
-                                    <td className="py-2.5 pr-4 text-gray-600 text-xs max-w-[200px] truncate" title={act.justification || ''}>
-                                      {act.justification || <span className="text-gray-300">—</span>}
-                                    </td>
-                                    <td className="py-2.5 text-gray-600 text-xs">
-                                      {act.ticket_number ? (
-                                        <span className="font-mono">{act.ticket_number}</span>
-                                      ) : (
-                                        <span className="text-gray-300">—</span>
-                                      )}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    </>
-                  )}
-                  <DataSource label="Microsoft Graph API" apiSource="/roleManagement/directory/roleEligibilityScheduleInstances" collectedAt={data?.evidence?.collected_at} />
-                </div>
+                <PimTab
+                  pimData={pimData}
+                  pimLoading={pimLoading}
+                  data={data!}
+                  identity={identity}
+                  riskLevel={identity.risk_level}
+                  identityCategory={identity.identity_category}
+                />
               )}
 
-              {/* Compliance & Intelligence Tab */}
+              {/* ═══ COMPLIANCE TAB ═══ */}
               {activeTab === 'compliance' && (
-                <div className="space-y-6">
-                  {/* GRC Framework Summary */}
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 mb-3">GRC Framework Relevance</div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      {(() => {
-                        const risk = safeLower(identity.risk_level);
-                        const hasPrivRoles = (data?.roles || []).length > 0;
-                        const hasHipaa = roleIntel.some(ri => ri.hipaa_violations.length > 0);
-                        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                        const hasAttacks = roleIntel.some(ri => ri.attack_patterns.length > 0);
-                        const isHuman = identity.identity_category === 'human_user' || identity.identity_category === 'guest';
-
-                        const frameworks = [
-                          {
-                            name: 'SOC 2',
-                            relevant: risk === 'critical' || risk === 'high' || (risk === 'medium' && hasPrivRoles),
-                            reason: hasPrivRoles ? 'Privileged access requires SOC 2 CC6.1 controls' : 'Low-risk identity',
-                          },
-                          {
-                            name: 'HIPAA',
-                            relevant: hasHipaa || (isHuman && hasPrivRoles),
-                            reason: hasHipaa ? `${roleIntel.reduce((s, r) => s + r.hipaa_violations.length, 0)} violation mappings found` : 'No HIPAA-relevant permissions',
-                          },
-                          {
-                            name: 'PCI-DSS',
-                            relevant: risk === 'critical' || risk === 'high',
-                            reason: risk === 'critical' || risk === 'high' ? 'Req 7/8: Privileged access control' : 'Below PCI threshold',
-                          },
-                          {
-                            name: 'NIST 800-53',
-                            relevant: hasPrivRoles,
-                            reason: hasPrivRoles ? 'AC-6: Least Privilege applies' : 'No privileged roles',
-                          },
-                        ];
-
-                        return frameworks.map(fw => (
-                          <div key={fw.name} className={`rounded-xl p-4 border ${fw.relevant ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-200'}`}>
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-semibold text-sm text-gray-900">{fw.name}</span>
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${fw.relevant ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-500'}`}>
-                                {fw.relevant ? 'Relevant' : 'Low'}
-                              </span>
-                            </div>
-                            <div className="text-xs text-gray-600">{fw.reason}</div>
-                          </div>
-                        ));
-                      })()}
-                    </div>
-                  </div>
-
-                  {/* Per-Role Intelligence */}
-                  {roleIntel.length === 0 ? (
-                    <div className="text-center py-8">
-                      <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <div className="text-sm text-gray-500">No compliance intelligence data for this identity's roles.</div>
-                      <div className="text-xs text-gray-400 mt-1">
-                        Attack patterns and HIPAA mappings are populated for privileged roles.
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      <div className="text-sm font-semibold text-gray-900">Per-Role Intelligence</div>
-                      {roleIntel.map((ri, idx) => (
-                        <div key={idx} className="border rounded-xl overflow-hidden">
-                          {/* Role header */}
-                          <div className="bg-gray-50 px-4 py-3 border-b flex items-center justify-between">
-                            <div className="font-semibold text-gray-900 text-sm">{ri.role_name}</div>
-                            <div className="flex items-center gap-2">
-                              {ri.attack_patterns.length > 0 && (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">
-                                  {ri.attack_patterns.length} incident{ri.attack_patterns.length > 1 ? 's' : ''}
-                                </span>
-                              )}
-                              {ri.hipaa_violations.length > 0 && (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-100 text-purple-700">
-                                  {ri.hipaa_violations.length} HIPAA
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="p-4 space-y-4">
-                            {/* Attack Patterns / Real-World Incidents */}
-                            {ri.attack_patterns.length > 0 && (
-                              <div>
-                                <div className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1">
-                                  <svg className="w-3.5 h-3.5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                                  </svg>
-                                  Real-World Incidents
-                                </div>
-                                <div className="space-y-2">
-                                  {ri.attack_patterns.map((ap, apIdx) => (
-                                    <div key={apIdx} className="bg-red-50 border border-red-100 rounded-lg p-3">
-                                      <div className="flex items-start justify-between gap-2">
-                                        <div className="font-medium text-sm text-gray-900">{ap.attack_scenario}</div>
-                                        {ap.estimated_cost_usd > 0 && (
-                                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-200 text-red-900 whitespace-nowrap">
-                                            {formatUsd(ap.estimated_cost_usd)}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <div className="text-xs text-gray-700 mt-1">{ap.real_world_example}</div>
-                                      <div className="flex items-center gap-3 mt-2 text-[10px] text-gray-500">
-                                        {ap.company_affected && <span className="font-medium">{ap.company_affected}</span>}
-                                        {ap.breach_year > 0 && <span>{ap.breach_year}</span>}
-                                      </div>
-                                      {ap.source && (
-                                        <div className="mt-1.5 text-[10px] text-gray-400 italic">
-                                          Source: {ap.source}
-                                        </div>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {/* HIPAA Violations */}
-                            {ri.hipaa_violations.length > 0 && (
-                              <div>
-                                <div className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1">
-                                  <svg className="w-3.5 h-3.5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                  </svg>
-                                  HIPAA Violation Mappings
-                                </div>
-                                <div className="overflow-x-auto">
-                                  <table className="min-w-full text-xs">
-                                    <thead>
-                                      <tr className="border-b text-gray-500">
-                                        <th className="text-left py-1.5 pr-3 font-medium">Section</th>
-                                        <th className="text-left py-1.5 pr-3 font-medium">Violation</th>
-                                        <th className="text-left py-1.5 pr-3 font-medium">Risk</th>
-                                        <th className="text-left py-1.5 font-medium">Penalty Range</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-gray-100">
-                                      {ri.hipaa_violations.map((hv, hvIdx) => (
-                                        <tr key={hvIdx}>
-                                          <td className="py-2 pr-3 font-mono text-gray-700 whitespace-nowrap">{hv.hipaa_section}</td>
-                                          <td className="py-2 pr-3 text-gray-700">{hv.violation_explanation}</td>
-                                          <td className="py-2 pr-3">
-                                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${violationRiskColor(hv.violation_risk)}`}>
-                                              {hv.violation_risk}
-                                            </span>
-                                          </td>
-                                          <td className="py-2 text-gray-700 whitespace-nowrap">
-                                            {formatUsd(hv.typical_penalty_min)} – {formatUsd(hv.typical_penalty_max)}
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <DataSource label="AuditGraph Intelligence Engine" apiSource="Role-based GRC mapping" collectedAt={data?.evidence?.collected_at} />
-                </div>
+                <IdentityComplianceTab
+                  roleIntel={roleIntel}
+                  data={data!}
+                />
               )}
 
               {/* ═══ REMEDIATION TAB ═══ */}
               {activeTab === 'remediation' && (
-                <div className="space-y-6">
-                  {remediationLoading ? (
-                    <div className="animate-pulse space-y-4">
-                      {[1, 2, 3].map(i => <div key={i} className="h-32 bg-gray-100 rounded-xl" />)}
-                    </div>
-                  ) : !remediationData || remediationData.remediations.length === 0 ? (
-                    <div className="text-center py-12">
-                      <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <div className="text-sm font-medium text-gray-600">No remediations needed</div>
-                      <div className="text-xs text-gray-400 mt-1">This identity has no risk factors matching the remediation playbook library.</div>
-                    </div>
-                  ) : (
-                    <>
-                      {/* Summary bar */}
-                      <div className="grid grid-cols-5 gap-4">
-                        <div className="bg-gray-50 rounded-xl p-4 text-center">
-                          <div className="text-2xl font-bold text-gray-900">{remediationData.summary.total}</div>
-                          <div className="text-xs text-gray-500 mt-1">Total Actions</div>
-                        </div>
-                        <div className="bg-red-50 rounded-xl p-4 text-center">
-                          <div className="text-2xl font-bold text-red-700">{remediationData.summary.critical_actions}</div>
-                          <div className="text-xs text-red-600 mt-1">Critical</div>
-                        </div>
-                        <div className="bg-green-50 rounded-xl p-4 text-center">
-                          <div className="text-2xl font-bold text-green-700">{remediationData.summary.quick_wins}</div>
-                          <div className="text-xs text-green-600 mt-1">Quick Wins</div>
-                        </div>
-                        <div className="bg-green-50 rounded-xl p-4 text-center">
-                          <div className="text-2xl font-bold text-green-700">
-                            {Object.values(remediationActions).filter(a => a.status === 'completed').length}
-                          </div>
-                          <div className="text-xs text-green-600 mt-1">Completed</div>
-                        </div>
-                        <div className="bg-blue-50 rounded-xl p-4 text-center">
-                          <div className="text-2xl font-bold text-blue-700">
-                            {Object.values(remediationActions).filter(a => a.status === 'acknowledged').length}
-                          </div>
-                          <div className="text-xs text-blue-600 mt-1">Acknowledged</div>
-                        </div>
-                      </div>
-
-                      {/* Remediation cards */}
-                      <div className="space-y-4">
-                        {remediationData.remediations.map((rem, idx) => (
-                          <RemediationCard
-                            key={rem.id}
-                            remediation={rem}
-                            index={idx}
-                            action={remediationActions[rem.id]}
-                            onAction={(status, notes) => handleRemediationAction(rem.id, status, notes)}
-                            onExecute={(actionType) => handleRemediationExecute(rem.id, actionType)}
-                            loading={actionLoading === rem.id}
-                            executing={executeLoading === rem.id}
-                          />
-                        ))}
-                      </div>
-                    </>
-                  )}
-                  <DataSource label="AuditGraph Remediation Engine" apiSource="Pattern-matched playbook library" collectedAt={data?.evidence?.collected_at} />
-                </div>
+                <RemediationTab
+                  remediationData={remediationData}
+                  remediationLoading={remediationLoading}
+                  remediationActions={remediationActions}
+                  actionLoading={actionLoading}
+                  executeLoading={executeLoading}
+                  handleRemediationAction={handleRemediationAction}
+                  handleRemediationExecute={handleRemediationExecute}
+                  data={data!}
+                />
               )}
 
-              {/* ─── Lifecycle Tab ─── */}
+              {/* ═══ LIFECYCLE TAB ═══ */}
               {activeTab === 'lifecycle' && (
-                <div className="space-y-6">
-                  {lifecycleLoading ? (
-                    <div className="animate-pulse space-y-4">
-                      <div className="h-20 bg-gray-100 rounded-xl" />
-                      {[1, 2, 3, 4].map(i => <div key={i} className="h-16 bg-gray-100 rounded-xl" />)}
-                    </div>
-                  ) : !lifecycleData || lifecycleData.total_events === 0 ? (
-                    <div className="text-center py-12">
-                      <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <div className="text-sm font-medium text-gray-600">No lifecycle events</div>
-                      <div className="text-xs text-gray-400 mt-1">Run multiple discovery scans to build a change timeline.</div>
-                    </div>
-                  ) : (
-                    <>
-                      {/* Summary bar */}
-                      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-                        <div className="bg-gray-50 rounded-xl p-3 text-center">
-                          <div className="text-xl font-bold text-gray-900">{lifecycleData.summary.total_runs_observed}</div>
-                          <div className="text-[10px] text-gray-500 mt-0.5">Runs Observed</div>
-                        </div>
-                        <div className="bg-gray-50 rounded-xl p-3 text-center">
-                          <div className="text-xl font-bold text-gray-900">{lifecycleData.total_events}</div>
-                          <div className="text-[10px] text-gray-500 mt-0.5">Total Events</div>
-                        </div>
-                        <div className="bg-red-50 rounded-xl p-3 text-center">
-                          <div className="text-xl font-bold text-red-700">{lifecycleData.summary.risk_changes}</div>
-                          <div className="text-[10px] text-red-600 mt-0.5">Risk Changes</div>
-                        </div>
-                        <div className="bg-orange-50 rounded-xl p-3 text-center">
-                          <div className="text-xl font-bold text-orange-700">{lifecycleData.summary.credential_events}</div>
-                          <div className="text-[10px] text-orange-600 mt-0.5">Credential Events</div>
-                        </div>
-                        <div className="bg-blue-50 rounded-xl p-3 text-center">
-                          <div className="text-xl font-bold text-blue-700">{lifecycleData.summary.access_changes}</div>
-                          <div className="text-[10px] text-blue-600 mt-0.5">Access Changes</div>
-                        </div>
-                        <div className="bg-purple-50 rounded-xl p-3 text-center">
-                          <div className="text-xl font-bold text-purple-700">{lifecycleData.summary.status_changes}</div>
-                          <div className="text-[10px] text-purple-600 mt-0.5">Status Changes</div>
-                        </div>
-                      </div>
-
-                      {/* Date range */}
-                      <div className="text-xs text-gray-500 flex items-center gap-2">
-                        <span>First seen: {lifecycleData.summary.first_seen ? new Date(lifecycleData.summary.first_seen).toLocaleDateString() : 'N/A'}</span>
-                        <span className="text-gray-300">|</span>
-                        <span>Last seen: {lifecycleData.summary.last_seen ? new Date(lifecycleData.summary.last_seen).toLocaleDateString() : 'N/A'}</span>
-                      </div>
-
-                      {/* Category filter */}
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {['all', 'risk', 'credential', 'access', 'lifecycle', 'activity', 'compliance'].map(cat => (
-                          <button
-                            key={cat}
-                            onClick={() => setLifecycleFilter(cat)}
-                            className={`px-3 py-1 rounded-lg text-xs font-medium border transition ${
-                              lifecycleFilter === cat
-                                ? 'bg-blue-600 text-white border-blue-600'
-                                : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-                            }`}
-                          >
-                            {cat === 'all' ? 'All' : cat.charAt(0).toUpperCase() + cat.slice(1)}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* Timeline */}
-                      <div className="relative">
-                        {/* Vertical line */}
-                        <div className="absolute left-[7px] top-2 bottom-2 w-0.5 bg-gray-200" />
-
-                        <div className="space-y-0">
-                          {(lifecycleData.events as any[])
-                            .filter((ev: any) => lifecycleFilter === 'all' || ev.category === lifecycleFilter)
-                            .map((ev: any, idx: number) => {
-                              const sevColors: Record<string, string> = {
-                                critical: 'bg-red-500',
-                                high: 'bg-orange-500',
-                                medium: 'bg-yellow-500',
-                                info: 'bg-blue-400',
-                              };
-                              const catBadge: Record<string, string> = {
-                                risk: 'bg-red-50 text-red-700',
-                                credential: 'bg-orange-50 text-orange-700',
-                                access: 'bg-blue-50 text-blue-700',
-                                lifecycle: 'bg-purple-50 text-purple-700',
-                                activity: 'bg-cyan-50 text-cyan-700',
-                                compliance: 'bg-green-50 text-green-700',
-                              };
-                              return (
-                                <div key={idx} className="flex items-start gap-4 py-3 group">
-                                  {/* Dot */}
-                                  <div className={`w-3.5 h-3.5 rounded-full flex-shrink-0 mt-0.5 ring-2 ring-white ${sevColors[ev.severity] || 'bg-gray-400'}`} />
-
-                                  {/* Content */}
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="text-sm font-medium text-gray-900">{ev.description}</span>
-                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${catBadge[ev.category] || 'bg-gray-100 text-gray-600'}`}>
-                                        {ev.category}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-400">
-                                      <span>{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : 'Unknown'}</span>
-                                      {ev.run_id && <span>Run #{ev.run_id}</span>}
-                                      {ev.previous_value && ev.current_value && (
-                                        <span className="font-mono text-gray-500">{ev.previous_value} &rarr; {ev.current_value}</span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          {(lifecycleData.events as any[]).filter((ev: any) => lifecycleFilter === 'all' || ev.category === lifecycleFilter).length === 0 && (
-                            <div className="text-center py-8 text-sm text-gray-400">No events in this category.</div>
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                  <DataSource label="AuditGraph Lifecycle Engine" apiSource="Cross-run identity snapshot comparison" collectedAt={data?.evidence?.collected_at} />
-                </div>
+                <LifecycleTab
+                  lifecycleData={lifecycleData}
+                  lifecycleLoading={lifecycleLoading}
+                  lifecycleFilter={lifecycleFilter}
+                  setLifecycleFilter={setLifecycleFilter}
+                  data={data!}
+                />
               )}
 
-              {/* ─── What If Simulation Tab ─── */}
+              {/* ═══ SIMULATE TAB ═══ */}
               {activeTab === 'simulate' && (
-                <div className="space-y-6">
-                  {/* Header */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-lg font-bold text-gray-900">What-If Risk Simulation</h3>
-                      <p className="text-xs text-gray-500 mt-0.5">Toggle roles and permissions to see how the risk score would change.</p>
-                    </div>
-                    <button onClick={resetSimulation} className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition">
-                      Reset
-                    </button>
-                  </div>
-
-                  {/* Score comparison cards */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-gray-50 rounded-xl p-4 border">
-                      <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Current</div>
-                      <div className="text-3xl font-bold text-gray-900">{simResult?.current?.risk_score ?? identity?.risk_score ?? '—'}</div>
-                      <div className="mt-1">{riskBadge(simResult?.current?.risk_level ?? identity?.risk_level)}</div>
-                    </div>
-                    <div className={`rounded-xl p-4 border ${simResult ? 'bg-blue-50 border-blue-200' : 'bg-gray-50'}`}>
-                      <div className="text-xs font-semibold text-blue-600 uppercase mb-1">Simulated</div>
-                      <div className="text-3xl font-bold text-gray-900">{simResult?.simulated?.risk_score ?? '—'}</div>
-                      {simResult && <div className="mt-1">{riskBadge(simResult.simulated.risk_level)}</div>}
-                      {!simResult && <div className="text-xs text-gray-400 mt-2">Click "Simulate" to compute</div>}
-                    </div>
-                    <div className={`rounded-xl p-4 border ${simResult ? (simResult.delta < 0 ? 'bg-green-50 border-green-200' : simResult.delta > 0 ? 'bg-red-50 border-red-200' : 'bg-gray-50') : 'bg-gray-50'}`}>
-                      <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Delta</div>
-                      {simResult ? (
-                        <>
-                          <div className={`text-3xl font-bold ${simResult.delta < 0 ? 'text-green-700' : simResult.delta > 0 ? 'text-red-700' : 'text-gray-500'}`}>
-                            {simResult.delta > 0 ? '+' : ''}{simResult.delta}
-                          </div>
-                          <div className="text-xs text-gray-500 mt-1">{simResult.level_change}</div>
-                        </>
-                      ) : (
-                        <div className="text-3xl font-bold text-gray-300">—</div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Roles section */}
-                  <div className="border rounded-xl overflow-hidden">
-                    <div className="bg-gray-50 px-4 py-3 border-b flex items-center justify-between">
-                      <div className="text-sm font-semibold text-gray-700">Roles ({(data?.roles?.length || 0) + simAddedRoles.length - simRemovedRoles.size} active)</div>
-                      <button
-                        onClick={() => setSimAddRoleOpen(!simAddRoleOpen)}
-                        className="px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
-                      >
-                        + Add Role
-                      </button>
-                    </div>
-                    <div className="divide-y max-h-64 overflow-y-auto">
-                      {(data?.roles || []).map((r: any, idx: number) => {
-                        const key = r.role_name || `role-${idx}`;
-                        const removed = simRemovedRoles.has(key);
-                        return (
-                          <label key={`existing-${idx}`} className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition ${removed ? 'opacity-50 line-through' : ''}`}>
-                            <input
-                              type="checkbox"
-                              checked={!removed}
-                              onChange={() => {
-                                setSimRemovedRoles(prev => {
-                                  const next = new Set(prev);
-                                  if (next.has(key)) next.delete(key); else next.add(key);
-                                  return next;
-                                });
-                                setSimResult(null);
-                              }}
-                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                            />
-                            <div className="flex-1 min-w-0">
-                              <span className="text-sm text-gray-900">{r.role_name}</span>
-                              <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                safeLower(r.role_type) === 'entra' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
-                              }`}>
-                                {(r.role_type || 'azure').toUpperCase()}
-                              </span>
-                              {r.scope && <span className="ml-1 text-[10px] text-gray-400 font-mono truncate">{r.scope}</span>}
-                            </div>
-                            {removed && <span className="text-xs font-medium text-red-500">removed</span>}
-                          </label>
-                        );
-                      })}
-                      {simAddedRoles.map((r, idx) => (
-                        <div key={`added-${idx}`} className="flex items-center gap-3 px-4 py-2.5 bg-green-50">
-                          <div className="w-4 h-4 rounded bg-green-500 flex items-center justify-center">
-                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
-                            </svg>
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <span className="text-sm text-green-800 font-medium">{r.role_name}</span>
-                            <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                              r.role_type === 'entra' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
-                            }`}>
-                              {r.role_type.toUpperCase()}
-                            </span>
-                            <span className="ml-1 text-[10px] text-gray-400">{r.scope_type}</span>
-                          </div>
-                          <button
-                            onClick={() => { setSimAddedRoles(prev => prev.filter((_, i) => i !== idx)); setSimResult(null); }}
-                            className="text-xs text-red-500 hover:text-red-700 font-medium"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      ))}
-                      {(data?.roles?.length || 0) === 0 && simAddedRoles.length === 0 && (
-                        <div className="px-4 py-6 text-center text-sm text-gray-400">No roles assigned</div>
-                      )}
-                    </div>
-                    {simAddRoleOpen && (
-                      <div className="border-t bg-blue-50 px-4 py-3">
-                        <div className="flex items-end gap-2">
-                          <div className="flex-1">
-                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Role Name</label>
-                            <input
-                              type="text"
-                              value={simNewRole.role_name}
-                              onChange={e => setSimNewRole(prev => ({...prev, role_name: e.target.value}))}
-                              placeholder="e.g. Reader, Contributor"
-                              className="w-full px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Type</label>
-                            <select
-                              value={simNewRole.role_type}
-                              onChange={e => setSimNewRole(prev => ({...prev, role_type: e.target.value}))}
-                              className="px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            >
-                              <option value="azure">Azure RBAC</option>
-                              <option value="entra">Entra ID</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Scope</label>
-                            <select
-                              value={simNewRole.scope_type}
-                              onChange={e => setSimNewRole(prev => ({...prev, scope_type: e.target.value}))}
-                              className="px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            >
-                              <option value="subscription">Subscription</option>
-                              <option value="resource_group">Resource Group</option>
-                              <option value="resource">Resource</option>
-                              <option value="management_group">Management Group</option>
-                            </select>
-                          </div>
-                          <button
-                            onClick={() => {
-                              if (!simNewRole.role_name.trim()) return;
-                              setSimAddedRoles(prev => [...prev, {...simNewRole}]);
-                              setSimNewRole({role_name: '', role_type: 'azure', scope_type: 'subscription'});
-                              setSimAddRoleOpen(false);
-                              setSimResult(null);
-                            }}
-                            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
-                          >
-                            Add
-                          </button>
-                          <button
-                            onClick={() => setSimAddRoleOpen(false)}
-                            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Permissions section */}
-                  <div className="border rounded-xl overflow-hidden">
-                    <div className="bg-gray-50 px-4 py-3 border-b flex items-center justify-between">
-                      <div className="text-sm font-semibold text-gray-700">Graph API Permissions ({(data?.graph_permissions?.length || 0) + simAddedPerms.length - simRemovedPerms.size} active)</div>
-                      <button
-                        onClick={() => setSimAddPermOpen(!simAddPermOpen)}
-                        className="px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
-                      >
-                        + Add Permission
-                      </button>
-                    </div>
-                    <div className="divide-y max-h-48 overflow-y-auto">
-                      {(data?.graph_permissions || []).map((p: any, idx: number) => {
-                        const key = p.permission_name || `perm-${idx}`;
-                        const removed = simRemovedPerms.has(key);
-                        return (
-                          <label key={`existing-perm-${idx}`} className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition ${removed ? 'opacity-50 line-through' : ''}`}>
-                            <input
-                              type="checkbox"
-                              checked={!removed}
-                              onChange={() => {
-                                setSimRemovedPerms(prev => {
-                                  const next = new Set(prev);
-                                  if (next.has(key)) next.delete(key); else next.add(key);
-                                  return next;
-                                });
-                                setSimResult(null);
-                              }}
-                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                            />
-                            <div className="flex-1 min-w-0">
-                              <span className="text-sm text-gray-900 font-mono">{p.permission_name}</span>
-                              {p.consent_type && (
-                                <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                  p.consent_type === 'Application' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {p.consent_type}
-                                </span>
-                              )}
-                            </div>
-                            {removed && <span className="text-xs font-medium text-red-500">removed</span>}
-                          </label>
-                        );
-                      })}
-                      {simAddedPerms.map((p, idx) => (
-                        <div key={`added-perm-${idx}`} className="flex items-center gap-3 px-4 py-2.5 bg-green-50">
-                          <div className="w-4 h-4 rounded bg-green-500 flex items-center justify-center">
-                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
-                            </svg>
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <span className="text-sm text-green-800 font-medium font-mono">{p.permission_name}</span>
-                            <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                              p.risk_level === 'high' ? 'bg-red-100 text-red-700' : p.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'
-                            }`}>
-                              {p.risk_level}
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => { setSimAddedPerms(prev => prev.filter((_, i) => i !== idx)); setSimResult(null); }}
-                            className="text-xs text-red-500 hover:text-red-700 font-medium"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      ))}
-                      {(data?.graph_permissions?.length || 0) === 0 && simAddedPerms.length === 0 && (
-                        <div className="px-4 py-6 text-center text-sm text-gray-400">No Graph API permissions</div>
-                      )}
-                    </div>
-                    {simAddPermOpen && (
-                      <div className="border-t bg-blue-50 px-4 py-3">
-                        <div className="flex items-end gap-2">
-                          <div className="flex-1">
-                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Permission Name</label>
-                            <input
-                              type="text"
-                              value={simNewPerm.permission_name}
-                              onChange={e => setSimNewPerm(prev => ({...prev, permission_name: e.target.value}))}
-                              placeholder="e.g. Mail.Read, Files.ReadWrite.All"
-                              className="w-full px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-medium text-gray-600 block mb-1">Risk Level</label>
-                            <select
-                              value={simNewPerm.risk_level}
-                              onChange={e => setSimNewPerm(prev => ({...prev, risk_level: e.target.value}))}
-                              className="px-2.5 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            >
-                              <option value="high">High (Write/ReadWrite)</option>
-                              <option value="medium">Medium (Read)</option>
-                              <option value="low">Low</option>
-                            </select>
-                          </div>
-                          <button
-                            onClick={() => {
-                              if (!simNewPerm.permission_name.trim()) return;
-                              setSimAddedPerms(prev => [...prev, {...simNewPerm}]);
-                              setSimNewPerm({permission_name: '', risk_level: 'medium'});
-                              setSimAddPermOpen(false);
-                              setSimResult(null);
-                            }}
-                            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
-                          >
-                            Add
-                          </button>
-                          <button
-                            onClick={() => setSimAddPermOpen(false)}
-                            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Simulate button */}
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={runSimulation}
-                      disabled={simulating}
-                      className="px-6 py-2.5 rounded-xl font-semibold text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition flex items-center gap-2"
-                    >
-                      {simulating ? (
-                        <>
-                          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
-                            <path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" fill="currentColor" className="opacity-75" />
-                          </svg>
-                          Simulating...
-                        </>
-                      ) : (
-                        <>
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                          </svg>
-                          Simulate
-                        </>
-                      )}
-                    </button>
-                    {(simRemovedRoles.size > 0 || simAddedRoles.length > 0 || simRemovedPerms.size > 0 || simAddedPerms.length > 0) && !simResult && (
-                      <span className="text-xs text-amber-600 font-medium">
-                        {simRemovedRoles.size + simRemovedPerms.size} removed, {simAddedRoles.length + simAddedPerms.length} added — click Simulate to see impact
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Risk reasons comparison */}
-                  {simResult && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="border rounded-xl p-4">
-                        <div className="text-xs font-semibold text-gray-500 uppercase mb-2">Current Risk Reasons</div>
-                        <div className="space-y-1.5">
-                          {(simResult.current.risk_reasons || []).map((r, i) => {
-                            const isRemoved = (simResult.removed_reasons || []).includes(r);
-                            return (
-                              <div key={i} className={`text-xs px-2 py-1.5 rounded ${isRemoved ? 'bg-red-50 text-red-700 line-through' : 'bg-gray-50 text-gray-700'}`}>
-                                {r}
-                                {isRemoved && <span className="ml-1 font-semibold text-red-500 no-underline">(removed)</span>}
-                              </div>
-                            );
-                          })}
-                          {(simResult.current.risk_reasons || []).length === 0 && (
-                            <div className="text-xs text-gray-400">No risk factors</div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="border rounded-xl p-4 border-blue-200">
-                        <div className="text-xs font-semibold text-blue-600 uppercase mb-2">Simulated Risk Reasons</div>
-                        <div className="space-y-1.5">
-                          {(simResult.simulated.risk_reasons || []).map((r, i) => {
-                            const isNew = (simResult.added_reasons || []).includes(r);
-                            return (
-                              <div key={i} className={`text-xs px-2 py-1.5 rounded ${isNew ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-700'}`}>
-                                {r}
-                                {isNew && <span className="ml-1 font-semibold text-green-600">(new)</span>}
-                              </div>
-                            );
-                          })}
-                          {(simResult.simulated.risk_reasons || []).length === 0 && (
-                            <div className="text-xs text-gray-400">No risk factors</div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  <DataSource label="AuditGraph Risk Simulation" apiSource="What-if analysis engine (no changes applied)" collectedAt={data?.evidence?.collected_at} />
-                </div>
+                <SimulateTab
+                  identity={identity}
+                  data={data!}
+                  simRemovedRoles={simRemovedRoles}
+                  setSimRemovedRoles={setSimRemovedRoles}
+                  simRemovedPerms={simRemovedPerms}
+                  setSimRemovedPerms={setSimRemovedPerms}
+                  simAddedRoles={simAddedRoles}
+                  setSimAddedRoles={setSimAddedRoles}
+                  simAddedPerms={simAddedPerms}
+                  setSimAddedPerms={setSimAddedPerms}
+                  simResult={simResult}
+                  setSimResult={setSimResult}
+                  simulating={simulating}
+                  simAddRoleOpen={simAddRoleOpen}
+                  setSimAddRoleOpen={setSimAddRoleOpen}
+                  simAddPermOpen={simAddPermOpen}
+                  setSimAddPermOpen={setSimAddPermOpen}
+                  simNewRole={simNewRole}
+                  setSimNewRole={setSimNewRole}
+                  simNewPerm={simNewPerm}
+                  setSimNewPerm={setSimNewPerm}
+                  runSimulation={runSimulation}
+                  resetSimulation={resetSimulation}
+                />
               )}
 
+              {/* ═══ ENTRA GROUPS TAB ═══ */}
+              {activeTab === 'entra_groups' && <EntraGroupsTab identityId={id!} riskLevel={identity.risk_level} />}
+
+              {/* ═══ SENSITIVE ACCESS TAB ═══ */}
+              {activeTab === 'sensitive_access' && <SensitiveAccessTab identityId={id!} roleBasedFallback={(data as any)?.sensitive_access_from_roles} identityCategory={identity.identity_category} />}
+
+              {/* ═══ ATTACK PATHS TAB ═══ */}
+              {activeTab === 'attack_paths' && <AttackPathsTab identityId={id!} />}
+
+              {/* ═══ TIMELINE TAB ═══ */}
               {activeTab === 'timeline' && <TimelineTab identityId={id!} />}
+
             </div>
           </div>
         </>
-      )}
-    </div>
-  );
-}
-
-/* ═══ Remediation Card Component ═══ */
-
-const STATUS_COLORS: Record<RemediationStatus, string> = {
-  open: 'bg-gray-100 text-gray-600',
-  acknowledged: 'bg-blue-100 text-blue-700',
-  completed: 'bg-green-100 text-green-700',
-  skipped: 'bg-yellow-100 text-yellow-700',
-};
-
-const STATUS_LABELS: Record<RemediationStatus, string> = {
-  open: 'Open',
-  acknowledged: 'Acknowledged',
-  completed: 'Completed',
-  skipped: 'Skipped',
-};
-
-function RemediationCard({
-  remediation,
-  index,
-  action,
-  onAction,
-  onExecute,
-  loading,
-  executing,
-}: {
-  remediation: RemediationItem;
-  index: number;
-  action?: RemediationAction;
-  onAction: (status: RemediationStatus, notes?: string) => void;
-  onExecute: (actionType: string) => void;
-  loading: boolean;
-  executing: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  const currentStatus: RemediationStatus = action?.status || 'open';
-
-  const impactColors: Record<string, string> = {
-    critical: 'bg-red-100 text-red-700',
-    high: 'bg-orange-100 text-orange-700',
-    medium: 'bg-yellow-100 text-yellow-700',
-    low: 'bg-green-100 text-green-700',
-  };
-
-  const effortColors: Record<string, string> = {
-    low: 'bg-green-100 text-green-700',
-    medium: 'bg-yellow-100 text-yellow-700',
-    high: 'bg-red-100 text-red-700',
-  };
-
-  const categoryLabels: Record<string, string> = {
-    access_control: 'Access Control',
-    credential_hygiene: 'Credential Hygiene',
-    governance: 'Governance',
-    monitoring: 'Monitoring',
-  };
-
-  // Contextual action buttons based on current status
-  const availableActions: { status: RemediationStatus; label: string; color: string }[] = [];
-  if (currentStatus === 'open') {
-    availableActions.push(
-      { status: 'acknowledged', label: 'Acknowledge', color: 'bg-blue-600 hover:bg-blue-700 text-white' },
-      { status: 'completed', label: 'Mark Complete', color: 'bg-green-600 hover:bg-green-700 text-white' },
-      { status: 'skipped', label: 'Skip', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
-    );
-  } else if (currentStatus === 'acknowledged') {
-    availableActions.push(
-      { status: 'completed', label: 'Mark Complete', color: 'bg-green-600 hover:bg-green-700 text-white' },
-      { status: 'skipped', label: 'Skip', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
-      { status: 'open', label: 'Reopen', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
-    );
-  } else if (currentStatus === 'completed') {
-    availableActions.push(
-      { status: 'open', label: 'Reopen', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
-    );
-  } else if (currentStatus === 'skipped') {
-    availableActions.push(
-      { status: 'open', label: 'Reopen', color: 'bg-gray-200 hover:bg-gray-300 text-gray-700' },
-    );
-  }
-
-  return (
-    <div className={`border rounded-xl overflow-hidden hover:shadow-md transition ${currentStatus === 'completed' ? 'opacity-60' : ''}`}>
-      {/* Header — always visible */}
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full text-left bg-white px-5 py-4 flex items-start justify-between gap-4"
-      >
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-xs font-bold text-gray-400">P{index + 1}</span>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${impactColors[remediation.impact] || 'bg-gray-100 text-gray-600'}`}>
-              {remediation.impact}
-            </span>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${effortColors[remediation.effort] || 'bg-gray-100 text-gray-600'}`}>
-              {remediation.effort} effort
-            </span>
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700">
-              {categoryLabels[remediation.category] || remediation.category}
-            </span>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_COLORS[currentStatus]}`}>
-              {STATUS_LABELS[currentStatus]}
-            </span>
-          </div>
-          <div className="font-semibold text-sm text-gray-900">{remediation.title}</div>
-          <div className="text-xs text-gray-500 mt-1 line-clamp-1">{remediation.description}</div>
-        </div>
-        <svg className={`w-5 h-5 text-gray-400 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {/* Expandable content */}
-      {expanded && (
-        <div className="border-t bg-gray-50 px-5 py-4 space-y-4">
-          <div className="text-xs text-gray-700">{remediation.description}</div>
-
-          {/* Step-by-step instructions */}
-          <div>
-            <div className="text-xs font-semibold text-gray-700 mb-2">Step-by-Step Remediation</div>
-            <ol className="space-y-2">
-              {remediation.steps.map((step, sIdx) => (
-                <li key={sIdx} className="flex gap-3 text-xs text-gray-700">
-                  <span className="flex-shrink-0 w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-[10px]">
-                    {sIdx + 1}
-                  </span>
-                  <span className="pt-0.5">{step}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-
-          {/* Compliance references */}
-          {remediation.compliance_refs.length > 0 && (
-            <div>
-              <div className="text-xs font-semibold text-gray-700 mb-1.5">Compliance References</div>
-              <div className="flex flex-wrap gap-1.5">
-                {remediation.compliance_refs.map((ref, rIdx) => (
-                  <span key={rIdx} className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-50 text-purple-700 border border-purple-200">
-                    {ref}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Execution result */}
-          {action?.execution_status && (
-            <div className={`border rounded-lg p-3 ${
-              action.execution_status === 'success' ? 'bg-green-50 border-green-200' :
-              action.execution_status === 'simulated' ? 'bg-amber-50 border-amber-200' :
-              'bg-red-50 border-red-200'
-            }`}>
-              <div className="flex items-center gap-2">
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
-                  action.execution_status === 'success' ? 'bg-green-200 text-green-800' :
-                  action.execution_status === 'simulated' ? 'bg-amber-200 text-amber-800' :
-                  'bg-red-200 text-red-800'
-                }`}>
-                  {action.execution_status}
-                </span>
-                {action.execution_log?.action_type && (
-                  <span className="text-[10px] text-gray-500">{action.execution_log.action_type.replace(/_/g, ' ')}</span>
-                )}
-                {action.executed_at && (
-                  <span className="text-[10px] text-gray-400 ml-auto">
-                    {new Date(action.executed_at).toLocaleString()}
-                  </span>
-                )}
-              </div>
-              {action.execution_log?.detail && (
-                <p className="text-xs text-gray-600 mt-1">{action.execution_log.detail}</p>
-              )}
-            </div>
-          )}
-
-          {/* Action buttons */}
-          <div className="border-t pt-3">
-            <div className="flex items-center gap-2 flex-wrap">
-              {availableActions.map(btn => (
-                <button
-                  key={btn.status}
-                  onClick={(e) => { e.stopPropagation(); onAction(btn.status); }}
-                  disabled={loading}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${btn.color} disabled:opacity-50`}
-                >
-                  {loading ? 'Updating...' : btn.label}
-                </button>
-              ))}
-
-              {/* Execute dropdown */}
-              {currentStatus !== 'completed' && currentStatus !== 'skipped' && !action?.execution_status && (
-                <>
-                  <span className="text-gray-300 mx-1">|</span>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onExecute('flag_for_review'); }}
-                    disabled={executing}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-50"
-                  >
-                    {executing ? 'Executing...' : 'Flag for Review'}
-                  </button>
-                  {(remediation.category === 'governance') && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); if (window.confirm('This will simulate disabling the identity. Continue?')) onExecute('disable_identity'); }}
-                      disabled={executing}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
-                    >
-                      {executing ? 'Executing...' : 'Disable Identity'}
-                    </button>
-                  )}
-                  {(remediation.category === 'credential_hygiene') && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); if (window.confirm('This will simulate credential rotation. Continue?')) onExecute('rotate_credential'); }}
-                      disabled={executing}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-orange-600 hover:bg-orange-700 text-white disabled:opacity-50"
-                    >
-                      {executing ? 'Executing...' : 'Rotate Credential'}
-                    </button>
-                  )}
-                  {(remediation.category === 'access_control') && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); if (window.confirm('This will simulate role removal. Continue?')) onExecute('remove_role'); }}
-                      disabled={executing}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium transition bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
-                    >
-                      {executing ? 'Executing...' : 'Remove Role'}
-                    </button>
-                  )}
-                </>
-              )}
-
-              {action?.updated_at && (
-                <span className="text-[10px] text-gray-400 ml-auto">
-                  Updated {new Date(action.updated_at).toLocaleString()}
-                </span>
-              )}
-            </div>
-            {action?.notes && (
-              <div className="mt-2 text-[10px] text-gray-500 bg-white rounded p-2 border">
-                {action.notes}
-              </div>
-            )}
-          </div>
-
-          {/* Matched reason */}
-          <div className="text-[10px] text-gray-400 italic">
-            Matched: {remediation.matched_reason}
-          </div>
-        </div>
       )}
     </div>
   );
@@ -2726,6 +1148,181 @@ const EVENT_LABELS: Record<string, string> = {
   soar_action: 'SOAR Action',
   remediation: 'Remediation',
 };
+
+const SENS_CLASS_COLORS: Record<string, { bg: string; fg: string }> = {
+  PHI: { bg: 'rgba(239,68,68,0.12)', fg: '#F87171' },
+  PCI: { bg: 'rgba(251,191,36,0.12)', fg: '#FBBF24' },
+  PII: { bg: 'rgba(96,165,250,0.12)', fg: '#60A5FA' },
+};
+
+function SensitiveAccessTab({ identityId, roleBasedFallback, identityCategory }: { identityId: string; roleBasedFallback?: Array<{ role: string; scope: string; description: string; sensitivity: string }>; identityCategory?: string }) {
+  const { withConnection } = useConnection();
+  const navigate = useNavigate();
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(withConnection(`/api/identities/${identityId}/sensitive-access`));
+        if (res.ok) setData(await res.json());
+      } catch { /* ignore */ }
+      setLoading(false);
+    })();
+  }, [identityId, withConnection]);
+
+  if (loading) return <div className="p-8 text-center text-gray-500">Loading sensitive access data...</div>;
+  if (!data || !data.sensitive_resources || data.sensitive_resources.length === 0) {
+    // Role-based fallback: show sensitive roles even without classified resources
+    if (roleBasedFallback && roleBasedFallback.length > 0) {
+      const sensColor: Record<string, string> = {
+        High: 'bg-red-100 text-red-700',
+        Medium: 'bg-orange-100 text-orange-700',
+      };
+      return (
+        <div className="p-6">
+          <div className="text-xs text-gray-400 uppercase tracking-wider font-semibold mb-3">Sensitive Access (Role-Based Analysis)</div>
+          <div className="text-xs text-gray-500 mb-4">No classified resources found, but this identity holds roles that grant access to sensitive resource types.</div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Role</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Scope</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Implication</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Sensitivity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {roleBasedFallback.map((r, i) => (
+                <tr key={i} className="border-b">
+                  <td className="px-4 py-3 font-medium text-gray-900">{r.role}</td>
+                  <td className="px-4 py-3 text-gray-600 text-xs font-mono truncate max-w-[200px]" title={r.scope}>{r.scope || '—'}</td>
+                  <td className="px-4 py-3 text-gray-600 text-xs">{r.description}</td>
+                  <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded text-xs font-semibold ${sensColor[r.sensitivity] || 'bg-gray-100 text-gray-600'}`}>{r.sensitivity}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    return (
+      <div className="p-8 text-center">
+        <div className="text-gray-400 text-lg mb-2">No Sensitive Access Detected</div>
+        <div className="text-gray-500 text-sm">
+          This identity does not have RBAC access to any classified resources and holds no roles matching sensitive patterns.
+          <br />
+          <button onClick={() => navigate('/data-security')} className="text-blue-500 mt-2 text-sm cursor-pointer hover:opacity-80">
+            Classify resources in Data Security
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const br = data.blast_radius || {};
+  const resources = data.sensitive_resources;
+  const isHuman = identityCategory === 'human_user' || identityCategory === 'guest';
+  const phiCount = (br.by_classification || {}).PHI || 0;
+  const pciCount = (br.by_classification || {}).PCI || 0;
+  const piiCount = (br.by_classification || {}).PII || 0;
+
+  return (
+    <div className="p-6">
+      {/* Human user summary callout */}
+      {isHuman && (br.total_sensitive || 0) > 0 && (
+        <div className="border-l-4 border-l-amber-400 bg-amber-50 rounded-r-lg p-4 mb-6">
+          <div className="text-sm text-amber-800">
+            This human user has direct access to <span className="font-bold">{br.total_sensitive}</span> sensitive resources
+            {(phiCount > 0 || pciCount > 0 || piiCount > 0) && (
+              <> including {phiCount > 0 && <><span className="font-bold">{phiCount}</span> PHI</>}{phiCount > 0 && (pciCount > 0 || piiCount > 0) ? ', ' : ''}{pciCount > 0 && <><span className="font-bold">{pciCount}</span> PCI</>}{pciCount > 0 && piiCount > 0 ? ', and ' : ''}{piiCount > 0 && <><span className="font-bold">{piiCount}</span> PII</>} classified assets</>
+            )}.
+            Per HIPAA §164.312, access should be reviewed quarterly.
+          </div>
+        </div>
+      )}
+
+      {/* Blast Radius Summary */}
+      <div className="grid grid-cols-4 gap-3 mb-6">
+        <div className="rounded-lg p-4" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+          <div className="text-2xl font-bold font-mono" style={{ color: '#F87171' }}>{br.total_sensitive || 0}</div>
+          <div className="text-xs text-gray-500">Sensitive Resources</div>
+        </div>
+        {(['PHI', 'PCI', 'PII'] as const).map(cls => {
+          const count = (br.by_classification || {})[cls] || 0;
+          const c = SENS_CLASS_COLORS[cls];
+          return (
+            <div key={cls} className="rounded-lg p-4" style={{ background: c.bg, border: `1px solid ${c.fg}33` }}>
+              <div className="text-2xl font-bold font-mono" style={{ color: c.fg }}>{count}</div>
+              <div className="text-xs text-gray-500">{cls} Resources</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Access Table */}
+      <div className="bg-white rounded-lg border overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b">
+              {['Resource', 'Type', 'Classification', 'Access Level', 'Role', 'Access Source', 'Risk'].map(h => (
+                <th key={h} className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {resources.map((r: any, i: number) => (
+              <tr key={i} className="border-b hover:bg-gray-50 cursor-pointer"
+                onClick={() => navigate(`/resources/detail?rid=${encodeURIComponent(r.resource_path)}`)}>
+                <td className="px-4 py-3 font-medium">{r.resource_name}</td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-medium"
+                    style={{
+                      background: r.resource_type === 'storage_account' ? 'rgba(59,130,246,0.12)' : 'rgba(139,92,246,0.12)',
+                      color: r.resource_type === 'storage_account' ? '#60A5FA' : '#A78BFA',
+                    }}>
+                    {r.resource_type === 'storage_account' ? 'Storage' : 'Key Vault'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-bold font-mono"
+                    style={{
+                      background: SENS_CLASS_COLORS[r.classification]?.bg || 'rgba(255,255,255,0.06)',
+                      color: SENS_CLASS_COLORS[r.classification]?.fg || '#999',
+                    }}>
+                    {r.classification}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-semibold"
+                    style={{
+                      background: r.access_level === 'Admin' ? 'rgba(239,68,68,0.12)' : r.access_level === 'Write' ? 'rgba(251,191,36,0.12)' : 'rgba(96,165,250,0.12)',
+                      color: r.access_level === 'Admin' ? '#F87171' : r.access_level === 'Write' ? '#FBBF24' : '#60A5FA',
+                    }}>
+                    {r.access_level}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-gray-600 text-xs">{r.role_name}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs capitalize">{r.access_source?.replace('_', ' ')}</td>
+                <td className="px-4 py-3">
+                  <span className="px-2 py-0.5 rounded text-xs font-bold uppercase"
+                    style={{
+                      background: r.resource_risk_level === 'critical' ? 'rgba(255,23,68,0.12)' : r.resource_risk_level === 'high' ? 'rgba(255,109,0,0.12)' : 'rgba(255,179,0,0.12)',
+                      color: r.resource_risk_level === 'critical' ? '#FF1744' : r.resource_risk_level === 'high' ? '#FF6D00' : '#FFB300',
+                    }}>
+                    {r.resource_risk_level}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 function TimelineTab({ identityId }: { identityId: string }) {
   const { withConnection } = useConnection();
@@ -2825,8 +1422,8 @@ function TimelineTab({ identityId }: { identityId: string }) {
       {/* Timeline */}
       {events.length === 0 ? (
         <div className="bg-gray-50 border rounded-xl p-8 text-center">
-          <div className="text-sm text-gray-500 font-medium">No events recorded for this identity</div>
-          <div className="text-xs text-gray-400 mt-1">Events will appear here as they are detected</div>
+          <div className="text-sm text-gray-500 font-medium">No timeline events detected yet</div>
+          <div className="text-xs text-gray-400 mt-1">Anomalies, PIM activations, risk changes, and drift events will appear here after the next discovery scan.</div>
         </div>
       ) : (
         <div className="relative">
@@ -2881,6 +1478,167 @@ function TimelineTab({ identityId }: { identityId: string }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ═══ Attack Paths Tab Component ═══ */
+
+const AP_TIER_BADGE: Record<string, string> = {
+  CRITICAL: 'bg-red-100 text-red-700',
+  HIGH: 'bg-orange-100 text-orange-700',
+  MEDIUM: 'bg-yellow-100 text-yellow-700',
+  LOW: 'bg-blue-100 text-blue-700',
+};
+
+function AttackPathsTab({ identityId }: { identityId: string }) {
+  const { withConnection } = useConnection();
+  const navigate = useNavigate();
+  const [paths, setPaths] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/api/identities/${identityId}/persisted-attack-paths?${withConnection('')}`)
+      .then(r => r.ok ? r.json() : { paths: [] })
+      .then(d => setPaths(d.paths || d.attack_paths || []))
+      .finally(() => setLoading(false));
+  }, [identityId, withConnection]);
+
+  // TEMP diagnostic — remove after field rendering is verified in the browser.
+  useEffect(() => {
+    if (paths.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log('ATTACK_PATH_KEYS:', Object.keys(paths[0]));
+      // eslint-disable-next-line no-console
+      console.log('ATTACK_PATH_SAMPLE:', JSON.stringify(paths[0], null, 2));
+    }
+  }, [paths]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full" />
+      </div>
+    );
+  }
+
+  if (paths.length === 0) {
+    return (
+      <div className="text-center py-16 text-sm text-gray-500">
+        No attack paths found for this identity.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-gray-900">{paths.length} Attack Path{paths.length !== 1 ? 's' : ''}</h3>
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b text-left">
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Path</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Target</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Severity</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Score</th>
+            <th className="px-4 py-2 text-xs font-medium text-gray-500">Indicators</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paths.map((p: any) => {
+            // Canonical field resolution — read keys defensively with fallback chains.
+            const pathSource =
+              p.source_entity_name ||
+              p.highest_role ||
+              p.source_entity_type ||
+              p.path_type ||
+              '—';
+
+            // target_resource_name is not a stored column; derive from
+            // path_nodes[-1].name/label/id or fall back to target_resource_id.
+            let pathTarget: string = '—';
+            if (p.target_resource_name) {
+              pathTarget = p.target_resource_name;
+            } else if (Array.isArray(p.path_nodes) && p.path_nodes.length > 0) {
+              const tail = p.path_nodes[p.path_nodes.length - 1] || {};
+              pathTarget = tail.name || tail.label || tail.id || p.target_resource_id || p.target_resource_type || p.highest_scope_level || '—';
+            } else {
+              pathTarget = p.target_resource_id || p.target_resource_type || p.highest_scope_level || '—';
+            }
+
+            const pathSeverity = (
+              p.path_risk_tier ||
+              p.risk_tier ||
+              p.severity ||
+              '—'
+            ).toUpperCase();
+
+            const pathScore =
+              (p.path_risk_score ?? p.risk_score ?? p.blast_radius_score ?? p.exploitability ?? 0) as number;
+
+            const pathFlags: string[] = [
+              p.has_keyvault_access && 'Key Vault',
+              p.has_subscription_scope && 'Subscription scope',
+              p.has_no_owner && 'No owner',
+              p.has_expired_credentials && 'Expired creds',
+            ].filter(Boolean) as string[];
+
+            // privilege_chain — may be array, string, or derived from path_nodes
+            let chainSteps: string | null = null;
+            if (Array.isArray(p.privilege_chain)) {
+              chainSteps = p.privilege_chain.join(' → ');
+            } else if (typeof p.privilege_chain === 'string' && p.privilege_chain) {
+              chainSteps = p.privilege_chain;
+            } else if (Array.isArray(p.path_nodes) && p.path_nodes.length > 1) {
+              chainSteps = p.path_nodes
+                .map((n: any) => n.name || n.label || n.id || n.type)
+                .filter(Boolean)
+                .join(' → ');
+            }
+
+            const pathDescription = p.description || chainSteps || null;
+
+            return (
+              <tr
+                key={p.id}
+                onClick={() => navigate(`/attack-paths/${p.id}`)}
+                className="border-b cursor-pointer hover:bg-gray-50 transition-colors"
+              >
+                <td className="px-4 py-3 text-gray-900 align-top">
+                  <div className="font-medium">{pathSource}</div>
+                  {pathDescription && (
+                    <div className="text-xs text-gray-500 mt-0.5 line-clamp-2">{pathDescription}</div>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-gray-600 align-top">{pathTarget}</td>
+                <td className="px-4 py-3 align-top">
+                  <span className={`px-2 py-0.5 rounded text-xs font-semibold ${AP_TIER_BADGE[pathSeverity] || 'bg-gray-100 text-gray-600'}`}>
+                    {pathSeverity}
+                  </span>
+                </td>
+                <td className="px-4 py-3 font-mono text-xs align-top">
+                  {pathScore > 0 ? pathScore : 'Computing'}
+                </td>
+                <td className="px-4 py-3 align-top">
+                  <div className="flex flex-wrap gap-1">
+                    {pathFlags.length > 0
+                      ? pathFlags.map((f) => (
+                          <span
+                            key={f}
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200"
+                          >
+                            {f}
+                          </span>
+                        ))
+                      : <span className="text-xs text-gray-400">—</span>}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

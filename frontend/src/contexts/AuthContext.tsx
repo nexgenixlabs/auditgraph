@@ -1,15 +1,19 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { isAdminHost } from '../utils/hostDetection';
 
 interface User {
   id: number;
   username: string;
   display_name: string;
-  role: 'admin' | 'security_admin' | 'compliance' | 'reader';
-  tenant_id?: number;
-  tenant_name?: string;
+  role: 'admin' | 'security_admin' | 'security_analyst' | 'compliance' | 'reader';
+  organization_id?: number;
+  org_name?: string;
   is_superadmin?: boolean;
   portal_role?: 'superadmin' | 'poweradmin' | 'billing' | 'reader' | null;
   force_password_change?: boolean;
+  is_demo?: boolean;
+  impersonating?: boolean;
+  impersonator_username?: string;
 }
 
 type PortalContext = 'admin' | 'client';
@@ -18,7 +22,7 @@ interface AuthContextValue {
   user: User | null;
   loading: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  login: (username: string, password: string, tenantSlug?: string, portal?: PortalContext) => Promise<any>;
+  login: (username: string, password: string, tenantSlug?: string) => Promise<any>;
   loginWithSsoCode: (code: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
@@ -29,9 +33,22 @@ interface AuthContextValue {
   canSeePricing: boolean;
   canManageConnections: boolean;
   canManageUsers: boolean;
-  activeTenantId: number | null;
-  activeTenantName: string | null;
-  switchTenant: (tenantId: number | null, tenantName?: string) => void;
+  canManageSettings: boolean;
+  canExportData: boolean;
+  canManageRemediation: boolean;
+  canManageFindings: boolean;
+  canRunSimulations: boolean;
+  canViewCompliance: boolean;
+  canTriggerScans: boolean;
+  isDemo: boolean;
+  activeOrgId: number | null;
+  activeOrgName: string | null;
+  switchOrganization: (orgId: number | null, orgName?: string) => void;
+  // Phase 1B: Impersonation
+  isImpersonating: boolean;
+  impersonatorUsername: string | null;
+  impersonate: (orgId: number) => Promise<void>;
+  exitImpersonation: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -51,17 +68,17 @@ function resolveApiUrl(url: string): string {
   return url;
 }
 
-/** Detect which portal we're running in based on current URL path. */
+/** Detect which portal we're running in based on current URL path or hostname. */
 function detectPortal(): PortalContext {
-  return window.location.pathname.startsWith('/admin') ? 'admin' : 'client';
+  if (window.location.pathname.startsWith('/admin')) return 'admin';
+  if (isAdminHost()) return 'admin';
+  return 'client';
 }
 
-/** Get localStorage key names for a given portal context. */
-function tokenKeys(portal: PortalContext) {
-  if (portal === 'admin') {
-    return { access: 'admin_access_token', refresh: 'admin_refresh_token' };
-  }
-  return { access: 'access_token', refresh: 'refresh_token' };
+/** Read the CSRF double-submit cookie value (set by server, readable by JS). */
+function getCsrfToken(): string {
+  const match = document.cookie.split('; ').find(row => row.startsWith('csrf_token='));
+  return match ? match.split('=')[1] : '';
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -70,44 +87,77 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const originalFetchRef = useRef<typeof window.fetch>(window.fetch.bind(window));
   const refreshingRef = useRef<Promise<boolean> | null>(null);
 
-  // Phase 46: Tenant switching for superadmins
-  const [activeTenantId, setActiveTenantId] = useState<number | null>(() => {
-    const stored = localStorage.getItem('active_tenant_id');
+  // Phase 46: Organization switching for superadmins (non-sensitive UI state — OK in localStorage)
+  const [activeOrgId, setActiveOrgId] = useState<number | null>(() => {
+    // Migration: move old key to new key
+    const oldStored = localStorage.getItem('active_tenant_id');
+    if (oldStored) {
+      localStorage.setItem('active_org_id', oldStored);
+      localStorage.removeItem('active_tenant_id');
+    }
+    const stored = localStorage.getItem('active_org_id');
     return stored ? parseInt(stored, 10) : null;
   });
-  const [activeTenantName, setActiveTenantName] = useState<string | null>(
-    () => localStorage.getItem('active_tenant_name')
+  const [activeOrgName, setActiveOrgName] = useState<string | null>(
+    () => {
+      // Migration: move old key to new key
+      const oldStored = localStorage.getItem('active_tenant_name');
+      if (oldStored) {
+        localStorage.setItem('active_org_name', oldStored);
+        localStorage.removeItem('active_tenant_name');
+      }
+      return localStorage.getItem('active_org_name');
+    }
   );
 
-  const switchTenant = useCallback((tenantId: number | null, tenantName?: string) => {
-    setActiveTenantId(tenantId);
-    setActiveTenantName(tenantName || null);
-    if (tenantId !== null) {
-      localStorage.setItem('active_tenant_id', String(tenantId));
-      localStorage.setItem('active_tenant_name', tenantName || '');
+  // Phase S1: Impersonation state derived from /api/auth/me response (no longer localStorage)
+  const [isImpersonating, setIsImpersonating] = useState(false);
+  const [impersonatorUsername, setImpersonatorUsername] = useState<string | null>(null);
+
+  // Phase S1 migration: clear legacy localStorage token keys on mount
+  useEffect(() => {
+    const legacyKeys = [
+      'access_token', 'refresh_token',
+      'admin_access_token', 'admin_refresh_token',
+      'admin_backup_access', 'admin_backup_refresh',
+      'impersonating', 'impersonator_username',
+    ];
+    legacyKeys.forEach(k => localStorage.removeItem(k));
+  }, []);
+
+  const switchOrganization = useCallback((orgId: number | null, orgName?: string) => {
+    const prevOrgId = localStorage.getItem('active_org_id');
+    setActiveOrgId(orgId);
+    setActiveOrgName(orgName || null);
+    if (orgId !== null) {
+      localStorage.setItem('active_org_id', String(orgId));
+      localStorage.setItem('active_org_name', orgName || '');
     } else {
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
+    }
+    // Force full page reload on org switch to guarantee all components refetch
+    // with the new org context. Without this, stale data from the previous org
+    // remains in component state (subscriptions, groups, identities, etc.)
+    const newOrgId = orgId !== null ? String(orgId) : null;
+    if (prevOrgId !== newOrgId && prevOrgId !== null) {
+      window.location.reload();
     }
   }, []);
 
+  // Phase S1: Cookie-based refresh — server reads refresh token from httpOnly cookie
   const tryRefresh = useCallback(async (): Promise<boolean> => {
-    const portal = detectPortal();
-    const keys = tokenKeys(portal);
-    const refreshToken = localStorage.getItem(keys.refresh);
-    if (!refreshToken) return false;
-
     try {
       const res = await originalFetchRef.current(resolveApiUrl('/api/auth/refresh'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        credentials: 'include',
+        body: JSON.stringify({}),
       });
       if (!res.ok) return false;
 
       const data = await res.json();
-      localStorage.setItem(keys.access, data.access_token);
-      localStorage.setItem(keys.refresh, data.refresh_token);
+      // Cookies are set by server response — no localStorage needed
       setUser(data.user);
       return true;
     } catch {
@@ -115,59 +165,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Global fetch interceptor
+  // Global fetch interceptor — Phase S1: cookie-based auth (no Authorization header from storage)
   useEffect(() => {
     const origFetch = originalFetchRef.current;
 
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
 
-      // Attach auth header to API calls (except login/refresh)
-      if (url.startsWith('/api/') && !url.startsWith('/api/auth/login') && !url.startsWith('/api/auth/refresh')) {
-        const portal = detectPortal();
-        const keys = tokenKeys(portal);
-        const token = localStorage.getItem(keys.access);
-        if (token) {
-          const headers = new Headers(init?.headers);
-          if (!headers.has('Authorization')) {
-            headers.set('Authorization', `Bearer ${token}`);
-          }
-          // Phase 46: Attach tenant override header for superadmins (admin portal only)
-          const activeTid = localStorage.getItem('active_tenant_id');
-          if (activeTid && !headers.has('X-Tenant-Id')) {
-            const currentPortal = detectPortal();
-            if (currentPortal === 'admin') {
-              headers.set('X-Tenant-Id', activeTid);
-            }
-          }
-          init = { ...init, headers };
+      // Attach credentials + CSRF + org context to API calls
+      if (url.startsWith('/api/') || (API_BASE && url.startsWith(API_BASE))) {
+        const headers = new Headers(init?.headers);
+
+        // Phase S1: CSRF token for mutating requests (double-submit cookie pattern)
+        const method = (init?.method || 'GET').toUpperCase();
+        if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+          const csrf = getCsrfToken();
+          if (csrf) headers.set('X-CSRF-Token', csrf);
         }
+
+        // Phase 46: Attach organization override header for superadmins
+        const activeOid = localStorage.getItem('active_org_id');
+        if (activeOid && !headers.has('X-Organization-Id')) {
+          headers.set('X-Organization-Id', activeOid);
+        }
+        // Send portal context header so backend knows admin context
+        if (detectPortal() === 'admin') {
+          headers.set('X-Portal-Context', 'admin');
+        }
+
+        init = { ...init, headers, credentials: 'include' };
       }
 
       // Resolve /api/* URLs to full backend URL when API_BASE is set (SWA mode)
       const resolvedInput = typeof input === 'string' ? resolveApiUrl(input) : input;
       let response = await origFetch(resolvedInput, init);
 
-      // On 401, try token refresh once (deduplicated)
+      // On 401, try cookie-based token refresh once (deduplicated)
       if (response.status === 401 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
         if (!refreshingRef.current) {
           refreshingRef.current = tryRefresh().finally(() => { refreshingRef.current = null; });
         }
         const refreshed = await refreshingRef.current;
         if (refreshed) {
-          const portal = detectPortal();
-          const keys = tokenKeys(portal);
-          const newToken = localStorage.getItem(keys.access);
-          if (newToken) {
-            const headers = new Headers(init?.headers);
-            headers.set('Authorization', `Bearer ${newToken}`);
-            response = await origFetch(resolvedInput, { ...init, headers });
-          }
+          // Retry with new cookies (set by refresh response)
+          response = await origFetch(resolvedInput, init);
         } else {
-          const portal = detectPortal();
-          const keys = tokenKeys(portal);
-          localStorage.removeItem(keys.access);
-          localStorage.removeItem(keys.refresh);
           setUser(null);
         }
       }
@@ -178,53 +220,55 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => { window.fetch = origFetch; };
   }, [tryRefresh]);
 
-  // Check existing token on mount
+  // Check auth state on mount via /api/auth/me (cookies sent automatically)
   useEffect(() => {
-    const portal = detectPortal();
-    const keys = tokenKeys(portal);
-    const token = localStorage.getItem(keys.access);
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-
     originalFetchRef.current(resolveApiUrl('/api/auth/me'), {
-      headers: { 'Authorization': `Bearer ${token}` },
+      credentials: 'include',
+      headers: detectPortal() === 'admin' ? { 'X-Portal-Context': 'admin' } : {},
     })
       .then(res => {
-        if (!res.ok) throw new Error('Invalid token');
+        if (!res.ok) throw new Error('Not authenticated');
         return res.json();
       })
-      .then(data => setUser(data.user))
+      .then(data => {
+        setUser(data.user);
+        // Phase S1: Derive impersonation state from server response
+        if (data.user?.impersonating) {
+          setIsImpersonating(true);
+          setImpersonatorUsername(data.user.impersonator_username || null);
+        }
+      })
       .catch(() => {
-        tryRefresh().then(ok => {
-          if (!ok) {
-            localStorage.removeItem(keys.access);
-            localStorage.removeItem(keys.refresh);
-          }
-        });
+        // Try refresh — cookies may contain a valid refresh token
+        tryRefresh().catch(() => { /* no valid session */ });
       })
       .finally(() => setLoading(false));
   }, [tryRefresh]);
 
-  const login = useCallback(async (username: string, password: string, tenantSlug?: string, portal?: PortalContext) => {
-    const resolvedPortal = portal || detectPortal();
-    const keys = tokenKeys(resolvedPortal);
+  // Phase S1: login — server sets httpOnly cookies; frontend only stores user state
+  const login = useCallback(async (username: string, password: string, tenantSlug?: string) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const body: any = { username, password, portal: resolvedPortal };
+    const body: any = { username, password };
     if (tenantSlug) body.tenant_slug = tenantSlug;
+
+    // Send portal context header so backend knows admin context even on cross-origin API calls
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (detectPortal() === 'admin') {
+      headers['X-Portal-Context'] = 'admin';
+    }
+
     const res = await originalFetchRef.current(resolveApiUrl('/api/auth/login'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
+      credentials: 'include',
       body: JSON.stringify(body),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.message || data.error || 'Login failed');
     }
-    const data = await res.json();
-    localStorage.setItem(keys.access, data.access_token);
-    localStorage.setItem(keys.refresh, data.refresh_token);
+    const data = await res.json().catch(() => ({}));
+    // Cookies are set by server response — no localStorage needed
     // Don't set user when force_password_change is required — keeps user null
     // so the /login route stays active and Login.tsx can show the password change form
     if (!data.user?.force_password_change) {
@@ -233,13 +277,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return data.user;
   }, []);
 
-  // Phase 54: SSO code-to-token exchange
+  // Phase 54: SSO code-to-token exchange — server sets cookies
   const loginWithSsoCode = useCallback(async (code: string) => {
-    const portal = detectPortal();
-    const keys = tokenKeys(portal);
     const res = await originalFetchRef.current(resolveApiUrl('/api/auth/saml/token'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ code }),
     });
     if (!res.ok) {
@@ -247,37 +290,83 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || 'SSO login failed');
     }
     const data = await res.json();
-    localStorage.setItem(keys.access, data.access_token);
-    localStorage.setItem(keys.refresh, data.refresh_token);
     setUser(data.user);
   }, []);
 
+  // Phase S1: logout — server clears httpOnly cookies
   const logout = useCallback(async () => {
-    const portal = detectPortal();
-    const keys = tokenKeys(portal);
-    const refreshToken = localStorage.getItem(keys.refresh);
-    const accessToken = localStorage.getItem(keys.access);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const csrf = getCsrfToken();
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+    if (detectPortal() === 'admin') headers['X-Portal-Context'] = 'admin';
+
     try {
       await originalFetchRef.current(resolveApiUrl('/api/auth/logout'), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
-        },
-        body: JSON.stringify({ refresh_token: refreshToken, portal }),
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({}),
       });
     } catch { /* ignore */ }
-    // Only clear the current portal's tokens
-    localStorage.removeItem(keys.access);
-    localStorage.removeItem(keys.refresh);
-    // Only clear tenant context if logging out of admin portal
-    if (portal === 'admin') {
-      localStorage.removeItem('active_tenant_id');
-      localStorage.removeItem('active_tenant_name');
-      setActiveTenantId(null);
-      setActiveTenantName(null);
+
+    setIsImpersonating(false);
+    setImpersonatorUsername(null);
+    // Only clear organization context if logging out of admin portal
+    if (detectPortal() === 'admin') {
+      localStorage.removeItem('active_org_id');
+      localStorage.removeItem('active_org_name');
+      setActiveOrgId(null);
+      setActiveOrgName(null);
     }
     setUser(null);
+  }, []);
+
+  // Phase S1: Impersonation — server manages cookie swap (backup + restore)
+  const impersonate = useCallback(async (orgId: number) => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Portal-Context': 'admin',
+    };
+    const csrf = getCsrfToken();
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+
+    const res = await originalFetchRef.current(resolveApiUrl('/api/admin/impersonate'), {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify({ organization_id: orgId }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Impersonation failed');
+    }
+    // Server sets client cookies + admin backup cookies — no localStorage needed
+    setIsImpersonating(true);
+    setImpersonatorUsername(user?.username || null);
+
+    // Redirect to client portal root
+    window.location.href = '/';
+  }, [user]);
+
+  // Phase S1: Exit impersonation — server restores admin cookies from backup
+  const exitImpersonation = useCallback(async () => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const csrf = getCsrfToken();
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+
+    try {
+      await originalFetchRef.current(resolveApiUrl('/api/admin/impersonate/end'), {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+      });
+    } catch { /* ignore — best-effort logging */ }
+
+    setIsImpersonating(false);
+    setImpersonatorUsername(null);
+
+    // Redirect back to admin portal
+    window.location.href = '/admin';
   }, []);
 
   const role = user?.role;
@@ -295,9 +384,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     canSeePricing: role === 'admin',
     canManageConnections: role === 'admin' || role === 'security_admin',
     canManageUsers: role === 'admin',
-    activeTenantId,
-    activeTenantName,
-    switchTenant,
+    canManageSettings: role === 'admin',
+    canExportData: role === 'admin' || role === 'security_admin' || role === 'security_analyst' || role === 'compliance',
+    canManageRemediation: role === 'admin' || role === 'security_admin' || role === 'security_analyst',
+    canManageFindings: role === 'admin' || role === 'security_admin' || role === 'security_analyst',
+    canRunSimulations: role === 'admin' || role === 'security_admin' || role === 'security_analyst',
+    canTriggerScans: role === 'admin' || role === 'security_admin',
+    canViewCompliance: role === 'admin' || role === 'security_admin' || role === 'security_analyst' || role === 'compliance',
+    isDemo: !!user?.is_demo,
+    activeOrgId,
+    activeOrgName,
+    switchOrganization,
+    isImpersonating,
+    impersonatorUsername,
+    impersonate,
+    exitImpersonation,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

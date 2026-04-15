@@ -49,11 +49,12 @@ function InlineRoleBadges({ roles }: { roles: RoleData[] }) {
 }
 
 // Central identity node
+// TODO: Add resource_name subtitle for SAMI nodes when node component supports subtitles
 export function IdentityNode({ data }: NodeProps) {
   const colors = riskBorder[data.risk_level as string] || 'border-blue-500 bg-blue-50';
   return (
     <div
-      title={`${data.label}\nRisk: ${(data.risk_level as string || 'unknown').toUpperCase()} (${data.risk_score} pts)${data.category ? `\nCategory: ${data.category}` : ''}`}
+      title={`${data.label}\nRisk: ${(data.risk_level as string || 'unknown').toUpperCase()}${data.category ? `\nCategory: ${data.category}` : ''}`}
       className={`px-5 py-3 rounded-xl border-2 shadow-lg ${colors} min-w-[180px] max-w-[240px]`}
     >
       <Handle type="target" position={Position.Left} className="!bg-gray-400" />
@@ -67,7 +68,7 @@ export function IdentityNode({ data }: NodeProps) {
         <span className={`font-bold uppercase ${riskText[data.risk_level as string] || 'text-gray-500'}`}>
           {(data.risk_level as string || 'unknown').toUpperCase()}
         </span>
-        <span className="text-gray-400">{data.risk_score as number} pts</span>
+        <span className="text-gray-400">{(data.risk_level as string || 'unknown').toUpperCase()}</span>
         {!!data.category && <span className="text-gray-400 truncate">{data.category as string}</span>}
       </div>
       <Handle type="source" position={Position.Right} className="!bg-gray-400" />
@@ -355,6 +356,145 @@ export function EntraDirectoryNode({ data }: NodeProps) {
   );
 }
 
+// AI Agent node — amber when active, gray when orphaned
+export function AgentNode({ data }: NodeProps) {
+  const isOrphaned = !!data.has_orphan_finding;
+  const borderColor = isOrphaned ? 'border-gray-400 bg-gray-50' : 'border-amber-400 bg-amber-50';
+  const iconColor = isOrphaned ? 'text-gray-500' : 'text-amber-600';
+  const handleColor = isOrphaned ? '!bg-gray-400' : '!bg-amber-400';
+  const statusLabel = isOrphaned ? 'ORPHANED' : 'ACTIVE';
+  const statusColor = isOrphaned ? 'text-red-600' : 'text-green-600';
+
+  const tooltip = [
+    data.label as string,
+    `Platform: ${data.detected_platform || 'Unknown'}`,
+    `Risk: ${(data.risk_level as string || 'unknown').toUpperCase()}`,
+    data.days_inactive != null
+      ? `Inactive: ${data.days_inactive} days`
+      : 'Inactive: Never signed in',
+    `Status: ${statusLabel}`,
+  ].join('\n');
+
+  return (
+    <div
+      title={tooltip}
+      className={`px-5 py-3 rounded-xl border-2 shadow-lg ${borderColor} min-w-[180px] max-w-[240px]`}
+    >
+      <Handle type="target" position={Position.Left} className={handleColor} />
+      <div className="flex items-center gap-2 mb-1">
+        {/* Robot/agent icon */}
+        <svg className={`w-4 h-4 ${iconColor} flex-shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+        <span className="font-bold text-sm text-gray-900 truncate">{data.label as string}</span>
+      </div>
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold text-[9px]">AI Agent</span>
+        <span className={`font-bold uppercase ${statusColor}`}>{statusLabel}</span>
+        {data.agirs_score != null && (
+          <span className="text-gray-400">{(data.risk_level as string || 'unknown').toUpperCase()}</span>
+        )}
+      </div>
+      <Handle type="source" position={Position.Right} className={handleColor} />
+      <Handle type="source" position={Position.Bottom} id="bottom" className={handleColor} />
+    </div>
+  );
+}
+
+// Key Vault node — shows vault name with lock icon, tier-colored border
+const kvTierBorder: Record<string, string> = {
+  CRITICAL: 'border-red-500 bg-red-50',
+  WARNING: 'border-amber-500 bg-amber-50',
+  INFO: 'border-blue-400 bg-blue-50',
+  HEALTHY: 'border-green-400 bg-green-50',
+  NONE: 'border-gray-300 bg-gray-50',
+};
+
+export function KeyVaultNode({ data }: NodeProps) {
+  const tier = (data.worst_tier as string) || 'NONE';
+  const colors = kvTierBorder[tier] || kvTierBorder.NONE;
+  const itemCount = (data.item_count as number) || 0;
+  const roles = (data.roles as string[]) || [];
+  return (
+    <div
+      title={`Key Vault: ${data.label}\nItems: ${itemCount}\nWorst tier: ${tier}\nRoles: ${roles.join(', ')}`}
+      className={`px-4 py-2.5 rounded-lg border-2 ${colors} shadow-sm max-w-[240px]`}
+    >
+      <Handle type="target" position={Position.Left} className="!bg-gray-400" />
+      <div className="flex items-center gap-2">
+        <svg className="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+        </svg>
+        <div className="min-w-0">
+          <div className="text-[9px] font-bold text-gray-500 uppercase">Key Vault</div>
+          <div className="text-xs font-medium text-gray-900 truncate">{data.label as string}</div>
+        </div>
+      </div>
+      {roles.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-1.5">
+          {roles.map((r, i) => (
+            <span key={i} className="text-[9px] px-1.5 py-0.5 rounded border bg-gray-100 text-gray-600 border-gray-200 font-semibold">{r}</span>
+          ))}
+        </div>
+      )}
+      {itemCount > 0 && (
+        <div className="text-[9px] text-gray-500 mt-1">{itemCount} item{itemCount !== 1 ? 's' : ''}</div>
+      )}
+      <Handle type="source" position={Position.Right} className="!bg-gray-400" />
+    </div>
+  );
+}
+
+// Key Vault item node — shows secret/key/cert with expiry tier badge
+const kvItemTierColor: Record<string, string> = {
+  CRITICAL: 'border-red-400 bg-red-50',
+  WARNING: 'border-amber-400 bg-amber-50',
+  INFO: 'border-blue-300 bg-blue-50',
+  HEALTHY: 'border-green-300 bg-green-50',
+  NONE: 'border-gray-300 bg-gray-50',
+};
+const kvItemTierText: Record<string, string> = {
+  CRITICAL: 'text-red-700',
+  WARNING: 'text-amber-700',
+  INFO: 'text-blue-600',
+  HEALTHY: 'text-green-600',
+  NONE: 'text-gray-500',
+};
+const typeIcons: Record<string, string> = { secret: 'Secret', key: 'Key', certificate: 'Cert' };
+
+export function KeyVaultItemNode({ data }: NodeProps) {
+  const tier = (data.expiry_risk_tier as string) || 'NONE';
+  const colors = kvItemTierColor[tier] || kvItemTierColor.NONE;
+  const textColor = kvItemTierText[tier] || kvItemTierText.NONE;
+  const daysLeft = data.days_until_expiry as number | null;
+  const expiryLabel = daysLeft != null
+    ? daysLeft < 0 ? 'Expired' : `${daysLeft}d`
+    : 'No expiry';
+  return (
+    <div
+      title={`${data.label}\nType: ${typeIcons[data.item_type as string] || data.item_type}\nExpiry: ${expiryLabel}\nTier: ${tier}`}
+      className={`px-3 py-2 rounded-lg border ${colors} shadow-sm max-w-[170px]`}
+    >
+      <Handle type="target" position={Position.Left} className="!bg-gray-400" />
+      <div className="flex items-center gap-1">
+        <svg className="w-3 h-3 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+        </svg>
+        <span className="text-[10px] font-semibold text-gray-900 truncate">{data.label as string}</span>
+      </div>
+      <div className="flex items-center gap-1 mt-0.5 text-[9px]">
+        <span className="px-1 py-0.5 rounded bg-gray-200 text-gray-600 font-medium">
+          {typeIcons[data.item_type as string] || data.item_type as string}
+        </span>
+        <span className={`font-bold ${textColor}`}>{tier}</span>
+        {daysLeft != null && (
+          <span className="text-gray-500">{expiryLabel}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export const nodeTypes = {
   identity: IdentityNode,
   risk_summary: RiskSummaryNode,
@@ -369,4 +509,7 @@ export const nodeTypes = {
   resource_group: ResourceGroupNode,
   resource: ResourceNode,
   entra_directory: EntraDirectoryNode,
+  ai_agent: AgentNode,
+  keyvault: KeyVaultNode,
+  keyvault_item: KeyVaultItemNode,
 };

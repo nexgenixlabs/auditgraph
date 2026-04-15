@@ -2,18 +2,20 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
-  "proxy": "http://localhost:5001",
+  "proxy": "http://localhost:5000",
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^13.5.0",
+    "@types/dompurify": "^3.0.5",
     "@types/jest": "^27.5.2",
     "@types/node": "^16.18.126",
     "@types/react": "^19.2.9",
     "@types/react-dom": "^19.2.3",
     "@xyflow/react": "^12.10.0",
     "axios": "^1.13.2",
+    "dompurify": "^3.3.3",
     "express": "^5.2.1",
     "http-proxy-middleware": "^3.0.5",
     "jspdf": "^4.1.0",
@@ -34,7 +36,8 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "lint": "echo \"(optional) add eslint later\"",
-    "audit:fix": "npm audit fix"
+    "audit:fix": "npm audit fix",
+    "check:contract": "node scripts/check-contract.js"
   },
   "eslintConfig": {
     "extends": [

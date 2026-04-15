@@ -1,13 +1,15 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES, ENTERPRISE_BUNDLES,
-  CLOUD_LABELS, ACCOUNT_TIER_LABELS,
+  ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
+  CLOUD_LABELS, ACCOUNT_TIER_LABELS, PLATFORM_FEE_CENTS,
   SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
   SUB_RATES_CENTS,
   formatCents,
   type CloudConfig,
 } from '../../constants/pricing';
+import { api, ApiError } from '../../services/apiClient';
+import { TIME_MS } from '../../constants/metrics';
 
 interface Tenant {
   id: number;
@@ -15,6 +17,7 @@ interface Tenant {
   slug: string;
   plan: string;
   enabled: boolean;
+  billing_status?: string;
   user_count: number;
   created_at: string;
   license_activated_at: string | null;
@@ -97,7 +100,7 @@ function formatDate(iso: string | null): string {
 function licenseStatus(t: Tenant): { label: string; color: string } {
   if (!t.license_activated_at) return { label: 'Not Activated', color: 'text-gray-400' };
   if (t.license_expires_at) {
-    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / 86400000);
+    const days = Math.ceil((new Date(t.license_expires_at).getTime() - Date.now()) / TIME_MS.DAY);
     if (days < 0) return { label: 'Expired', color: 'text-red-600' };
     if (days < 30) return { label: `${days}d left`, color: 'text-yellow-600' };
   }
@@ -105,7 +108,7 @@ function licenseStatus(t: Tenant): { label: string; color: string } {
 }
 
 export default function AdminTenants() {
-  const { switchTenant, user } = useAuth();
+  const { switchOrganization, user } = useAuth();
   const portalRole = user?.portal_role;
   const isSuperadmin = portalRole === 'superadmin';
   const canWrite = portalRole === 'superadmin' || portalRole === 'poweradmin';
@@ -127,35 +130,36 @@ export default function AdminTenants() {
   const [configForm, setConfigForm] = useState<CloudConfig>(DEFAULT_CLOUD_CONFIG);
   const [configTerm, setConfigTerm] = useState(0);
   const [configSaving, setConfigSaving] = useState(false);
+  const [planConfirm, setPlanConfirm] = useState<{ tenant: Tenant; newPlan: string } | null>(null);
   const [taxBillingForm, setTaxBillingForm] = useState<TaxBillingForm>(DEFAULT_TAX_BILLING);
   const [tenantBilling, setTenantBilling] = useState<{
     billing: { platform_fee_cents: number; subscription_total_cents: number; net_monthly_cents: number; active_count: number; subscriptions_by_cloud: Record<string, { count: number; revenue_cents: number }> };
     subscriptions: Array<{ cloud: string; rate_cents: number; monitored: boolean }>;
   } | null>(null);
+  const [opsDropdown, setOpsDropdown] = useState<number | null>(null);
+  const [opsModal, setOpsModal] = useState<{ tenant: Tenant; action: string; label: string; description: string; requireConfirm?: boolean } | null>(null);
+  const [opsReason, setOpsReason] = useState('');
+  const [opsConfirm, setOpsConfirm] = useState('');
+  const [opsLoading, setOpsLoading] = useState(false);
+  const [configRootUsername, setConfigRootUsername] = useState<string | null>(null);
+  const [resetRootModal, setResetRootModal] = useState<{ orgId: number; orgName: string; currentUsername: string } | null>(null);
+  const [resetRootUsername, setResetRootUsername] = useState('');
+  const [resetRootLoading, setResetRootLoading] = useState(false);
+  const [showRootTempPassword, setShowRootTempPassword] = useState<string | null>(null);
 
   const fetchTenants = useCallback(() => {
-    fetch('/api/clients')
-      .then(r => {
-        if (!r.ok) throw new Error(`Failed to load clients (${r.status})`);
-        return r.json();
-      })
+    api.get('/clients')
       .then(d => setTenants(d.tenants || []))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load clients'))
+      .catch((err: any) => setError(err instanceof ApiError ? err.message : 'Failed to load clients'))
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { fetchTenants(); }, [fetchTenants]);
 
-  async function handleProvision(tenantId: number) {
+  async function handleProvision(orgId: number) {
     setError(null);
     try {
-      const res = await fetch(`/api/clients/${tenantId}/provision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(provisionForm),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to provision tenant');
+      const data = await api.post(`/clients/${orgId}/provision`, provisionForm);
       setSuccess(data.message || 'Tenant provisioned successfully');
       setShowProvision(null);
       setProvisionForm({ admin_username: '', admin_display_name: '', admin_password: '' });
@@ -167,22 +171,21 @@ export default function AdminTenants() {
 
   async function toggleEnabled(t: Tenant) {
     try {
-      await fetch(`/api/clients/${t.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !t.enabled }),
-      });
+      await api.put(`/clients/${t.id}`, { enabled: !t.enabled });
       fetchTenants();
     } catch { /* ignore */ }
   }
 
-  async function changePlan(t: Tenant, plan: string) {
+  function changePlan(t: Tenant, plan: string) {
+    if (plan === t.plan) return;
+    setPlanConfirm({ tenant: t, newPlan: plan });
+  }
+
+  async function confirmPlanChange() {
+    if (!planConfirm) return;
     try {
-      await fetch(`/api/admin/clients/${t.id}/plan`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan }),
-      });
+      await api.put(`/admin/clients/${planConfirm.tenant.id}/plan`, { plan: planConfirm.newPlan });
+      setPlanConfirm(null);
       fetchTenants();
     } catch { /* ignore */ }
   }
@@ -191,11 +194,7 @@ export default function AdminTenants() {
     if (!showDeleteConfirm) return;
     setError(null);
     try {
-      const res = await fetch(`/api/clients/${showDeleteConfirm.id}`, { method: 'DELETE' });
-      const text = await res.text();
-      let data: Record<string, string> = {};
-      try { data = JSON.parse(text); } catch { /* non-JSON response */ }
-      if (!res.ok) throw new Error(data.error || `Failed to delete tenant (${res.status})`);
+      await api.del(`/clients/${showDeleteConfirm.id}`);
       setSuccess(`Tenant "${showDeleteConfirm.name}" deleted successfully`);
       setShowDeleteConfirm(null);
       setDeleteConfirmName('');
@@ -209,18 +208,65 @@ export default function AdminTenants() {
     if (!showEdit) return;
     setError(null);
     try {
-      const res = await fetch(`/api/clients/${showEdit.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: editForm.name }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update tenant');
+      await api.put(`/clients/${showEdit.id}`, { name: editForm.name });
       setSuccess(`Tenant updated successfully`);
       setShowEdit(null);
       fetchTenants();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to update tenant');
+    }
+  }
+
+  async function executeOps() {
+    if (!opsModal) return;
+    setOpsLoading(true);
+    setError(null);
+    try {
+      const body: Record<string, string> = { reason: opsReason };
+      if (opsModal.requireConfirm) body.confirm = opsConfirm;
+      await api.post(`/admin/tenants/${opsModal.tenant.id}/${opsModal.action}`, body);
+      setSuccess(`${opsModal.label} completed for ${opsModal.tenant.name}`);
+      setOpsModal(null);
+      setOpsReason('');
+      setOpsConfirm('');
+      fetchTenants();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : `Failed: ${opsModal.label}`);
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
+  async function openResetRootModal(t: Tenant) {
+    setOpsDropdown(null);
+    setError(null);
+    try {
+      const data = await api.get(`/users?organization_id=${t.id}`);
+      const users = data.users || [];
+      const root = users.find((u: any) => u.role === 'admin');
+      setResetRootModal({ orgId: t.id, orgName: t.name, currentUsername: root?.username || '(none)' });
+      setResetRootUsername('');
+    } catch {
+      setError('Failed to fetch root user for this tenant');
+    }
+  }
+
+  async function executeResetRoot() {
+    if (!resetRootModal) return;
+    setResetRootLoading(true);
+    setError(null);
+    try {
+      const body: Record<string, string> = {};
+      if (resetRootUsername.trim()) body.new_username = resetRootUsername.trim();
+      const data = await api.post(`/admin/clients/${resetRootModal.orgId}/reset-root-user`, body);
+      setResetRootModal(null);
+      setShowRootTempPassword(data.temp_password);
+      if (data.username) setConfigRootUsername(data.username);
+      setSuccess(data.message || 'Root user credentials reset');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to reset root user');
+    } finally {
+      setResetRootLoading(false);
     }
   }
 
@@ -241,7 +287,7 @@ export default function AdminTenants() {
     reader.readAsDataURL(file);
   }
 
-  async function handleLogoUpload(tenantId: number) {
+  async function handleLogoUpload(orgId: number) {
     if (!logoFile) return;
     setUploadingLogo(true);
     try {
@@ -250,15 +296,7 @@ export default function AdminTenants() {
         reader.onload = () => resolve(reader.result as string);
         reader.readAsDataURL(logoFile);
       });
-      const res = await fetch(`/api/clients/${tenantId}/logo`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ logo: dataUrl }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to upload logo');
-      }
+      await api.post(`/clients/${orgId}/logo`, { logo: dataUrl });
       setSuccess('Logo uploaded');
       setLogoFile(null);
       setLogoPreview(null);
@@ -270,13 +308,9 @@ export default function AdminTenants() {
     }
   }
 
-  async function handleLogoDelete(tenantId: number) {
+  async function handleLogoDelete(orgId: number) {
     try {
-      const res = await fetch(`/api/clients/${tenantId}/logo`, { method: 'DELETE' });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to delete logo');
-      }
+      await api.del(`/clients/${orgId}/logo`);
       setSuccess('Logo removed');
       fetchTenants();
     } catch (err: unknown) {
@@ -308,10 +342,17 @@ export default function AdminTenants() {
     });
     setShowConfigure(t);
     setTenantBilling(null);
+    setConfigRootUsername(null);
     // Fetch billing data for this tenant
-    fetch(`/api/admin/clients/${t.id}/billing`)
-      .then(r => r.ok ? r.json() : null)
+    api.get(`/admin/clients/${t.id}/billing`)
       .then(data => { if (data) setTenantBilling(data); })
+      .catch(() => {});
+    // Fetch root admin username
+    api.get(`/users?organization_id=${t.id}`)
+      .then(data => {
+        const root = (data.users || []).find((u: any) => u.role === 'admin');
+        setConfigRootUsername(root?.username || null);
+      })
       .catch(() => {});
   }
 
@@ -334,13 +375,7 @@ export default function AdminTenants() {
       if (configTerm > 0 && !showConfigure.license_activated_at) {
         payload.license_activated_at = new Date().toISOString();
       }
-      const res = await fetch(`/api/clients/${showConfigure.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
+      await api.put(`/clients/${showConfigure.id}`, payload);
       setSuccess(`Cloud configuration saved for "${showConfigure.name}"`);
       setShowConfigure(null);
       fetchTenants();
@@ -391,9 +426,7 @@ export default function AdminTenants() {
   };
 
   const configPlan = showConfigure?.plan || 'pro';
-  const isEnterprise = configPlan === 'enterprise';
   const termDiscount = getTermDiscount(configTerm);
-  const enterpriseBundles = ENTERPRISE_BUNDLES[configTerm] || [];
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading clients...</div>;
 
@@ -407,7 +440,7 @@ export default function AdminTenants() {
         {canWrite && (
           <p className="text-xs text-gray-500">
             To create a new client, use the{' '}
-            <a href="/admin/onboarding" className="text-blue-600 hover:text-blue-700 underline">Onboarding</a> tab.
+            <a href="/admin/onboarding" className="text-blue-600 hover:text-blue-700 hover:opacity-80">Onboarding</a> tab.
           </p>
         )}
       </div>
@@ -446,7 +479,7 @@ export default function AdminTenants() {
         <div className="bg-white border border-red-200 rounded-lg p-6 shadow-sm">
           <h3 className="text-sm font-semibold text-red-700 mb-2">Delete Organization</h3>
           <p className="text-xs text-gray-600 mb-3">
-            This will permanently delete <span className="font-semibold">{showDeleteConfirm.name}</span> and all associated data including users, discovery runs, and settings. This action cannot be undone.
+            This will permanently delete <span className="font-semibold">{showDeleteConfirm.name}</span> and all associated data including users, snapshots, and settings. This action cannot be undone.
           </p>
           <div className="mb-3">
             <label className="block text-xs font-medium text-gray-600 mb-1">
@@ -476,6 +509,198 @@ export default function AdminTenants() {
           </div>
         </div>
       )}
+
+      {/* Operations confirmation modal */}
+      {opsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-md p-6">
+            <h3 className="text-sm font-bold text-gray-900 mb-2">{opsModal.label}</h3>
+            <p className="text-xs text-gray-600 mb-4">{opsModal.description}</p>
+            <p className="text-xs text-gray-500 mb-3">Target: <span className="font-semibold">{opsModal.tenant.name}</span></p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+                <input
+                  value={opsReason}
+                  onChange={e => setOpsReason(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="Reason for this action"
+                />
+              </div>
+              {opsModal.requireConfirm && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Type <span className="font-mono font-bold">{opsModal.tenant.name}</span> to confirm
+                  </label>
+                  <input
+                    value={opsConfirm}
+                    onChange={e => setOpsConfirm(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    placeholder="Tenant name"
+                  />
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={executeOps}
+                disabled={opsLoading || !opsReason.trim() || (opsModal.requireConfirm && opsConfirm.trim() !== opsModal.tenant.name.trim())}
+                className={`px-4 py-2 text-white text-sm rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${
+                  opsModal.action === 'reset-discovery' || opsModal.action === 'disable'
+                    ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {opsLoading ? 'Processing...' : 'Confirm'}
+              </button>
+              <button
+                onClick={() => { setOpsModal(null); setOpsReason(''); setOpsConfirm(''); }}
+                className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Root User modal */}
+      {resetRootModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-md p-6">
+            <h3 className="text-sm font-bold text-gray-900 mb-2">Reset Root User Credentials</h3>
+            <p className="text-xs text-gray-600 mb-4">Reset the root admin credentials for <span className="font-semibold">{resetRootModal.orgName}</span>. A temporary password will be generated.</p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Current username</label>
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 font-mono">{resetRootModal.currentUsername}</div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">New username (optional)</label>
+                <input
+                  value={resetRootUsername}
+                  onChange={e => setResetRootUsername(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="Leave blank to keep current username"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={executeResetRoot}
+                disabled={resetRootLoading || (resetRootUsername.trim().length > 0 && resetRootUsername.trim().length < 3)}
+                className="px-4 py-2 text-white text-sm rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {resetRootLoading ? 'Resetting...' : 'Reset Credentials'}
+              </button>
+              <button
+                onClick={() => { setResetRootModal(null); setResetRootUsername(''); }}
+                className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Root user temp password display */}
+      {showRootTempPassword && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowRootTempPassword(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 mb-2">Temporary Password</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              This password is shown only once. The user will be required to change it on next login.
+            </p>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-sm break-all select-all">
+              {showRootTempPassword}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(showRootTempPassword);
+                  setSuccess('Password copied to clipboard');
+                }}
+                className="flex-1 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
+              >
+                Copy to Clipboard
+              </button>
+              <button
+                onClick={() => setShowRootTempPassword(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Plan change confirmation modal */}
+      {planConfirm && (() => {
+        const oldPlan = planConfirm.tenant.plan;
+        const newPlan = planConfirm.newPlan;
+        const oldFee = PLATFORM_FEE_CENTS[oldPlan] ?? 0;
+        const newFee = PLATFORM_FEE_CENTS[newPlan] ?? 0;
+        const feeDelta = newFee - oldFee;
+        const isDowngrade = (oldPlan === 'pro') && (['free', 'trial'].includes(newPlan));
+        const oldLabel = ACCOUNT_TIER_LABELS[oldPlan]?.label || oldPlan;
+        const newLabel = ACCOUNT_TIER_LABELS[newPlan]?.label || newPlan;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-md p-6">
+              <h3 className="text-sm font-bold text-gray-900 mb-4">Confirm Plan Change</h3>
+              <div className="flex items-center justify-center gap-3 mb-4">
+                <span className={`px-3 py-1 rounded-lg text-xs font-bold ${
+                  ACCOUNT_TIER_LABELS[oldPlan]?.bg || 'bg-gray-100'
+                } ${ACCOUNT_TIER_LABELS[oldPlan]?.color || 'text-gray-700'}`}>{oldLabel}</span>
+                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                </svg>
+                <span className={`px-3 py-1 rounded-lg text-xs font-bold ${
+                  ACCOUNT_TIER_LABELS[newPlan]?.bg || 'bg-gray-100'
+                } ${ACCOUNT_TIER_LABELS[newPlan]?.color || 'text-gray-700'}`}>{newLabel}</span>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3 mb-4 space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Current platform fee</span>
+                  <span className="font-semibold text-gray-700">{formatCents(oldFee)}/mo</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">New platform fee</span>
+                  <span className="font-semibold text-gray-900">{formatCents(newFee)}/mo</span>
+                </div>
+                <div className="border-t border-gray-200 pt-1.5 flex justify-between">
+                  <span className="text-gray-500">Delta</span>
+                  <span className={`font-bold ${feeDelta > 0 ? 'text-blue-600' : feeDelta < 0 ? 'text-green-600' : 'text-gray-500'}`}>
+                    {feeDelta > 0 ? '+' : ''}{formatCents(feeDelta)}/mo
+                  </span>
+                </div>
+              </div>
+              {isDowngrade && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-xs text-red-700">
+                  Downgrading from <strong>{oldLabel}</strong> to <strong>{newLabel}</strong> will reduce platform features. The tenant will lose access to paid capabilities immediately.
+                </div>
+              )}
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => setPlanConfirm(null)}
+                  className="px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmPlanChange}
+                  className={`px-4 py-2 text-white text-sm font-semibold rounded-lg ${
+                    isDowngrade ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
+                >
+                  {isDowngrade ? 'Confirm Downgrade' : 'Confirm Change'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Edit tenant modal */}
       {showEdit && (
@@ -560,7 +785,7 @@ export default function AdminTenants() {
             </div>
             <div className="text-right">
               <div className="flex items-center gap-2">
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isEnterprise ? 'bg-purple-500/20 text-purple-300' : 'bg-blue-500/20 text-blue-300'}`}>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/20 text-blue-300">
                   {configPlan.toUpperCase()}
                 </span>
                 <span className="text-lg font-bold text-white">
@@ -580,6 +805,47 @@ export default function AdminTenants() {
           </div>
 
           <div className="p-6">
+            {/* Root Administrator */}
+            <div className="mb-6">
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Root Administrator</h4>
+              <div className="flex items-center justify-between border border-gray-200 rounded-lg px-4 py-3">
+                <div className="min-w-0">
+                  <div className="text-[10px] text-gray-500 mb-0.5">Username</div>
+                  <div className="text-sm font-mono text-gray-800 truncate">
+                    {configRootUsername || <span className="text-gray-400 italic">No admin user provisioned</span>}
+                  </div>
+                </div>
+                {configRootUsername && canWrite && (
+                  <div className="flex items-center gap-2 shrink-0 ml-4">
+                    <button
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          const data = await api.post(`/admin/clients/${showConfigure!.id}/reset-root-user`, {});
+                          setShowRootTempPassword(data.temp_password);
+                          setSuccess(data.message || 'Password reset');
+                        } catch (err: unknown) {
+                          setError(err instanceof Error ? err.message : 'Failed to reset password');
+                        }
+                      }}
+                      className="px-3 py-1.5 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition"
+                    >
+                      Reset Password
+                    </button>
+                    <button
+                      onClick={() => {
+                        setResetRootModal({ orgId: showConfigure!.id, orgName: showConfigure!.name, currentUsername: configRootUsername });
+                        setResetRootUsername('');
+                      }}
+                      className="px-3 py-1.5 text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition"
+                    >
+                      Change Username
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Cloud Providers */}
             <div className="mb-6">
               <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Cloud Providers</h4>
@@ -605,20 +871,11 @@ export default function AdminTenants() {
                       {cfg.enabled && (
                         <div className="mt-3">
                           <div className="flex items-center justify-between px-3 py-2 border border-blue-400 bg-blue-50 rounded-lg">
-                            {isEnterprise ? (
-                              <>
-                                <span className="text-xs font-semibold text-purple-700">Included in Enterprise</span>
-                                <span className="text-[10px] font-bold text-green-600 uppercase tracking-wider">Included</span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="text-xs font-semibold text-blue-700">{subCount} subscription{subCount !== 1 ? 's' : ''} monitored</span>
-                                <span className="text-xs font-bold text-blue-700">
-                                  {cloudBillingData ? formatCents(cloudBillingData.revenue_cents) : '$0'}/mo
-                                  <span className="text-[10px] font-normal text-gray-400"> @ {formatCents(SUB_RATES_CENTS[key] ?? 6900)}/sub</span>
-                                </span>
-                              </>
-                            )}
+                            <span className="text-xs font-semibold text-blue-700">{subCount} subscription{subCount !== 1 ? 's' : ''} monitored</span>
+                            <span className="text-xs font-bold text-blue-700">
+                              {cloudBillingData ? formatCents(cloudBillingData.revenue_cents) : '$0'}/mo
+                              <span className="text-[10px] font-normal text-gray-400"> @ {formatCents(SUB_RATES_CENTS[key] ?? 6900)}/sub</span>
+                            </span>
                           </div>
                         </div>
                       )}
@@ -630,7 +887,7 @@ export default function AdminTenants() {
 
             {/* Base Features (included with Pro+) */}
             <div className="mb-6">
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Included with Pro & Enterprise</h4>
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Included with Pro</h4>
               <div className="space-y-2">
                 {Object.entries(BASE_FEATURES).map(([key, feat]) => (
                   <div key={key} className="flex items-center justify-between border-2 border-green-200 bg-green-50/30 rounded-xl px-4 py-3">
@@ -649,11 +906,9 @@ export default function AdminTenants() {
               </div>
             </div>
 
-            {/* Paid Add-Ons (Pro only — Enterprise includes all) */}
+            {/* Paid Add-Ons */}
             <div className="mb-6">
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">
-                {isEnterprise ? 'Add-Ons (Included with Enterprise)' : 'Paid Add-Ons'}
-              </h4>
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Paid Add-Ons</h4>
               <div className="space-y-2">
                 {Object.entries(ADDON_PRICING).map(([key, addon]) => {
                   const enabled = configForm.addons[key] || false;
@@ -661,16 +916,14 @@ export default function AdminTenants() {
                     <div
                       key={key}
                       className={`flex items-center justify-between border-2 rounded-xl px-4 py-3 transition ${
-                        isEnterprise
-                          ? 'border-green-200 bg-green-50/30'
-                          : enabled ? 'border-green-300 bg-green-50/30' : 'border-gray-200'
+                        enabled ? 'border-green-300 bg-green-50/30' : 'border-gray-200'
                       }`}
                     >
                       <div className="flex items-center gap-3">
                         <div className={`w-5 h-5 rounded flex items-center justify-center ${
-                          isEnterprise || enabled ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-400'
+                          enabled ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-400'
                         }`}>
-                          {isEnterprise || enabled ? (
+                          {enabled ? (
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
                           ) : (
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
@@ -682,19 +935,13 @@ export default function AdminTenants() {
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
-                        {isEnterprise ? (
-                          <span className="text-[10px] font-bold text-green-600 uppercase tracking-wider">Included</span>
-                        ) : (
-                          <>
-                            <span className={`text-xs font-bold ${enabled ? 'text-green-700' : 'text-gray-400'}`}>+${addon.price}/mo</span>
-                            <button
-                              onClick={() => toggleAddon(key)}
-                              className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${enabled ? 'bg-green-500' : 'bg-gray-300'}`}
-                            >
-                              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${enabled ? 'translate-x-5' : ''}`} />
-                            </button>
-                          </>
-                        )}
+                        <span className={`text-xs font-bold ${enabled ? 'text-green-700' : 'text-gray-400'}`}>+${addon.price}/mo</span>
+                        <button
+                          onClick={() => toggleAddon(key)}
+                          className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${enabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                        >
+                          <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${enabled ? 'translate-x-5' : ''}`} />
+                        </button>
                       </div>
                     </div>
                   );
@@ -747,17 +994,6 @@ export default function AdminTenants() {
                 </button>
               ))}
             </div>
-            {/* Enterprise term bundles */}
-            {isEnterprise && enterpriseBundles.length > 0 && (
-              <div className="mt-3 bg-purple-50 border border-purple-200 rounded-lg px-4 py-2.5">
-                <div className="text-[10px] font-semibold text-purple-700 uppercase tracking-wider mb-1">Enterprise {getTermLabel(configTerm)} Bundle</div>
-                <div className="flex flex-wrap gap-2">
-                  {enterpriseBundles.map(b => (
-                    <span key={b} className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px] font-semibold">{b}</span>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
 
           {/* Per-Subscription Billing Summary */}
@@ -918,7 +1154,7 @@ export default function AdminTenants() {
           </div>
 
           {/* Dark Billing Summary Card */}
-          <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
+          <div className="bg-gray-900 px-6 py-5">
             {/* Line items from billing API */}
             <div className="space-y-1.5 mb-3">
               {tenantBilling ? (
@@ -1000,7 +1236,7 @@ export default function AdminTenants() {
             <button
               onClick={handleSaveConfig}
               disabled={configSaving}
-              className="w-full mt-4 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-bold rounded-lg hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition"
+              className="w-full mt-4 py-2.5 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
             >
               {configSaving ? 'Saving...' : 'Save & Apply Changes'}
             </button>
@@ -1061,15 +1297,20 @@ export default function AdminTenants() {
                   </td>
                   <td className="px-4 py-2.5 text-gray-700">{t.user_count}</td>
                   <td className="px-4 py-2.5">
-                    {canWrite ? (
-                      <button onClick={() => toggleEnabled(t)} className={`px-2 py-0.5 rounded text-[10px] font-semibold transition ${t.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}>
-                        {t.enabled ? 'Active' : 'Disabled'}
-                      </button>
-                    ) : (
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${t.enabled ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                        {t.enabled ? 'Active' : 'Disabled'}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1">
+                      {canWrite ? (
+                        <button onClick={() => toggleEnabled(t)} className={`px-2 py-0.5 rounded text-[10px] font-semibold transition ${t.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}>
+                          {t.enabled ? 'Active' : 'Disabled'}
+                        </button>
+                      ) : (
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${t.enabled ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                          {t.enabled ? 'Active' : 'Disabled'}
+                        </span>
+                      )}
+                      {t.billing_status === 'suspended' && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700">Suspended</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2.5 text-gray-500">{formatDate(t.license_activated_at)}</td>
                   <td className="px-4 py-2.5">
@@ -1093,13 +1334,27 @@ export default function AdminTenants() {
                         >
                           Configure
                         </button>
-                        <button
-                          disabled
-                          className="text-[10px] text-gray-400 font-medium cursor-not-allowed"
-                          title="Coming soon"
-                        >
-                          View As
-                        </button>
+                        {/* Operations dropdown */}
+                        <div className="relative">
+                          <button
+                            onClick={() => setOpsDropdown(opsDropdown === t.id ? null : t.id)}
+                            className="text-[10px] text-gray-500 hover:text-gray-700 font-medium px-1.5 py-0.5 rounded hover:bg-gray-100"
+                          >
+                            Ops &#9662;
+                          </button>
+                          {opsDropdown === t.id && (
+                            <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1">
+                              <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'snapshot', label: 'Trigger Snapshot', description: 'Start a new discovery run for this tenant.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Trigger Snapshot</button>
+                              <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'rebuild-graph', label: 'Rebuild Graph', description: 'Clear and rebuild graph visualization cache.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Rebuild Graph</button>
+                              <button onClick={() => openResetRootModal(t)} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Reset Root User</button>
+                              <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'disable', label: 'Disable Tenant', description: 'Disable this tenant. Users will lose access.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-orange-700 hover:bg-orange-50">Disable Tenant</button>
+                              <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'suspend', label: 'Suspend Billing', description: 'Suspend billing. Data stays, billing pauses.' }); }} className="w-full text-left px-3 py-1.5 text-xs text-orange-700 hover:bg-orange-50">Suspend Billing</button>
+                              {isSuperadmin && (
+                                <button onClick={() => { setOpsDropdown(null); setOpsModal({ tenant: t, action: 'reset-discovery', label: 'Reset Discovery', description: 'Delete ALL discovery data for this tenant. This cannot be undone.', requireConfirm: true }); }} className="w-full text-left px-3 py-1.5 text-xs text-red-700 hover:bg-red-50 border-t border-gray-100">Reset Discovery Data</button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                         {isSuperadmin && t.slug !== 'default' && (
                           <button
                             onClick={() => setShowDeleteConfirm(t)}

@@ -6,6 +6,7 @@
  */
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { TIME_MS } from '../constants/metrics';
 
 // Extend jsPDF type for autotable
 declare module 'jspdf' {
@@ -144,7 +145,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
     year: 'numeric', month: 'long', day: 'numeric'
   });
   doc.text(`Generated: ${reportDate}`, margin, 115);
-  doc.text(`Discovery Run: #${data.run_id}`, margin, 122);
+  doc.text(`Snapshot: #${data.run_id}`, margin, 122);
   if (data.collected_at) {
     doc.text(`Data Collected: ${new Date(data.collected_at).toLocaleString()}`, margin, 129);
   }
@@ -154,7 +155,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
   doc.setFontSize(11);
   doc.setFont('helvetica', 'bold');
   txt(doc, DARK);
-  doc.text('Discovery Summary', margin, statsY);
+  doc.text('Snapshot Summary', margin, statsY);
 
   const statsData = [
     ['Total Identities', String(data.stats.total_identities)],
@@ -183,7 +184,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
     txt(doc, GRAY);
     const critDelta = data.stats.critical - data.previous_run.critical;
     const highDelta = data.stats.high - data.previous_run.high;
-    const trendText = `Trend vs previous run: Critical ${critDelta >= 0 ? '+' : ''}${critDelta}, High ${highDelta >= 0 ? '+' : ''}${highDelta}`;
+    const trendText = `Trend vs previous snapshot: Critical ${critDelta >= 0 ? '+' : ''}${critDelta}, High ${highDelta >= 0 ? '+' : ''}${highDelta}`;
     doc.text(trendText, margin, trendY);
   }
 
@@ -474,7 +475,7 @@ export function generateReport(data: ReportData, clientName?: string): void {
   doc.text('Methodology:', margin, y);
   y += 5;
   const methodLines = [
-    '1. Identity Discovery: Enumerate all identities (service principals, managed identities, users) via Microsoft Graph API.',
+    '1. Identity Enumeration: Enumerate all identities (service principals, managed identities, users) via Microsoft Graph API.',
     '2. Role Analysis: Map Azure RBAC and Entra ID directory role assignments with privilege tier classification (T0-T3).',
     '3. Risk Scoring: Points-based risk calculation considering role criticality, credential health, activity status, and ownership.',
     '4. Remediation Matching: Pattern-match risk factors against the AuditGraph playbook library for actionable fix steps.',
@@ -555,9 +556,9 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
   const credTotal = (data.credential_health.expired + data.credential_health.expiring_soon + data.credential_health.healthy + data.credential_health.unknown) || 1;
   const credHealthPct = Math.round((data.credential_health.healthy / credTotal) * 100);
 
-  // Days since last scan
-  const daysSinceScan = data.collected_at
-    ? Math.max(0, Math.floor((Date.now() - new Date(data.collected_at).getTime()) / 86400000))
+  // Days since last snapshot
+  const daysSinceSnapshot = data.collected_at
+    ? Math.max(0, Math.floor((Date.now() - new Date(data.collected_at).getTime()) / TIME_MS.DAY))
     : -1;
 
   // ── Header ──────────────────────────────────────────────────
@@ -619,7 +620,7 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
     if (delta !== 0) {
       doc.setFontSize(8);
       txt(doc, delta > 0 ? GREEN : RED);
-      doc.text(`${delta > 0 ? '+' : ''}${delta} from previous scan`, circleCx, circleCy + 33, { align: 'center' });
+      doc.text(`${delta > 0 ? '+' : ''}${delta} from previous snapshot`, circleCx, circleCy + 33, { align: 'center' });
     }
   }
 
@@ -629,13 +630,15 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
   const boxW = (rightWidth - 10) / 3;
   const boxH = 32;
 
+  const ghostCount = (data.stats as Record<string, unknown>).ghost_count as number || 0;
+
   const metrics: { label: string; value: string; color: RGB }[] = [
     { label: 'Total Identities', value: `${data.stats.total_identities}`, color: DARK },
     { label: 'Critical / High Risk', value: `${crit + high}`, color: crit + high > 0 ? RED : GREEN },
     { label: 'Credential Health', value: `${credHealthPct}%`, color: credHealthPct >= 80 ? GREEN : credHealthPct >= 60 ? [202, 138, 4] : RED },
     { label: 'CA Coverage', value: data.conditional_access ? `${Math.round((data.conditional_access.covered / (data.conditional_access.total || 1)) * 100)}%` : 'N/A', color: BLUE },
-    { label: 'Active Anomalies', value: 'N/A', color: GRAY },
-    { label: 'Days Since Scan', value: daysSinceScan >= 0 ? `${daysSinceScan}` : 'N/A', color: daysSinceScan <= 1 ? GREEN : daysSinceScan <= 7 ? [202, 138, 4] : RED },
+    { label: 'Ghost Access', value: `${ghostCount}`, color: ghostCount > 0 ? RED : GREEN },
+    { label: 'Days Since Snapshot', value: daysSinceSnapshot >= 0 ? `${daysSinceSnapshot}` : 'N/A', color: daysSinceSnapshot <= 1 ? GREEN : daysSinceSnapshot <= 7 ? [202, 138, 4] : RED },
   ];
 
   metrics.forEach((m, idx) => {
@@ -678,7 +681,8 @@ export function generateExecutiveReport(data: ReportData, clientName?: string): 
     `Your organization manages ${data.stats.total_identities} identities across cloud providers.`,
     crit > 0 ? `${crit} critical risk identities require immediate attention.` : 'No critical risk identities detected.',
     `Credential health is at ${credHealthPct}%. ${data.credential_health.expired > 0 ? data.credential_health.expired + ' credentials have expired.' : 'All credentials are current.'}`,
-  ].join(' ');
+    ghostCount > 0 ? `WARNING: ${ghostCount} disabled/deleted identities still retain active role assignments (ghost access).` : '',
+  ].filter(Boolean).join(' ');
   const splitSummary = doc.splitTextToSize(summaryText, pageWidth - margin * 2 - 12);
   doc.text(splitSummary, margin + 6, summaryY + 15);
 

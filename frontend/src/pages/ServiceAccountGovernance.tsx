@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
 // ─── Theme-aware constants (page-scoped) ───
 const G = {
@@ -269,7 +270,7 @@ export default function ServiceAccountGovernance() {
 
   // ─── Render ───
   return (
-    <div style={{ background: G.bg, fontFamily: "'DM Sans', sans-serif" }} className="min-h-screen -m-4 -mt-4 p-8">
+    <div style={{ background: G.bg, fontFamily: "'Inter', sans-serif" }} className="min-h-screen -m-4 -mt-4 p-8">
       <style>{`
         @keyframes gov-fade-up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
         .gov-card { animation: gov-fade-up 0.4s ease-out both; }
@@ -301,6 +302,7 @@ export default function ServiceAccountGovernance() {
           <p style={{ color: G.textMuted }} className="text-sm mt-1">
             Risk-aware governance decisions for service principals and managed identities
           </p>
+          <SnapshotContextHeader />
         </div>
         {stats && stats.recent_decisions > 0 && (
           <div style={{ background: G.surface, border: `1px solid ${G.surfaceBorder}` }}
@@ -319,33 +321,35 @@ export default function ServiceAccountGovernance() {
                className="gov-card gov-card-1 rounded-xl p-4">
             <div>
               <div style={{ color: G.textMuted }} className="text-[10px] uppercase tracking-wider font-medium">Total NHIs</div>
-              <div style={{ color: G.text, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{stats.total}</div>
+              <button onClick={() => { setActiveBand('All'); setPage(0); }} className="cursor-pointer hover:opacity-70 transition">
+                <div style={{ color: G.text, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{stats.total.toLocaleString()}</div>
+              </button>
               <div className="flex gap-1 mt-3">
                 {['Critical', 'High', 'Medium', 'Low'].map(b => (
-                  <div key={b} className="flex-1 text-center">
-                    <div style={{ color: G.band[b], fontFamily: G.mono }} className="text-sm font-bold">{rd[b] || 0}</div>
+                  <button key={b} className="flex-1 text-center cursor-pointer hover:opacity-70 transition" onClick={() => { setActiveBand(b); setPage(0); }}>
+                    <div style={{ color: (rd[b] || 0) === 0 ? G.textMuted : G.band[b], fontFamily: G.mono, borderBottom: '1px dashed currentColor', width: 'fit-content', margin: '0 auto' }} className="text-sm font-bold">{(rd[b] || 0).toLocaleString()}</div>
                     <div style={{ color: G.textMuted }} className="text-[9px]">{b}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
           </div>
 
           {/* Critical */}
-          <div style={{ background: G.bandBg.Critical, border: `1px solid rgba(255,23,68,0.2)` }}
+          <div style={{ background: (rd.Critical || 0) === 0 ? G.surface : G.bandBg.Critical, border: `1px solid ${(rd.Critical || 0) === 0 ? G.surfaceBorder : 'rgba(255,23,68,0.2)'}` }}
                className="gov-card gov-card-2 rounded-xl p-4 cursor-pointer transition hover:scale-[1.01]"
                onClick={() => { setActiveBand('Critical'); setPage(0); }}>
-            <div style={{ color: G.band.Critical }} className="text-[10px] uppercase tracking-wider font-medium">Critical Risk</div>
-            <div style={{ color: G.band.Critical, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{rd.Critical || 0}</div>
+            <div style={{ color: (rd.Critical || 0) === 0 ? G.textMuted : G.band.Critical }} className="text-[10px] uppercase tracking-wider font-medium">Critical Risk</div>
+            <div style={{ color: (rd.Critical || 0) === 0 ? G.textMuted : G.band.Critical, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.Critical || 0).toLocaleString()}</div>
             <div style={{ color: G.textMuted }} className="text-[10px] mt-2">Immediate action required</div>
           </div>
 
           {/* High */}
-          <div style={{ background: G.bandBg.High, border: `1px solid rgba(255,109,0,0.2)` }}
+          <div style={{ background: (rd.High || 0) === 0 ? G.surface : G.bandBg.High, border: `1px solid ${(rd.High || 0) === 0 ? G.surfaceBorder : 'rgba(255,109,0,0.2)'}` }}
                className="gov-card gov-card-3 rounded-xl p-4 cursor-pointer transition hover:scale-[1.01]"
                onClick={() => { setActiveBand('High'); setPage(0); }}>
-            <div style={{ color: G.band.High }} className="text-[10px] uppercase tracking-wider font-medium">High Risk</div>
-            <div style={{ color: G.band.High, fontFamily: G.mono }} className="text-3xl font-bold mt-1">{rd.High || 0}</div>
+            <div style={{ color: (rd.High || 0) === 0 ? G.textMuted : G.band.High }} className="text-[10px] uppercase tracking-wider font-medium">High Risk</div>
+            <div style={{ color: (rd.High || 0) === 0 ? G.textMuted : G.band.High, fontFamily: G.mono, width: 'fit-content', borderBottom: '1px dashed currentColor' }} className="text-3xl font-bold mt-1">{(rd.High || 0).toLocaleString()}</div>
             <div style={{ color: G.textMuted }} className="text-[10px] mt-2">Review within 7 days</div>
           </div>
 
@@ -362,16 +366,16 @@ export default function ServiceAccountGovernance() {
                 const count = gb[g.key] || 0;
                 const pct = stats.total > 0 ? (count / stats.total) * 100 : 0;
                 return (
-                  <div key={g.key}>
+                  <button key={g.key} className="w-full text-left cursor-pointer hover:opacity-70 transition" onClick={() => { setSearch(g.key); setPage(0); }}>
                     <div className="flex justify-between text-[10px]">
                       <span style={{ color: G.govStatus[g.key] }}>{g.label}</span>
-                      <span style={{ color: G.textSecondary, fontFamily: G.mono }}>{count}</span>
+                      <span style={{ color: G.textSecondary, fontFamily: G.mono, borderBottom: '1px dashed currentColor' }}>{count}</span>
                     </div>
                     <div style={{ background: 'rgba(255,255,255,0.06)' }} className="h-1 rounded-full mt-0.5">
                       <div style={{ width: `${pct}%`, background: G.govStatus[g.key], transition: 'width 0.6s ease-out' }}
                            className="h-full rounded-full" />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -502,17 +506,13 @@ export default function ServiceAccountGovernance() {
                               background: G.bandBg[item.risk_band] || G.surface,
                               color: G.band[item.risk_band] || G.textSecondary,
                               fontFamily: G.mono,
-                            }} className="px-1.5 py-0.5 rounded text-[10px] font-bold">
-                              {item.risk_score}
-                            </span>
-                            <span style={{ color: G.band[item.risk_band] || G.textMuted }}
-                                  className="text-[9px] font-medium">
+                            }} className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase">
                               {item.risk_band}
                             </span>
                           </div>
                           {item.expected_reduction > 0 && (
                             <div style={{ color: '#4ADE80' }} className="text-[9px] mt-0.5">
-                              -{item.expected_reduction}pts possible
+                              Remediable
                             </div>
                           )}
                         </td>
@@ -566,7 +566,7 @@ export default function ServiceAccountGovernance() {
                         {canDecide && (
                           <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
                             <button
-                              onClick={() => { setDecisionTarget(item); setDecisionType(item.recommended_action === 'Approve' ? 'approve' : item.recommended_action === 'Revoke' ? 'revoke' : item.recommended_action === 'Downgrade' ? 'downgrade' : item.recommended_action === 'Rotate' ? 'rotate' : 'approve'); setDecisionReason(''); }}
+                              onClick={() => { setDecisionTarget(item); setDecisionType((item.recommended_action || '').toLowerCase() as typeof decisionType || 'approve'); setDecisionReason(''); }}
                               style={{ background: 'rgba(139,92,246,0.12)', color: G.accent }}
                               className="px-2 py-1 rounded text-[10px] font-medium hover:opacity-80 transition">
                               Decide
@@ -650,13 +650,13 @@ export default function ServiceAccountGovernance() {
                 <div style={{ background: G.bandBg[detail.risk_band], border: `1px solid ${G.band[detail.risk_band]}20` }}
                      className="rounded-xl p-4 text-center">
                   <div style={{ color: G.band[detail.risk_band], fontFamily: G.mono }}
-                       className="text-4xl font-bold">{detail.risk_score}</div>
+                       className="text-2xl font-bold uppercase">{detail.risk_band}</div>
                   <div style={{ color: G.band[detail.risk_band] }} className="text-xs font-semibold mt-1">
-                    {detail.risk_band} Risk
+                    Severity
                   </div>
                   {detail.expected_reduction > 0 && (
                     <div style={{ color: '#4ADE80' }} className="text-[10px] mt-2">
-                      {detail.recommended_action}: -{detail.expected_reduction}pts
+                      {detail.recommended_action}: remediable
                     </div>
                   )}
                 </div>
@@ -780,12 +780,12 @@ export default function ServiceAccountGovernance() {
                     <div style={{ background: G.surface, border: `1px solid ${G.surfaceBorder}` }}
                          className="rounded-lg p-3">
                       <div style={{ color: G.textMuted }} className="text-[10px] uppercase tracking-wider mb-2">
-                        Credentials ({detail.credentials.length})
+                        Credentials ({(detail.credentials ?? []).length})
                       </div>
-                      {detail.credentials.length === 0 ? (
+                      {(detail.credentials ?? []).length === 0 ? (
                         <div style={{ color: G.textMuted }} className="text-[10px]">No credentials</div>
-                      ) : detail.credentials.map((c, i) => (
-                        <div key={i} className="py-1.5" style={{ borderBottom: i < detail.credentials.length - 1 ? `1px solid ${G.surfaceBorder}` : 'none' }}>
+                      ) : (detail.credentials ?? []).map((c, i) => (
+                        <div key={i} className="py-1.5" style={{ borderBottom: i < (detail.credentials ?? []).length - 1 ? `1px solid ${G.surfaceBorder}` : 'none' }}>
                           <div className="flex items-center justify-between">
                             <span style={{ color: G.textSecondary }} className="text-[10px]">{c.credential_type}</span>
                             <span style={{ color: G.textMuted }} className="text-[9px]">
@@ -899,7 +899,7 @@ export default function ServiceAccountGovernance() {
                       const item = items.find(i => i.identity_id === detail.identity_id);
                       if (item) {
                         setDecisionTarget(item);
-                        setDecisionType(detail.recommended_action === 'Approve' ? 'approve' : detail.recommended_action === 'Revoke' ? 'revoke' : detail.recommended_action === 'Downgrade' ? 'downgrade' : detail.recommended_action === 'Rotate' ? 'rotate' : 'approve');
+                        setDecisionType((detail.recommended_action || '').toLowerCase() as typeof decisionType || 'approve');
                         setDecisionReason('');
                       }
                     }}
@@ -918,7 +918,7 @@ export default function ServiceAccountGovernance() {
       {decisionTarget && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setDecisionTarget(null)}>
           <div style={{ background: '#141820', border: `1px solid ${G.surfaceBorder}` }}
-               className="rounded-xl shadow-2xl w-full max-w-lg mx-4 p-6 space-y-4"
+               className="rounded-xl shadow-lg w-full max-w-lg mx-4 p-6 space-y-4"
                onClick={e => e.stopPropagation()}>
             <div>
               <h3 style={{ color: G.text }} className="text-sm font-bold">Governance Decision</h3>

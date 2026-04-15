@@ -550,6 +550,6 @@ Week 12 (20 hours):
 
 ---
 
-**Prepared by:** Bhupathi  
+**Prepared by:** AuditGraph Team  
 **Date:** January 31, 2026  
 **Status:** Ready for Week 10 kickoff 🚀

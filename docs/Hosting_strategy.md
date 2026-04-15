@@ -1,7 +1,7 @@
 # AuditGraph - Hosting & Domain Strategy
 
 **Status:** Planning (Implementation in Week 10)  
-**Owner:** Bhupathi Reddy Sangabattula  
+**Owner:** Platform Admin  
 **Last Updated:** January 27, 2026
 
 ---
@@ -33,7 +33,7 @@ demo.auditgraph.ai      → Demo environment (prospects)
 
 #### **Customer Tenants:**
 ```
-lanterncare.auditgraph.ai   → Customer: Lantern Care
+acme-health.auditgraph.ai   → Customer: Acme Health
 ibm.auditgraph.ai           → Customer: IBM
 wipro.auditgraph.ai         → Customer: Wipro
 ```
@@ -43,7 +43,7 @@ wipro.auditgraph.ai         → Customer: Wipro
 - Lowercase letters: `a-z`
 - Numbers: `0-9`
 - Hyphens: `-` (not at start/end)
-- Examples: `lanterncare`, `ibm-healthcare`, `wipro-us`
+- Examples: `acme-health`, `ibm-healthcare`, `wipro-us`
 
 ❌ **Reserved Names:**
 - `www`, `api`, `dev`, `demo`, `staging`, `admin`, `support`, `status`
@@ -106,7 +106,7 @@ CI/CD:     GitHub Actions
 **Managed by:** Cloudflare (automatic renewal)
 
 **Benefits:**
-- One cert covers: `dev`, `demo`, `lanterncare`, `ibm`, etc.
+- One cert covers: `dev`, `demo`, `acme-health`, `ibm`, etc.
 - No need to issue cert per customer
 - Zero maintenance
 
@@ -148,16 +148,16 @@ CNAME   api     auditgraph-api.azurecontainerapps.io   ON
 
 **1. Request arrives:**
 ```
-Host: lanterncare.auditgraph.ai
+Host: acme-health.auditgraph.ai
 ```
 
 **2. Cloudflare routes to frontend**
 
 **3. Frontend extracts tenant:**
 ```javascript
-const hostname = window.location.hostname;  // lanterncare.auditgraph.ai
+const hostname = window.location.hostname;  // acme-health.auditgraph.ai
 const parts = hostname.split('.');
-const tenant = parts[0];  // "lanterncare"
+const tenant = parts[0];  // "acme-health"
 ```
 
 **4. Frontend validates tenant:**
@@ -206,7 +206,7 @@ const identities = await fetch(`/api/identities?tenant=${tenant}`);
 
 **Option A: Database per Tenant (Most Secure)**
 ```
-lanterncare → db-lanterncare
+acme-health → db-acme-health
 ibm         → db-ibm
 wipro       → db-wipro
 ```
@@ -216,7 +216,7 @@ wipro       → db-wipro
 **Option B: Schema per Tenant**
 ```
 Single DB, multiple schemas:
-- schema_lanterncare
+- schema_acme-health
 - schema_ibm
 - schema_wipro
 ```
@@ -394,8 +394,8 @@ echo | openssl s_client -connect dev.auditgraph.ai:443 2>/dev/null | openssl x50
 **Tenant Routing:**
 ```bash
 # Test tenant extraction
-curl -H "Host: lanterncare.auditgraph.ai" https://auditgraph.ai/api/tenant
-# Should return: {"tenant": "lanterncare"}
+curl -H "Host: acme-health.auditgraph.ai" https://auditgraph.ai/api/tenant
+# Should return: {"tenant": "acme-health"}
 ```
 
 ---

@@ -1,0 +1,2 @@
+# Development and testing dependencies
+pip-audit>=2.7

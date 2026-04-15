@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface Anomaly {
   id: number;
@@ -31,6 +32,7 @@ const TYPE_LABELS: Record<string, string> = {
   credential_surge: 'Credential Surge',
   off_hours_pim: 'Off-Hours PIM',
   excessive_pim_usage: 'Excessive PIM',
+  ghost_identity: 'Ghost Identity',
 };
 
 function timeAgo(dateStr: string): string {
@@ -44,6 +46,8 @@ function timeAgo(dateStr: string): string {
 }
 
 export default function AnomalyAlerts({ anomalies, unresolvedCount, loading }: AnomalyAlertsProps) {
+  const navigate = useNavigate();
+
   if (loading) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-5">
@@ -99,7 +103,7 @@ export default function AnomalyAlerts({ anomalies, unresolvedCount, loading }: A
 
       <div className="space-y-2">
         {anomalies.map(a => (
-          <div key={a.id} className="flex items-start gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors">
+          <div key={a.id} onClick={() => a.identity_id ? navigate(`/identities/${a.identity_id}`) : undefined} className={`flex items-start gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors${a.identity_id ? ' cursor-pointer' : ''}`}>
             <span className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${SEVERITY_COLORS[a.severity] || 'bg-gray-400'}`} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">

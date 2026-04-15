@@ -86,14 +86,20 @@ export default function ConditionalAccessCard({ data, loading }: ConditionalAcce
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="bg-gray-50 rounded-lg p-3">
+        <button
+          onClick={() => navigate('/settings#conditional-access')}
+          className="bg-gray-50 rounded-lg p-3 text-left hover:bg-blue-50 transition"
+        >
           <div className="text-xs text-gray-500">Policies</div>
           <div className="text-lg font-bold text-gray-900">{data.enabled_policies}<span className="text-sm font-normal text-gray-400">/{data.total_policies}</span></div>
-        </div>
-        <div className="bg-gray-50 rounded-lg p-3">
+        </button>
+        <button
+          onClick={() => navigate('/identities?ca_coverage=covered')}
+          className="bg-gray-50 rounded-lg p-3 text-left hover:bg-blue-50 transition"
+        >
           <div className="text-xs text-gray-500">MFA Enforcing</div>
           <div className="text-lg font-bold text-blue-700">{data.mfa_policies ?? 0}</div>
-        </div>
+        </button>
         <button
           onClick={() => navigate('/identities?ca_coverage=covered')}
           className="bg-gray-50 rounded-lg p-3 text-left hover:bg-green-50 transition"
@@ -117,13 +123,19 @@ export default function ConditionalAccessCard({ data, loading }: ConditionalAcce
           <div className="space-y-1.5">
             {data.weak_policy_flags.map((flag, idx) => {
               const cfg = severityConfig[flag.severity] || severityConfig.medium;
+              const flagNav: Record<string, string> = {
+                no_mfa_for_all_users: '/identities?ca_coverage=not_covered',
+                no_mfa_for_admins: '/identities?ca_coverage=not_covered&privilege_tier=0',
+                ca_policy_disabled: '/settings#conditional-access',
+                legacy_auth_enabled: '/identities?ca_coverage=not_covered',
+              };
               return (
-                <div key={idx} className="flex items-center justify-between">
+                <button key={idx} onClick={() => navigate(flagNav[flag.flag] || '/identities')} className="flex items-center justify-between w-full hover:bg-gray-50 rounded px-1 -mx-1 transition">
                   <span className="text-xs text-gray-700">{flagLabels[flag.flag] || flag.flag}</span>
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cfg.bg} ${cfg.text}`}>
                     {flag.count} {flag.severity.toUpperCase()}
                   </span>
-                </div>
+                </button>
               );
             })}
           </div>

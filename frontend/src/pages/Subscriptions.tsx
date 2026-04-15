@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { maskCredential } from '../utils/maskCredential';
@@ -6,7 +7,7 @@ import { formatCents, SUB_RATES_CENTS } from '../constants/pricing';
 
 interface CloudSubscription {
   id: number;
-  tenant_id: number;
+  organization_id: number;
   cloud: string;
   account_id: string;
   account_name: string | null;
@@ -27,6 +28,8 @@ interface SubscriptionStats {
 
 interface BillingBreakdown {
   platform_fee_cents: number;
+  platform_fee_waiver_cents: number;
+  trial_active: boolean;
   subscription_total_cents: number;
   gross_monthly_cents: number;
   discount_pct: number;
@@ -43,6 +46,7 @@ const CLOUD_BADGE: Record<string, { label: string; color: string; bg: string }> 
 };
 
 export default function Subscriptions() {
+  const navigate = useNavigate();
   const { canActivateSubscriptions, canSeePricing } = useAuth();
   const { withConnection, selectedConnectionId } = useConnection();
   const [subs, setSubs] = useState<CloudSubscription[]>([]);
@@ -54,8 +58,8 @@ export default function Subscriptions() {
 
   const fetchData = () => {
     Promise.all([
-      fetch(withConnection('/api/subscriptions')).then(r => r.json()),
-      fetch(withConnection('/api/subscriptions/stats')).then(r => r.json()),
+      fetch(withConnection('/api/subscriptions')).then(r => r.ok ? r.json() : { subscriptions: [], billing: null }),
+      fetch(withConnection('/api/subscriptions/stats')).then(r => r.ok ? r.json() : null),
     ])
       .then(([subsData, statsData]) => {
         setSubs(subsData.subscriptions || []);
@@ -72,18 +76,14 @@ export default function Subscriptions() {
     setActivating(id);
     setActivateError(null);
     try {
-      const res = await fetch(withConnection('/api/subscriptions/activate'), {
+      const res = await fetch(`/api/client/subscriptions/${id}/activate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
       });
       if (res.ok) {
-        fetchData();
+        navigate('/dashboard');
       } else {
-        const data = await res.json();
-        if (data.upgrade_required) {
-          setActivateError(data.error);
-        }
+        const data = await res.json().catch(() => ({}));
+        setActivateError(data.error || 'Activation failed');
       }
     } finally {
       setActivating(null);
@@ -92,21 +92,32 @@ export default function Subscriptions() {
 
   const handleDeactivate = async (id: number) => {
     setActivating(id);
+    setActivateError(null);
     try {
       const res = await fetch(withConnection(`/api/subscriptions/${id}/deactivate`), { method: 'PUT' });
-      if (res.ok) fetchData();
+      if (res.ok) {
+        fetchData();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setActivateError(data.error || 'Deactivation failed');
+      }
     } finally {
       setActivating(null);
     }
   };
 
   const unmonitored = subs.filter(s => !s.monitored);
-
-  // Use billing API data if available, otherwise fall back to local calculation
+  const isTrial = billing?.trial_active ?? false;
   const netMonthlyCents = billing?.net_monthly_cents ?? 0;
 
+  // Filter line items: hide platform fee + waiver on trial
+  const displayLineItems = billing?.line_items.filter(li => {
+    if (isTrial) return li.type !== 'platform' && li.type !== 'trial_waiver';
+    return li.type !== 'trial_waiver';
+  }) ?? [];
+
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
+    <div className="p-6 max-w-6xl mx-auto space-y-4">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Subscriptions</h1>
         <p className="text-sm text-gray-500 mt-1">Manage monitored cloud accounts across your organization</p>
@@ -159,46 +170,64 @@ export default function Subscriptions() {
         {canSeePricing && (
           <div className="bg-white border rounded-xl p-4 shadow-sm">
             <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">Monthly Cost</div>
-            <div className="text-2xl font-bold text-gray-900 mt-1">{formatCents(netMonthlyCents)}/mo</div>
-            {!!billing && billing.active_count > 0 && (
+            <div className="flex items-baseline gap-1.5 mt-1">
+              <div className="text-2xl font-bold text-gray-900">{formatCents(netMonthlyCents)}/mo</div>
+              {isTrial && <span className="text-[10px] text-gray-400">after trial</span>}
+            </div>
+            {!!billing && billing.active_count > 0 && !isTrial && (
               <div className="text-[10px] text-gray-400 mt-0.5">
                 {formatCents(billing.platform_fee_cents)} platform + {formatCents(billing.subscription_total_cents)} ({billing.active_count} subs)
                 {billing.discount_pct > 0 && <span className="text-green-600"> - {billing.discount_pct}% discount</span>}
+              </div>
+            )}
+            {!!billing && billing.active_count > 0 && isTrial && (
+              <div className="text-[10px] text-gray-400 mt-0.5">
+                {formatCents(billing.subscription_total_cents)} ({billing.active_count} sub{billing.active_count !== 1 ? 's' : ''})
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* Billing breakdown */}
-      {canSeePricing && !!billing && billing.line_items.length > 0 && (
+      {/* Cost Breakdown — only show for paid plans with line items */}
+      {canSeePricing && !!billing && displayLineItems.length > 0 && (
         <div className="bg-white border rounded-xl p-4 shadow-sm">
           <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Cost Breakdown</h3>
           <div className="space-y-1.5">
-            {billing.line_items.map((item, i) => (
+            {displayLineItems.map((item, i) => (
               <div key={i} className="flex items-center justify-between text-xs">
-                <span className="text-gray-700">{item.label}</span>
+                <span className={item.amount_cents < 0 ? 'text-green-700' : 'text-gray-700'}>
+                  {item.label}
+                </span>
                 <span className={`font-semibold ${item.amount_cents < 0 ? 'text-green-700' : 'text-gray-900'}`}>
                   {item.amount_cents < 0 ? '-' : ''}{formatCents(Math.abs(item.amount_cents))}/mo
                 </span>
               </div>
             ))}
             <div className="border-t border-gray-200 pt-2 mt-2 flex items-center justify-between">
-              <span className="text-xs font-semibold text-gray-700">Net Monthly</span>
-              <span className="text-sm font-bold text-gray-900">{formatCents(billing.net_monthly_cents)}/mo</span>
+              <span className="text-xs font-semibold text-gray-700">
+                {isTrial ? 'Projected Monthly' : 'Net Monthly'}
+              </span>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-sm font-bold text-gray-900">{formatCents(billing.net_monthly_cents)}/mo</span>
+                {isTrial && <span className="text-[10px] text-gray-400">after trial</span>}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Platform fee notice */}
+      {/* Pricing notice — no active subs */}
       {canSeePricing && (stats?.active || 0) === 0 && subs.length > 0 && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="text-sm font-semibold text-blue-800 mb-1">Pricing</div>
           <p className="text-xs text-blue-700">
-            Platform base fee: <span className="font-semibold">{formatCents(billing?.platform_fee_cents ?? 20000)}/mo</span> +{' '}
-            per-subscription rates starting at <span className="font-semibold">{formatCents(SUB_RATES_CENTS.azure)}/mo</span>.
-            Activate subscriptions below to begin identity monitoring.
+            {isTrial ? (
+              <>Per-subscription rate: <span className="font-semibold">{formatCents(SUB_RATES_CENTS.azure)}/mo</span> per monitored account. No charges during trial.</>
+            ) : (
+              <>Platform base fee: <span className="font-semibold">{formatCents(billing?.platform_fee_cents ?? 50000)}/mo</span> + per-subscription rate: <span className="font-semibold">{formatCents(SUB_RATES_CENTS.azure)}/mo</span> per monitored account.</>
+            )}
+            {' '}Activate subscriptions below to begin identity monitoring.
           </p>
         </div>
       )}
@@ -206,7 +235,7 @@ export default function Subscriptions() {
       {/* Info box */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
         No additional permissions needed &mdash; Graph API credentials operate at the Entra ID tenant level.
-        All subscriptions discovered during scans appear here automatically.
+        All subscriptions discovered during snapshots appear here automatically.
       </div>
 
       {/* Table */}
@@ -228,7 +257,7 @@ export default function Subscriptions() {
               {loading ? (
                 <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
               ) : subs.length === 0 ? (
-                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Run a discovery scan to detect cloud accounts.</td></tr>
+                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Capture a snapshot to detect cloud accounts.</td></tr>
               ) : subs.map(sub => {
                 const badge = CLOUD_BADGE[sub.cloud] || CLOUD_BADGE.azure;
                 const rateCents = sub.rate_cents ?? SUB_RATES_CENTS[sub.cloud] ?? SUB_RATES_CENTS.azure;

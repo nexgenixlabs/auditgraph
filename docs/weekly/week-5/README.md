@@ -192,7 +192,7 @@ auditgraph/
 - [Lessons Learned](LESSONS-LEARNED.md) - Insights & mistakes
 
 **GitHub:**
-- [Repository](https://github.com/bhupathireddys/auditgraph)
+- [Repository](https://github.com/AuditGraph/auditgraph)
 
 ---
 

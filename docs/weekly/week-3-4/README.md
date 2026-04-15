@@ -172,8 +172,8 @@ backend/
 - [Lessons Learned](LESSONS-LEARNED.md) - Insights & mistakes
 
 **GitHub:**
-- [Repository](https://github.com/bhupathireddys/auditgraph)
-- [Week 3-4 Commits](https://github.com/bhupathireddys/auditgraph/commits/main)
+- [Repository](https://github.com/AuditGraph/auditgraph)
+- [Week 3-4 Commits](https://github.com/AuditGraph/auditgraph/commits/main)
 
 ---
 

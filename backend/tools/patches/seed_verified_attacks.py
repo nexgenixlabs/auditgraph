@@ -8,7 +8,8 @@ HHS breach notifications, or vendor post-incident reports. No fabricated data.
 Run: cd backend && ./venv/bin/python tools/patches/seed_verified_attacks.py
 """
 import sys
-sys.path.insert(0, '/Users/sangabattula/projects/auditgraph/backend')
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from app.database import Database
 

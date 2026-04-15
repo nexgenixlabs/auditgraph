@@ -62,7 +62,7 @@ export default function RiskVelocityChart({ transitions, retention }: RiskVeloci
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold text-gray-900">Risk Escalation Tracker</h3>
-          <p className="text-[11px] text-gray-500">Identity flow between risk levels per run</p>
+          <p className="text-[11px] text-gray-500">Identity flow between risk levels per snapshot</p>
         </div>
         {Object.keys(retention).length > 0 && (
           <div className="flex gap-2">
@@ -100,7 +100,7 @@ export default function RiskVelocityChart({ transitions, retention }: RiskVeloci
                 if (!d) return null;
                 return (
                   <div className="bg-white border rounded-lg shadow-lg px-3 py-2 text-xs">
-                    <div className="font-semibold mb-1">{label} (Run #{d.run_id})</div>
+                    <div className="font-semibold mb-1">{label} (Snapshot #{d.run_id})</div>
                     {(['critical', 'high', 'medium'] as const).map(l => {
                       const inKey = `${l}_in` as keyof typeof d;
                       const outKey = `${l}_out` as keyof typeof d;

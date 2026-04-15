@@ -5,9 +5,9 @@
  * REST API. All functions return Promises and handle error logging.
  *
  * API Functions:
- *   - getStats(): Fetch dashboard statistics from latest discovery run
+ *   - getStats(): Fetch dashboard statistics from latest snapshot
  *   - getRisks(): Fetch high-risk identities requiring attention
- *   - getIdentities(): Fetch all identities from latest discovery run
+ *   - getIdentities(): Fetch all identities from latest snapshot
  *   - getIdentity(id): Fetch detailed info for a single identity
  *
  * Configuration:
@@ -26,6 +26,11 @@
 import axios from 'axios';
 import { Identity } from '../types';
 
+/** Dev-only logger — silenced in production to prevent data leaks in devtools. */
+const log = process.env.NODE_ENV !== 'production'
+  ? console
+  : { log: () => {}, warn: () => {}, error: () => {} };
+
 /**
  * Base URL for API requests.
  * Defaults to localhost:5001/api for local development.
@@ -36,12 +41,33 @@ const API_BASE =
 
 /**
  * Axios instance configured for AuditGraph API requests.
+ * Includes auth + tenant isolation interceptors matching the global fetch interceptor.
  */
 const api = axios.create({
   baseURL: API_BASE,
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: true,
+});
+
+// Phase S1: Attach X-Organization-Id + CSRF on every request (cookies sent via withCredentials)
+api.interceptors.request.use((config) => {
+  const orgId = localStorage.getItem('active_org_id');
+  if (orgId) {
+    config.headers = config.headers || {};
+    config.headers['X-Organization-Id'] = orgId;
+  }
+  // CSRF double-submit token for mutating requests
+  const method = (config.method || 'get').toUpperCase();
+  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+    const csrfMatch = document.cookie.split('; ').find(row => row.startsWith('csrf_token='));
+    if (csrfMatch) {
+      config.headers = config.headers || {};
+      config.headers['X-CSRF-Token'] = csrfMatch.split('=')[1];
+    }
+  }
+  return config;
 });
 
 export const getStats = async () => {
@@ -49,7 +75,7 @@ export const getStats = async () => {
     const res = await api.get('/stats');
     return res.data;
   } catch (error) {
-    console.error('Failed to fetch stats:', error);
+    log.error('Failed to fetch stats:', error);
     throw error;
   }
 };
@@ -59,7 +85,7 @@ export const getRisks = async () => {
     const res = await api.get('/risks');
     return res.data;
   } catch (error) {
-    console.error('Failed to fetch risks:', error);
+    log.error('Failed to fetch risks:', error);
     throw error;
   }
 };
@@ -69,7 +95,7 @@ export const getIdentities = async () => {
     const res = await api.get('/identities');
     return res.data;
   } catch (error) {
-    console.error('Failed to fetch getIdentities:', error);
+    log.error('Failed to fetch identities:', error);
     throw error;
   }
 };
@@ -91,9 +117,6 @@ export const getIdentity = async (identityId: string): Promise<Identity> => {
     const roles = identity?.roles ?? payload?.roles ?? [];
     const graph_permissions = identity?.graph_permissions ?? payload?.graph_permissions ?? [];
     
-    console.log('API: Full payload:', payload);
-    console.log('API: graph_permissions extracted:', graph_permissions);
-    
     return {
       ...identity,
       roles,
@@ -106,7 +129,7 @@ export const getIdentity = async (identityId: string): Promise<Identity> => {
             : 0,
     };
   } catch (error) {
-    console.error('Failed to fetch identity:', error);
+    log.error('Failed to fetch identity:', error);
     throw error;
   }
 };
@@ -129,7 +152,7 @@ export const queryIdentities = async (
     const res = await api.post('/identities/query', body);
     return res.data;
   } catch (error) {
-    console.error('Failed to query identities:', error);
+    log.error('Failed to query identities:', error);
     throw error;
   }
 };
@@ -139,9 +162,48 @@ export const getQueryFields = async () => {
     const res = await api.get('/identities/query/fields');
     return res.data;
   } catch (error) {
-    console.error('Failed to fetch query fields:', error);
+    log.error('Failed to fetch query fields:', error);
     throw error;
   }
 };
+
+// ── Snapshot API wrappers (frontend-only terminology layer) ──────
+// Backend routes are /api/runs — these wrappers provide snapshot-aligned naming.
+
+/** Fetch all snapshots. Wraps GET /api/runs */
+export const getSnapshots = async () => {
+  try {
+    const res = await api.get('/runs');
+    return res.data;
+  } catch (error) {
+    log.error('Failed to fetch snapshots:', error);
+    throw error;
+  }
+};
+
+/** Trigger a new snapshot capture. Wraps POST /api/runs/trigger */
+export const triggerSnapshot = async () => {
+  try {
+    const res = await api.post('/runs/trigger');
+    return res.data;
+  } catch (error) {
+    log.error('Failed to trigger snapshot:', error);
+    throw error;
+  }
+};
+
+/** Fetch a single snapshot's drift report. Wraps GET /api/runs/:id/drift */
+export const getSnapshotById = async (snapshotId: number) => {
+  try {
+    const res = await api.get(`/runs/${snapshotId}/drift`);
+    return res.data;
+  } catch (error) {
+    log.error('Failed to fetch snapshot:', error);
+    throw error;
+  }
+};
+
+/** @deprecated Use getSnapshots() instead */
+export const getRuns = getSnapshots;
 
 export default api;

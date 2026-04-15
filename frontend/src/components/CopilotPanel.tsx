@@ -1,4 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import DOMPurify from 'dompurify';
+import { useCopilot } from '../contexts/CopilotContext';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -12,7 +14,22 @@ interface Conversation {
   message_count: number;
 }
 
+const CONTEXT_CHIPS: Record<string, string[]> = {
+  identity: ['Summarize risk', 'Show attack paths', 'Check credentials', 'Review anomalies'],
+  resource: ['Who can access this?', 'Security assessment', 'Compliance status', 'Hardening recommendations'],
+  posture: ['Top priorities', 'Compliance gaps', 'Risk trends', 'Quick wins'],
+  attack_path: ['Explain this path', 'How to mitigate?', 'What is the blast radius?', 'Related identities'],
+};
+
+const CONTEXT_LABELS: Record<string, string> = {
+  identity: 'Identity Investigation',
+  resource: 'Resource Investigation',
+  posture: 'Posture Analysis',
+  attack_path: 'Attack Path Analysis',
+};
+
 export default function CopilotPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { state } = useCopilot();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -22,8 +39,12 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
   const [showHistory, setShowHistory] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [addonEnabled, setAddonEnabled] = useState<boolean | null>(null);
+  const [initialSent, setInitialSent] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Track previous context to detect new investigations
+  const prevContextRef = useRef<string | null>(null);
 
   // Check if AI Copilot add-on is enabled for this tenant
   useEffect(() => {
@@ -31,24 +52,51 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
     fetch('/api/tenant/config')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (!data) { setAddonEnabled(true); return; } // no config = allow
+        if (!data) { setAddonEnabled(true); return; }
         const plan = data.plan || 'free';
-        // Enterprise includes everything; otherwise check add-on toggle
-        if (plan === 'enterprise') {
+        if (plan === 'pro' || plan === 'trial') {
           setAddonEnabled(true);
         } else {
           setAddonEnabled(!!data.addons?.ai_copilot);
         }
       })
-      .catch(() => setAddonEnabled(true)); // on error, allow access
+      .catch(() => setAddonEnabled(true));
   }, [open]);
+
+  // When context changes (new investigation), reset chat
+  useEffect(() => {
+    if (!open) return;
+    const contextKey = `${state.contextType || ''}:${state.contextId || ''}`;
+    if (prevContextRef.current !== contextKey) {
+      prevContextRef.current = contextKey;
+      setMessages([]);
+      setConversationId(null);
+      setInitialSent(false);
+      // Set context-specific chips or fetch generic suggestions
+      if (state.contextType && CONTEXT_CHIPS[state.contextType]) {
+        setSuggestions(CONTEXT_CHIPS[state.contextType]);
+      } else {
+        fetchSuggestions();
+      }
+    }
+  }, [open, state.contextType, state.contextId]);
 
   useEffect(() => {
     if (open && addonEnabled) {
-      fetchSuggestions();
+      if (!state.contextType) {
+        fetchSuggestions();
+      }
       inputRef.current?.focus();
     }
   }, [open, addonEnabled]);
+
+  // Auto-send initial question when set
+  useEffect(() => {
+    if (open && addonEnabled && state.initialQuestion && !initialSent && configured) {
+      setInitialSent(true);
+      sendMessage(state.initialQuestion);
+    }
+  }, [open, addonEnabled, state.initialQuestion, initialSent, configured]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -75,6 +123,13 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
     } catch { /* ignore */ }
   }
 
+  const isInvestigationQuery = useCallback((msg: string): boolean => {
+    if (state.contextType) return true;
+    const lower = msg.toLowerCase();
+    return lower.includes('who can access') || lower.includes('show attack paths') ||
+           lower.includes('lateral movement') || lower.includes('blast radius');
+  }, [state.contextType]);
+
   async function sendMessage(text?: string) {
     const msg = (text || input).trim();
     if (!msg || loading) return;
@@ -84,18 +139,59 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
     setLoading(true);
 
     try {
-      const res = await fetch('/api/copilot/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg, conversation_id: conversationId }),
-      });
-      const data = await res.json();
-      if (data.error === 'not_configured') {
-        setConfigured(false);
+      let res: Response;
+
+      if (state.contextType && state.contextType !== 'attack_path') {
+        // Route to investigation endpoint
+        res = await fetch('/api/copilot/investigate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: state.contextType,
+            target_id: state.contextId,
+            question: msg,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${data.error || res.statusText}` }]);
+        } else {
+          setMessages(prev => [...prev, { role: 'assistant', content: data.report || 'No response' }]);
+          if (data.suggestions) setSuggestions(data.suggestions);
+        }
+      } else if (isInvestigationQuery(msg) && !state.contextType) {
+        // Route graph-like queries to graph-query endpoint
+        res = await fetch('/api/copilot/graph-query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: msg }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${data.error || res.statusText}` }]);
+        } else {
+          setMessages(prev => [...prev, { role: 'assistant', content: data.answer || 'No response' }]);
+          if (data.suggestions) setSuggestions(data.suggestions);
+        }
+      } else {
+        // Standard chat
+        res = await fetch('/api/copilot/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg, conversation_id: conversationId }),
+        });
+        const data = await res.json();
+        if (data.error === 'not_configured') {
+          setConfigured(false);
+        }
+        if (!res.ok) {
+          setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${data.error || res.statusText}` }]);
+        } else {
+          setMessages(prev => [...prev, { role: 'assistant', content: data.response || 'No response' }]);
+          if (data.conversation_id) setConversationId(data.conversation_id);
+          if (data.suggestions) setSuggestions(data.suggestions);
+        }
       }
-      setMessages(prev => [...prev, { role: 'assistant', content: data.response || data.error || 'No response' }]);
-      if (data.conversation_id) setConversationId(data.conversation_id);
-      if (data.suggestions) setSuggestions(data.suggestions);
     } catch (e: any) {
       setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${e?.message || 'Failed to reach copilot'}` }]);
     } finally {
@@ -107,6 +203,8 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
     setMessages([]);
     setConversationId(null);
     setShowHistory(false);
+    setInitialSent(false);
+    prevContextRef.current = null;
     fetchSuggestions();
   }
 
@@ -118,13 +216,13 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
   }
 
   function renderMarkdown(text: string) {
-    // Simple markdown: bold, inline code, bullet lists
     return text.split('\n').map((line, i) => {
       const processed = line
         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
         .replace(/`(.*?)`/g, '<code class="px-1 py-0.5 bg-gray-200 dark:bg-slate-600 rounded text-xs">$1</code>');
+      const sanitize = (html: string) => DOMPurify.sanitize(html, { ALLOWED_TAGS: ['strong', 'code', 'em', 'br'], ALLOWED_ATTR: [] });
       if (line.startsWith('- ') || line.startsWith('* ')) {
-        return <li key={i} className="ml-4 list-disc text-sm" dangerouslySetInnerHTML={{ __html: processed.slice(2) }} />;
+        return <li key={i} className="ml-4 list-disc text-sm" dangerouslySetInnerHTML={{ __html: sanitize(processed.slice(2)) }} />;
       }
       if (line.startsWith('### ')) {
         return <h4 key={i} className="font-semibold text-sm mt-2">{line.slice(4)}</h4>;
@@ -132,11 +230,14 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
       if (line.startsWith('## ')) {
         return <h3 key={i} className="font-bold text-sm mt-2">{line.slice(3)}</h3>;
       }
-      return <p key={i} className="text-sm" dangerouslySetInnerHTML={{ __html: processed || '&nbsp;' }} />;
+      return <p key={i} className="text-sm" dangerouslySetInnerHTML={{ __html: sanitize(processed || '&nbsp;') }} />;
     });
   }
 
   if (!open) return null;
+
+  const contextMode = state.contextType;
+  const contextLabel = contextMode ? CONTEXT_LABELS[contextMode] : null;
 
   return (
     <>
@@ -144,9 +245,9 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
       <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
 
       {/* Panel */}
-      <div className="fixed right-0 top-0 h-full w-96 bg-white dark:bg-slate-900 shadow-2xl z-50 flex flex-col border-l border-gray-200 dark:border-slate-700">
+      <div className="fixed right-0 top-0 h-full w-96 bg-white dark:bg-slate-900 shadow-lg z-50 flex flex-col border-l border-gray-200 dark:border-slate-700">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-slate-700 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-950/50 dark:to-purple-950/50">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-slate-700 bg-blue-50">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
               <svg className="w-[18px] h-[18px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -188,6 +289,25 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
           </div>
         </div>
 
+        {/* Context banner — shown when investigating a specific entity */}
+        {addonEnabled !== false && contextMode && (
+          <div className="px-4 py-2.5 bg-indigo-50 dark:bg-indigo-900/30 border-b border-indigo-100 dark:border-indigo-800">
+            <div className="flex items-center gap-2">
+              <div className="w-5 h-5 rounded bg-indigo-600 flex items-center justify-center flex-shrink-0">
+                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 uppercase">{contextLabel}</div>
+                {state.contextLabel && (
+                  <div className="text-xs text-indigo-800 dark:text-indigo-300 truncate">{state.contextLabel}</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Add-on not enabled gate */}
         {addonEnabled === false && (
           <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
@@ -222,7 +342,6 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
                   onClick={() => {
                     setConversationId(c.id);
                     setShowHistory(false);
-                    // Load conversation messages
                     fetch(`/api/copilot/conversations`)
                       .then(r => r.ok ? r.json() : null)
                       .catch(() => null);
@@ -239,20 +358,22 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
           </div>
         )}
 
-        {/* Not configured warning */}
+        {/* Not configured warning — platform key missing */}
         {addonEnabled !== false && !configured && messages.length === 0 && (
           <div className="mx-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
-            <div className="text-xs font-medium text-amber-800 dark:text-amber-300">API Key Required</div>
+            <div className="text-xs font-medium text-amber-800 dark:text-amber-300">Copilot Unavailable</div>
             <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
-              Configure your Anthropic API key in Settings to use the Security Copilot.
+              AI Copilot is not configured by the platform administrator. Please contact support.
             </div>
           </div>
         )}
 
-        {/* Suggestions */}
+        {/* Suggestions / Context chips */}
         {addonEnabled !== false && messages.length === 0 && suggestions.length > 0 && (
           <div className="px-4 pt-4">
-            <div className="text-[10px] font-semibold text-gray-500 dark:text-slate-400 uppercase mb-2">Quick Ask</div>
+            <div className="text-[10px] font-semibold text-gray-500 dark:text-slate-400 uppercase mb-2">
+              {contextMode ? 'Investigation Actions' : 'Quick Ask'}
+            </div>
             <div className="flex flex-wrap gap-1.5">
               {suggestions.map((s, i) => (
                 <button
@@ -309,7 +430,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about your security posture..."
+                placeholder={contextMode ? `Ask about this ${contextMode.replace('_', ' ')}...` : 'Ask about your security posture...'}
                 className="flex-1 px-3 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                 disabled={loading}
               />

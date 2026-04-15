@@ -1,15 +1,25 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { getTermLabel, getTermDiscount, ACCOUNT_TIER_LABELS } from '../constants/pricing';
-import { maskCredential } from '../utils/maskCredential';
+import { useConnection } from '../contexts/ConnectionContext';
+import { GeneralTab } from '../components/settings/GeneralTab';
+import { ConnectionsTab } from '../components/settings/ConnectionsTab';
+import { NotificationsTab } from '../components/settings/NotificationsTab';
+import { ScoringTab } from '../components/settings/ScoringTab';
+import { UsersTab } from '../components/settings/UsersTab';
+import { SecurityTab } from '../components/settings/SecurityTab';
+import { ComplianceSettingsTab } from '../components/settings/ComplianceSettingsTab';
+import { GovernanceTab } from '../components/settings/GovernanceTab';
+import { AdvancedTab } from '../components/settings/AdvancedTab';
+import { IntegrationsTab } from '../components/settings/IntegrationsTab';
+import type { CloudConnection } from '../components/settings/types';
 
 interface CloudProviderConfig {
   enabled: boolean;
   plan: string | null;
 }
 
-interface TenantCloudConfig {
+interface OrgCloudConfig {
   cloud_providers: Record<string, CloudProviderConfig>;
   addons: Record<string, boolean>;
 }
@@ -47,7 +57,7 @@ interface WebhookFormData {
 }
 
 const WEBHOOK_EVENT_LABELS: Record<string, string> = {
-  discovery_completed: 'Discovery Completed',
+  discovery_completed: 'Snapshot Completed',
   risk_escalation: 'Risk Escalation',
   new_identities: 'New Identities',
   removed_identities: 'Removed Identities',
@@ -132,7 +142,7 @@ interface SettingsData {
   report_schedule_enabled: string;
   report_schedule_frequency: string;
   report_email_to: string;
-  azure_tenant_id: string;
+  azure_directory_id: string;
   azure_client_id: string;
   azure_client_secret: string;
   aws_access_key_id: string;
@@ -142,7 +152,6 @@ interface SettingsData {
   gcp_service_account_json: string;
   timezone: string;
   theme: string;
-  copilot_api_key: string;
 }
 
 interface StatusData {
@@ -153,10 +162,174 @@ interface StatusData {
   next_report: string | null;
 }
 
+// ─── Ticketing Integration Component ───────────────────────────
+
+const TICKETING_PROVIDERS = [
+  { key: 'jira', label: 'Jira', icon: '🟦', desc: 'Atlassian Jira Cloud or Server',
+    fields: [
+      { name: 'cloud_url', label: 'Cloud URL', placeholder: 'acme.atlassian.net', type: 'text' },
+      { name: 'api_token', label: 'API Token', placeholder: 'Your Jira API token', type: 'password' },
+      { name: 'project_key', label: 'Project Key', placeholder: 'SECOPS', type: 'text' },
+      { name: 'issue_type', label: 'Issue Type', placeholder: 'Task', type: 'select', options: ['Task', 'Bug', 'Story'] },
+    ],
+  },
+  { key: 'servicenow', label: 'ServiceNow', icon: '🟩', desc: 'ServiceNow ITSM',
+    fields: [
+      { name: 'instance_url', label: 'Instance URL', placeholder: 'acme.service-now.com', type: 'text' },
+      { name: 'client_id', label: 'Client ID', placeholder: 'OAuth Client ID', type: 'text' },
+      { name: 'client_secret', label: 'Client Secret', placeholder: 'OAuth Client Secret', type: 'password' },
+      { name: 'assignment_group', label: 'Assignment Group', placeholder: 'Security Ops', type: 'text' },
+    ],
+  },
+  { key: 'azure_devops', label: 'Azure DevOps', icon: '🔷', desc: 'Azure DevOps Work Items',
+    fields: [
+      { name: 'org_url', label: 'Organization URL', placeholder: 'dev.azure.com/acme', type: 'text' },
+      { name: 'pat', label: 'Personal Access Token', placeholder: 'Your PAT', type: 'password' },
+      { name: 'project_name', label: 'Project Name', placeholder: 'SecurityOps', type: 'text' },
+      { name: 'work_item_type', label: 'Work Item Type', placeholder: 'Task', type: 'select', options: ['Task', 'Bug', 'Issue'] },
+    ],
+  },
+] as const;
+
+function TicketingSection({ ticketingRef }: { ticketingRef: React.RefObject<HTMLDivElement | null> }) {
+  const [configuring, setConfiguring] = useState<string | null>(null);
+  const [formData, setFormData] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const provider = TICKETING_PROVIDERS.find(p => p.key === configuring);
+
+  function handleConnect(key: string) {
+    setConfiguring(key);
+    setFormData({});
+    setSaved(null);
+  }
+
+  function handleSave() {
+    setSaving(true);
+    // Simulate save — backend integration can be added later
+    setTimeout(() => {
+      setSaving(false);
+      setSaved(configuring);
+      setConfiguring(null);
+    }, 800);
+  }
+
+  return (
+    <div ref={ticketingRef} id="ticketing" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
+      <div className="flex items-center gap-3">
+        <span className="text-xl">🎫</span>
+        <div>
+          <div className="text-lg font-semibold text-gray-900">Ticketing</div>
+          <p className="text-xs text-gray-500">Connect your ITSM platform to create remediation tickets directly from the dashboard. <span className="text-amber-600 font-medium">(Preview — integration coming soon)</span></p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {TICKETING_PROVIDERS.map(t => (
+          <div key={t.key} className={`border rounded-lg p-4 text-center transition ${
+            saved === t.key ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-blue-300 hover:shadow-sm'
+          }`}>
+            <div className="text-2xl mb-2">{t.icon}</div>
+            <div className="font-semibold text-sm text-gray-900">{t.label}</div>
+            <p className="text-xs text-gray-500 mt-1 mb-3">{t.desc}</p>
+            {saved === t.key ? (
+              <span className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-green-700 bg-green-100 rounded-lg">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                Connected
+              </span>
+            ) : (
+              <button
+                onClick={() => handleConnect(t.key)}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+              >
+                Connect
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Configuration Panel */}
+      {configuring && provider && (
+        <div className="border border-blue-200 rounded-lg bg-blue-50/30 p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-gray-900">Configure {provider.label}</div>
+            <button onClick={() => setConfiguring(null)} className="text-gray-400 hover:text-gray-600 text-xs">Cancel</button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {provider.fields.map(f => (
+              <div key={f.name}>
+                <label className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                {f.type === 'select' ? (
+                  <select
+                    value={formData[f.name] || ''}
+                    onChange={e => setFormData(prev => ({ ...prev, [f.name]: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="">Select...</option>
+                    {f.options?.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type={f.type === 'password' ? 'password' : 'text'}
+                    value={formData[f.name] || ''}
+                    onChange={e => setFormData(prev => ({ ...prev, [f.name]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-3 pt-2">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-4 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save & Connect'}
+            </button>
+            <button
+              onClick={() => setConfiguring(null)}
+              className="px-4 py-2 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <p className="text-xs text-gray-400">
+        Configured ticketing enables the "Create Ticket" button on remediation cards across the CISO Dashboard.
+      </p>
+    </div>
+  );
+}
+
+const SETTINGS_TABS = [
+  { key: 'general', label: 'General' },
+  { key: 'users', label: 'Users' },
+  { key: 'connections', label: 'Connections' },
+  { key: 'notifications', label: 'Notifications' },
+  { key: 'security', label: 'Security' },
+  { key: 'compliance', label: 'Compliance' },
+  { key: 'scoring', label: 'Scoring' },
+  { key: 'governance', label: 'Governance' },
+  { key: 'integrations', label: 'Integrations' },
+  { key: 'advanced', label: 'Advanced' },
+] as const;
+
+type SettingsTab = typeof SETTINGS_TABS[number]['key'];
+
 export default function Settings() {
   const { isSuperAdmin, user } = useAuth();
+  const { onConnectionDeleted } = useConnection();
   const location = useLocation();
   const navigate = useNavigate();
+  const { tab: urlTab } = useParams<{ tab?: string }>();
+  const activeTab: SettingsTab = (SETTINGS_TABS.some(t => t.key === urlTab) ? urlTab : 'general') as SettingsTab;
+  const ticketingRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,7 +338,7 @@ export default function Settings() {
   const [status, setStatus] = useState<StatusData | null>(null);
 
   // Phase 78b: Cloud connections state
-  const [cloudConfig, setCloudConfig] = useState<TenantCloudConfig | null>(null);
+  const [cloudConfig, setCloudConfig] = useState<OrgCloudConfig | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<{ status: 'success' | 'error'; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
   const [maskCredentials, setMaskCredentials] = useState(true);
@@ -173,38 +346,43 @@ export default function Settings() {
   const isAdmin = user?.role === 'admin';
 
   // Cloud connections (multi-directory)
-  const [cloudConnections, setCloudConnections] = useState<Array<{
-    id: number; cloud: string; label: string; status: string;
-    entra_tenant_id: string | null; client_id: string | null;
-    last_test_status: string | null; last_discovery_at: string | null;
-    created_at: string;
-    sub_count?: number;
-    discovered_count?: number;
-  }>>([]);
+  const [cloudConnections, setCloudConnections] = useState<CloudConnection[]>([]);
+  const [removingConnId, setRemovingConnId] = useState<number | null>(null);
   const [showAddWizard, setShowAddWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState(0);
   const [wizardCloud, setWizardCloud] = useState('azure');
   const [wizardLabel, setWizardLabel] = useState('');
-  const [wizardEntraTenantId, setWizardEntraTenantId] = useState('');
+  const [wizardAzureDirectoryId, setWizardAzureDirectoryId] = useState('');
   const [wizardClientId, setWizardClientId] = useState('');
   const [wizardClientSecret, setWizardClientSecret] = useState('');
+  const [wizardRegion, setWizardRegion] = useState('us-east-1');
   const [wizardTesting, setWizardTesting] = useState(false);
   const [wizardTestResult, setWizardTestResult] = useState<{ status: string; message: string; subscriptions?: { id: string; name: string }[] } | null>(null);
   const [wizardSaving, setWizardSaving] = useState(false);
   const [scanningConnId, setScanningConnId] = useState<number | null>(null);
 
-  // Phase 85: Tenant onboarding stage
-  const [tenantStage, setTenantStage] = useState<string>('active');
+  // Phase 3: Active snapshot jobs per connection
+  const [activeJobs, setActiveJobs] = useState<Record<number, any>>({});
+
+  // Phase 85: Organization onboarding stage
+  const [orgStage, setOrgStage] = useState<string>('active');
   const [primaryCloud, setPrimaryCloud] = useState<string | null>(null);
   const [unlocking, setUnlocking] = useState(false);
   const [addingCloud, setAddingCloud] = useState(false);
 
+  // Hash scroll: when navigating to /settings/integrations#ticketing, scroll to ticketing section
+  useEffect(() => {
+    if (location.hash === '#ticketing' && activeTab === 'integrations') {
+      setTimeout(() => ticketingRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
+    }
+  }, [activeTab, location.hash]);
+
   useEffect(() => {
     if (user?.is_superadmin) return;
-    fetch('/api/tenant/stage')
+    fetch('/api/organization/stage')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data?.stage) setTenantStage(data.stage);
+        if (data?.stage) setOrgStage(data.stage);
         if (data?.primary_cloud) setPrimaryCloud(data.primary_cloud);
       })
       .catch(() => {});
@@ -219,6 +397,36 @@ export default function Settings() {
   }
   useEffect(() => { fetchConnections(); }, []);
 
+  // Phase 3: Poll active snapshot jobs for connections
+  useEffect(() => {
+    const connIds = Object.keys(activeJobs).map(Number);
+    if (connIds.length === 0) return;
+
+    const poll = async () => {
+      const next: Record<number, any> = {};
+      for (const cid of connIds) {
+        try {
+          const r = await fetch(`/api/discovery/jobs/${cid}`);
+          if (r.ok) {
+            const d = await r.json();
+            if (d.active_job) {
+              next[cid] = d.active_job;
+            }
+            // If no active_job, job completed — don't add to next, refresh connections
+          }
+        } catch { /* ignore */ }
+      }
+      setActiveJobs(next);
+      // If any jobs disappeared (completed), refresh connections list
+      if (Object.keys(next).length < connIds.length) {
+        fetchConnections();
+      }
+    };
+
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
+  }, [Object.keys(activeJobs).join(',')]);
+
   async function handleWizardTest() {
     setWizardTesting(true);
     setWizardTestResult(null);
@@ -226,12 +434,9 @@ export default function Settings() {
       const res = await fetch('/api/client/connections/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cloud: wizardCloud,
-          entra_tenant_id: wizardEntraTenantId,
-          client_id: wizardClientId,
-          client_secret: wizardClientSecret,
-        }),
+        body: JSON.stringify(wizardCloud === 'aws'
+          ? { cloud: 'aws', access_key_id: wizardClientId, secret_access_key: wizardClientSecret, region: wizardRegion }
+          : { cloud: wizardCloud, azure_directory_id: wizardAzureDirectoryId, client_id: wizardClientId, client_secret: wizardClientSecret }),
       });
       const data = await res.json();
       setWizardTestResult(data);
@@ -249,15 +454,17 @@ export default function Settings() {
       const res = await fetch('/api/client/connections', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cloud: wizardCloud,
-          label: wizardLabel,
-          entra_tenant_id: wizardEntraTenantId,
-          client_id: wizardClientId,
-          client_secret: wizardClientSecret,
-          connection_type: 'entra',
-          status: 'connected',
-        }),
+        body: JSON.stringify(wizardCloud === 'aws'
+          ? {
+              cloud: 'aws', label: wizardLabel, client_id: wizardClientId,
+              client_secret: wizardClientSecret, connection_type: 'iam', status: 'connected',
+              metadata: { access_key_id: wizardClientId, secret_access_key: wizardClientSecret, region: wizardRegion },
+            }
+          : {
+              cloud: wizardCloud, label: wizardLabel, azure_directory_id: wizardAzureDirectoryId,
+              client_id: wizardClientId, client_secret: wizardClientSecret,
+              connection_type: 'entra', status: 'connected',
+            }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -286,18 +493,51 @@ export default function Settings() {
     setWizardStep(0);
     setWizardCloud('azure');
     setWizardLabel('');
-    setWizardEntraTenantId('');
+    setWizardAzureDirectoryId('');
     setWizardClientId('');
     setWizardClientSecret('');
+    setWizardRegion('us-east-1');
     setWizardTestResult(null);
   }
 
   async function handleDeleteConnection(connId: number) {
-    if (!window.confirm('Delete this connection?')) return;
+    const conn = cloudConnections.find(c => c.id === connId);
+    const label = conn?.label || conn?.azure_directory_id || `Connection #${connId}`;
+    const confirmed = window.confirm(
+      `Remove "${label}"?\n\nThis will permanently delete:\n` +
+      `• All discovery runs and snapshots\n` +
+      `• All identities, roles, and permissions\n` +
+      `• All risk scores, drift reports, and anomalies\n` +
+      `• All resources (storage accounts, key vaults)\n` +
+      `• All app registrations and attack simulations\n\n` +
+      `This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setRemovingConnId(connId);
+    setError(null);
     try {
-      await fetch(`/api/client/connections/${connId}`, { method: 'DELETE' });
-      fetchConnections();
-    } catch { /* ignore */ }
+      const res = await fetch(`/api/client/connections/${connId}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        const totalDeleted = data?.data_removed?.total_deleted ?? 0;
+        setSuccess(
+          `"${label}" removed successfully` +
+          (totalDeleted > 0 ? ` — ${totalDeleted.toLocaleString()} rows cleaned up` : '') +
+          ` (+ cascaded child rows).`
+        );
+        setTimeout(() => setSuccess(null), 8000);
+        // Reset selectedConnectionId if this was the active one, refresh list
+        onConnectionDeleted(connId);
+        fetchConnections();
+      } else {
+        setError(data?.error || 'Failed to remove connection');
+      }
+    } catch {
+      setError('Failed to remove connection — network error');
+    } finally {
+      setRemovingConnId(null);
+    }
   }
 
   async function handleRunScan(connId: number) {
@@ -309,14 +549,36 @@ export default function Settings() {
         body: JSON.stringify({ connection_id: connId }),
       });
       if (res.ok) {
-        setSuccess('Discovery scan started for this connection. Check Runs for progress.');
+        setSuccess('Snapshot capture started for this connection.');
+        // Seed activeJobs so polling starts immediately
+        setActiveJobs(prev => ({ ...prev, [connId]: { status: 'queued', stage: null, progress: 0 } }));
+      } else if (res.status === 409) {
+        setError('A scan is already in progress for this connection.');
       } else {
-        setError('Failed to trigger discovery scan');
+        setError('Failed to trigger snapshot');
       }
     } catch {
-      setError('Failed to trigger discovery scan');
+      setError('Failed to trigger snapshot');
     } finally {
       setScanningConnId(null);
+    }
+  }
+
+  async function handleUpdateDiscoverySettings(connId: number, enabled: boolean, intervalMinutes: number) {
+    try {
+      const res = await fetch(`/api/discovery/settings/${connId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discovery_enabled: enabled, discovery_interval_minutes: intervalMinutes }),
+      });
+      if (res.ok) {
+        fetchConnections();
+        setSuccess(enabled ? 'Continuous discovery enabled.' : 'Continuous discovery disabled.');
+      } else {
+        setError('Failed to update discovery settings');
+      }
+    } catch {
+      setError('Failed to update discovery settings');
     }
   }
 
@@ -340,7 +602,7 @@ export default function Settings() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          azure_tenant_id: settings.azure_tenant_id,
+          azure_directory_id: settings.azure_directory_id,
           azure_client_id: settings.azure_client_id,
           azure_client_secret: settings.azure_client_secret,
         }),
@@ -350,7 +612,7 @@ export default function Settings() {
         throw new Error(testData.error || testData.message || 'Connection test failed. Please check your credentials.');
       }
       // 3. Update stage to active
-      await fetch('/api/tenant/stage', {
+      await fetch('/api/organization/stage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ stage: 'active' }),
@@ -359,7 +621,7 @@ export default function Settings() {
       try {
         await fetch('/api/subscriptions/activate-all', { method: 'POST' });
       } catch { /* ignore */ }
-      // 5. Trigger first discovery
+      // 5. Trigger first snapshot
       try {
         await fetch('/api/runs/trigger', { method: 'POST' });
       } catch { /* ignore */ }
@@ -381,7 +643,7 @@ export default function Settings() {
 
   // Fetch cloud config
   useEffect(() => {
-    fetch('/api/tenant/config')
+    fetch('/api/organization/config')
       .then(r => r.ok ? r.json() : null)
       .then(cfg => {
         if (cfg) setCloudConfig({ cloud_providers: cfg.cloud_providers, addons: cfg.addons });
@@ -398,7 +660,7 @@ export default function Settings() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          azure_tenant_id: settings.azure_tenant_id,
+          azure_directory_id: settings.azure_directory_id,
           azure_client_id: settings.azure_client_id,
           azure_client_secret: settings.azure_client_secret,
         }),
@@ -416,9 +678,9 @@ export default function Settings() {
     }
   }
 
-  // Phase 45: Tenant info
-  const [currentTenant, setCurrentTenant] = useState<any>(null);
-  const [tenants, setTenants] = useState<any[]>([]);
+  // Phase 45: Organization info
+  const [currentOrg, setCurrentOrg] = useState<any>(null);
+  const [orgs, setOrgs] = useState<any[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -429,6 +691,16 @@ export default function Settings() {
         const data = await res.json();
         setSettings(data.settings as SettingsData);
         setStatus(data.status);
+        // Populate P2 telemetry state
+        const s = data.settings as any;
+        if (s) {
+          setP2Telemetry(prev => ({
+            ...prev,
+            p2_telemetry_enabled: s.p2_telemetry_enabled || 'false',
+            retention_signin_events_days: s.retention_signin_events_days || '90',
+            retention_workload_anomalies_days: s.retention_workload_anomalies_days || '180',
+          }));
+        }
       } catch (e: any) {
         setError(e?.message || 'Failed to load settings');
       } finally {
@@ -438,26 +710,26 @@ export default function Settings() {
     load();
   }, []);
 
-  // Phase 45: Load tenant data
+  // Phase 45: Load organization data
   useEffect(() => {
-    async function loadTenant() {
+    async function loadOrg() {
       try {
-        const res = await fetch('/api/tenant');
+        const res = await fetch('/api/organization');
         if (res.ok) {
           const data = await res.json();
-          setCurrentTenant(data.tenant);
+          setCurrentOrg(data.organization);
         }
       } catch { /* ignore */ }
     }
-    loadTenant();
+    loadOrg();
   }, []);
 
-  // Load tenants list for superadmin user modal
+  // Load organizations list for superadmin user modal
   useEffect(() => {
     if (!isSuperAdmin) return;
     fetch('/api/clients')
-      .then(r => r.ok ? r.json() : { tenants: [] })
-      .then(d => setTenants(d.tenants || []))
+      .then(r => r.ok ? r.json() : { organizations: [] })
+      .then(d => setOrgs(d.organizations || []))
       .catch(() => {});
   }, [isSuperAdmin]);
 
@@ -784,8 +1056,8 @@ export default function Settings() {
   };
 
   // User management state
-  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; tenant_id?: number; tenant_name?: string; is_superadmin?: boolean; }
-  interface UserFormData { username: string; display_name: string; password: string; role: string; tenant_id?: number; is_superadmin?: boolean; }
+  interface UserData { id: number; username: string; display_name: string; role: string; enabled: boolean; last_login_at: string | null; created_at: string | null; organization_id?: number; org_name?: string; is_superadmin?: boolean; }
+  interface UserFormData { username: string; display_name: string; password: string; role: string; organization_id?: number; is_superadmin?: boolean; }
 
   const [users, setUsers] = useState<UserData[]>([]);
   const [userModal, setUserModal] = useState(false);
@@ -810,10 +1082,10 @@ export default function Settings() {
   function openUserModal(u?: UserData) {
     if (u) {
       setEditingUser(u);
-      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role, tenant_id: u.tenant_id, is_superadmin: u.is_superadmin });
+      setUserForm({ username: u.username, display_name: u.display_name, password: '', role: u.role, organization_id: u.organization_id, is_superadmin: u.is_superadmin });
     } else {
       setEditingUser(null);
-      setUserForm({ username: '', display_name: '', password: '', role: 'compliance', tenant_id: undefined, is_superadmin: false });
+      setUserForm({ username: '', display_name: '', password: '', role: 'compliance', organization_id: undefined, is_superadmin: false });
     }
     setUserError(null);
     setUserModal(true);
@@ -835,9 +1107,9 @@ export default function Settings() {
       } else if (userForm.password) {
         payload.password = userForm.password;
       }
-      // Phase 46: Include tenant fields for superadmins
+      // Phase 46: Include organization fields for superadmins
       if (isSuperAdmin) {
-        if (userForm.tenant_id !== undefined) payload.tenant_id = userForm.tenant_id;
+        if (userForm.organization_id !== undefined) payload.organization_id = userForm.organization_id;
         payload.is_superadmin = !!userForm.is_superadmin;
       }
       const res = await fetch(url, {
@@ -1300,6 +1572,15 @@ export default function Settings() {
   const [saGovSaving, setSaGovSaving] = useState(false);
   const [saGovMsg, setSaGovMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // P2 Telemetry
+  const [p2Telemetry, setP2Telemetry] = useState({
+    p2_telemetry_enabled: 'false',
+    retention_signin_events_days: '90',
+    retention_workload_anomalies_days: '180',
+  });
+  const [p2Saving, setP2Saving] = useState(false);
+  const [p2Msg, setP2Msg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   // Phase 72: Data Retention
   const [retention, setRetention] = useState({
     retention_enabled: 'false',
@@ -1375,6 +1656,28 @@ export default function Settings() {
       setRetentionMsg({ type: 'error', text: 'Network error' });
     } finally {
       setRetentionSaving(false);
+    }
+  }
+
+  async function handleP2TelemetrySave() {
+    setP2Saving(true);
+    setP2Msg(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(p2Telemetry),
+      });
+      if (res.ok) {
+        setP2Msg({ type: 'success', text: 'P2 Telemetry settings saved' });
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setP2Msg({ type: 'error', text: d.error || 'Save failed' });
+      }
+    } catch {
+      setP2Msg({ type: 'error', text: 'Network error' });
+    } finally {
+      setP2Saving(false);
     }
   }
 
@@ -1512,7 +1815,7 @@ export default function Settings() {
   if (loading) {
     return (
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse space-y-6">
+        <div className="animate-pulse space-y-4">
           <div className="h-8 bg-gray-200 rounded w-48" />
           <div className="h-48 bg-gray-100 rounded-xl" />
           <div className="h-48 bg-gray-100 rounded-xl" />
@@ -1523,17 +1826,36 @@ export default function Settings() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Settings</h2>
         <p className="text-sm text-gray-600 mt-1">
-          Configure discovery schedule, notifications, and organization details
+          Configure organization, connections, and integrations
         </p>
       </div>
 
+      {/* Tab Bar */}
+      <div className="border-b border-gray-200 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8">
+        <nav className="flex gap-0 overflow-x-auto" aria-label="Settings tabs">
+          {SETTINGS_TABS.map(t => (
+            <button
+              key={t.key}
+              onClick={() => navigate(`/settings/${t.key}`, { replace: true })}
+              className={`whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === t.key
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
       {/* Phase 85: Locked stage banner */}
-      {tenantStage === 'locked' && (
+      {orgStage === 'locked' && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3">
           <svg className="w-5 h-5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -1541,7 +1863,7 @@ export default function Settings() {
           <div>
             <div className="text-sm font-semibold text-amber-800">Complete Cloud Setup</div>
             <p className="text-xs text-amber-700">
-              Enter your cloud provider credentials below, test the connection, then click "Save &amp; Run First Discovery" to unlock your dashboard.
+              Enter your cloud provider credentials below, test the connection, then click "Save &amp; Capture First Snapshot" to unlock your dashboard.
             </p>
           </div>
         </div>
@@ -1561,2251 +1883,223 @@ export default function Settings() {
 
       {settings && (
         <>
-          {/* Section 1: Organization */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-5">
-            <div className="text-lg font-semibold text-gray-900">Organization</div>
-
-            <div className="grid grid-cols-2 gap-6">
-              {/* Left: Logo upload */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Organization Logo</label>
-                <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-gray-400 transition">
-                  {currentTenant?.settings?.logo_url ? (
-                    <img src={String(currentTenant.settings.logo_url)} alt="Logo" className="w-16 h-16 mx-auto mb-2 rounded-lg object-cover" />
-                  ) : (
-                    <svg className="w-12 h-12 mx-auto text-gray-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                  )}
-                  <p className="text-xs text-gray-500">Drag & drop or click to upload</p>
-                  <p className="text-[10px] text-gray-400 mt-1">PNG, SVG, or JPG — max 2MB</p>
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/svg+xml"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      if (file.size > 2 * 1024 * 1024) { setError('Logo must be under 2MB'); return; }
-                      const reader = new FileReader();
-                      reader.onload = async () => {
-                        try {
-                          const tid = currentTenant?.id;
-                          if (!tid) { setError('No tenant context'); return; }
-                          const res = await fetch(`/api/clients/${tid}/logo`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ logo: reader.result }),
-                          });
-                          if (!res.ok) throw new Error('Upload failed');
-                          setSuccess('Logo uploaded');
-                        } catch { setError('Failed to upload logo'); }
-                      };
-                      reader.readAsDataURL(file);
-                    }}
-                    className="hidden"
-                    id="logo-upload"
-                  />
-                  <label htmlFor="logo-upload" className="mt-2 inline-block px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-200 cursor-pointer transition">
-                    Choose File
-                  </label>
-                </div>
-              </div>
-
-              {/* Right: Org Name + Timezone + Theme */}
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Organization Name</label>
-                  <input
-                    type="text"
-                    value={settings.org_name}
-                    onChange={e => update('org_name', e.target.value)}
-                    placeholder="e.g., Acme Corp"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">Appears on PDF reports and email notifications</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
-                  <select
-                    value={settings.timezone || 'UTC'}
-                    onChange={e => update('timezone' as keyof SettingsData, e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  >
-                    <option value="UTC">UTC</option>
-                    <option value="America/New_York">Eastern (ET)</option>
-                    <option value="America/Chicago">Central (CT)</option>
-                    <option value="America/Denver">Mountain (MT)</option>
-                    <option value="America/Los_Angeles">Pacific (PT)</option>
-                    <option value="Europe/London">London (GMT)</option>
-                    <option value="Europe/Berlin">Berlin (CET)</option>
-                    <option value="Asia/Tokyo">Tokyo (JST)</option>
-                    <option value="Asia/Kolkata">India (IST)</option>
-                    <option value="Australia/Sydney">Sydney (AEST)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Theme</label>
-                  <div className="flex gap-2">
-                    {(['light', 'dark', 'system'] as const).map(t => (
-                      <button
-                        key={t}
-                        onClick={() => update('theme' as keyof SettingsData, t)}
-                        className={`px-4 py-2 rounded-lg text-sm font-medium border transition capitalize ${
-                          settings.theme === t
-                            ? 'bg-blue-600 text-white border-blue-600'
-                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                        }`}
-                      >
-                        {t}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Subscription Info */}
-            {currentTenant && (
-              <div className="pt-3 border-t space-y-3">
-                <div className="text-sm font-semibold text-gray-800">Subscription</div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Plan</div>
-                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                      (ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).bg
-                    } ${(ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).color}`}>
-                      {(ACCOUNT_TIER_LABELS[currentTenant.plan] || ACCOUNT_TIER_LABELS.free).label}
-                    </span>
-                  </div>
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Term</div>
-                    <div className="text-sm font-semibold text-gray-800">
-                      {getTermLabel(currentTenant.subscription_term || 0)}
-                      {getTermDiscount(currentTenant.subscription_term || 0) > 0 && (
-                        <span className="ml-1 text-[10px] text-green-600 font-semibold">{getTermDiscount(currentTenant.subscription_term || 0) * 100}% off</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Activated</div>
-                    <div className="text-sm font-semibold text-gray-800">
-                      {currentTenant.license_activated_at
-                        ? new Date(currentTenant.license_activated_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-                        : '\u2014'}
-                    </div>
-                  </div>
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Expires</div>
-                    <div className={`text-sm font-semibold ${
-                      currentTenant.license_expires_at
-                        ? (new Date(currentTenant.license_expires_at).getTime() - Date.now()) / 86400000 < 30
-                          ? 'text-yellow-600'
-                          : (new Date(currentTenant.license_expires_at).getTime() - Date.now()) < 0
-                            ? 'text-red-600'
-                            : 'text-gray-800'
-                        : 'text-gray-400'
-                    }`}>
-                      {currentTenant.license_expires_at
-                        ? new Date(currentTenant.license_expires_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-                        : currentTenant.subscription_term === 0 ? 'Monthly (no expiry)' : '\u2014'}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Section 2: Cloud Connections */}
-          <div ref={cloudSectionRef} id="cloud-connections" className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">Cloud Connections</div>
-                <p className="text-xs text-gray-500">Configure cloud provider credentials for identity discovery.</p>
-              </div>
-              {isAdmin && (
-                <button
-                  onClick={() => { resetWizard(); setShowAddWizard(true); }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                  </svg>
-                  Add Connection
-                </button>
-              )}
-            </div>
-
-            {/* Summary Strip */}
-            {cloudConnections.length > 0 && (
-              <div className="flex gap-4 text-xs">
-                <span className="text-gray-500">Connections: <span className="font-semibold text-gray-800">{cloudConnections.length}</span></span>
-                <span className="text-gray-500">Active Subs: <span className="font-semibold text-gray-800">{cloudConnections.reduce((s, c) => s + (c.sub_count || 0), 0)}</span></span>
-                {cloudConnections.reduce((s, c) => s + (c.discovered_count || 0), 0) > 0 && (
-                  <span className="text-amber-600 font-semibold">Discovered: {cloudConnections.reduce((s, c) => s + (c.discovered_count || 0), 0)}</span>
-                )}
-              </div>
-            )}
-
-            {/* Connections List */}
-            {cloudConnections.length > 0 && (
-              <div className="space-y-2">
-                {cloudConnections.map(conn => (
-                  <div key={conn.id} className={`border-2 rounded-xl p-4 transition ${
-                    conn.status === 'connected' ? 'border-green-200 bg-green-50/30' :
-                    conn.status === 'failed' ? 'border-red-200 bg-red-50/30' :
-                    'border-gray-200 bg-gray-50/30'
-                  }`}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                          conn.cloud === 'azure' ? 'bg-blue-100 text-blue-700' :
-                          conn.cloud === 'aws' ? 'bg-orange-100 text-orange-700' :
-                          'bg-red-100 text-red-600'
-                        }`}>{conn.cloud.toUpperCase()}</span>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-gray-800">{conn.label}</span>
-                            {conn.label === 'Primary' && (
-                              <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-bold rounded">PRIMARY</span>
-                            )}
-                          </div>
-                          {conn.entra_tenant_id && (
-                            <div className="text-[10px] text-gray-400 font-mono">{conn.entra_tenant_id.slice(0, 8)}...</div>
-                          )}
-                          <div className="text-[10px] text-gray-500 mt-0.5">
-                            {conn.sub_count || 0} active subs
-                            {conn.last_discovery_at ? ` · Last scan: ${new Date(conn.last_discovery_at).toLocaleDateString()}` : ' · No scan yet'}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className={`flex items-center gap-1 text-[10px] font-semibold ${
-                          conn.status === 'connected' ? 'text-green-600' :
-                          conn.status === 'failed' ? 'text-red-600' :
-                          'text-gray-400'
-                        }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${
-                            conn.status === 'connected' ? 'bg-green-500' :
-                            conn.status === 'failed' ? 'bg-red-500' :
-                            'bg-gray-400'
-                          }`} />
-                          {conn.status === 'connected' ? 'Connected' :
-                           conn.status === 'failed' ? 'Failed' : 'Pending'}
-                        </span>
-                        {isAdmin && conn.status === 'connected' && (
-                          <button
-                            onClick={() => handleRunScan(conn.id)}
-                            disabled={scanningConnId === conn.id}
-                            className="text-[10px] text-blue-500 hover:text-blue-700 font-medium disabled:opacity-50"
-                          >
-                            {scanningConnId === conn.id ? 'Starting...' : 'Run Scan'}
-                          </button>
-                        )}
-                        {isAdmin && (
-                          <button
-                            onClick={() => handleDeleteConnection(conn.id)}
-                            className="text-[10px] text-red-400 hover:text-red-600 font-medium"
-                          >
-                            Remove
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {/* Discovered subscriptions warning */}
-                    {(conn.discovered_count || 0) > 0 && (
-                      <div className="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
-                        <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                        </svg>
-                        <span>{conn.discovered_count} subscription(s) discovered — </span>
-                        <a href="/subscriptions" className="font-semibold underline hover:text-amber-800">activate on Subscriptions page</a>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Add Connection Wizard Modal */}
-            {showAddWizard && (
-              <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddWizard(false)}>
-                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
-                  {/* Wizard Header */}
-                  <div className="bg-slate-900 px-6 py-4 flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-bold text-white">Add Cloud Connection</h3>
-                      <p className="text-[10px] text-slate-400 mt-0.5">Step {wizardStep + 1} of 4</p>
-                    </div>
-                    <button onClick={() => setShowAddWizard(false)} className="text-slate-400 hover:text-white text-lg">&times;</button>
-                  </div>
-
-                  {/* Step indicator */}
-                  <div className="px-6 pt-4">
-                    <div className="flex gap-1.5">
-                      {['Cloud', 'Credentials', 'Test', 'Confirm'].map((s, i) => (
-                        <div key={s} className="flex-1">
-                          <div className={`h-1 rounded-full transition ${i <= wizardStep ? 'bg-blue-500' : 'bg-gray-200'}`} />
-                          <div className={`text-[9px] mt-1 ${i <= wizardStep ? 'text-blue-600 font-semibold' : 'text-gray-400'}`}>{s}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="p-6 space-y-4">
-                    {/* Step 0: Select Cloud */}
-                    {wizardStep === 0 && (
-                      <div className="space-y-3">
-                        <p className="text-sm text-gray-600">Select the cloud provider for this connection.</p>
-                        {[
-                          { key: 'azure', label: 'Azure / Entra ID', desc: 'Microsoft Azure cloud and Entra directory', color: 'blue' },
-                          { key: 'aws', label: 'AWS', desc: 'Amazon Web Services (coming soon)', color: 'orange', disabled: true },
-                          { key: 'gcp', label: 'GCP', desc: 'Google Cloud Platform (coming soon)', color: 'red', disabled: true },
-                        ].map(c => (
-                          <button
-                            key={c.key}
-                            disabled={c.disabled}
-                            onClick={() => setWizardCloud(c.key)}
-                            className={`w-full text-left border-2 rounded-xl p-4 transition ${
-                              c.disabled ? 'opacity-50 cursor-not-allowed border-gray-200' :
-                              wizardCloud === c.key ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div>
-                                <div className="text-sm font-semibold text-gray-800">{c.label}</div>
-                                <div className="text-[10px] text-gray-500">{c.desc}</div>
-                              </div>
-                              {wizardCloud === c.key && !c.disabled && (
-                                <svg className="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
-                                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                                </svg>
-                              )}
-                            </div>
-                          </button>
-                        ))}
-                        <div className="flex justify-end pt-2">
-                          <button onClick={() => setWizardStep(1)} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">
-                            Next
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Step 1: Enter Credentials */}
-                    {wizardStep === 1 && (
-                      <div className="space-y-3">
-                        <p className="text-sm text-gray-600">Enter your Azure service principal credentials.</p>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Connection Name</label>
-                          <input
-                            value={wizardLabel}
-                            onChange={e => setWizardLabel(e.target.value)}
-                            placeholder="e.g., Production Entra Directory"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Entra Directory ID</label>
-                          <input
-                            value={wizardEntraTenantId}
-                            onChange={e => setWizardEntraTenantId(e.target.value)}
-                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Application (Client) ID</label>
-                          <input
-                            value={wizardClientId}
-                            onChange={e => setWizardClientId(e.target.value)}
-                            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Client Secret</label>
-                          <input
-                            type="password"
-                            value={wizardClientSecret}
-                            onChange={e => setWizardClientSecret(e.target.value)}
-                            placeholder="Enter client secret"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div className="flex justify-between pt-2">
-                          <button onClick={() => setWizardStep(0)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
-                          <button
-                            onClick={() => setWizardStep(2)}
-                            disabled={!wizardLabel || !wizardEntraTenantId || !wizardClientId || !wizardClientSecret}
-                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            Next: Test Connection
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Step 2: Test Connection */}
-                    {wizardStep === 2 && (
-                      <div className="space-y-4">
-                        <p className="text-sm text-gray-600">Verify that AuditGraph can connect to your Entra directory.</p>
-                        <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
-                          <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
-                          <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
-                          <div className="flex justify-between"><span className="text-gray-500">Directory</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
-                        </div>
-                        {wizardTestResult && (
-                          <div className={`rounded-lg p-3 text-sm ${
-                            wizardTestResult.status === 'success' ? 'bg-green-50 border border-green-200 text-green-700' :
-                            'bg-red-50 border border-red-200 text-red-700'
-                          }`}>
-                            {wizardTestResult.message}
-                            {wizardTestResult.subscriptions && wizardTestResult.subscriptions.length > 0 && (
-                              <div className="mt-2 space-y-1">
-                                {wizardTestResult.subscriptions.map(sub => (
-                                  <div key={sub.id} className="flex items-center gap-2 text-xs">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                                    <span className="font-medium">{sub.name}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        <div className="flex justify-between pt-2">
-                          <button onClick={() => setWizardStep(1)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
-                          <button
-                            onClick={handleWizardTest}
-                            disabled={wizardTesting}
-                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40"
-                          >
-                            {wizardTesting ? 'Testing...' : 'Test Connection'}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Step 3: Confirm & Save */}
-                    {wizardStep === 3 && (
-                      <div className="space-y-4">
-                        <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
-                          <svg className="w-10 h-10 text-green-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          </svg>
-                          <div className="text-sm font-semibold text-green-800">Connection Verified</div>
-                          <p className="text-xs text-green-600 mt-1">Ready to save this connection.</p>
-                        </div>
-                        <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
-                          <div className="flex justify-between"><span className="text-gray-500">Name</span><span className="font-semibold text-gray-800">{wizardLabel}</span></div>
-                          <div className="flex justify-between"><span className="text-gray-500">Cloud</span><span className="font-semibold text-gray-800">{wizardCloud.toUpperCase()}</span></div>
-                          <div className="flex justify-between"><span className="text-gray-500">Directory ID</span><span className="font-mono text-gray-700">{wizardEntraTenantId.slice(0, 12)}...</span></div>
-                          {wizardTestResult?.subscriptions && (
-                            <div className="flex justify-between"><span className="text-gray-500">Subscriptions</span><span className="font-semibold text-gray-800">{wizardTestResult.subscriptions.length} found</span></div>
-                          )}
-                        </div>
-                        <div className="flex justify-between pt-2">
-                          <button onClick={() => setWizardStep(2)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Back</button>
-                          <button
-                            onClick={handleWizardSave}
-                            disabled={wizardSaving}
-                            className="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-40"
-                          >
-                            {wizardSaving ? 'Saving...' : 'Save Connection'}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {tenantStage === 'locked' && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
-                <svg className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <div className="text-sm font-semibold text-blue-800">Connect Your Cloud Provider</div>
-                  <p className="text-xs text-blue-700 mt-0.5">
-                    Your administrator has enabled <strong className="font-semibold">{primaryCloud ? primaryCloud.charAt(0).toUpperCase() + primaryCloud.slice(1) : 'your cloud provider'}</strong> for your organization.
-                    Add your connector credentials below to start monitoring.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {!isAdmin ? (
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-600">
-                Contact your organization administrator to configure cloud credentials.
-              </div>
-            ) : (
-              <div className="space-y-5">
-                {/* Azure */}
-                {cloudConfig?.cloud_providers?.azure?.enabled ? (() => {
-                  const hasCredentials = !!(settings?.azure_tenant_id || settings?.azure_client_id);
-                  const showForm = hasCredentials || addingCloud;
-                  return showForm ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-blue-700">Azure</span>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200">
-                        {cloudConfig.cloud_providers.azure.plan || 'enabled'}
-                      </span>
-                      {status?.azure_configured && (
-                        <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                          Connected
-                        </span>
-                      )}
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Entra Directory ID</label>
-                      <input
-                        type="text"
-                        value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_tenant_id || '') : (settings?.azure_tenant_id || '')}
-                        onChange={e => update('azure_tenant_id' as keyof SettingsData, e.target.value)}
-                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Application (Client) ID</label>
-                      <input
-                        type="text"
-                        value={maskCredentials && status?.azure_configured ? maskCredential(settings?.azure_client_id || '') : (settings?.azure_client_id || '')}
-                        onChange={e => update('azure_client_id' as keyof SettingsData, e.target.value)}
-                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
-                      <input
-                        type="password"
-                        value={settings?.azure_client_secret || ''}
-                        onChange={e => update('azure_client_secret' as keyof SettingsData, e.target.value)}
-                        placeholder="Enter client secret"
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                      <p className="text-[10px] text-gray-400 mt-1">Secret is masked after saving. Clear and re-enter to change.</p>
-                    </div>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={maskCredentials}
-                        onChange={e => setMaskCredentials(e.target.checked)}
-                        className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                      />
-                      <span className="text-xs text-gray-500">Mask credential IDs (recommended)</span>
-                    </label>
-
-                    <div className="flex items-center gap-3 pt-1">
-                      <button
-                        onClick={handleTestConnection}
-                        disabled={testingConnection || !settings?.azure_tenant_id || !settings?.azure_client_id || !settings?.azure_client_secret}
-                        className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
-                          testingConnection || !settings?.azure_tenant_id || !settings?.azure_client_id || !settings?.azure_client_secret
-                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                            : 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100'
-                        }`}
-                      >
-                        {testingConnection ? 'Testing...' : 'Test Connection'}
-                      </button>
-                      {!hasCredentials && (
-                        <button
-                          onClick={() => setAddingCloud(false)}
-                          className="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 transition"
-                        >
-                          Cancel
-                        </button>
-                      )}
-                      {connectionTestResult && (
-                        <span className={`text-sm ${connectionTestResult.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-                          {connectionTestResult.message}
-                        </span>
-                      )}
-                    </div>
-
-                    {connectionTestResult?.status === 'success' && connectionTestResult.subscriptions && connectionTestResult.subscriptions.length > 0 && (
-                      <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                        <div className="text-xs font-semibold text-green-700 mb-1">Discovered Subscriptions</div>
-                        <div className="space-y-1">
-                          {connectionTestResult.subscriptions.map(sub => (
-                            <div key={sub.id} className="text-xs text-green-800 flex items-center gap-2">
-                              <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                              <span className="font-medium">{sub.name}</span>
-                              <span className="text-green-600 font-mono text-[10px]">{sub.id}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {tenantStage === 'locked' && connectionTestResult?.status === 'success' && (
-                      <button
-                        type="button"
-                        onClick={handleSaveAndUnlock}
-                        disabled={unlocking}
-                        className="w-full py-3 text-sm font-semibold text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 transition flex items-center justify-center gap-2"
-                      >
-                        {unlocking ? (
-                          <>
-                            <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                            Saving & Running First Discovery...
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            Save &amp; Run First Discovery
-                          </>
-                        )}
-                      </button>
-                    )}
-
-                    {tenantStage !== 'locked' && (
-                      <p className="text-xs text-gray-400">
-                        Credentials are saved with the global &quot;Save Settings&quot; button below.
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  /* Empty state — no credentials yet */
-                  <div className="border border-dashed border-gray-300 rounded-xl p-6 text-center">
-                    <div className="flex items-center justify-center gap-2 mb-2">
-                      <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z" />
-                      </svg>
-                      <span className="text-sm font-semibold text-gray-800">Azure</span>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200">Primary</span>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-50 text-amber-600 border border-amber-200">Not Connected</span>
-                    </div>
-                    <p className="text-xs text-gray-500 mb-4">No cloud credentials configured. Connect your Azure environment to start identity discovery.</p>
-                    <button
-                      onClick={() => setAddingCloud(true)}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                      </svg>
-                      Add Cloud Connection
-                    </button>
-                  </div>
-                );
-                })() : (
-                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
-                    <div className="text-sm font-medium text-gray-600">Azure</div>
-                    <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
-                  </div>
-                )}
-
-                {/* AWS */}
-                {cloudConfig?.cloud_providers?.aws?.enabled ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-orange-700">AWS</span>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-orange-50 text-orange-600 border border-orange-200">
-                        {cloudConfig.cloud_providers.aws.plan || 'enabled'}
-                      </span>
-                      {settings?.aws_access_key_id && (
-                        <>
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-50 text-orange-600">IAM Access Key</span>
-                          <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                            Configured
-                          </span>
-                        </>
-                      )}
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Access Key ID</label>
-                      <input
-                        type="text"
-                        value={settings?.aws_access_key_id || ''}
-                        onChange={e => update('aws_access_key_id' as keyof SettingsData, e.target.value)}
-                        placeholder="AKIAIOSFODNN7EXAMPLE"
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Secret Access Key</label>
-                      <input
-                        type="password"
-                        value={settings?.aws_secret_access_key || ''}
-                        onChange={e => update('aws_secret_access_key' as keyof SettingsData, e.target.value)}
-                        placeholder="Enter secret access key"
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                      <p className="text-[10px] text-gray-400 mt-1">Secret is masked after saving. Clear and re-enter to change.</p>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Default Region</label>
-                      <select
-                        value={settings?.aws_region || 'us-east-1'}
-                        onChange={e => update('aws_region' as keyof SettingsData, e.target.value)}
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      >
-                        <option value="us-east-1">US East (N. Virginia)</option>
-                        <option value="us-east-2">US East (Ohio)</option>
-                        <option value="us-west-1">US West (N. California)</option>
-                        <option value="us-west-2">US West (Oregon)</option>
-                        <option value="eu-west-1">EU (Ireland)</option>
-                        <option value="eu-west-2">EU (London)</option>
-                        <option value="eu-central-1">EU (Frankfurt)</option>
-                        <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
-                        <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
-                        <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
-                      </select>
-                    </div>
-
-                    <p className="text-xs text-gray-400">
-                      Credentials are saved with the global &quot;Save Settings&quot; button below.
-                    </p>
-                  </div>
-                ) : cloudConfig ? (
-                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
-                    <div className="text-sm font-medium text-gray-600">AWS</div>
-                    <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
-                  </div>
-                ) : null}
-
-                {/* GCP */}
-                {cloudConfig?.cloud_providers?.gcp?.enabled ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-red-600">GCP</span>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-red-50 text-red-500 border border-red-200">
-                        {cloudConfig.cloud_providers.gcp.plan || 'enabled'}
-                      </span>
-                      {settings?.gcp_project_id && (
-                        <>
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600">Service Account</span>
-                          <span className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                            Configured
-                          </span>
-                        </>
-                      )}
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
-                      <input
-                        type="text"
-                        value={settings?.gcp_project_id || ''}
-                        onChange={e => update('gcp_project_id' as keyof SettingsData, e.target.value)}
-                        placeholder="my-project-123456"
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Service Account JSON Key</label>
-                      <textarea
-                        value={settings?.gcp_service_account_json || ''}
-                        onChange={e => update('gcp_service_account_json' as keyof SettingsData, e.target.value)}
-                        placeholder='{"type": "service_account", "project_id": "...", ...}'
-                        rows={4}
-                        className="w-full max-w-lg px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                      <p className="text-[10px] text-gray-400 mt-1">Paste the full JSON key file contents. Stored encrypted.</p>
-                    </div>
-
-                    <p className="text-xs text-gray-400">
-                      Credentials are saved with the global &quot;Save Settings&quot; button below.
-                    </p>
-                  </div>
-                ) : cloudConfig ? (
-                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center gap-3">
-                    <div className="text-sm font-medium text-gray-600">GCP</div>
-                    <span className="text-xs text-gray-400">Not enabled. Contact your AuditGraph administrator to enable this provider.</span>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </div>
-
-          {/* Section 3: Discovery Schedule */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="text-lg font-semibold text-gray-900">Discovery Schedule</div>
-
-            {/* Status indicators */}
-            <div className="flex items-center gap-6 text-sm">
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${status?.azure_configured ? 'bg-green-500' : 'bg-red-500'}`} />
-                <span className="text-gray-600">
-                  Azure: {status?.azure_configured ? 'Connected' : 'Not configured'}
-                </span>
-                {status?.azure_configured && (
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-600">Service Principal</span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${status?.scheduler_running ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-                <span className="text-gray-600">
-                  Scheduler: {status?.scheduler_running ? 'Running' : 'Stopped'}
-                </span>
-              </div>
-              {status?.next_run && (
-                <span className="text-gray-400 text-xs">
-                  Next run: {new Date(status.next_run).toLocaleString()}
-                </span>
-              )}
-              <button
-                onClick={async () => {
-                  try {
-                    const res = await fetch('/api/runs/trigger', { method: 'POST' });
-                    if (res.ok) setSuccess('Scan triggered successfully');
-                    else setError('Failed to trigger scan');
-                  } catch { setError('Failed to trigger scan'); }
-                }}
-                className="ml-auto px-3 py-1.5 text-xs font-medium text-blue-600 border border-blue-300 rounded-lg hover:bg-blue-50 transition"
-              >
-                Scan Now
-              </button>
-            </div>
-
-            {/* Interval selector */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Discovery Interval
-              </label>
-              <div className="flex gap-3">
-                {['6', '12', '24'].map(val => (
-                  <button
-                    key={val}
-                    onClick={() => update('discovery_interval_hours', val)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
-                      settings.discovery_interval_hours === val
-                        ? 'bg-blue-600 text-white border-blue-600'
-                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                    }`}
-                  >
-                    Every {val} hours
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs text-gray-400 mt-2">
-                How often the discovery engine scans your Azure environment. Takes effect on next scheduler restart.
-              </p>
-            </div>
-          </div>
-
-          {/* Section 4: Email Notifications */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="text-lg font-semibold text-gray-900">Email Notifications</div>
-              <button
-                onClick={() => toggleBool('email_enabled')}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  settings.email_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    settings.email_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
-
-            {/* Email service status */}
-            <div className="flex items-center gap-2 text-sm">
-              <span className={`w-2 h-2 rounded-full ${status?.email_configured ? 'bg-green-500' : 'bg-red-500'}`} />
-              <span className="text-gray-600">
-                Email service: {status?.email_configured ? 'Configured (Microsoft Graph)' : 'Not configured (needs Azure credentials)'}
-              </span>
-            </div>
-
-            {settings.email_enabled === 'true' && (
-              <>
-                {/* Recipient + Sender */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Alert Recipients</label>
-                    <input
-                      type="email"
-                      value={settings.email_to}
-                      onChange={e => update('email_to', e.target.value)}
-                      placeholder="alerts@yourcompany.com"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Sender</label>
-                    <div className="px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-500 bg-gray-50">
-                      auditgraphalerts@nexgenixlabs.com
-                    </div>
-                  </div>
-                </div>
-
-                {/* Test email button */}
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={handleTestEmail}
-                    disabled={testingEmail || !status?.email_configured}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
-                      testingEmail || !status?.email_configured
-                        ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                    }`}
-                  >
-                    {testingEmail ? (
-                      <span className="flex items-center gap-2">
-                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                        Sending...
-                      </span>
-                    ) : 'Send Test Email'}
-                  </button>
-                  {testResult && (
-                    <span className={`text-sm ${testResult.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-                      {testResult.message}
-                    </span>
-                  )}
-                </div>
-
-                {/* Notification toggles — 6 switches */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-3">Notification Types</label>
-                  <div className="space-y-3">
-                    {([
-                      { key: 'notify_credential_changes' as const, label: 'Secret / credential expiry', description: 'Alert when secrets or certificates are expiring or expired' },
-                      { key: 'notify_permission_changes' as const, label: 'Drift detection', description: 'Notify when permission or role changes are detected' },
-                      { key: 'notify_risk_changes' as const, label: 'Critical risk alerts', description: 'Immediate alerts for critical and high risk escalations' },
-                      { key: 'notify_new_identities' as const, label: 'Scan failure alerts', description: 'Alert when a discovery scan fails or encounters errors' },
-                      { key: 'notify_removed_identities' as const, label: 'Discovery completion', description: 'Summary notification after each successful scan' },
-                      { key: 'notify_weekly_digest' as const, label: 'Weekly risk digest', description: 'Weekly summary of risk posture and key changes' },
-                    ]).map(item => (
-                      <div key={item.key} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0">
-                        <div>
-                          <div className="text-sm font-medium text-gray-800">{item.label}</div>
-                          <div className="text-xs text-gray-400">{item.description}</div>
-                        </div>
-                        <button
-                          onClick={() => toggleBool(item.key)}
-                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors shrink-0 ${
-                            settings[item.key] === 'true' ? 'bg-blue-500' : 'bg-gray-300'
-                          }`}
-                        >
-                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                            settings[item.key] === 'true' ? 'translate-x-4' : 'translate-x-0.5'
-                          }`} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Section 4: Scheduled Reports */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="text-lg font-semibold text-gray-900">Scheduled Reports</div>
-              <button
-                onClick={() => toggleBool('report_schedule_enabled')}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  settings.report_schedule_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    settings.report_schedule_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
-
-            <p className="text-sm text-gray-500">
-              Automatically send an executive summary report on a recurring schedule.
-            </p>
-
-            {settings.report_schedule_enabled === 'true' && (
-              <>
-                {/* Frequency selector */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Delivery Frequency
-                  </label>
-                  <div className="flex gap-3">
-                    {([
-                      { value: 'weekly', label: 'Weekly (Mon 8:00 UTC)' },
-                      { value: 'monthly', label: 'Monthly (1st 8:00 UTC)' },
-                    ] as const).map(opt => (
-                      <button
-                        key={opt.value}
-                        onClick={() => update('report_schedule_frequency', opt.value)}
-                        className={`px-4 py-2 rounded-lg text-sm font-medium border transition ${
-                          settings.report_schedule_frequency === opt.value
-                            ? 'bg-blue-600 text-white border-blue-600'
-                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-xs text-gray-400 mt-2">
-                    Schedule changes take effect on next scheduler restart.
-                  </p>
-                </div>
-
-                {/* Report recipient */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Report Recipient
-                  </label>
-                  <input
-                    type="email"
-                    value={settings.report_email_to}
-                    onChange={e => update('report_email_to', e.target.value)}
-                    placeholder={settings.email_to || 'Uses notification recipient'}
-                    className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">
-                    Leave empty to use the notification recipient above.
-                  </p>
-                </div>
-
-                {/* Next delivery time */}
-                {status?.next_report && (
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <span className="text-gray-600">
-                      Next delivery: {new Date(status.next_report).toLocaleString()}
-                    </span>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* Section 5: Webhooks */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">Webhooks</div>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Send real-time alerts to Slack, Teams, Splunk, or any HTTP endpoint
-                </p>
-              </div>
-              <button
-                onClick={() => openWebhookModal()}
-                disabled={webhooks.length >= 10}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-                  webhooks.length >= 10
-                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                }`}
-              >
-                + Add Webhook
-              </button>
-            </div>
-
-            {webhooks.length === 0 ? (
-              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
-                No webhooks configured. Add one to receive real-time alerts.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {webhooks.map(wh => (
-                  <div key={wh.id} className="border rounded-lg">
-                    <div className="flex items-center justify-between px-4 py-3">
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        {/* Enabled toggle */}
-                        <button
-                          onClick={() => handleToggleWebhook(wh)}
-                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
-                            wh.enabled ? 'bg-green-500' : 'bg-gray-300'
-                          }`}
-                        >
-                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                            wh.enabled ? 'translate-x-4' : 'translate-x-0.5'
-                          }`} />
-                        </button>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="text-sm font-medium text-gray-900 truncate">{wh.name}</div>
-                          <div className="text-xs text-gray-400 font-mono truncate">{wh.url}</div>
-                        </div>
-                      </div>
-
-                      {/* Event type badges */}
-                      <div className="hidden sm:flex items-center gap-1 mx-3 flex-shrink-0">
-                        {(wh.event_types || []).slice(0, 3).map(et => (
-                          <span key={et} className="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-medium rounded">
-                            {WEBHOOK_EVENT_LABELS[et]?.split(' ')[0] || et}
-                          </span>
-                        ))}
-                        {(wh.event_types || []).length > 3 && (
-                          <span className="text-[10px] text-gray-400">+{wh.event_types.length - 3}</span>
-                        )}
-                      </div>
-
-                      {/* Stats + actions */}
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        <span className="text-xs text-gray-400">
-                          {wh.successful_deliveries}/{wh.total_deliveries} delivered
-                        </span>
-                        <button
-                          onClick={() => handleWebhookTest(wh.id)}
-                          disabled={testingWebhookId === wh.id}
-                          className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
-                        >
-                          {testingWebhookId === wh.id ? 'Testing...' : 'Test'}
-                        </button>
-                        <button
-                          onClick={() => loadDeliveries(wh.id)}
-                          className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
-                        >
-                          {expandedDeliveries === wh.id ? 'Hide' : 'Log'}
-                        </button>
-                        <button
-                          onClick={() => openWebhookModal(wh)}
-                          className="px-2 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition"
-                        >
-                          Edit
-                        </button>
-                        {deleteConfirm === wh.id ? (
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => handleWebhookDelete(wh.id)}
-                              className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition"
-                            >
-                              Confirm
-                            </button>
-                            <button
-                              onClick={() => setDeleteConfirm(null)}
-                              className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setDeleteConfirm(wh.id)}
-                            className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition"
-                          >
-                            Delete
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Delivery log (expandable) */}
-                    {expandedDeliveries === wh.id && (
-                      <div className="border-t px-4 py-3 bg-gray-50">
-                        <div className="text-xs font-semibold text-gray-600 mb-2">Recent Deliveries</div>
-                        {deliveries.length === 0 ? (
-                          <div className="text-xs text-gray-400">No deliveries yet</div>
-                        ) : (
-                          <div className="space-y-1">
-                            {deliveries.map(d => (
-                              <div key={d.id} className="flex items-center justify-between text-xs">
-                                <div className="flex items-center gap-2">
-                                  <span className={`w-1.5 h-1.5 rounded-full ${
-                                    d.status === 'delivered' ? 'bg-green-500' : d.status === 'pending' ? 'bg-yellow-500' : 'bg-red-500'
-                                  }`} />
-                                  <span className="font-medium text-gray-700">{WEBHOOK_EVENT_LABELS[d.event_type] || d.event_type}</span>
-                                </div>
-                                <div className="flex items-center gap-3 text-gray-400">
-                                  {d.http_status && <span>HTTP {d.http_status}</span>}
-                                  <span>{d.created_at ? new Date(d.created_at).toLocaleString() : '-'}</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <p className="text-xs text-gray-400">
-              Maximum 10 webhooks. Payloads are signed with HMAC-SHA256 if a secret is configured.
-            </p>
-          </div>
-
-          {/* Section 6: Custom Risk Rules */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">Custom Risk Rules</div>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Adjust risk scoring with custom conditions — runs after default scoring
-                </p>
-              </div>
-              <button
-                onClick={() => openRuleModal()}
-                disabled={riskRules.length >= 50}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-                  riskRules.length >= 50
-                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                }`}
-              >
-                + Add Rule
-              </button>
-            </div>
-
-            {riskRules.length === 0 ? (
-              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
-                No custom risk rules configured. Add one to customize risk scoring.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {riskRules.map(rule => (
-                  <div key={rule.id} className="border rounded-lg px-4 py-3 flex items-center justify-between">
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
-                      <button
-                        onClick={() => handleToggleRule(rule)}
-                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
-                          rule.enabled ? 'bg-green-500' : 'bg-gray-300'
-                        }`}
-                      >
-                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                          rule.enabled ? 'translate-x-4' : 'translate-x-0.5'
-                        }`} />
-                      </button>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-gray-900 truncate">{rule.name}</div>
-                        <div className="text-xs text-gray-400">
-                          {(rule.conditions?.all || []).length} condition{(rule.conditions?.all || []).length !== 1 ? 's' : ''} · Priority {rule.priority}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      {/* Action badge */}
-                      {rule.action_type === 'force_level' ? (
-                        <span className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
-                          rule.force_level === 'critical' ? 'bg-red-100 text-red-700' :
-                          rule.force_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                          rule.force_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                          'bg-green-100 text-green-700'
-                        }`}>
-                          FORCE {(rule.force_level || '').toUpperCase()}
-                        </span>
-                      ) : (
-                        <span className={`px-2 py-0.5 text-[10px] font-semibold rounded ${
-                          rule.points_adjustment > 0 ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'
-                        }`}>
-                          {rule.points_adjustment > 0 ? '+' : ''}{rule.points_adjustment} pts
-                        </span>
-                      )}
-
-                      <button
-                        onClick={() => openRuleModal(rule)}
-                        className="px-2 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition"
-                      >
-                        Edit
-                      </button>
-                      {ruleDeleteConfirm === rule.id ? (
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleRuleDelete(rule.id)}
-                            className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition"
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            onClick={() => setRuleDeleteConfirm(null)}
-                            className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setRuleDeleteConfirm(rule.id)}
-                          className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition"
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <p className="text-xs text-gray-400">
-              Maximum 50 rules. Rules run after default scoring on every discovery run, ordered by priority (lower runs first).
-            </p>
-          </div>
-
-          {/* Change Password */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div>
-              <div className="text-lg font-semibold text-gray-900">Change Password</div>
-              <p className="text-sm text-gray-500 mt-0.5">Update your account password</p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
-                <input
-                  type="password"
-                  value={currentPassword}
-                  onChange={e => { setCurrentPassword(e.target.value); setPwMessage(null); }}
-                  className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter current password"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={e => { setNewPassword(e.target.value); setPwMessage(null); }}
-                  className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Min. 8 characters"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={e => { setConfirmPassword(e.target.value); setPwMessage(null); }}
-                  className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Repeat new password"
-                />
-              </div>
-            </div>
-            {pwMessage && (
-              <div className={`text-sm px-3 py-2 rounded-lg ${pwMessage.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                {pwMessage.text}
-              </div>
-            )}
-            <button
-              onClick={handleChangePassword}
-              disabled={pwChanging || !currentPassword || !newPassword || !confirmPassword}
-              className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
-            >
-              {pwChanging ? 'Changing...' : 'Change Password'}
-            </button>
-          </div>
-
-          {/* Section 7: User Management */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">User Management</div>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Manage user accounts and role-based access control
-                </p>
-              </div>
-              <button
-                onClick={() => openUserModal()}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
-              >
-                + Add User
-              </button>
-            </div>
-
-            {userError && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-                {userError}
-                <button onClick={() => setUserError(null)} className="ml-2 font-medium underline">Dismiss</button>
-              </div>
-            )}
-
-            {users.length === 0 ? (
-              <p className="text-sm text-gray-400 py-4 text-center">No users configured</p>
-            ) : (
-              <div className="space-y-2">
-                {users.map(u => (
-                  <div key={u.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600 uppercase">
-                        {u.display_name.charAt(0)}
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
-                          {u.display_name}
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
-                            u.role === 'admin' ? 'bg-red-50 text-red-700' :
-                            u.role === 'security_admin' ? 'bg-amber-50 text-amber-700' :
-                            u.role === 'compliance' ? 'bg-green-50 text-green-700' :
-                            'bg-blue-50 text-blue-700'
-                          }`}>
-                            {u.role === 'security_admin' ? 'Security Admin' : u.role}
-                          </span>
-                          {!u.enabled && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
-                          )}
-                          {isSuperAdmin && u.tenant_name && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">{u.tenant_name}</span>
-                          )}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          @{u.username}
-                          {u.last_login_at && <> &middot; Last login: {new Date(u.last_login_at).toLocaleDateString()}</>}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => handleToggleUser(u)}
-                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                          u.enabled ? 'bg-green-500' : 'bg-gray-300'
-                        }`}
-                        title={u.enabled ? 'Disable user' : 'Enable user'}
-                      >
-                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                          u.enabled ? 'translate-x-4' : 'translate-x-0.5'
-                        }`} />
-                      </button>
-                      <button
-                        onClick={() => openUserModal(u)}
-                        className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition"
-                      >
-                        Edit
-                      </button>
-                      {userDeleteConfirm === u.id ? (
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleUserDelete(u.id)}
-                            className="px-2 py-1 text-xs text-white bg-red-600 hover:bg-red-700 rounded transition"
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            onClick={() => setUserDeleteConfirm(null)}
-                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded transition"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setUserDeleteConfirm(u.id)}
-                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded transition"
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <p className="text-xs text-gray-400">
-              Roles: Admin (full access), Reader (read-only), Compliance (reports + compliance config). The last admin cannot be deleted or demoted.
-            </p>
-          </div>
-
-          {/* Section 8: API Keys */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">API Keys</div>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Manage programmatic access keys for integrations and automations
-                </p>
-              </div>
-              <button
-                onClick={() => openApiKeyModal()}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
-              >
-                + Create API Key
-              </button>
-            </div>
-
-            {apiKeyError && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-                {apiKeyError}
-                <button onClick={() => setApiKeyError(null)} className="ml-2 font-medium underline">Dismiss</button>
-              </div>
-            )}
-
-            {apiKeys.length === 0 ? (
-              <p className="text-sm text-gray-400 py-4 text-center">No API keys configured</p>
-            ) : (
-              <div className="space-y-2">
-                {apiKeys.map(k => (
-                  <div key={k.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-600">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                        </svg>
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
-                          {k.name}
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
-                            k.role === 'admin' ? 'bg-red-50 text-red-700' :
-                            k.role === 'security_admin' ? 'bg-amber-50 text-amber-700' :
-                            k.role === 'compliance' ? 'bg-green-50 text-green-700' :
-                            'bg-blue-50 text-blue-700'
-                          }`}>
-                            {k.role === 'security_admin' ? 'Security Admin' : k.role}
-                          </span>
-                          {!k.enabled && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">DISABLED</span>
-                          )}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          <span className="font-mono">{k.key_prefix}{'****'}</span>
-                          {' '}&middot; {k.usage_count} request{k.usage_count !== 1 ? 's' : ''}
-                          {k.last_used_at && <> &middot; Last used {new Date(k.last_used_at).toLocaleDateString()}</>}
-                          {k.expires_at && <> &middot; Expires {new Date(k.expires_at).toLocaleDateString()}</>}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => handleToggleApiKey(k)}
-                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                          k.enabled ? 'bg-green-500' : 'bg-gray-300'
-                        }`}
-                        title={k.enabled ? 'Disable key' : 'Enable key'}
-                      >
-                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                          k.enabled ? 'translate-x-4' : 'translate-x-0.5'
-                        }`} />
-                      </button>
-                      <button
-                        onClick={() => openApiKeyModal(k)}
-                        className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition"
-                      >
-                        Edit
-                      </button>
-                      {apiKeyDeleteConfirm === k.id ? (
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleApiKeyDelete(k.id)}
-                            className="px-2 py-1 text-xs text-white bg-red-600 hover:bg-red-700 rounded transition"
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            onClick={() => setApiKeyDeleteConfirm(null)}
-                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded transition"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setApiKeyDeleteConfirm(k.id)}
-                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded transition"
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <p className="text-xs text-gray-400">
-              API keys authenticate requests via <code className="bg-gray-100 px-1 rounded">X-API-Key</code> header or Bearer token with <code className="bg-gray-100 px-1 rounded">ag_</code> prefix.
-              Keys inherit the assigned role's permissions.
-            </p>
-          </div>
-
-          {/* Section 9: SSO/SAML Configuration (Phase 54) */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">SSO / SAML</div>
-                <p className="text-sm text-gray-500 mt-0.5">Configure SAML 2.0 Single Sign-On with your identity provider</p>
-              </div>
-              <button
-                onClick={() => setSsoConfig(prev => ({ ...prev, sso_enabled: prev.sso_enabled === 'true' ? 'false' : 'true' }))}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${ssoConfig.sso_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'}`}
-              >
-                <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition ${ssoConfig.sso_enabled === 'true' ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
-              </button>
-            </div>
-
-            {ssoMessage && (
-              <div className={`p-3 rounded-lg text-sm ${ssoMessage.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
-                {ssoMessage.text}
-              </div>
-            )}
-
-            {/* IdP Metadata URL shortcut */}
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">IdP Metadata URL</label>
-              <div className="flex gap-2">
-                <input
-                  value={ssoMetadataUrl}
-                  onChange={e => setSsoMetadataUrl(e.target.value)}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                  placeholder="https://login.microsoftonline.com/.../federationmetadata/2007-06/federationmetadata.xml"
-                />
-                <button
-                  onClick={handleSsoParseMetadata}
-                  disabled={ssoParsing || !ssoMetadataUrl}
-                  className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 transition whitespace-nowrap"
-                >
-                  {ssoParsing ? 'Parsing...' : 'Fetch & Parse'}
-                </button>
-              </div>
-              <p className="text-[10px] text-gray-400 mt-1">Auto-fills the fields below from your IdP's metadata endpoint</p>
-            </div>
-
-            {/* Manual IdP config fields */}
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">IdP Entity ID</label>
-                <input
-                  value={ssoConfig.sso_idp_entity_id}
-                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_entity_id: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                  placeholder="https://sts.windows.net/..."
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">SSO URL</label>
-                <input
-                  value={ssoConfig.sso_idp_sso_url}
-                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_sso_url: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                  placeholder="https://login.microsoftonline.com/.../saml2"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">SLO URL (Optional)</label>
-                <input
-                  value={ssoConfig.sso_idp_slo_url}
-                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_slo_url: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                  placeholder="https://login.microsoftonline.com/.../saml2"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Default Role</label>
-                <select
-                  value={ssoConfig.sso_default_role}
-                  onChange={e => setSsoConfig(prev => ({ ...prev, sso_default_role: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                >
-                  <option value="compliance">Compliance</option>
-                  <option value="reader">Reader</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">X.509 Certificate (PEM)</label>
-              <textarea
-                value={ssoConfig.sso_idp_x509_cert}
-                onChange={e => setSsoConfig(prev => ({ ...prev, sso_idp_x509_cert: e.target.value }))}
-                rows={3}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono"
-                placeholder="MIIDpDCCA..."
-              />
-            </div>
-
-            {/* SP Information (read-only) */}
-            {ssoSpInfo.sp_entity_id && (
-              <div className="bg-gray-50 rounded-lg p-3 space-y-1">
-                <div className="text-xs font-semibold text-gray-700 mb-1">Service Provider Information (copy to your IdP)</div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-gray-500 w-24">Entity ID:</span>
-                  <code className="text-gray-800 bg-white px-2 py-0.5 rounded border text-[11px] flex-1">{ssoSpInfo.sp_entity_id}</code>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-gray-500 w-24">ACS URL:</span>
-                  <code className="text-gray-800 bg-white px-2 py-0.5 rounded border text-[11px] flex-1">{ssoSpInfo.sp_acs_url}</code>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-gray-500 w-24">Metadata:</span>
-                  <code className="text-gray-800 bg-white px-2 py-0.5 rounded border text-[11px] flex-1">{ssoSpInfo.sp_metadata_url}</code>
-                </div>
-              </div>
-            )}
-
-            {/* Role Mapping */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-medium text-gray-600">Role Mapping (IdP Group → AuditGraph Role)</label>
-                <button
-                  onClick={() => setSsoRoleMappings(prev => [...prev, { group: '', role: 'compliance' }])}
-                  className="text-xs text-blue-600 hover:underline"
-                >
-                  + Add Mapping
-                </button>
-              </div>
-              {ssoRoleMappings.length === 0 && (
-                <p className="text-xs text-gray-400 py-2">No role mappings configured. All SSO users will get the default role.</p>
-              )}
-              {ssoRoleMappings.map((m, i) => (
-                <div key={i} className="flex items-center gap-2 mb-1.5">
-                  <input
-                    value={m.group}
-                    onChange={e => {
-                      const updated = [...ssoRoleMappings];
-                      updated[i] = { ...m, group: e.target.value };
-                      setSsoRoleMappings(updated);
-                    }}
-                    className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-                    placeholder="IdP Group Name"
-                  />
-                  <span className="text-xs text-gray-400">→</span>
-                  <select
-                    value={m.role}
-                    onChange={e => {
-                      const updated = [...ssoRoleMappings];
-                      updated[i] = { ...m, role: e.target.value };
-                      setSsoRoleMappings(updated);
-                    }}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-                  >
-                    <option value="compliance">Compliance</option>
-                    <option value="reader">Reader</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                  <button
-                    onClick={() => setSsoRoleMappings(prev => prev.filter((_, j) => j !== i))}
-                    className="text-red-400 hover:text-red-600 text-xs px-1"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            {/* Toggle options */}
-            <div className="flex items-center gap-6">
-              <label className="flex items-center gap-2 text-sm text-gray-700">
-                <button
-                  onClick={() => setSsoConfig(prev => ({ ...prev, sso_jit_enabled: prev.sso_jit_enabled === 'true' ? 'false' : 'true' }))}
-                  className={`relative inline-flex h-4 w-7 items-center rounded-full transition ${ssoConfig.sso_jit_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'}`}
-                >
-                  <span className={`inline-block h-3 w-3 rounded-full bg-white transition ${ssoConfig.sso_jit_enabled === 'true' ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
-                </button>
-                JIT User Provisioning
-              </label>
-              <label className="flex items-center gap-2 text-sm text-gray-700">
-                <button
-                  onClick={() => setSsoConfig(prev => ({ ...prev, sso_force_sso: prev.sso_force_sso === 'true' ? 'false' : 'true' }))}
-                  className={`relative inline-flex h-4 w-7 items-center rounded-full transition ${ssoConfig.sso_force_sso === 'true' ? 'bg-red-600' : 'bg-gray-300'}`}
-                >
-                  <span className={`inline-block h-3 w-3 rounded-full bg-white transition ${ssoConfig.sso_force_sso === 'true' ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
-                </button>
-                Force SSO (disable local login)
-              </label>
-            </div>
-            {ssoConfig.sso_force_sso === 'true' && (
-              <p className="text-xs text-red-500">Warning: Enabling Force SSO will prevent local credential login for all non-superadmin users in this tenant.</p>
-            )}
-
-            <button
-              onClick={handleSsoSave}
-              disabled={ssoSaving}
-              className="px-6 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 transition"
-            >
-              {ssoSaving ? 'Saving...' : 'Save SSO Settings'}
-            </button>
-          </div>
-
-          {/* Section 10: Compliance Frameworks */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <div className="text-lg font-semibold text-gray-900">Compliance Frameworks</div>
-                <span className="px-2 py-0.5 rounded-full text-[9px] font-medium bg-violet-50 text-violet-600">
-                  Identity Controls Only
-                </span>
-              </div>
-              <p className="text-sm text-gray-500 mt-0.5">
-                Enable or disable compliance frameworks evaluated against your identity posture.
-                Scope: Identity, access, and privilege controls only.
-              </p>
-            </div>
-
-            {compFrameworks.length === 0 ? (
-              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
-                No compliance frameworks found. They will be seeded on backend startup.
-              </div>
-            ) : (
-              (() => {
-                const TIER_ORDER = ['core', 'industry', 'privacy', 'benchmark'];
-                const TIER_LABELS: Record<string, string> = {
-                  core: 'Core Governance',
-                  industry: 'Industry Specific',
-                  privacy: 'Privacy & Data Protection',
-                  benchmark: 'Technical Benchmarks',
-                };
-                const tierGroups: Record<string, ComplianceFramework[]> = {};
-                for (const fw of compFrameworks) {
-                  const tier = fw.tier || 'core';
-                  if (!tierGroups[tier]) tierGroups[tier] = [];
-                  tierGroups[tier].push(fw);
-                }
-                const orderedTiers = TIER_ORDER.filter(t => tierGroups[t]?.length);
-                // Fallback: if no tier data, show flat
-                if (orderedTiers.length === 0) {
-                  return (
-                    <div className="space-y-2">
-                      {compFrameworks.map(fw => (
-                        <ComplianceFrameworkRow key={fw.id} fw={fw} isCore={false} toggling={togglingFramework === fw.id} onToggle={() => handleToggleFramework(fw)} />
-                      ))}
-                    </div>
-                  );
-                }
-                return (
-                  <div className="space-y-5">
-                    {orderedTiers.map(tier => (
-                      <div key={tier}>
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                            {TIER_LABELS[tier] || tier}
-                          </span>
-                          {tier === 'core' && (
-                            <span className="px-1.5 py-0.5 bg-violet-50 text-violet-600 text-[9px] font-semibold rounded">
-                              Required
-                            </span>
-                          )}
-                        </div>
-                        <div className="space-y-2">
-                          {tierGroups[tier].map(fw => (
-                            <ComplianceFrameworkRow key={fw.id} fw={fw} isCore={tier === 'core'} toggling={togglingFramework === fw.id} onToggle={() => handleToggleFramework(fw)} />
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()
-            )}
-
-            <p className="text-xs text-gray-400">
-              Disabled frameworks are excluded from the compliance dashboard and gap analysis. Controls are evaluated on each API call using current identity posture data.
-            </p>
-          </div>
-
-          {/* Section 10: SOAR Playbooks */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-semibold text-gray-900">SOAR Playbooks</div>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Automated response playbooks triggered by security events
-                </p>
-              </div>
-              <button
-                onClick={() => openSoarModal()}
-                disabled={soarPlaybooks.length >= 20}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-                  soarPlaybooks.length >= 20
-                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                }`}
-              >
-                + Add Playbook
-              </button>
-            </div>
-
-            {soarPlaybooks.length === 0 ? (
-              <div className="text-sm text-gray-400 text-center py-6 border border-dashed rounded-lg">
-                No SOAR playbooks configured. Add one to automate security responses.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {soarPlaybooks.map(pb => (
-                  <div key={pb.id} className="border rounded-lg px-4 py-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <button
-                          onClick={() => handleToggleSoar(pb)}
-                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
-                            pb.enabled ? 'bg-green-500' : 'bg-gray-300'
-                          }`}
-                        >
-                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                            pb.enabled ? 'translate-x-4' : 'translate-x-0.5'
-                          }`} />
-                        </button>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-sm font-medium text-gray-900 truncate">{pb.name}</div>
-                          {pb.description && (
-                            <div className="text-xs text-gray-400 truncate">{pb.description}</div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="hidden sm:flex items-center gap-1.5 mx-3 flex-shrink-0">
-                        <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded">
-                          {SOAR_TRIGGER_LABELS[pb.trigger_type] || pb.trigger_type}
-                        </span>
-                        <span className="text-gray-300 text-[10px]">&rarr;</span>
-                        <span className="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-medium rounded">
-                          {SOAR_ACTION_LABELS[pb.action_type] || pb.action_type}
-                        </span>
-                        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 text-[10px] font-medium rounded">
-                          {SOAR_INTEGRATION_LABELS[pb.integration] || pb.integration}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        <span className="text-xs text-gray-400">
-                          {pb.trigger_count}x
-                          {pb.last_triggered_at && (
-                            <> &middot; {new Date(pb.last_triggered_at).toLocaleDateString()}</>
-                          )}
-                        </span>
-                        <button
-                          onClick={() => handleSoarTest(pb.id)}
-                          disabled={testingSoarId === pb.id}
-                          className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
-                        >
-                          {testingSoarId === pb.id ? 'Testing...' : 'Test'}
-                        </button>
-                        <button
-                          onClick={() => openSoarModal(pb)}
-                          className="px-2 py-1 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition"
-                        >
-                          Edit
-                        </button>
-                        {soarDeleteConfirm === pb.id ? (
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => handleSoarDelete(pb.id)}
-                              className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition"
-                            >
-                              Confirm
-                            </button>
-                            <button
-                              onClick={() => setSoarDeleteConfirm(null)}
-                              className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setSoarDeleteConfirm(pb.id)}
-                            className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition"
-                          >
-                            Delete
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Test result inline */}
-                    {soarTestResult && (soarTestResult as Record<string, unknown>).playbook_id === pb.id && (
-                      <div className="mt-2 p-2 bg-gray-50 rounded border text-xs">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className={`w-2 h-2 rounded-full ${(soarTestResult as Record<string, unknown>).would_match ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                          <span className="font-medium text-gray-700">
-                            {(soarTestResult as Record<string, unknown>).would_match ? 'Would trigger' : 'Would NOT trigger'}
-                          </span>
-                          {!(soarTestResult as Record<string, unknown>).cooldown_ok && (
-                            <span className="text-orange-600">(cooldown active)</span>
-                          )}
-                        </div>
-                        <div className="text-gray-500">{(soarTestResult as Record<string, unknown>).summary as string}</div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <p className="text-xs text-gray-400">
-              Maximum 20 playbooks. Playbooks are evaluated automatically after discovery runs detect anomalies, drift, or risk changes.
-              Cooldown prevents duplicate actions.
-            </p>
-          </div>
-
-          {/* Section 11: Service Account Governance (Phase 63) */}
-          <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div>
-              <div className="text-lg font-semibold text-gray-900">Service Account Governance</div>
-              <p className="text-sm text-gray-500 mt-0.5">
-                Configure governance policies for non-human identities (service principals, managed identities).
-              </p>
-            </div>
-
-            {saGovMsg && (
-              <div className={`rounded-lg p-3 text-sm ${saGovMsg.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
-                {saGovMsg.text}
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Max Credential Age (days)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={3650}
-                  value={saGov.sa_gov_max_credential_age_days}
-                  onChange={e => setSaGov(prev => ({ ...prev, sa_gov_max_credential_age_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-gray-400 mt-1">Credentials older than this are flagged</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Attestation Interval (days)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={365}
-                  value={saGov.sa_gov_attestation_interval_days}
-                  onChange={e => setSaGov(prev => ({ ...prev, sa_gov_attestation_interval_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-gray-400 mt-1">How often owners must re-attest</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Dormant Threshold (days)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={365}
-                  value={saGov.sa_gov_dormant_threshold_days}
-                  onChange={e => setSaGov(prev => ({ ...prev, sa_gov_dormant_threshold_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-gray-400 mt-1">No sign-in within this = dormant</p>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between max-w-xs">
-              <label className="text-sm font-medium text-gray-700">Require Owner</label>
-              <button
-                type="button"
-                onClick={() => setSaGov(prev => ({ ...prev, sa_gov_require_owner: prev.sa_gov_require_owner === 'true' ? 'false' : 'true' }))}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  saGov.sa_gov_require_owner === 'true' ? 'bg-blue-600' : 'bg-gray-300'
-                }`}
-              >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  saGov.sa_gov_require_owner === 'true' ? 'translate-x-6' : 'translate-x-1'
-                }`} />
-              </button>
-            </div>
-            <p className="text-xs text-gray-400 -mt-2">Unowned service accounts flagged as non-compliant</p>
-
-            <button
-              onClick={handleSaGovSave}
-              disabled={saGovSaving}
-              className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${
-                saGovSaving ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-              }`}
-            >
-              {saGovSaving ? 'Saving...' : 'Save Governance Policy'}
-            </button>
-          </div>
-
-          {/* Section 12: Data Retention (Phase 72) — superadmin only */}
-          {isSuperAdmin && <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div>
-              <div className="text-lg font-semibold text-gray-900">Data Retention</div>
-              <p className="text-sm text-gray-500 mt-0.5">
-                Configure how long historical data is kept. A daily cleanup job runs at 03:00 UTC.
-              </p>
-            </div>
-
-            {retentionMsg && (
-              <div className={`rounded-lg p-3 text-sm ${retentionMsg.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
-                {retentionMsg.text}
-              </div>
-            )}
-
-            {/* Enable toggle */}
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-sm font-medium text-gray-700">Enable Automatic Cleanup</span>
-                <p className="text-xs text-gray-400">When enabled, old data is automatically deleted on schedule</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setRetention(prev => ({ ...prev, retention_enabled: prev.retention_enabled === 'true' ? 'false' : 'true' }))}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  retention.retention_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
-                }`}
-              >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  retention.retention_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
-                }`} />
-              </button>
-            </div>
-
-            {/* Retention periods */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Discovery Runs (days)</label>
-                <input
-                  type="number" min={7} max={3650}
-                  value={retention.retention_discovery_days}
-                  onChange={e => setRetention(prev => ({ ...prev, retention_discovery_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.discovery_runs ?? 0} runs stored</p>}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Drift Reports (days)</label>
-                <input
-                  type="number" min={7} max={3650}
-                  value={retention.retention_drift_days}
-                  onChange={e => setRetention(prev => ({ ...prev, retention_drift_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.drift_reports ?? 0} reports stored</p>}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Activity Log (days)</label>
-                <input
-                  type="number" min={7} max={3650}
-                  value={retention.retention_activity_days}
-                  onChange={e => setRetention(prev => ({ ...prev, retention_activity_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.activity_log ?? 0} entries stored</p>}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Anomalies (days)</label>
-                <input
-                  type="number" min={7} max={3650}
-                  value={retention.retention_anomalies_days}
-                  onChange={e => setRetention(prev => ({ ...prev, retention_anomalies_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-gray-400 mt-1">Only resolved anomalies are cleaned</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">SOAR Actions (days)</label>
-                <input
-                  type="number" min={7} max={3650}
-                  value={retention.retention_soar_days}
-                  onChange={e => setRetention(prev => ({ ...prev, retention_soar_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.soar_actions ?? 0} actions stored</p>}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notifications (days)</label>
-                <input
-                  type="number" min={7} max={3650}
-                  value={retention.retention_notifications_days}
-                  onChange={e => setRetention(prev => ({ ...prev, retention_notifications_days: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                {storageStats && <p className="text-xs text-gray-400 mt-1">{storageStats.row_counts?.notifications ?? 0} notifications stored</p>}
-              </div>
-            </div>
-
-            {/* Storage summary */}
-            {storageStats && (
-              <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-gray-700">Database Size</span>
-                  <span className="text-sm font-bold text-gray-900">{storageStats.total_size_mb} MB</span>
-                </div>
-                {Object.entries(storageStats.oldest_records).some(([, v]) => v) && (
-                  <div className="mt-2 text-xs text-gray-500 space-y-0.5">
-                    {Object.entries(storageStats.oldest_records).map(([table, oldest]) => oldest && (
-                      <div key={table} className="flex justify-between">
-                        <span>{table.replace(/_/g, ' ')}</span>
-                        <span>oldest: {new Date(oldest).toLocaleDateString()}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Cleanup result */}
-            {cleanupResult && (
-              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                <p className="text-sm font-medium text-green-700">Cleanup complete: {cleanupResult.total} records deleted</p>
-                {cleanupResult.total > 0 && (
-                  <div className="mt-1 text-xs text-green-600 space-y-0.5">
-                    {Object.entries(cleanupResult.deleted).map(([table, count]) => count > 0 && (
-                      <div key={table}>{table.replace(/_/g, ' ')}: {count}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleRetentionSave}
-                disabled={retentionSaving}
-                className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${
-                  retentionSaving ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-                }`}
-              >
-                {retentionSaving ? 'Saving...' : 'Save Retention Policy'}
-              </button>
-              <button
-                onClick={handleManualCleanup}
-                disabled={cleanupRunning}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition border ${
-                  cleanupRunning ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-red-600 border-red-200 hover:bg-red-50'
-                }`}
-              >
-                {cleanupRunning ? 'Cleaning...' : 'Run Cleanup Now'}
-              </button>
-            </div>
-          </div>}
-
-          {/* Section 13: AI Security Copilot (Phase 79) — superadmin only */}
-          {isSuperAdmin && <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
-                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
-              </div>
-              <div>
-                <div className="text-lg font-semibold text-gray-900">AI Security Copilot</div>
-                <div className="text-xs text-gray-500">Configure the AI-powered security assistant</div>
-              </div>
-            </div>
-
-            <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3 text-xs text-indigo-700">
-              The Security Copilot uses Anthropic's Claude API to answer questions about your security posture using live AuditGraph data as context.
-              You need an Anthropic API key to use this feature. Get one at{' '}
-              <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="underline font-medium">console.anthropic.com</a>.
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Anthropic API Key
-              </label>
-              <input
-                type="password"
-                value={settings?.copilot_api_key || ''}
-                onChange={e => update('copilot_api_key', e.target.value)}
-                placeholder="sk-ant-api03-..."
-                className="w-full md:w-96 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-              />
-              <p className="text-xs text-gray-400 mt-1">
-                Your API key is stored securely and only used server-side for copilot requests.
-              </p>
-            </div>
-          </div>}
-
-          {/* Section 14: Integrations (Phase 83) */}
-          <IntegrationsSection />
+          {/* ═══ GENERAL TAB ═══ */}
+          {activeTab === 'general' && (
+            <GeneralTab
+              settings={settings}
+              update={update}
+              currentOrg={currentOrg}
+              setError={setError}
+              setSuccess={setSuccess}
+              currentPassword={currentPassword}
+              setCurrentPassword={setCurrentPassword}
+              newPassword={newPassword}
+              setNewPassword={setNewPassword}
+              confirmPassword={confirmPassword}
+              setConfirmPassword={setConfirmPassword}
+              pwChanging={pwChanging}
+              pwMessage={pwMessage}
+              setPwMessage={setPwMessage}
+              handleChangePassword={handleChangePassword}
+            />
+          )}
+
+          {/* ═══ CONNECTIONS TAB ═══ */}
+          {activeTab === 'connections' && (
+            <ConnectionsTab
+              settings={settings}
+              status={status}
+              cloudConfig={cloudConfig}
+              cloudConnections={cloudConnections}
+              isAdmin={isAdmin}
+              orgStage={orgStage}
+              primaryCloud={primaryCloud}
+              addingCloud={addingCloud}
+              setAddingCloud={setAddingCloud}
+              maskCredentials={maskCredentials}
+              setMaskCredentials={setMaskCredentials}
+              showAddWizard={showAddWizard}
+              setShowAddWizard={setShowAddWizard}
+              wizardStep={wizardStep}
+              setWizardStep={setWizardStep}
+              wizardCloud={wizardCloud}
+              setWizardCloud={setWizardCloud}
+              wizardLabel={wizardLabel}
+              setWizardLabel={setWizardLabel}
+              wizardAzureDirectoryId={wizardAzureDirectoryId}
+              setWizardAzureDirectoryId={setWizardAzureDirectoryId}
+              wizardClientId={wizardClientId}
+              setWizardClientId={setWizardClientId}
+              wizardClientSecret={wizardClientSecret}
+              setWizardClientSecret={setWizardClientSecret}
+              wizardRegion={wizardRegion}
+              setWizardRegion={setWizardRegion}
+              wizardTesting={wizardTesting}
+              wizardTestResult={wizardTestResult}
+              wizardSaving={wizardSaving}
+              scanningConnId={scanningConnId}
+              activeJobs={activeJobs}
+              connectionTestResult={connectionTestResult}
+              testingConnection={testingConnection}
+              unlocking={unlocking}
+              handleWizardTest={handleWizardTest}
+              handleWizardSave={handleWizardSave}
+              resetWizard={resetWizard}
+              handleDeleteConnection={handleDeleteConnection}
+              removingConnId={removingConnId}
+              handleRunScan={handleRunScan}
+              fetchConnections={fetchConnections}
+              handleUpdateDiscoverySettings={handleUpdateDiscoverySettings}
+              handleTestConnection={handleTestConnection}
+              handleSaveAndUnlock={handleSaveAndUnlock}
+              update={update}
+              setError={setError}
+              setSuccess={setSuccess}
+              cloudSectionRef={cloudSectionRef}
+            />
+          )}
+
+          {/* ═══ NOTIFICATIONS TAB ═══ */}
+          {activeTab === 'notifications' && (
+            <NotificationsTab
+              settings={settings}
+              status={status}
+              update={update}
+              toggleBool={toggleBool}
+              testingEmail={testingEmail}
+              testResult={testResult}
+              handleTestEmail={handleTestEmail}
+              webhooks={webhooks}
+              openWebhookModal={openWebhookModal}
+              handleToggleWebhook={handleToggleWebhook}
+              handleWebhookTest={handleWebhookTest}
+              handleWebhookDelete={handleWebhookDelete}
+              loadDeliveries={loadDeliveries}
+              testingWebhookId={testingWebhookId}
+              expandedDeliveries={expandedDeliveries}
+              deliveries={deliveries}
+              deleteConfirm={deleteConfirm}
+              setDeleteConfirm={setDeleteConfirm}
+              WEBHOOK_EVENT_LABELS={WEBHOOK_EVENT_LABELS}
+            />
+          )}
+
+          {/* ═══ SCORING TAB ═══ */}
+          {activeTab === 'scoring' && (
+            <ScoringTab
+              riskRules={riskRules}
+              openRuleModal={openRuleModal}
+              handleToggleRule={handleToggleRule}
+              ruleDeleteConfirm={ruleDeleteConfirm}
+              setRuleDeleteConfirm={setRuleDeleteConfirm}
+              handleRuleDelete={handleRuleDelete}
+            />
+          )}
+
+          {/* ═══ USERS TAB ═══ */}
+          {activeTab === 'users' && (
+            <UsersTab
+              users={users}
+              userError={userError}
+              setUserError={setUserError}
+              openUserModal={openUserModal}
+              handleToggleUser={handleToggleUser}
+              userDeleteConfirm={userDeleteConfirm}
+              setUserDeleteConfirm={setUserDeleteConfirm}
+              handleUserDelete={handleUserDelete}
+              isSuperAdmin={isSuperAdmin}
+            />
+          )}
+
+          {/* ═══ SECURITY TAB ═══ */}
+          {activeTab === 'security' && (
+            <SecurityTab
+              apiKeys={apiKeys}
+              apiKeyError={apiKeyError}
+              setApiKeyError={setApiKeyError}
+              openApiKeyModal={openApiKeyModal}
+              handleToggleApiKey={handleToggleApiKey}
+              apiKeyDeleteConfirm={apiKeyDeleteConfirm}
+              setApiKeyDeleteConfirm={setApiKeyDeleteConfirm}
+              handleApiKeyDelete={handleApiKeyDelete}
+              ssoConfig={ssoConfig}
+              setSsoConfig={setSsoConfig}
+              ssoMessage={ssoMessage}
+              ssoMetadataUrl={ssoMetadataUrl}
+              setSsoMetadataUrl={setSsoMetadataUrl}
+              ssoParsing={ssoParsing}
+              ssoSaving={ssoSaving}
+              ssoSpInfo={ssoSpInfo}
+              ssoRoleMappings={ssoRoleMappings}
+              setSsoRoleMappings={setSsoRoleMappings}
+              handleSsoParseMetadata={handleSsoParseMetadata}
+              handleSsoSave={handleSsoSave}
+            />
+          )}
+
+          {/* ═══ COMPLIANCE TAB ═══ */}
+          {activeTab === 'compliance' && (
+            <ComplianceSettingsTab
+              compFrameworks={compFrameworks}
+              togglingFramework={togglingFramework}
+              handleToggleFramework={handleToggleFramework}
+            />
+          )}
+
+          {/* ═══ GOVERNANCE TAB ═══ */}
+          {activeTab === 'governance' && (
+            <GovernanceTab
+              soarPlaybooks={soarPlaybooks}
+              openSoarModal={openSoarModal}
+              handleToggleSoar={handleToggleSoar}
+              handleSoarTest={handleSoarTest}
+              handleSoarDelete={handleSoarDelete}
+              soarDeleteConfirm={soarDeleteConfirm}
+              setSoarDeleteConfirm={setSoarDeleteConfirm}
+              testingSoarId={testingSoarId}
+              soarTestResult={soarTestResult}
+              SOAR_TRIGGER_LABELS={SOAR_TRIGGER_LABELS}
+              SOAR_ACTION_LABELS={SOAR_ACTION_LABELS}
+              SOAR_INTEGRATION_LABELS={SOAR_INTEGRATION_LABELS}
+              saGov={saGov}
+              setSaGov={setSaGov}
+              saGovMsg={saGovMsg}
+              saGovSaving={saGovSaving}
+              handleSaGovSave={handleSaGovSave}
+            />
+          )}
+
+          {/* ═══ ADVANCED TAB ═══ */}
+          {activeTab === 'advanced' && (
+            <AdvancedTab
+              isSuperAdmin={isSuperAdmin}
+              retention={retention}
+              setRetention={setRetention}
+              retentionMsg={retentionMsg}
+              retentionSaving={retentionSaving}
+              handleRetentionSave={handleRetentionSave}
+              cleanupRunning={cleanupRunning}
+              cleanupResult={cleanupResult}
+              handleManualCleanup={handleManualCleanup}
+              storageStats={storageStats}
+              settings={settings}
+              update={update}
+            />
+          )}
+
+          {/* ═══ INTEGRATIONS TAB ═══ */}
+          {activeTab === 'integrations' && (
+            <IntegrationsTab
+              ticketingRef={ticketingRef}
+              IntegrationsSection={IntegrationsSection}
+              TicketingSection={TicketingSection}
+              p2Telemetry={p2Telemetry}
+              setP2Telemetry={setP2Telemetry}
+              p2Saving={p2Saving}
+              p2Msg={p2Msg}
+              handleP2TelemetrySave={handleP2TelemetrySave}
+            />
+          )}
 
           {/* Save button */}
           <div className="flex items-center gap-4">
@@ -3838,7 +2132,7 @@ export default function Settings() {
       {ruleModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setRuleModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-2xl mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-2xl mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="text-lg font-semibold text-gray-900">
               {editingRule ? 'Edit Risk Rule' : 'Add Risk Rule'}
             </div>
@@ -4111,7 +2405,7 @@ export default function Settings() {
       {webhookModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setWebhookModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4">
             <div className="text-lg font-semibold text-gray-900">
               {editingWebhook ? 'Edit Webhook' : 'Add Webhook'}
             </div>
@@ -4206,7 +2500,7 @@ export default function Settings() {
       {userModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setUserModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4">
             <div className="text-lg font-semibold text-gray-900">
               {editingUser ? 'Edit User' : 'Add User'}
             </div>
@@ -4256,7 +2550,7 @@ export default function Settings() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
               <div className="flex gap-2">
-                {['admin', 'security_admin', 'compliance', 'reader'].map(role => (
+                {['admin', 'security_admin', 'security_analyst', 'compliance', 'reader'].map(role => (
                   <button
                     key={role}
                     onClick={() => setUserForm(prev => ({ ...prev, role }))}
@@ -4264,35 +2558,39 @@ export default function Settings() {
                       userForm.role === role
                         ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
                           : role === 'security_admin' ? 'bg-amber-600 text-white border-amber-600'
+                          : role === 'security_analyst' ? 'bg-cyan-600 text-white border-cyan-600'
                           : role === 'compliance' ? 'bg-green-600 text-white border-green-600'
                           : 'bg-blue-600 text-white border-blue-600'
                         : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                     }`}
                   >
-                    {role === 'security_admin' ? 'Security Admin' : role.charAt(0).toUpperCase() + role.slice(1)}
+                    {role === 'security_admin' ? 'Security Admin'
+                      : role === 'security_analyst' ? 'Security Analyst'
+                      : role.charAt(0).toUpperCase() + role.slice(1)}
                   </button>
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-1">
-                {userForm.role === 'admin' ? 'Full access: settings, users, billing, discovery, rules'
-                  : userForm.role === 'security_admin' ? 'Activate subscriptions, manage cloud connections, run scans'
+                {userForm.role === 'admin' ? 'Full access: settings, users, billing, snapshots, rules'
+                  : userForm.role === 'security_admin' ? 'Activate subscriptions, manage cloud connections, capture snapshots'
+                  : userForm.role === 'security_analyst' ? 'Manage findings, run simulations, export data'
                   : userForm.role === 'compliance' ? 'Read-only + compliance reports and access reviews'
                   : 'Read-only: view dashboards, identities, reports'}
               </p>
             </div>
 
-            {/* Phase 46: Tenant + Superadmin fields (superadmin only) */}
+            {/* Phase 46: Organization + Superadmin fields (superadmin only) */}
             {isSuperAdmin && (
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tenant</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Organization</label>
                   <select
-                    value={userForm.tenant_id || ''}
-                    onChange={e => setUserForm(prev => ({ ...prev, tenant_id: e.target.value ? Number(e.target.value) : undefined }))}
+                    value={userForm.organization_id || ''}
+                    onChange={e => setUserForm(prev => ({ ...prev, organization_id: e.target.value ? Number(e.target.value) : undefined }))}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
-                    <option value="">-- Select Tenant --</option>
-                    {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    <option value="">-- Select Organization --</option>
+                    {orgs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </div>
                 <div className="flex items-end">
@@ -4336,7 +2634,7 @@ export default function Settings() {
       {apiKeyModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => { setApiKeyModal(false); setNewKeyValue(null); }} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4">
             {newKeyValue ? (
               <>
                 <div className="text-lg font-semibold text-gray-900">API Key Created</div>
@@ -4392,7 +2690,7 @@ export default function Settings() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
                   <div className="flex gap-2">
-                    {['admin', 'security_admin', 'compliance', 'reader'].map(role => (
+                    {['admin', 'security_admin', 'security_analyst', 'compliance', 'reader'].map(role => (
                       <button
                         key={role}
                         onClick={() => setApiKeyForm(prev => ({ ...prev, role }))}
@@ -4400,12 +2698,15 @@ export default function Settings() {
                           apiKeyForm.role === role
                             ? role === 'admin' ? 'bg-red-600 text-white border-red-600'
                               : role === 'security_admin' ? 'bg-amber-600 text-white border-amber-600'
+                              : role === 'security_analyst' ? 'bg-cyan-600 text-white border-cyan-600'
                               : role === 'compliance' ? 'bg-green-600 text-white border-green-600'
                               : 'bg-blue-600 text-white border-blue-600'
                             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                         }`}
                       >
-                        {role === 'security_admin' ? 'Security Admin' : role.charAt(0).toUpperCase() + role.slice(1)}
+                        {role === 'security_admin' ? 'Security Admin'
+                          : role === 'security_analyst' ? 'Security Analyst'
+                          : role.charAt(0).toUpperCase() + role.slice(1)}
                       </button>
                     ))}
                   </div>
@@ -4451,7 +2752,7 @@ export default function Settings() {
       {soarModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/40" onClick={() => setSoarModal(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-xl shadow-lg border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="text-lg font-semibold text-gray-900">
               {editingSoar ? 'Edit SOAR Playbook' : 'Add SOAR Playbook'}
             </div>
@@ -4585,62 +2886,10 @@ const INTEGRATION_EVENTS = [
   { key: 'critical_risk', label: 'Critical Risk Detected' },
   { key: 'anomaly_detected', label: 'Anomaly Detected' },
   { key: 'drift_detected', label: 'Drift Detected' },
-  { key: 'scan_complete', label: 'Scan Complete' },
-  { key: 'scan_failed', label: 'Scan Failed' },
+  { key: 'scan_complete', label: 'Snapshot Complete' },
+  { key: 'scan_failed', label: 'Snapshot Failed' },
   { key: 'credential_expiring', label: 'Credential Expiring' },
 ];
-
-function ComplianceFrameworkRow({ fw, isCore, toggling, onToggle }: {
-  fw: { id: number; name: string; short_name?: string; version: string | null; enabled: boolean; description: string | null; controls: { id: number; control_id: string; name: string }[]; identity_controls_count?: number; total_framework_controls?: number };
-  isCore: boolean;
-  toggling: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border">
-      <div className="flex items-center gap-3 min-w-0 flex-1">
-        <button
-          onClick={onToggle}
-          disabled={toggling || isCore}
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
-            fw.enabled ? 'bg-green-500' : 'bg-gray-300'
-          } ${isCore ? 'opacity-60 cursor-not-allowed' : ''}`}
-        >
-          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-            fw.enabled ? 'translate-x-4' : 'translate-x-0.5'
-          }`} />
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
-            {fw.short_name || fw.name}
-            {fw.version && (
-              <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[10px] font-medium rounded">
-                {fw.version}
-              </span>
-            )}
-            {isCore && (
-              <span className="px-1.5 py-0.5 bg-violet-50 text-violet-600 text-[9px] font-semibold rounded">
-                Required
-              </span>
-            )}
-          </div>
-          <div className="text-xs text-gray-500">
-            {fw.identity_controls_count || fw.controls?.length || 0} identity controls
-            {!!fw.total_framework_controls && fw.total_framework_controls > 0 && (
-              <span className="text-gray-400"> of {fw.total_framework_controls} total</span>
-            )}
-            {fw.description && <> &middot; {fw.description.slice(0, 60)}{(fw.description.length ?? 0) > 60 ? '...' : ''}</>}
-          </div>
-        </div>
-      </div>
-      <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-        fw.enabled ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'
-      }`}>
-        {fw.enabled ? 'Active' : 'Disabled'}
-      </span>
-    </div>
-  );
-}
 
 function IntegrationsSection() {
   const [slackUrl, setSlackUrl] = useState('');

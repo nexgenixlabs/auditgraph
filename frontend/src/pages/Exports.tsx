@@ -1,16 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
 import {
   downloadCSV, downloadJSON, exportFilename,
   IDENTITY_CSV_COLUMNS, COMPLIANCE_CSV_COLUMNS, DRIFT_CSV_COLUMNS,
+  EXPORT_SCHEMA_VERSION, buildExportMeta,
 } from '../utils/exportUtils';
 
 interface ExportCard {
   key: string;
   title: string;
   description: string;
-  formats: ('csv' | 'json')[];
+  formats: ('csv' | 'json' | 'zip')[];
   icon: React.ReactNode;
 }
 
@@ -59,6 +61,39 @@ const EXPORT_CARDS: ExportCard[] = [
       </svg>
     ),
   },
+  {
+    key: 'evidence-package',
+    title: 'HIPAA Evidence Package',
+    description: 'Comprehensive audit evidence bundle: privileged access, compliance gaps, remediation priorities, credential health, sensitive data access — ready for HIPAA auditors.',
+    formats: ['json'],
+    icon: (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+      </svg>
+    ),
+  },
+  {
+    key: 'sensitive-data',
+    title: 'Sensitive Data Access Map',
+    description: 'Classification inventory (PHI/PCI/PII) with identity-to-resource access mappings — who can reach sensitive data and via which roles.',
+    formats: ['json'],
+    icon: (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+    ),
+  },
+  {
+    key: 'evidence-zip',
+    title: 'Evidence ZIP Package',
+    description: 'Complete audit evidence bundle: 8 CSV files (identities, privileged access, Entra roles, credentials, compliance, classifications, drift, activity) + MANIFEST.md — ready for auditor handoff.',
+    formats: ['zip'],
+    icon: (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+      </svg>
+    ),
+  },
 ];
 
 const CSV_COLUMNS_MAP: Record<string, typeof IDENTITY_CSV_COLUMNS> = {
@@ -67,60 +102,107 @@ const CSV_COLUMNS_MAP: Record<string, typeof IDENTITY_CSV_COLUMNS> = {
   drift: DRIFT_CSV_COLUMNS,
 };
 
+interface SnapshotInfo {
+  id: number;
+  completed_at: string | null;
+  total_identities: number;
+}
+
 export default function Exports() {
   const { addToast } = useToast();
   const { withConnection } = useConnection();
+  const { user, activeOrgId, activeOrgName } = useAuth();
   const [downloading, setDownloading] = useState<string | null>(null);
   const [lastExported, setLastExported] = useState<Record<string, string>>({});
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [latestSnapshot, setLatestSnapshot] = useState<SnapshotInfo | null>(null);
 
-  async function handleExport(exportType: string, format: 'csv' | 'json') {
+  const orgId = activeOrgId ?? user?.organization_id ?? null;
+  const orgName = activeOrgName ?? user?.org_name ?? null;
+
+  useEffect(() => {
+    fetch(withConnection('/api/runs'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        const runs = data?.runs || data || [];
+        if (Array.isArray(runs) && runs.length > 0) {
+          setLatestSnapshot({ id: runs[0].id, completed_at: runs[0].completed_at, total_identities: runs[0].total_identities });
+        }
+      })
+      .catch(() => {});
+  }, [withConnection]);
+
+  function getMeta() {
+    return buildExportMeta(latestSnapshot?.id ?? null, orgId, orgName);
+  }
+
+  async function handleExport(exportType: string, format: 'csv' | 'json' | 'zip') {
     const dlKey = `${exportType}-${format}`;
     setDownloading(dlKey);
     try {
-      const res = await fetch(withConnection(`/api/export/${exportType}`));
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null);
-        throw new Error(errData?.error || `Export failed (${res.status})`);
-      }
-      const data = await res.json();
+      const dateParams = (dateFrom && dateTo) ? `&from=${dateFrom}&to=${dateTo}` : '';
+      const meta = getMeta();
 
-      if (format === 'json') {
-        downloadJSON(data, exportFilename(exportType, 'json'));
-      } else {
-        // CSV: flatten appropriately
-        const columns = CSV_COLUMNS_MAP[exportType];
-        let rows: Record<string, unknown>[] = [];
-
-        if (exportType === 'identities') {
-          rows = data.identities || [];
-        } else if (exportType === 'compliance') {
-          rows = (data.gap_analysis || []).map((g: any) => ({
-            framework: g.framework_name,
-            control_id: g.control_id,
-            control_name: g.control_name,
-            status: g.status,
-            current_value: g.value,
-            threshold: g.pass_threshold,
-            detail: g.detail,
-          }));
-          // If no gaps, export all controls
-          if (rows.length === 0 && data.all_controls) {
-            rows = data.all_controls.map((c: any) => ({
-              framework: c.framework_name,
-              control_id: c.control_id,
-              control_name: c.control_name,
-              status: c.status,
-              current_value: c.value,
-              threshold: c.pass_threshold,
-              detail: c.detail,
-            }));
-          }
-        } else if (exportType === 'drift') {
-          rows = data.changes || [];
+      if (format === 'zip') {
+        const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `Export failed (${res.status})`);
         }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `auditgraph_evidence_${new Date().toISOString().slice(0, 10)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `Export failed (${res.status})`);
+        }
+        const data = await res.json();
 
-        if (columns) {
-          downloadCSV(rows, columns, exportFilename(exportType, 'csv'));
+        if (format === 'json') {
+          downloadJSON(data, exportFilename(exportType, 'json'), meta);
+        } else {
+          const columns = CSV_COLUMNS_MAP[exportType];
+          let rows: Record<string, unknown>[] = [];
+
+          if (exportType === 'identities') {
+            rows = data.identities || [];
+          } else if (exportType === 'compliance') {
+            rows = (data.gap_analysis || []).map((g: any) => ({
+              framework: g.framework,
+              control_id: g.control_id,
+              control_name: g.control_name,
+              status: g.status,
+              current_value: g.current_value,
+              threshold: g.threshold,
+              detail: g.detail,
+            }));
+            if (rows.length === 0 && data.all_controls) {
+              rows = data.all_controls.map((c: any) => ({
+                framework: c.framework,
+                control_id: c.control_id,
+                control_name: c.control_name,
+                status: c.status,
+                current_value: c.current_value,
+                threshold: c.threshold,
+                detail: c.detail,
+              }));
+            }
+          } else if (exportType === 'drift') {
+            rows = data.changes || [];
+          }
+
+          if (columns) {
+            downloadCSV(rows, columns, exportFilename(exportType, 'csv'), meta);
+          }
         }
       }
 
@@ -134,26 +216,104 @@ export default function Exports() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Export Center</h2>
-        <p className="text-sm text-gray-500 mt-1">
+        <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Export Center</h2>
+        <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
           Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
         </p>
+      </div>
+
+      {/* Export Metadata Strip */}
+      <div className="rounded-xl border px-5 py-4" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+        <div className="flex items-center gap-2 mb-3">
+          <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>Export Metadata</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200 font-medium">Included in all exports</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Snapshot ID</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              {latestSnapshot ? `#${latestSnapshot.id}` : 'Loading...'}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Timestamp</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              {latestSnapshot?.completed_at
+                ? new Date(latestSnapshot.completed_at).toLocaleString()
+                : new Date().toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Organization ID</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              {orgId ?? 'N/A'}
+              {orgName && <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-secondary)' }}>({orgName})</span>}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}>Schema Version</div>
+            <div className="text-sm font-semibold font-mono" style={{ color: 'var(--text-primary)' }}>
+              v{EXPORT_SCHEMA_VERSION}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Date range filter */}
+      <div className="flex items-end gap-4 rounded-xl border px-5 py-3" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
+        <div className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Date Range (optional)</div>
+        <div>
+          <label className="block text-[10px] font-medium mb-0.5" style={{ color: 'var(--text-secondary)' }}>From</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={e => setDateFrom(e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border text-xs"
+            style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-medium mb-0.5" style={{ color: 'var(--text-secondary)' }}>To</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={e => setDateTo(e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border text-xs"
+            style={{ backgroundColor: 'var(--bg-primary)', borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+          />
+        </div>
+        {(dateFrom || dateTo) && (
+          <button
+            onClick={() => { setDateFrom(''); setDateTo(''); }}
+            className="text-xs text-blue-600 hover:underline"
+          >
+            Clear
+          </button>
+        )}
+        {dateFrom && dateTo && (
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+            Exports will use data from {dateFrom} to {dateTo}
+          </span>
+        )}
       </div>
 
       {/* Export cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {EXPORT_CARDS.map(card => (
-          <div key={card.key} className="bg-white rounded-xl border shadow-sm p-6 flex flex-col">
+          <div key={card.key} className="rounded-xl border shadow-sm p-6 flex flex-col" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
             <div className="flex items-start gap-3 mb-3">
-              <div className="p-2 bg-blue-50 text-blue-600 rounded-lg flex-shrink-0">
+              <div className="p-2 rounded-lg flex-shrink-0" style={{ backgroundColor: 'rgba(59,130,246,0.1)', color: '#3B82F6' }}>
                 {card.icon}
               </div>
               <div className="min-w-0">
-                <h3 className="text-base font-semibold text-gray-900">{card.title}</h3>
-                <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{card.description}</p>
+                <h3 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>{card.title}</h3>
+                <p className="text-xs mt-0.5 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>{card.description}</p>
               </div>
             </div>
 
@@ -168,7 +328,9 @@ export default function Exports() {
                     onClick={() => handleExport(card.key, fmt)}
                     disabled={!!downloading}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition disabled:opacity-50 ${
-                      fmt === 'json'
+                      fmt === 'zip'
+                        ? 'text-blue-700 bg-blue-50 border-blue-200 hover:bg-blue-100'
+                        : fmt === 'json'
                         ? 'text-purple-700 bg-purple-50 border-purple-200 hover:bg-purple-100'
                         : 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
                     }`}
@@ -196,10 +358,10 @@ export default function Exports() {
       </div>
 
       {/* Info */}
-      <div className="bg-gray-50 border rounded-xl p-4 text-xs text-gray-500 space-y-1">
-        <p><strong>CSV</strong> format is optimized for spreadsheet import (Excel, Google Sheets). Compliance CSV exports gap analysis controls.</p>
-        <p><strong>JSON</strong> format includes full structured data suitable for SIEM, GRC platforms, or programmatic consumption.</p>
-        <p>All exports reflect the latest discovery run data. Export events are recorded in the activity log.</p>
+      <div className="border rounded-xl p-4 text-xs space-y-1" style={{ backgroundColor: 'var(--bg-tertiary, var(--bg-secondary))', color: 'var(--text-secondary)', borderColor: 'var(--border-default)' }}>
+        <p><strong>CSV</strong> format is optimized for spreadsheet import (Excel, Google Sheets). Metadata is prepended as comment rows (# prefix).</p>
+        <p><strong>JSON</strong> format includes an <code>_export_metadata</code> envelope with Snapshot ID, Timestamp, Organization ID, and Schema version.</p>
+        <p><strong>ZIP</strong> evidence packages include metadata in the MANIFEST. All exports reflect the latest snapshot data.</p>
       </div>
     </div>
   );

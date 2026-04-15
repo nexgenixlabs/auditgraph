@@ -1,4 +1,26 @@
 services:
+  # ─── PostgreSQL — local development database ─────────────
+  auditgraph-postgres:
+    image: postgres:16
+    container_name: auditgraph-postgres
+    env_file:
+      - .env.docker
+    environment:
+      POSTGRES_DB: auditgraph
+      POSTGRES_USER: auditgraph
+      POSTGRES_PASSWORD: ${POSTGRES_DEV_PASSWORD:?POSTGRES_DEV_PASSWORD is required}
+    ports:
+      - "5434:5432"
+    volumes:
+      - auditgraph_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auditgraph_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - auditgraph-net
+
   # ─── Backend (Flask API) ───────────────────────
   backend:
     build:
@@ -11,10 +33,15 @@ services:
     environment:
       - FLASK_APP=app.main:create_app()
       - FLASK_ENV=development
+      - APP_ENV=local
+      - DATABASE_URL=postgresql://auditgraph:${POSTGRES_DEV_PASSWORD:?POSTGRES_DEV_PASSWORD is required}@auditgraph-postgres:5432/auditgraph
     volumes:
       # Mount source code for hot reload in development
       - ./backend:/app
     command: ["python", "-m", "flask", "run", "--host=0.0.0.0", "--port=5000", "--reload"]
+    depends_on:
+      auditgraph-postgres:
+        condition: service_healthy
     networks:
       - auditgraph-net
     healthcheck:
@@ -44,30 +71,9 @@ services:
       timeout: 5s
       retries: 3
 
-  # ─── Local Postgres (optional — for offline dev) ─
-  # Uncomment if you want a local DB instead of Azure
-  # postgres:
-  #   image: postgres:16
-  #   container_name: auditgraph-postgres
-  #   environment:
-  #     POSTGRES_DB: auditgraph
-  #     POSTGRES_USER: auditgraph
-  #     POSTGRES_PASSWORD: auditgraph
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - auditgraph_pgdata:/var/lib/postgresql/data
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U auditgraph -d auditgraph"]
-  #     interval: 5s
-  #     timeout: 5s
-  #     retries: 20
-  #   networks:
-  #     - auditgraph-net
-
 networks:
   auditgraph-net:
     driver: bridge
 
-# volumes:
-#   auditgraph_pgdata:
+volumes:
+  auditgraph_pgdata:

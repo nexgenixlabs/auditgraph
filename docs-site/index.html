@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AuditGraph Documentation</title>
+  <meta name="description" content="AuditGraph identity security platform documentation — architecture, API reference, compliance, and operational guides.">
+  <link rel="icon" href="assets/favicon.ico">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- highlight.js -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/http.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/nginx.min.js"></script>
+
+  <!-- marked.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+
+  <!-- lunr.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lunr.js/2.3.9/lunr.min.js"></script>
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="site-header">
+    <div class="header-left">
+      <button class="hamburger" id="hamburger" aria-label="Toggle navigation">
+        <span></span><span></span><span></span>
+      </button>
+      <a href="#/introduction" class="logo-link">
+        <img src="assets/auditgraph-logo.png" alt="AuditGraph" class="logo-img">
+        <span class="logo-text">AuditGraph</span>
+        <span class="logo-divider">|</span>
+        <span class="logo-sub">Docs</span>
+      </a>
+    </div>
+    <div class="header-right">
+      <div class="search-wrapper" id="search-wrapper">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="search-input" placeholder="Search docs…" autocomplete="off">
+        <kbd class="search-shortcut">/</kbd>
+        <div class="search-results" id="search-results"></div>
+      </div>
+      <a href="https://app.auditgraph.ai" class="launch-btn" target="_blank" rel="noopener">
+        Launch App
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <!-- Main layout -->
+  <div class="layout">
+
+    <!-- Sidebar -->
+    <nav class="sidebar" id="sidebar">
+      <div class="sidebar-inner" id="sidebar-nav"></div>
+    </nav>
+
+    <!-- Content -->
+    <main class="content" id="content">
+      <!-- Loading skeleton -->
+      <div class="skeleton" id="skeleton">
+        <div class="skeleton-line w80"></div>
+        <div class="skeleton-line w60"></div>
+        <div class="skeleton-line w100"></div>
+        <div class="skeleton-line w90"></div>
+        <div class="skeleton-line w70"></div>
+        <div class="skeleton-line w100"></div>
+        <div class="skeleton-line w50"></div>
+      </div>
+      <!-- Rendered markdown -->
+      <article class="article" id="article"></article>
+    </main>
+
+    <!-- TOC rail -->
+    <aside class="toc-rail" id="toc-rail">
+      <div class="toc-header">On This Page</div>
+      <ul class="toc-list" id="toc-list"></ul>
+    </aside>
+
+  </div>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <span class="footer-copy">&copy; 2026 AuditGraph, Inc.</span>
+      <div class="footer-links">
+        <a href="https://app.auditgraph.ai" target="_blank" rel="noopener">App</a>
+        <a href="https://api.auditgraph.ai/health" target="_blank" rel="noopener">API Status</a>
+        <a href="#/security-overview">Security</a>
+        <a href="#/compliance">Compliance</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- 404 -->
+  <template id="not-found-tpl">
+    <div class="not-found">
+      <h1>404</h1>
+      <p>Page not found.</p>
+      <a href="#/introduction">Back to Introduction &rarr;</a>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

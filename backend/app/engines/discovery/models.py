@@ -224,12 +224,23 @@ class IdentityType(Enum):
 
 class IdentityCategory(Enum):
     """Canonical identity categories used by the UI and database"""
+    # Azure
     SERVICE_PRINCIPAL = "service_principal"
     MANAGED_IDENTITY_SYSTEM = "managed_identity_system"
     MANAGED_IDENTITY_USER = "managed_identity_user"
     HUMAN_USER = "human_user"
     GUEST = "guest"
     MICROSOFT_INTERNAL = "microsoft_internal"
+    # AWS
+    IAM_USER = "iam_user"
+    IAM_ROLE = "iam_role"
+    IAM_SERVICE_LINKED_ROLE = "iam_service_linked_role"
+    # GCP
+    GCP_SERVICE_ACCOUNT = "gcp_service_account"
+    GCP_USER = "gcp_user"
+    GCP_GROUP = "gcp_group"
+    GCP_DOMAIN = "gcp_domain"
+    GCP_MEMBER = "gcp_member"
     UNKNOWN = "unknown"
 
 

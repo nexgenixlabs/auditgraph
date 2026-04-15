@@ -1,0 +1,536 @@
+/**
+ * AuditGraph — CISO Executive Posture Dashboard (v3.1)
+ *
+ * Two-phase loading via /api/dashboard/posture:
+ *   Phase 1 (?include=core): Blocks 0-3 render immediately
+ *   Phase 2 (?include=full): Blocks 4-7 hydrate in background
+ *
+ * Falls back to legacy /api/ciso/summary when v3.1 API unavailable.
+ *
+ * P0: Exclusive phase-state rendering — only ONE view at a time.
+ */
+import React, { useState, useEffect, useRef } from 'react';
+import { useConnection } from '../contexts/ConnectionContext';
+import { useAuth } from '../contexts/AuthContext';
+import { mapSummaryToViewModel, buildEmptyCISOViewModel, type CISOViewModel, type PostureV31Response } from '../utils/cisoViewModel';
+import { DN } from '../components/dashboard/ciso-shared';
+import { IdentityDrawerProvider } from '../contexts/IdentityDrawerContext';
+import { IdentityContextDrawer } from '../components/dashboard/IdentityContextDrawer';
+import { usePostureDashboard, type PosturePhase } from '../hooks/usePostureDashboard';
+
+// Legacy VM components
+import { NarrativePanel, RiskScorePanel, ConfidencePanel } from '../components/ciso/ExecutiveSummaryHero';
+import { useInventorySummary } from '../hooks/useInventorySummary';
+import { BlastRadiusCard, AttackPathCard, IdentityRiskCard } from '../components/ciso/BlastRadiusSection';
+import { AnomalyWidget } from '../components/ciso/ActiveThreatsSection';
+import { BusinessImpactWidget } from '../components/ciso/BusinessImpactSection';
+import { DriftWidget } from '../components/ciso/ActivityDriftSection';
+import { TopActionsPanel } from '../components/ciso/RemediationImpactSection';
+import { ImmediateRisksPanel } from '../components/ciso/ImmediateRisksSection';
+
+// v3.1 components
+import { NarrativeBanner, PostureScoreHero } from '../components/ciso/ExecutiveSummaryHero';
+import { BlastRadiusCardV31, AttackPathCardV31, IdentityRiskCardV31 } from '../components/ciso/BlastRadiusSection';
+import { AnomalyWidgetV31 } from '../components/ciso/ActiveThreatsSection';
+import { BusinessImpactWidgetV31 } from '../components/ciso/BusinessImpactSection';
+import { DriftWidgetV31 } from '../components/ciso/ActivityDriftSection';
+import { PriorityActionsPanelV31 } from '../components/ciso/RemediationImpactSection';
+import { ImmediateRisksPanelV31 } from '../components/ciso/ImmediateRisksSection';
+import { DataIntegrityFooter } from '../components/ciso/DataIntegrityFooter';
+import { IdentityLegend } from '../components/ciso/IdentityLegend';
+import { POSTURE_CONFIDENCE_COLOR } from '../constants/cisoColors';
+
+// ─── Backend status values (SSOT — no frontend derivation) ──
+
+type BackendStatus = 'DISCOVERY_REQUIRED' | 'PARTIAL' | 'READY' | 'ERROR';
+type FrontendStatus = 'LOADING' | 'NOT_CONNECTED';
+type CISOStatus = BackendStatus | FrontendStatus;
+
+// ─── Legacy Data Hook (fallback for /api/ciso/summary) ──────
+
+function useCISOSummary() {
+  const { withConnection, selectedConnectionId, connections, loading: connectionLoading } = useConnection();
+  const { activeOrgId } = useAuth();
+  const [vm, setVm] = useState<CISOViewModel>(buildEmptyCISOViewModel);
+  const [status, setStatus] = useState<CISOStatus>('LOADING');
+  const [primaryGap, setPrimaryGap] = useState<string | null>(null);
+  const [usableSources, setUsableSources] = useState(0);
+  const [totalSources, setTotalSources] = useState(6);
+
+  const prevDepsRef = useRef<string>('');
+  const depsKey = `${selectedConnectionId ?? ''}|${activeOrgId ?? ''}`;
+  if (prevDepsRef.current !== '' && prevDepsRef.current !== depsKey) {
+    setStatus('LOADING');
+  }
+  prevDepsRef.current = depsKey;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (connectionLoading) return;
+    if (connections.length === 0) { setStatus('NOT_CONNECTED'); return; }
+    setStatus('LOADING');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    (async () => {
+      try {
+        const url = withConnection('/api/ciso/summary');
+        const res = await fetch(url, { signal: controller.signal });
+        const text = await res.text();
+        if (!res.ok) throw new Error(`API returned ${res.status}`);
+        let json: any;
+        try { json = JSON.parse(text); } catch { throw new Error('Invalid JSON'); }
+        if (cancelled) return;
+
+        const backendStatus: string = json.status;
+        const sources: number = json.usableSources ?? 0;
+        setPrimaryGap(json.primaryGap || null);
+        setUsableSources(sources);
+        setTotalSources(json.totalSources ?? 6);
+
+        if (backendStatus === 'ERROR') {
+          setStatus('ERROR');
+          setVm(buildEmptyCISOViewModel());
+        } else if (sources === 0 || backendStatus === 'DISCOVERY_REQUIRED') {
+          setStatus('DISCOVERY_REQUIRED');
+          setVm(buildEmptyCISOViewModel());
+        } else {
+          setStatus(backendStatus as BackendStatus);
+          setVm(mapSummaryToViewModel(json));
+        }
+      } catch {
+        if (!cancelled) { setStatus('ERROR'); setVm(buildEmptyCISOViewModel()); }
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
+
+    return () => { cancelled = true; controller.abort(); };
+  }, [withConnection, selectedConnectionId, activeOrgId, connectionLoading, connections.length]);
+
+  const activeConnection = connections.length > 0
+    ? (() => {
+        const selected = selectedConnectionId ? connections.find(c => c.id === selectedConnectionId) : null;
+        const conn = selected || connections[0];
+        return { label: conn.label, cloud: conn.cloud };
+      })()
+    : null;
+
+  return { vm, status, primaryGap, usableSources, totalSources, activeConnection };
+}
+
+// ─── Skeleton Block ──────────────────────────────────────────
+
+function SkeletonBlock() {
+  return (
+    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full animate-pulse">
+      <div className="h-3 w-24 bg-white/5 rounded mb-2" />
+      <div className="h-2 w-32 bg-white/5 rounded mb-1" />
+      <div className="h-2 w-20 bg-white/5 rounded" />
+    </div>
+  );
+}
+
+// ─── P1 Fix 1: Unavailable block for full-failure ────────────
+
+function UnavailableBlock() {
+  return (
+    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col items-center justify-center gap-1">
+      <span className="text-xs text-gray-400">Additional insights temporarily unavailable</span>
+      <span className="text-[10px] text-gray-500">Core posture data is up to date</span>
+    </div>
+  );
+}
+
+// ─── Legacy Partial-Visibility Banner ────────────────────────
+
+const GAP_ACTIONS: Record<string, string> = {
+  RISK_SUMMARY_FAILED: 'Run a discovery scan to complete your risk assessment',
+  ANOMALY_DISABLED: 'Enable anomaly detection to monitor for suspicious activity',
+  DRIFT_NOT_ENABLED: 'Run a second scan to track configuration changes over time',
+  DRIFT_NEEDS_SECOND_SCAN: 'Run a second scan to track configuration changes over time',
+  REMEDIATION_UNAVAILABLE: 'Configure remediation playbooks to enable automated fixes',
+  SPN_UNAVAILABLE: 'Service principal data is not yet available',
+};
+
+function PartialVisibilityBanner({ primaryGap, usableSources, totalSources }: {
+  primaryGap: string | null; usableSources: number; totalSources: number;
+}) {
+  const gapMessage = primaryGap ? GAP_ACTIONS[primaryGap] : null;
+  return (
+    <div className="mx-3 mt-1 p-3 rounded-md bg-[rgba(245,158,11,0.06)] border border-[rgba(245,158,11,0.12)] flex items-center gap-3 flex-shrink-0">
+      <svg className="w-3.5 h-3.5 text-amber-500/70 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />
+      </svg>
+      <div className="min-w-0">
+        <p className="text-xs text-amber-400/80 truncate">Partial visibility: {usableSources}/{totalSources} data sources active</p>
+        <p className="text-xs text-gray-400 truncate">{gapMessage || 'Complete data collection to unlock full risk coverage'}</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Timezone helper ─────────────────────────────────────────
+
+function getTimezoneLabel(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const offset = new Date().getTimezoneOffset();
+    const sign = offset <= 0 ? '+' : '-';
+    const h = Math.floor(Math.abs(offset) / 60);
+    const m = Math.abs(offset) % 60;
+    return `${tz} (UTC${sign}${h}${m > 0 ? ':' + String(m).padStart(2, '0') : ''})`;
+  } catch {
+    return 'UTC';
+  }
+}
+
+// ─── Page header (shared between v3.1 and error) ─────────────
+
+function PageHeader() {
+  return (
+    <header className="flex items-center justify-between p-3 flex-shrink-0">
+      <div className="flex items-baseline gap-3">
+        <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
+        <span className="text-xs text-gray-400">{getTimezoneLabel()}</span>
+      </div>
+      <div className="flex gap-3 flex-shrink-0">
+        <DN navigateTo="/reports/executive">
+          <button className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition cursor-pointer">
+            Export
+          </button>
+        </DN>
+        <DN navigateTo="/settings">
+          <button className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition cursor-pointer">
+            Rescan
+          </button>
+        </DN>
+        <DN navigateTo="/remediation">
+          <button className="px-3 py-1.5 rounded text-xs font-medium text-white bg-[#24A2A1] border border-transparent cursor-pointer">
+            + Remediate
+          </button>
+        </DN>
+      </div>
+    </header>
+  );
+}
+
+// ─── v3.1 Dashboard Grid ─────────────────────────────────────
+
+function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOnly: boolean }) {
+  const isFull = !coreOnly && !!(data.immediate_risks || data.priority_actions || data.anomalies || data.business_impact || data.drift);
+  const coverage = data.coverage || { active_sources: 0, total_sources: 0, sub_count: 0, cloud_label: 'None', confidence_level: 'low' as const, coverage_pct: 0 };
+  const scanMeta = data.scan_metadata || { last_scan_at: null, scan_duration_seconds: null, scan_count: 0, tenant_domain: null };
+  const identityRisk = data.identity_risk || { dormant: 0, ghost: 0, unowned_nhi: 0, machine_pct: 0, total: 0 };
+
+  // P2 Fix 5: Only show when coverage < 50%
+  const lowCoverage = coverage.coverage_pct < 50 && coverage.total_sources > 0;
+  const missingCount = Math.max(0, (coverage.total_sources || 0) - (coverage.active_sources || 0));
+
+  // P1 Fix 1: Blocks 4-7 placeholder when full unavailable
+  const FullBlockOrPlaceholder = coreOnly ? UnavailableBlock : SkeletonBlock;
+
+  const confColor = POSTURE_CONFIDENCE_COLOR[coverage.confidence_level] || '#4a6080';
+
+  return (
+    <>
+      <PageHeader />
+
+      {/* P2 Fix 5: Partial visibility banner — ONLY when coverage_pct < 50 */}
+      {lowCoverage && (
+        <div className="mx-3 mt-1 p-3 rounded-md bg-[rgba(245,158,11,0.06)] border border-[rgba(245,158,11,0.12)] flex items-center gap-3 flex-shrink-0">
+          <svg className="w-3.5 h-3.5 text-amber-500/70 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />
+          </svg>
+          <div className="min-w-0">
+            <p className="text-xs text-amber-400/80">
+              Partial visibility: {coverage.active_sources}/{coverage.total_sources} identity sources active
+            </p>
+            <p className="text-[10px] text-amber-500/60">
+              {missingCount} source{missingCount !== 1 ? 's' : ''} missing — risk may be underestimated
+            </p>
+            <DN navigateTo="/settings/connectors">
+              <span className="text-[10px] text-[#24A2A1] cursor-pointer">Connect now &rarr;</span>
+            </DN>
+          </div>
+        </div>
+      )}
+
+      {/* ── Main Grid ── */}
+      <div className="flex-1 px-3 pb-0 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
+
+        {/* ━━━ ROW 1 — Block 1 (Narrative) + Block 2 (Score Hero) + Coverage ━━━ */}
+        <div className="col-span-5">
+          <NarrativeBanner data={data} />
+        </div>
+        <div className="col-span-4">
+          <PostureScoreHero data={data} />
+        </div>
+        <div className="col-span-3">
+          {/* P1 Fix 4: Coverage block */}
+          <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col justify-center overflow-hidden">
+            {/* Line 1: active/total identity sources */}
+            <p className="text-sm font-medium text-gray-200 truncate">
+              {coverage.active_sources}/{coverage.total_sources} identity sources active
+            </p>
+            {/* Line 2: cloud + subs */}
+            <p className="text-[11px] text-gray-400 truncate">
+              {coverage.cloud_label} &middot; {coverage.sub_count} subscription{coverage.sub_count !== 1 ? 's' : ''}
+            </p>
+            {/* Line 3: Confidence + visibility qualifier */}
+            <p className="text-[10px] mt-0.5" style={{ color: confColor }}>
+              Confidence: {coverage.confidence_level.charAt(0).toUpperCase() + coverage.confidence_level.slice(1)}{' '}
+              ({coverage.coverage_pct >= 100 ? 'all sources active'
+                : coverage.coverage_pct >= 80 ? 'most sources active'
+                : coverage.coverage_pct >= 50 ? 'some sources inactive'
+                : 'limited coverage'})
+            </p>
+            {/* Progress bar (% implicit from fill width) */}
+            <div className="h-1 bg-[#1e2d4a] rounded-full mt-1.5 mb-1">
+              <div className="h-1 rounded-full bg-[#24A2A1] transition-all" style={{ width: `${coverage.coverage_pct}%` }} />
+            </div>
+            {/* Missing source warning */}
+            {missingCount > 0 && (
+              <>
+                <p className="text-[10px] text-amber-500/70 truncate">
+                  {missingCount} source{missingCount !== 1 ? 's' : ''} not yet connected — risk may be underestimated
+                </p>
+                <DN navigateTo="/settings/connectors">
+                  <span className="text-[10px] text-[#24A2A1] cursor-pointer">Connect now &rarr;</span>
+                </DN>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ━━━ ROW 2 — Block 3 (Intel Row) ━━━ */}
+        <div className="col-span-3">
+          <BlastRadiusCardV31 data={data} />
+        </div>
+        <div className="col-span-3">
+          <AttackPathCardV31 data={data} />
+        </div>
+        <div className="col-span-3">
+          <IdentityRiskCardV31 data={data} />
+        </div>
+
+        {/* Right Rail — spans row 2 + row 3 */}
+        <div className="col-span-3 row-span-2 flex flex-col gap-3 overflow-hidden">
+          {isFull ? (
+            <>
+              <AnomalyWidgetV31 data={data} />
+              <BusinessImpactWidgetV31 data={data} />
+              <DriftWidgetV31 data={data} />
+            </>
+          ) : (
+            <>
+              <FullBlockOrPlaceholder />
+              <FullBlockOrPlaceholder />
+              <FullBlockOrPlaceholder />
+            </>
+          )}
+        </div>
+
+        {/* ━━━ ROW 3 — Blocks 4-5 (Action Center) ━━━ */}
+        <div className="col-span-5">
+          {isFull ? <PriorityActionsPanelV31 data={data} /> : <FullBlockOrPlaceholder />}
+        </div>
+        <div className="col-span-4">
+          {isFull ? <ImmediateRisksPanelV31 data={data} /> : <FullBlockOrPlaceholder />}
+        </div>
+      </div>
+
+      {/* Data Integrity Footer */}
+      <DataIntegrityFooter data={data} />
+
+      {/* Identity Terminology Legend */}
+      <IdentityLegend />
+    </>
+  );
+}
+
+// ─── Legacy Dashboard Grid ───────────────────────────────────
+
+function LegacyDashboardGrid({ vm, status, primaryGap, usableSources, totalSources, inventorySubtitle, inventorySubscriptions, inventoryLastScan }: {
+  vm: CISOViewModel; status: CISOStatus; primaryGap: string | null;
+  usableSources: number; totalSources: number; inventorySubtitle: string;
+  inventorySubscriptions?: number; inventoryLastScan?: string;
+}) {
+  return (
+    <>
+      <header className="flex items-center justify-between p-3 flex-shrink-0">
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
+          <span className="text-xs text-gray-400">{inventorySubtitle}</span>
+        </div>
+        <div className="flex gap-3 flex-shrink-0">
+          <button className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition">
+            Export
+          </button>
+          <DN navigateTo="/remediation">
+            <button className="px-3 py-1.5 rounded text-xs font-medium text-white bg-[#24A2A1] border border-transparent cursor-pointer">
+              + Remediate
+            </button>
+          </DN>
+        </div>
+      </header>
+      {status === 'PARTIAL' && (
+        <PartialVisibilityBanner primaryGap={primaryGap} usableSources={usableSources} totalSources={totalSources} />
+      )}
+      <div className="flex-1 px-3 pb-3 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
+        <div className="col-span-5"><NarrativePanel vm={vm} /></div>
+        <div className="col-span-4"><RiskScorePanel vm={vm} /></div>
+        <div className="col-span-3"><ConfidencePanel vm={vm} inventorySubscriptions={inventorySubscriptions} inventoryLastScan={inventoryLastScan} /></div>
+        <div className="col-span-3"><BlastRadiusCard vm={vm} /></div>
+        <div className="col-span-3"><AttackPathCard vm={vm} /></div>
+        <div className="col-span-3"><IdentityRiskCard vm={vm} /></div>
+        <div className="col-span-3 row-span-2 flex flex-col gap-3 overflow-hidden">
+          <AnomalyWidget vm={vm} />
+          <BusinessImpactWidget vm={vm} />
+          <DriftWidget vm={vm} />
+        </div>
+        <div className="col-span-5"><TopActionsPanel vm={vm} /></div>
+        <div className="col-span-4"><ImmediateRisksPanel vm={vm} /></div>
+      </div>
+
+      {/* Identity Terminology Legend */}
+      <IdentityLegend />
+    </>
+  );
+}
+
+// ─── Main Component (P0: exclusive phase-state rendering) ────
+
+export default function CISODashboard() {
+  const { data: v31Data, phase: v31Phase, refetch } = usePostureDashboard();
+  const { vm, status: legacyStatus, primaryGap, usableSources, totalSources, activeConnection } = useCISOSummary();
+  const { headerSubtitle: inventorySubtitle, totalInventorySubscriptions, lastDiscoveryFormatted } = useInventorySummary();
+  const { connections, loading: connectionLoading } = useConnection();
+
+  // P0: Determine EXCLUSIVE render path — exactly one branch renders
+  const hasCoreData = v31Data != null && v31Data.coverage != null;
+
+  return (
+    <IdentityDrawerProvider>
+      <div className="h-[calc(100vh-56px)] bg-[#0B1220] rounded-tl-card overflow-hidden flex flex-col">
+
+        {/* ── 1. LOADING ── */}
+        {connectionLoading ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="flex items-center gap-3">
+              <div className="w-5 h-5 border-2 border-[#24A2A1] border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-gray-400">Loading executive briefing…</span>
+            </div>
+          </div>
+
+        /* ── 2. NOT_CONNECTED ── */
+        ) : connections.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="max-w-[460px] bg-[#111827] border border-white/5 rounded-xl p-4 text-center">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-[#1e2d4a] flex items-center justify-center">
+                <svg className="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.293-9.293a4.5 4.5 0 00-6.364 0l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-gray-200 mb-1">No cloud tenant connected</h3>
+              <p className="text-xs text-gray-400 mb-4">Connect your Azure tenant to start monitoring identity security posture.</p>
+              <DN navigateTo="/settings">
+                <span className="inline-flex items-center px-4 py-2 rounded-lg bg-[#24A2A1] text-white text-sm font-semibold cursor-pointer hover:brightness-110 transition">
+                  Configure Connection
+                </span>
+              </DN>
+            </div>
+          </div>
+
+        /* ── 3. P0: v3.1 core succeeded — show dashboard (partial or full) ── */
+        ) : hasCoreData && v31Data ? (
+          <V31DashboardGrid
+            data={v31Data}
+            coreOnly={v31Phase === 'core' || v31Phase === 'core_only'}
+          />
+
+        /* ── 4. Legacy: DISCOVERY_REQUIRED ── */
+        ) : legacyStatus === 'DISCOVERY_REQUIRED' ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="w-[460px] bg-[#111827] border border-white/5 rounded-xl overflow-hidden">
+              {activeConnection && (
+                <div className="p-3 border-b border-white/5 flex items-center justify-between bg-[#0f1a2e]">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-xs text-gray-400 uppercase tracking-wider font-medium flex-shrink-0">Tenant</span>
+                    <span className="text-xs font-medium text-gray-300 truncate">{activeConnection.label}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    <span className="text-xs text-emerald-400 font-medium">Connected</span>
+                  </div>
+                </div>
+              )}
+              <div className="p-4 text-center">
+                <div className="w-11 h-11 mx-auto mb-3 rounded-full bg-[#1e2d4a] flex items-center justify-center">
+                  <svg className="w-5 h-5 text-[#24A2A1]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5" />
+                  </svg>
+                </div>
+                <h3 className="text-base font-semibold text-gray-200 mb-1">Your environment has not been analyzed yet</h3>
+                <p className="text-xs text-gray-400 max-w-[340px] mx-auto">Run a discovery scan to assess identity risk and build your executive posture view.</p>
+              </div>
+              <div className="px-4 pb-4 flex items-center justify-center gap-3">
+                <DN navigateTo="/settings">
+                  <span className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#24A2A1] text-white text-xs font-semibold cursor-pointer hover:brightness-110 transition">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                    </svg>
+                    Run Discovery
+                  </span>
+                </DN>
+                <DN navigateTo="/settings">
+                  <span className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-transparent text-gray-400 text-xs font-medium border border-white/10 cursor-pointer hover:border-white/20 hover:text-gray-300 transition">
+                    View Connection
+                  </span>
+                </DN>
+              </div>
+            </div>
+          </div>
+
+        /* ── 6. Legacy: PARTIAL / READY ── */
+        ) : legacyStatus === 'PARTIAL' || legacyStatus === 'READY' ? (
+          <LegacyDashboardGrid vm={vm} status={legacyStatus} primaryGap={primaryGap} usableSources={usableSources} totalSources={totalSources} inventorySubtitle={inventorySubtitle} inventorySubscriptions={totalInventorySubscriptions} inventoryLastScan={lastDiscoveryFormatted} />
+
+        /* ── 7. Still loading v3.1 (legacy not ready either) ── */
+        ) : v31Phase === 'loading' || legacyStatus === 'LOADING' ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="flex items-center gap-3">
+              <div className="w-5 h-5 border-2 border-[#24A2A1] border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-gray-400">Loading executive briefing…</span>
+            </div>
+          </div>
+
+        /* ── 8. Both v3.1 AND legacy failed — full-page error ── */
+        ) : (
+          <>
+            <PageHeader />
+            <div className="flex-1 flex items-center justify-center">
+              <div className="max-w-[500px] bg-[#111827] border border-white/5 rounded-xl p-6 text-center">
+                <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-[#2d1e1e] flex items-center justify-center">
+                  <svg className="w-6 h-6 text-red-400/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />
+                  </svg>
+                </div>
+                <h3 className="text-base font-semibold text-gray-200 mb-1">Posture data unavailable</h3>
+                <p className="text-xs text-gray-400 mb-4">Last successful scan: {lastDiscoveryFormatted || 'Unknown'}</p>
+                <button
+                  onClick={() => refetch()}
+                  className="inline-flex items-center px-4 py-2 rounded-lg bg-[#24A2A1] text-white text-sm font-semibold cursor-pointer hover:brightness-110 transition"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+      </div>
+      <IdentityContextDrawer />
+    </IdentityDrawerProvider>
+  );
+}
