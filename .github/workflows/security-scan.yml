@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload static analysis reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: static-analysis-reports
           path: security-reports/
@@ -267,7 +267,7 @@ jobs:
 
       - name: Upload dependency scan reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dependency-scan-reports
           path: security-reports/
@@ -325,7 +325,7 @@ jobs:
 
       - name: Upload Gitleaks report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: secret-scan-report
           path: security-reports/
@@ -417,7 +417,7 @@ jobs:
 
       - name: Upload Trivy reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: "container-scan-${{ matrix.image_name }}"
           path: "trivy-${{ matrix.image_name }}.json"
@@ -468,7 +468,7 @@ jobs:
 
       - name: Upload Checkov reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: infra-scan-report
           path: security-reports/
@@ -587,7 +587,7 @@ jobs:
 
       - name: Upload SBOM artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-and-licenses
           path: security-reports/
@@ -751,7 +751,7 @@ jobs:
 
       - name: Upload final security summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-summary
           path: security-summary.md
