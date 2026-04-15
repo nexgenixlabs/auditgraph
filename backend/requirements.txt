@@ -70,7 +70,7 @@ starlette==0.27.0
 std-uritemplate==2.0.8
 typing_extensions==4.15.0
 urllib3==2.6.3
-uvicorn==0.24.0
+uvicorn==0.39.0
 yarl==1.22.0
 zipp==3.23.0
 boto3
