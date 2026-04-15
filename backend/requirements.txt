@@ -57,7 +57,7 @@ propcache==0.4.1
 psycopg2-binary==2.9.9
 pycparser==2.23
 pydantic==2.5.0
-pydantic_core==2.14.1
+pydantic_core==2.46.1
 PyJWT==2.10.1
 python-dotenv==1.0.0
 pytz==2025.2
