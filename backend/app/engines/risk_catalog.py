@@ -388,6 +388,14 @@ RISK_FACTOR_CATALOG: Dict[str, Dict] = {
         "category": "gcp_credential",
         "cloud": "gcp",
     },
+    # CIS Controls v8, Control 5.3 — Disable Dormant Accounts
+    # MITRE ATT&CK T1078.001 — Valid Accounts: Default/Disabled Accounts
+    "GHOST_ACCESS": {
+        "description": "Disabled identity retains active RBAC role assignments",
+        "severity": "critical",
+        "points": 900,
+        "category": "governance",
+    },
 }
 
 

@@ -57,6 +57,7 @@ from app.api.handlers import (
     get_report_data,
     get_latest_drift,
     get_drift_history,
+    generate_drift_reports,
     get_trends,
     get_app_settings,
     save_app_settings,
@@ -2293,6 +2294,10 @@ def create_app():
     @app.get("/api/drift/history")
     def drift_history():
         return get_drift_history()
+
+    @app.post("/api/drift/generate")
+    def drift_generate():
+        return generate_drift_reports()
 
     # -----------------------
     # Remediation Action Tracking (Phase 21)

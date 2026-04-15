@@ -2414,6 +2414,22 @@ def get_drift_history():
     try:
         limit = min(request.args.get('limit', 20, type=int), MAX_LIMIT)
         conn_id = _connection_id()
+
+        # Auto-generate drift reports if none exist yet
+        org_id = _org_id()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM drift_reports WHERE organization_id = %s", (org_id,))
+            drift_count = cursor.fetchone()[0]
+            cursor.close()
+            if drift_count == 0:
+                _backfill_drift_reports(db, org_id)
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
         reports = db.get_drift_history(limit=limit, connection_id=conn_id)
 
         for r in reports:
@@ -2421,6 +2437,52 @@ def get_drift_history():
             r['run_completed_at'] = r['run_completed_at'].isoformat() if r.get('run_completed_at') else None
 
         return jsonify({"count": len(reports), "reports": reports})
+    finally:
+        db.close()
+
+
+def _backfill_drift_reports(db, org_id):
+    """Generate drift reports for all consecutive completed run pairs."""
+    from app.engines.drift_detector import DriftDetector
+    cursor = db.conn.cursor()
+    cursor.execute("""
+        SELECT id FROM discovery_runs
+        WHERE organization_id = %s AND status = 'completed'
+          AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+        ORDER BY id ASC
+    """, (org_id,))
+    run_ids = [r[0] for r in cursor.fetchall()]
+    cursor.close()
+
+    if len(run_ids) < 2:
+        return
+
+    detector = DriftDetector(db)
+    for i in range(1, len(run_ids)):
+        prev_id, curr_id = run_ids[i - 1], run_ids[i]
+        try:
+            result = detector.compare_runs_v2(curr_id, prev_id)
+            db.save_drift_report(curr_id, prev_id, result['legacy'], events=result['events'])
+        except Exception as e:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+
+def generate_drift_reports():
+    """POST /api/drift/generate — manually trigger drift report generation."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        _backfill_drift_reports(db, org_id)
+
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM drift_reports WHERE organization_id = %s", (org_id,))
+        count = cursor.fetchone()[0]
+        cursor.close()
+
+        return jsonify({"status": "ok", "reports_generated": count})
     finally:
         db.close()
 
@@ -6851,7 +6913,14 @@ def get_dashboard_posture():
         # ── v3.1 fields required by usePostureDashboard ──
         org_id = _org_id()
 
-        posture_status = "good" if posture_score >= 90 else ("fair" if posture_score >= 70 else "at_risk")
+        if posture_score >= 90:
+            posture_status = "Strong"
+        elif posture_score >= 70:
+            posture_status = "Fair"
+        elif posture_score >= 50:
+            posture_status = "Needs Attention"
+        else:
+            posture_status = "At Risk"
 
         cursor.execute(
             "SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s AND monitored = true AND deleted = false",
@@ -6880,13 +6949,27 @@ def get_dashboard_posture():
         }
 
         cursor.execute(
-            "SELECT status, completed_at FROM discovery_runs WHERE organization_id = %s ORDER BY id DESC LIMIT 1",
+            "SELECT completed_at, status FROM discovery_runs WHERE organization_id = %s AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
             (org_id,),
         )
         dr_row = cursor.fetchone()
+        _last_scan_ts = dr_row[0] if dr_row and dr_row[0] else None
+        _last_scan_ago = None
+        if _last_scan_ts:
+            from datetime import datetime, timezone
+            _now = datetime.now(timezone.utc)
+            _diff = _now - _last_scan_ts
+            _mins = int(_diff.total_seconds() / 60)
+            if _mins < 60:
+                _last_scan_ago = f"{_mins}m ago"
+            elif _mins < 1440:
+                _last_scan_ago = f"{_mins // 60}h ago"
+            else:
+                _last_scan_ago = f"{_mins // 1440}d ago"
         scan_metadata = {
-            "last_scan": dr_row[1].isoformat() if dr_row and dr_row[1] else None,
-            "status": dr_row[0] if dr_row else "unknown",
+            "last_scan": _last_scan_ts.isoformat() if _last_scan_ts else None,
+            "last_scan_ago": _last_scan_ago,
+            "status": dr_row[1] if dr_row else "unknown",
         }
 
         # v3.1 identity_risk: dormant / ghost / unowned_nhi / machine_pct
@@ -6894,6 +6977,28 @@ def get_dashboard_posture():
         ghost_count = _scalar(cursor, 0)
         cursor.execute(get_metric_count_sql('dormant_privileged'), _mparams)
         dormant_priv_count = _scalar(cursor, 0)
+
+        # B3: Provisioned unowned — never authenticated, no owner assigned
+        cursor.execute(f"""
+            SELECT COUNT(*)
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%(run_ids)s)
+              AND i.activity_status = 'never_used'
+              AND COALESCE(i.owner_count, 0) = 0
+              {HIDE_MICROSOFT_SQL}
+        """, _mparams)
+        provisioned_unowned_count = _scalar(cursor, 0)
+
+        # A4: Excess privilege — T0/T1 with critical/high risk
+        cursor.execute(f"""
+            SELECT COUNT(*)
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%(run_ids)s)
+              AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+              AND i.risk_level IN ('critical', 'high')
+              {HIDE_MICROSOFT_SQL}
+        """, _mparams)
+        excess_privilege_count = _scalar(cursor, 0)
 
         cursor.execute(f"""
             SELECT COUNT(*) FILTER (
@@ -6915,6 +7020,8 @@ def get_dashboard_posture():
             "ghost": ghost_count,
             "unowned_nhi": no_owner_count,
             "machine_pct": machine_pct,
+            "dormant_privileged": dormant_priv_count,
+            "provisioned_unowned": provisioned_unowned_count,
         }
 
         # v3.1 blast_radius: single highest-risk identity object
@@ -6989,6 +7096,35 @@ def get_dashboard_posture():
                     "exploitation_text": _exploitation,
                     "impact_label": "Critical" if _br_level == 'critical' else "High",
                 }
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # A3: Microsoft system anomalies — unexpected privilege (MITRE T1078.004)
+        microsoft_anomalies = []
+        try:
+            cursor.execute("""
+                SELECT i.display_name, i.risk_level, ra.role_name, ra.scope
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND COALESCE(i.is_microsoft_system, false) = true
+                  AND i.risk_level IN ('critical', 'high')
+                  AND ra.role_name IN ('Owner', 'User Access Administrator', 'Contributor')
+                  AND ra.scope ~ '^/subscriptions/[^/]+$'
+                ORDER BY i.display_name
+            """, {'run_ids': run_ids})
+            for ma_row in cursor.fetchall():
+                microsoft_anomalies.append({
+                    "display_name": ma_row[0],
+                    "risk_level": ma_row[1],
+                    "anomaly_type": "unexpected_privilege",
+                    "role": ma_row[2],
+                    "scope": ma_row[3],
+                    "mitre_technique": "T1078.004",
+                })
         except Exception:
             try:
                 cursor.connection.rollback()
@@ -7117,6 +7253,22 @@ def get_dashboard_posture():
                 "severity": "high",
             },
         ]
+        # B4: Provisioned — Never Used card
+        if provisioned_unowned_count > 0:
+            _prov_pct = round((provisioned_unowned_count / total) * 100, 1) if total > 0 else 0
+            _prov_noun = 'identity' if provisioned_unowned_count == 1 else 'identities'
+            _risk_items.append({
+                "type": "provisioned_unowned",
+                "label": "Provisioned \u2014 Never Used",
+                "count": provisioned_unowned_count,
+                "severity": "high",
+                "narrative": (
+                    f"{provisioned_unowned_count} {_prov_noun} ({_prov_pct}%) "
+                    f"exist with roles assigned but have never signed in \u2014 "
+                    f"access was provisioned but never justified"
+                ),
+                "pct": _prov_pct,
+            })
         immediate_risks = [r for r in _risk_items if r["count"] > 0]
         immediate_risks.sort(key=lambda r: r["count"], reverse=True)
 
@@ -7136,6 +7288,10 @@ def get_dashboard_posture():
                 f"{c} service principal{'s' if c != 1 else ''} ({p}%) operate without "
                 f"an owner \u2014 creates blind spots for attackers"
             ),
+            "provisioned_unowned": lambda c, p: (
+                f"{c} {'identity' if c == 1 else 'identities'} ({p}%) exist with roles "
+                f"assigned but have never signed in \u2014 access was provisioned but never justified"
+            ),
         }
         top_risk_narrative = None
         if highest_risk_type:
@@ -7147,6 +7303,110 @@ def get_dashboard_posture():
 
         # Check for overlapping identities across risk categories
         has_overlapping = (dormant_priv_count + ghost_count + no_owner_count) > if_unaddressed_count if if_unaddressed_count > 0 else False
+
+        # ── v3.1 drift: mini-widget data from latest drift report ──
+        drift = None
+        try:
+            cursor.execute("""
+                SELECT events, total_changes, created_at
+                FROM drift_reports
+                WHERE organization_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (org_id,))
+            dr_drift = cursor.fetchone()
+            if dr_drift and dr_drift[0]:
+                _drift_events = dr_drift[0] if isinstance(dr_drift[0], list) else []
+                _total = dr_drift[1] or len(_drift_events)
+                # Map backend event_types → frontend widget categories
+                _DRIFT_TYPE_MAP = {
+                    'role_assigned': 'ROLE_ADDED',
+                    'role_removed': 'ROLE_REMOVED',
+                    'privilege_escalated': 'PRIVILEGE_CHANGE',
+                    'privilege_deescalated': 'PRIVILEGE_CHANGE',
+                    'risk_escalated': 'PRIVILEGE_CHANGE',
+                    'risk_deescalated': 'PRIVILEGE_CHANGE',
+                    'identity_added': 'NEW_IDENTITY',
+                    'identity_removed': 'STATE_CHANGE',
+                    'identity_disabled': 'STATE_CHANGE',
+                    'identity_reactivated': 'STATE_CHANGE',
+                    'identity_resurrection': 'STATE_CHANGE',
+                    'spn_credential_expired': 'CREDENTIAL_CHANGE',
+                    'spn_credential_added': 'CREDENTIAL_CHANGE',
+                    'mfa_disabled': 'CREDENTIAL_CHANGE',
+                    'owner_changed': 'STATE_CHANGE',
+                    'microsoft_spn_modified': 'STATE_CHANGE',
+                    'classification_added': 'STATE_CHANGE',
+                    'classification_removed': 'STATE_CHANGE',
+                    'classification_changed': 'STATE_CHANGE',
+                    'attack_path_created': 'PRIVILEGE_CHANGE',
+                }
+                from collections import Counter
+                _type_counts = Counter()
+                for ev in _drift_events:
+                    _et = ev.get('event_type') or ev.get('type', '')
+                    _mapped = _DRIFT_TYPE_MAP.get(_et, 'STATE_CHANGE')
+                    _type_counts[_mapped] += 1
+                drift = {
+                    "has_drift": _total > 0,
+                    "total_changes": _total,
+                    "changes": [
+                        {"type": t, "count": c}
+                        for t, c in _type_counts.most_common()
+                    ],
+                    "report_date": dr_drift[2].isoformat() if dr_drift[2] else None,
+                }
+            elif dr_drift:
+                # Drift report exists but no events → stable
+                drift = {"has_drift": False, "total_changes": 0, "changes": []}
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # A3: Score trend delta
+        score_trend = None
+        if previous_posture_score and previous_posture_score > 0:
+            _delta = round(posture_score - previous_posture_score, 1)
+            if _delta > 0:
+                _direction = "up"
+            elif _delta < 0:
+                _direction = "down"
+            else:
+                _direction = "stable"
+            score_trend = {
+                "current": posture_score,
+                "previous": previous_posture_score,
+                "delta": _delta,
+                "direction": _direction,
+                "delta_pct": round(abs(_delta / previous_posture_score * 100), 1),
+            }
+
+        # A4: Business impact findings
+        business_impact = []
+        if ghost_count > 0:
+            _ghost_noun = 'identity' if ghost_count == 1 else 'identities'
+            _ghost_verb = 'holds' if ghost_count == 1 else 'hold'
+            business_impact.append({
+                "type": "ghost_access",
+                "count": ghost_count,
+                "statement": (
+                    f"{ghost_count} disabled {_ghost_noun} still "
+                    f"{_ghost_verb} live RBAC roles \u2014 access not fully revoked"
+                ),
+                "severity": "critical",
+            })
+        if excess_privilege_count > 0:
+            _ep_noun = 'identity' if excess_privilege_count == 1 else 'identities'
+            business_impact.append({
+                "type": "excess_privilege",
+                "count": excess_privilege_count,
+                "statement": (
+                    f"{excess_privilege_count} {_ep_noun} retain admin access "
+                    f"\u2014 reduces to 0 after remediation"
+                ),
+                "severity": "high",
+            })
 
         return jsonify({
             "current_run": current_run,
@@ -7170,6 +7430,15 @@ def get_dashboard_posture():
             "highest_risk_type": highest_risk_type,
             "if_unaddressed_count": if_unaddressed_count,
             "has_overlapping_identities": has_overlapping,
+            "score_trend": score_trend,
+            "business_impact": business_impact,
+            "has_business_risk": len(business_impact) > 0,
+            "microsoft_anomalies": microsoft_anomalies,
+            "drift": drift,
+            # AG-43: flat aliases for frontend trend rendering
+            "previous_score": previous_posture_score,
+            "score_direction": score_trend["direction"] if score_trend else None,
+            "posture_change_pct": score_trend["delta_pct"] if score_trend else None,
         })
 
     finally:

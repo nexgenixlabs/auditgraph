@@ -4383,8 +4383,7 @@ class Database:
                        dr.new_identities_count, dr.removed_identities_count,
                        dr.permission_changes_count, dr.risk_changes_count,
                        dr.credential_changes_count, dr.total_changes,
-                       dr.max_severity, dr.privilege_escalation_count,
-                       dr.attack_path_created_count, dr.identity_resurrection_count,
+                       dr.max_severity,
                        dr.created_at,
                        r.completed_at as run_completed_at
                 FROM drift_reports dr
@@ -4400,8 +4399,7 @@ class Database:
                        dr.new_identities_count, dr.removed_identities_count,
                        dr.permission_changes_count, dr.risk_changes_count,
                        dr.credential_changes_count, dr.total_changes,
-                       dr.max_severity, dr.privilege_escalation_count,
-                       dr.attack_path_created_count, dr.identity_resurrection_count,
+                       dr.max_severity,
                        dr.created_at,
                        r.completed_at as run_completed_at
                 FROM drift_reports dr

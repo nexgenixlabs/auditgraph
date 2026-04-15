@@ -6184,6 +6184,13 @@ class AzureDiscoveryEngine:
                     risk_factors.append(make_factor("ORPHANED_IDENTITY", "No role assignments"))
 
             # ============================================================
+            # 8. Ghost identity — CIS v8 Control 5.3 / MITRE T1078.001
+            # ============================================================
+            if not identity.get('enabled', True) and has_roles:
+                risk_factors.append(make_factor("GHOST_ACCESS",
+                    f"Disabled identity with {len(identity_roles) + len(identity_entra_roles)} active role assignment(s)"))
+
+            # ============================================================
             # Sum V2 score and derive level
             # ============================================================
             risk_score = sum(f['points'] for f in risk_factors)
