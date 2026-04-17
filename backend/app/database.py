@@ -991,6 +991,59 @@ class Database:
                 admin_conn.close()
 
     @staticmethod
+    def ensure_app_user_grants():
+        """Grant schema and table privileges to the app user (auditgraph_app).
+
+        Idempotent — safe to run on every startup.  Re-applies USAGE on
+        the public schema plus SELECT/INSERT/UPDATE/DELETE on all tables
+        and USAGE/SELECT on all sequences so the NOBYPASSRLS app user
+        can operate normally.  Also sets DEFAULT PRIVILEGES so future
+        tables/sequences created by the admin user are accessible.
+
+        Skipped in local mode (single Postgres user) or when DB_USER ==
+        DB_ADMIN_USER.
+        """
+        from app.config import IS_LOCAL
+        if IS_LOCAL:
+            return
+        if DB_USER == DB_ADMIN_USER:
+            return
+
+        import logging
+        logger = logging.getLogger(__name__)
+        admin_conn = None
+        try:
+            admin_conn = psycopg2.connect(
+                host=DB_HOST, port=DB_PORT, database=DB_NAME,
+                user=DB_ADMIN_USER, password=DB_ADMIN_PASSWORD,
+                sslmode=DB_SSLMODE, connect_timeout=DB_CONNECT_TIMEOUT,
+            )
+            cursor = admin_conn.cursor()
+
+            grants = [
+                f"GRANT USAGE ON SCHEMA public TO {DB_USER}",
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {DB_USER}",
+                f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {DB_USER}",
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {DB_USER}",
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {DB_USER}",
+            ]
+            for sql in grants:
+                cursor.execute(sql)
+
+            admin_conn.commit()
+            cursor.close()
+            logger.info("ensure_app_user_grants: applied %d grants for %s", len(grants), DB_USER)
+        except psycopg2.OperationalError as e:
+            import logging
+            logging.getLogger(__name__).warning("ensure_app_user_grants skipped — DB not reachable: %s", e)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("ensure_app_user_grants error (non-fatal): %s", e)
+        finally:
+            if admin_conn:
+                admin_conn.close()
+
+    @staticmethod
     def validate_rls_drift():
         """Comprehensive RLS drift detection engine.
 
@@ -1721,7 +1774,7 @@ class Database:
                   AND COALESCE(is_discovery_connector, false) = false
                   AND NOT ({prefix_conditions})
                   AND (app_owner_org_id IS NULL OR app_owner_org_id IN %s)
-            """, (ms_tenant_ids,))
+            """, prefix_params + [ms_tenant_ids])
             ms_count = cursor.rowcount
 
             # Pass 4: Non-SPN categories → NOT Microsoft
@@ -2766,8 +2819,8 @@ class Database:
             """, (
                 self._organization_id,
                 identity_data.get("identity_id"),
-                _uuid.uuid5(_uuid.NAMESPACE_DNS,
-                            f"{self._organization_id}|{identity_data.get('identity_id')}"),
+                str(_uuid.uuid5(_uuid.NAMESPACE_DNS,
+                            f"{self._organization_id}|{identity_data.get('identity_id')}")),
                 identity_data.get("display_name", ""),
                 _il_type,
                 identity_data.get("cloud", "azure"),
@@ -2782,8 +2835,9 @@ class Database:
             self._commit()
             cur2.close()
         except Exception as _e:
-            _db_logger.debug("identity_list dual-write skipped for %s: %s",
-                             identity_data.get("identity_id"), _e)
+            _db_logger.error("identity_list dual-write FAILED for %s (org=%s): %s",
+                             identity_data.get("identity_id"),
+                             self._organization_id, _e)
             try:
                 self._rollback()
             except Exception:
@@ -11685,7 +11739,7 @@ class Database:
 
     def get_active_snapshot_job(self, cloud_connection_id):
         """Get the active (queued/running) job for a connection, if any.
-        Jobs older than 30 minutes are considered stale and ignored.
+        Jobs older than 90 minutes are considered stale and ignored.
         """
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
@@ -11696,7 +11750,7 @@ class Database:
                    created_at, started_at, completed_at, last_heartbeat_at
             FROM snapshot_jobs
             WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
-              AND created_at > NOW() - INTERVAL '30 minutes'
+              AND created_at > NOW() - INTERVAL '90 minutes'
             ORDER BY created_at DESC LIMIT 1
         """, (cloud_connection_id,))
         row = cursor.fetchone()
@@ -12406,7 +12460,7 @@ class Database:
             INSERT INTO risk_rules (rule_key, rule_name, description, severity, rule_type)
             VALUES ('identity_large_blast_radius', 'Large Blast Radius',
                     'Identity has access to a high number of resources through role assignments',
-                    'high', 'privilege_escalation')
+                    'high', 'access')
             ON CONFLICT (rule_key) DO NOTHING
         """)
 
@@ -17263,6 +17317,15 @@ class Database:
         ]:
             _safe_del(t)
 
+        # ── Phase 5b: Phase 3 projection / resource tables (org-scoped, no FK CASCADE) ──
+        for t in [
+            'identity_list', 'identity_list_snapshots',
+            'global_identity_members', 'snapshots',
+            'resources', 'resource_snapshots',
+            'azure_storage_accounts', 'azure_key_vaults',
+        ]:
+            _safe_del(t)
+
         # ── Phase 6: Identities [CRITICAL] ──
         _critical_del('identities')
 
@@ -17845,6 +17908,103 @@ class Database:
 
     # ── Phase 72: Data Retention & Archival ───────────────────────────
 
+    def prune_old_identity_runs(self, organization_id: int, keep_latest: int = 2) -> dict:
+        """Delete identity rows from old discovery runs, keeping only the
+        latest N completed runs per cloud_connection.
+
+        This prevents unbounded accumulation: without pruning, every scan
+        appends ~300+ new rows to the identities table (keyed on
+        discovery_run_id + identity_id).  Drift detection only needs the
+        latest 2 runs per connection.
+
+        Args:
+            organization_id: Org whose old identity data should be pruned
+            keep_latest: Number of most-recent completed runs to keep per
+                         connection (default 2 — current + previous for drift)
+
+        Returns:
+            dict with counts: identities_deleted, runs_pruned, role_assignments_deleted
+        """
+        cursor = self.conn.cursor()
+
+        # Find run IDs to KEEP — latest N per connection
+        cursor.execute("""
+            WITH ranked AS (
+                SELECT id, cloud_connection_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cloud_connection_id
+                           ORDER BY id DESC
+                       ) AS rn
+                FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND cloud_connection_id IS NOT NULL
+            )
+            SELECT id FROM ranked WHERE rn <= %s
+        """, (organization_id, keep_latest))
+        keep_ids = [r[0] for r in cursor.fetchall()]
+
+        if not keep_ids:
+            cursor.close()
+            return {'identities_deleted': 0, 'runs_pruned': 0, 'role_assignments_deleted': 0}
+
+        # Find run IDs to PRUNE (completed runs not in the keep list)
+        keep_placeholders = ','.join(['%s'] * len(keep_ids))
+        cursor.execute(f"""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+              AND id NOT IN ({keep_placeholders})
+        """, [organization_id] + keep_ids)
+        prune_ids = [r[0] for r in cursor.fetchall()]
+
+        if not prune_ids:
+            cursor.close()
+            return {'identities_deleted': 0, 'runs_pruned': 0, 'role_assignments_deleted': 0}
+
+        prune_placeholders = ','.join(['%s'] * len(prune_ids))
+
+        # Delete role_assignments for pruned identities
+        cursor.execute(f"""
+            DELETE FROM role_assignments
+            WHERE identity_db_id IN (
+                SELECT id FROM identities WHERE discovery_run_id IN ({prune_placeholders})
+            )
+        """, prune_ids)
+        ra_deleted = cursor.rowcount
+
+        # Delete identities from pruned runs
+        cursor.execute(f"""
+            DELETE FROM identities WHERE discovery_run_id IN ({prune_placeholders})
+        """, prune_ids)
+        ident_deleted = cursor.rowcount
+
+        # Delete identity_risk_scores from pruned runs (use savepoint to avoid poisoning txn)
+        try:
+            cursor.execute("SAVEPOINT prune_risk")
+            cursor.execute(f"""
+                DELETE FROM identity_risk_scores WHERE discovery_run_id IN ({prune_placeholders})
+            """, prune_ids)
+            cursor.execute("RELEASE SAVEPOINT prune_risk")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT prune_risk")
+            except Exception:
+                pass
+
+        # Mark pruned runs as 'archived' (keep the run metadata, remove the heavy data)
+        cursor.execute(f"""
+            UPDATE discovery_runs SET status = 'archived'
+            WHERE id IN ({prune_placeholders})
+        """, prune_ids)
+        runs_archived = cursor.rowcount
+
+        self._commit()
+        cursor.close()
+        return {
+            'identities_deleted': ident_deleted,
+            'runs_pruned': runs_archived,
+            'role_assignments_deleted': ra_deleted,
+        }
+
     def cleanup_old_discovery_runs(self, days=90) -> dict:
         """Delete discovery runs and related data older than N days.
         Returns counts of deleted rows per table."""
@@ -17859,9 +18019,13 @@ class Database:
         old_ids = [r[0] for r in cursor.fetchall()]
         if not old_ids:
             cursor.close()
-            return {'discovery_runs': 0, 'risk_scores': 0}
+            return {'discovery_runs': 0, 'identities': 0, 'risk_scores': 0}
 
         placeholders = ','.join(['%s'] * len(old_ids))
+
+        # Delete identities linked to old runs (prevents accumulation)
+        cursor.execute(f"DELETE FROM identities WHERE discovery_run_id IN ({placeholders})", old_ids)
+        counts['identities'] = cursor.rowcount
 
         # Delete risk_scores linked to old runs
         cursor.execute(f"DELETE FROM risk_scores WHERE run_id IN ({placeholders})", old_ids)
@@ -18269,7 +18433,13 @@ class Database:
                     CASE WHEN %s THEN NOW() ELSE NULL END)
             ON CONFLICT (organization_id, cloud, azure_directory_id) DO UPDATE
               SET label = EXCLUDED.label, client_id = EXCLUDED.client_id,
-                  external_id = EXCLUDED.external_id, updated_at = NOW()
+                  external_id = EXCLUDED.external_id, updated_at = NOW(),
+                  metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb
+                                  THEN EXCLUDED.metadata
+                                  ELSE cloud_connections.metadata END,
+                  credential_last_rotated = CASE WHEN EXCLUDED.metadata != '{}'::jsonb
+                                                 THEN COALESCE(EXCLUDED.credential_last_rotated, cloud_connections.credential_last_rotated)
+                                                 ELSE cloud_connections.credential_last_rotated END
             RETURNING *
         """, (organization_id, cloud, connection_type, label, azure_directory_id,
               client_id, next_order, json.dumps(metadata or {}), external_id, has_creds))
@@ -18371,6 +18541,8 @@ class Database:
                     row[ts] = row[ts].isoformat()
             # Decrypt client_secret from storage
             meta = row.get('metadata') or {}
+            has_credential = bool(isinstance(meta, dict) and meta.get('client_secret'))
+            row['needs_reauth'] = not has_credential
             if isinstance(meta, dict) and meta.get('client_secret'):
                 meta['client_secret'] = decrypt_field(meta['client_secret'])
                 row['metadata'] = meta
@@ -26936,7 +27108,7 @@ class Database:
             self._rollback()
             if self._organization_id:
                 self.set_organization_context(self._organization_id)
-            logger.warning("keyvault_metadata table error: %s", e)
+            _db_logger.warning("keyvault_metadata table error: %s", e)
         finally:
             cursor.close()
 

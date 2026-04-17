@@ -151,6 +151,15 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     Otherwise scan ALL connected connections for the organization.
     Requires at least one connected cloud_connection — legacy settings path is deprecated.
     """
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     import time as _time
 
     # Demo tenant guard — block real cloud discovery for demo orgs
@@ -319,6 +328,18 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     # Check for identity changes and send email notification
     _send_change_notification_if_needed(db_org_id=db_org_id)
 
+    # Prune old identity runs to prevent unbounded accumulation
+    # (keep latest 2 completed runs per connection for drift detection)
+    try:
+        prune_db = Database()
+        result = prune_db.prune_old_identity_runs(db_org_id, keep_latest=2)
+        prune_db.close()
+        if result['identities_deleted'] > 0:
+            logger.info("IDENTITY_PRUNE tenant_id=%d deleted=%d runs_archived=%d",
+                        db_org_id, result['identities_deleted'], result['runs_pruned'])
+    except Exception as e:
+        logger.warning("Identity pruning failed for tenant %d: %s", db_org_id, e)
+
     # Phase 83: Dispatch scan_complete notification
     _dispatch_notification('scan_complete', {
         'title': f'Discovery Scan Complete — {org_name}',
@@ -347,6 +368,15 @@ def _classify_discovery_error(error):
 
 def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mode: str = 'deep'):
     """Run discovery for a single cloud connection with job lifecycle tracking."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     import time as _time
     if not AZURE_DISCOVERY_ENABLED and conn.get('cloud', 'azure') == 'azure':
         logger.info(f"  ⏭ Azure discovery disabled (APP_ENV=local), skipping connection '{conn.get('label', 'Unknown')}'")
@@ -754,12 +784,36 @@ def run_snapshot_job_maintenance():
             except Exception as e:
                 logger.warning(f"  ⚠ Failed to recover zombie job {z['id']}: {e}")
 
-        # 2. Enforce runtime limit (30 minutes max)
-        overtime = db.get_runtime_exceeded_jobs(max_runtime_minutes=30)
+        # 2. Enforce runtime limit (90 minutes max)
+        overtime = db.get_runtime_exceeded_jobs(max_runtime_minutes=90)
         for ot in overtime:
             try:
-                db.complete_snapshot_job(ot['id'], 'failed',
-                                        'Discovery exceeded 30-minute runtime limit',
+                # Check if partial results exist — mark as 'partial' instead of 'failed'
+                run_id = ot.get('discovery_run_id')
+                partial_count = 0
+                if run_id:
+                    try:
+                        cnt_cursor = db.conn.cursor()
+                        cnt_cursor.execute(
+                            "SELECT COUNT(*) FROM identities WHERE discovery_run_id = %s",
+                            (run_id,))
+                        partial_count = cnt_cursor.fetchone()[0]
+                        cnt_cursor.close()
+                    except Exception:
+                        try:
+                            db.conn.rollback()
+                        except Exception:
+                            pass
+
+                if partial_count > 0:
+                    final_status = 'partial'
+                    msg = f'Discovery exceeded 90-minute runtime limit ({partial_count} identities saved before timeout)'
+                else:
+                    final_status = 'failed'
+                    msg = 'Discovery exceeded 90-minute runtime limit'
+
+                db.complete_snapshot_job(ot['id'], final_status,
+                                        msg,
                                         error_type='runtime_exceeded')
                 logger.warning("  ⏰ RUNTIME_EXCEEDED job=%s connection=%s",
                                ot['id'], ot.get('cloud_connection_id'))
@@ -3025,8 +3079,15 @@ def check_scan_schedules():
                     for conn_row in connections:
                         if conn_row.get('cloud') == 'azure' and conn_row.get('enabled'):
                             try:
-                                engine = AzureDiscoveryEngine(conn_row, org_db)
-                                engine.discover()
+                                metadata = conn_row.get('metadata') or {}
+                                engine = AzureDiscoveryEngine(
+                                    azure_directory_id=conn_row.get('azure_directory_id'),
+                                    client_id=conn_row.get('client_id'),
+                                    client_secret=metadata.get('client_secret'),
+                                    db_org_id=org_id,
+                                    cloud_connection_id=conn_row['id'],
+                                )
+                                engine.run_discovery()
                                 ran = True
                             except Exception as de:
                                 logger.error(f"Discovery error for organization {org_id}: {de}")

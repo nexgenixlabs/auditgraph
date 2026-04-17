@@ -2629,7 +2629,7 @@ def create_app():
     def groups_compare():
         return get_group_comparison_handler()
 
-    @app.get("/api/groups/<int:group_id>")
+    @app.get("/api/groups/<group_id>")
     def groups_detail(group_id):
         return get_group_detail(group_id)
 
@@ -4019,6 +4019,9 @@ def create_app():
 
     # Enterprise isolation: FORCE ROW LEVEL SECURITY on all tenant tables
     Database.enforce_force_rls()
+
+    # Re-apply schema + table grants for the app user (idempotent)
+    Database.ensure_app_user_grants()
 
     # Ensure default admin user and compliance frameworks on first startup
     db = Database()

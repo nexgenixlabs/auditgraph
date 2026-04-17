@@ -549,7 +549,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
         # Case 1: Single connection — latest run for this connection
         cursor.execute("""
             SELECT MAX(id) AS id FROM discovery_runs
-            WHERE status = 'completed' AND organization_id = %s AND cloud_connection_id = %s
+            WHERE status IN ('completed', 'partial') AND organization_id = %s AND cloud_connection_id = %s
         """, (organization_id, connection_id))
         row = cursor.fetchone()
         run_id = _extract_id(row) if row else None
@@ -564,7 +564,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
                 dr.id
             FROM discovery_runs dr
             JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
-            WHERE dr.status = 'completed' AND dr.organization_id = %s
+            WHERE dr.status IN ('completed', 'partial') AND dr.organization_id = %s
               AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
               AND cc.status = 'connected'
             ORDER BY dr.cloud_connection_id, dr.id DESC
@@ -581,7 +581,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
             dr.id
         FROM discovery_runs dr
         JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
-        WHERE dr.status = 'completed'
+        WHERE dr.status IN ('completed', 'partial')
           AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
           AND cc.status = 'connected'
         ORDER BY dr.cloud_connection_id, dr.id DESC
@@ -1889,7 +1889,7 @@ def get_discovery_runs():
     try:
         cursor.execute(
             """
-            SELECT id, status, started_at, completed_at, total_identities, critical_count, high_count, medium_count
+            SELECT id, status, started_at, completed_at, total_identities, critical_count, high_count, medium_count, metadata
             FROM discovery_runs
             WHERE organization_id = %s
             ORDER BY id DESC
@@ -1901,6 +1901,7 @@ def get_discovery_runs():
 
         runs = []
         for r in rows:
+            meta = r[8] if r[8] else {}
             runs.append(
                 {
                     "id": r[0],
@@ -1911,6 +1912,7 @@ def get_discovery_runs():
                     "critical_count": r[5] or 0,
                     "high_count": r[6] or 0,
                     "medium_count": r[7] or 0,
+                    "component_status": meta.get("component_status"),
                 }
             )
         return jsonify({"count": len(runs), "runs": runs})
@@ -6914,13 +6916,13 @@ def get_dashboard_posture():
         org_id = _org_id()
 
         if posture_score >= 90:
-            posture_status = "Strong"
+            posture_status = "STRONG"
         elif posture_score >= 70:
-            posture_status = "Fair"
+            posture_status = "MODERATE"
         elif posture_score >= 50:
-            posture_status = "Needs Attention"
+            posture_status = "ELEVATED_RISK"
         else:
-            posture_status = "At Risk"
+            posture_status = "WEAK"
 
         cursor.execute(
             "SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s AND monitored = true AND deleted = false",
@@ -6968,6 +6970,7 @@ def get_dashboard_posture():
                 _last_scan_ago = f"{_mins // 1440}d ago"
         scan_metadata = {
             "last_scan": _last_scan_ts.isoformat() if _last_scan_ts else None,
+            "last_scan_at": _last_scan_ts.isoformat() if _last_scan_ts else None,
             "last_scan_ago": _last_scan_ago,
             "status": dr_row[1] if dr_row else "unknown",
         }
@@ -7383,30 +7386,12 @@ def get_dashboard_posture():
             }
 
         # A4: Business impact findings
-        business_impact = []
-        if ghost_count > 0:
-            _ghost_noun = 'identity' if ghost_count == 1 else 'identities'
-            _ghost_verb = 'holds' if ghost_count == 1 else 'hold'
-            business_impact.append({
-                "type": "ghost_access",
-                "count": ghost_count,
-                "statement": (
-                    f"{ghost_count} disabled {_ghost_noun} still "
-                    f"{_ghost_verb} live RBAC roles \u2014 access not fully revoked"
-                ),
-                "severity": "critical",
-            })
-        if excess_privilege_count > 0:
-            _ep_noun = 'identity' if excess_privilege_count == 1 else 'identities'
-            business_impact.append({
-                "type": "excess_privilege",
-                "count": excess_privilege_count,
-                "statement": (
-                    f"{excess_privilege_count} {_ep_noun} retain admin access "
-                    f"\u2014 reduces to 0 after remediation"
-                ),
-                "severity": "high",
-            })
+        # v3.1 business_impact: object with named count fields
+        # (BusinessImpactWidgetV31 reads .inactive_admin_count, .disabled_live_rbac_count)
+        business_impact = {
+            "inactive_admin_count": dormant_priv_count,
+            "disabled_live_rbac_count": ghost_count,
+        }
 
         return jsonify({
             "current_run": current_run,
@@ -7432,10 +7417,11 @@ def get_dashboard_posture():
             "has_overlapping_identities": has_overlapping,
             "score_trend": score_trend,
             "business_impact": business_impact,
-            "has_business_risk": len(business_impact) > 0,
+            "has_business_risk": (business_impact["inactive_admin_count"] + business_impact["disabled_live_rbac_count"]) > 0,
             "microsoft_anomalies": microsoft_anomalies,
             "drift": drift,
-            # AG-43: flat aliases for frontend trend rendering
+            # AG-43/44: flat aliases for frontend trend rendering
+            "score_delta": score_trend["delta"] if score_trend else None,
             "previous_score": previous_posture_score,
             "score_direction": score_trend["direction"] if score_trend else None,
             "posture_change_pct": score_trend["delta_pct"] if score_trend else None,
@@ -13025,6 +13011,37 @@ def get_groups_list():
                           {where_clause} {HIDE_MICROSOFT_SQL}
                     """, [run_ids] + where_params)
                     grp['member_count'] = _scalar(cursor, 0)
+
+            # Append Entra security groups from latest discovery run
+            try:
+                db._ensure_entra_group_tables()
+                cursor.execute("""
+                    SELECT id, display_name, member_count, is_privileged,
+                           is_role_assignable, group_id as azure_object_id
+                    FROM entra_groups
+                    WHERE discovery_run_id = ANY(%s)
+                    ORDER BY display_name ASC
+                """, (run_ids,))
+                for row in cursor.fetchall():
+                    groups.append({
+                        'id': f"entra-{row[5]}",
+                        'name': row[1],
+                        'display_name': row[1],
+                        'member_count': row[2] or 0,
+                        'group_type': 'entra',
+                        'source': 'entra',
+                        'color': '#7C3AED',
+                        'is_privileged': row[3],
+                        'is_role_assignable': row[4],
+                        'azure_object_id': row[5],
+                    })
+            except Exception as e:
+                logger.warning("Failed to load Entra groups for filter: %s", e)
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+
         cursor.close()
 
         return jsonify({'groups': groups})
@@ -13058,14 +13075,84 @@ def create_group_handler():
 
 
 def get_group_detail(group_id):
+    """Get group detail — handles both custom integer IDs and 'entra-{uuid}' string IDs."""
     db = _db()
     try:
-        group = db.get_group(group_id)
+        group_id_str = str(group_id)
+        # Entra groups use 'entra-{azure_object_id}' prefix
+        if group_id_str.startswith('entra-'):
+            azure_object_id = group_id_str[6:]  # strip 'entra-' prefix
+            return _get_entra_group_detail(db, azure_object_id)
+
+        # Custom / auto groups use integer IDs
+        try:
+            int_id = int(group_id_str)
+        except ValueError:
+            return jsonify({'error': 'Invalid group ID'}), 400
+
+        group = db.get_group(int_id)
         if not group:
             return jsonify({'error': 'Group not found'}), 404
         return jsonify(group)
     finally:
         db.close()
+
+
+def _get_entra_group_detail(db, azure_object_id: str):
+    """Return Entra group detail with members in the same format as identity_groups."""
+    db._ensure_entra_group_tables()
+    organization_id = _org_id()
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No completed discovery runs'}), 404
+
+        cursor.execute("""
+            SELECT id, group_id, display_name, description, member_count,
+                   is_privileged, is_role_assignable, membership_type,
+                   discovery_run_id
+            FROM entra_groups
+            WHERE group_id = %s AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (azure_object_id, run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Entra group not found'}), 404
+        row = dict(row)
+        entra_group_db_id = row['id']
+        run_id = row['discovery_run_id']
+
+        # Fetch members via entra_group_memberships → identities
+        cursor.execute("""
+            SELECT DISTINCT i.identity_id, i.display_name,
+                   COALESCE(i.identity_category, '') as identity_category,
+                   COALESCE(i.cloud, 'azure') as cloud,
+                   i.risk_level, COALESCE(i.risk_score, 0) as risk_score,
+                   i.activity_status
+            FROM entra_group_memberships egm
+            JOIN identities i ON i.object_id = egm.member_object_id
+                             AND i.discovery_run_id = egm.discovery_run_id
+            WHERE egm.group_db_id = %s
+              AND egm.discovery_run_id = %s
+            ORDER BY i.display_name ASC
+        """, (entra_group_db_id, run_id))
+        members = [dict(r) for r in cursor.fetchall()]
+
+        return jsonify({
+            'id': f"entra-{azure_object_id}",
+            'name': row['display_name'],
+            'display_name': row['display_name'],
+            'description': row.get('description'),
+            'group_type': 'entra',
+            'source': 'entra',
+            'member_count': row['member_count'] or len(members),
+            'is_privileged': row['is_privileged'],
+            'is_role_assignable': row['is_role_assignable'],
+            'members': members,
+        })
+    finally:
+        cursor.close()
 
 
 def update_group_handler(group_id):
@@ -14811,10 +14898,11 @@ def get_onboarding_status():
     try:
         tid = _org_id()
         settings = db.get_settings(organization_id=tid)
-        completed = settings.get('onboarding_completed', 'false') == 'true'
+        completed_flag = settings.get('onboarding_completed', 'false') == 'true'
 
         # Check cloud_connections table for verified connections (not stale settings keys)
         azure_configured = False
+        cloud_connections_count = 0
         try:
             cursor = db.conn.cursor()
             cursor.execute("""
@@ -14822,17 +14910,25 @@ def get_onboarding_status():
                 WHERE organization_id = %s AND status = 'connected'
             """, (tid,))
             row = cursor.fetchone()
-            azure_configured = row and row[0] > 0
+            cloud_connections_count = (row[0] if row else 0)
+            azure_configured = cloud_connections_count > 0
             cursor.close()
         except Exception:
             try: db.conn.rollback()
             except Exception: pass
-            # Fallback to settings keys if cloud_connections table doesn't exist
-            azure_configured = all([
-                settings.get('azure_directory_id'),
-                settings.get('azure_client_id'),
-                settings.get('azure_client_secret'),
-            ])
+
+        # FIX: Never report onboarding as complete if no cloud connection
+        # actually exists. The settings flag alone is not sufficient — the
+        # user must have successfully tested a connection during the wizard.
+        completed = completed_flag and (azure_configured or cloud_connections_count > 0)
+
+        # Pre-fetch org name (needed for checklist + response)
+        org_name = ''
+        try:
+            org = db.get_organization_by_id(tid)
+            org_name = (org or {}).get('name', '') or ''
+        except Exception:
+            pass
 
         # Check for active subscriptions
         subs_activated = False
@@ -14852,11 +14948,14 @@ def get_onboarding_status():
             pass
 
         # Build onboarding checklist
+        # org_name: check both settings key and organization name
+        # (signup sets org name on the organizations table, not settings)
+        has_org_name = bool(settings.get('org_name') or org_name)
         checklist = [
             {
                 'key': 'org_name',
                 'label': 'Set organization name',
-                'done': bool(settings.get('org_name')),
+                'done': has_org_name,
             },
             {
                 'key': 'cloud_connected',
@@ -14914,11 +15013,13 @@ def get_onboarding_status():
         return jsonify({
             'onboarding_completed': completed,
             'azure_configured': azure_configured,
+            'cloud_connections_count': cloud_connections_count,
             'snapshot_completed': snapshot_completed,
             'has_settings': bool(settings),
             'checklist': checklist,
             'checklist_progress': done_count,
             'checklist_total': len(checklist),
+            'org_name': org_name,
         })
     finally:
         db.close()
@@ -14930,9 +15031,9 @@ def test_azure_connection():
     if not data:
         return jsonify({'error': 'Expected JSON body'}), 400
 
-    azure_directory_id = (data.get('azure_directory_id') or '').strip()
-    azure_client_id = (data.get('azure_client_id') or '').strip()
-    azure_client_secret = (data.get('azure_client_secret') or '').strip()
+    azure_directory_id = (data.get('azure_directory_id') or data.get('tenant_id') or '').strip()
+    azure_client_id = (data.get('azure_client_id') or data.get('client_id') or '').strip()
+    azure_client_secret = (data.get('azure_client_secret') or data.get('client_secret') or '').strip()
 
     if not all([azure_directory_id, azure_client_id, azure_client_secret]):
         return jsonify({'error': 'All three Azure credential fields are required'}), 400
@@ -14972,14 +15073,51 @@ def test_azure_connection():
             admin_db = Database(_admin_reason='test_azure: advance stage + insert subs')
             try:
                 admin_db.update_organization(tid, onboarding_stage='active')
-                admin_db._ensure_cloud_subscriptions_table()
+
+                # Ensure a cloud_connection exists for this directory (needed as FK for subscriptions)
+                # Always persist encrypted credentials so discovery can use them later
+                from app.encryption import encrypt_field
+                encrypted_meta = json.dumps({'client_secret': encrypt_field(azure_client_secret)})
                 cursor = admin_db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM cloud_connections
+                    WHERE organization_id = %s AND cloud = 'azure'
+                      AND azure_directory_id = %s
+                    ORDER BY id LIMIT 1
+                """, (tid, azure_directory_id))
+                row = cursor.fetchone()
+                if row:
+                    conn_id = row[0]
+                    # Update credentials + status on existing connection
+                    cursor.execute("""
+                        UPDATE cloud_connections
+                        SET metadata = %s, client_id = %s, status = 'connected',
+                            credential_last_rotated = NOW(), updated_at = NOW()
+                        WHERE id = %s
+                    """, (encrypted_meta, azure_client_id, conn_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO cloud_connections
+                            (organization_id, cloud, connection_type, label,
+                             azure_directory_id, client_id, status, metadata,
+                             credential_last_rotated)
+                        VALUES (%s, 'azure', 'entra', 'Primary',
+                                %s, %s, 'connected', %s, NOW())
+                        RETURNING id
+                    """, (tid, azure_directory_id, azure_client_id, encrypted_meta))
+                    conn_id = cursor.fetchone()[0]
+
+                admin_db._ensure_cloud_subscriptions_table()
                 for s in subs:
                     cursor.execute("""
-                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
-                        VALUES (%s, 'azure', %s, %s, 'discovered')
-                        ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
-                    """, (tid, s['id'], s['name']))
+                        INSERT INTO cloud_subscriptions
+                            (organization_id, cloud, account_id, account_name,
+                             status, cloud_connection_id)
+                        VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                        ON CONFLICT (organization_id, cloud, account_id)
+                        DO UPDATE SET cloud_connection_id = EXCLUDED.cloud_connection_id,
+                                      account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
+                    """, (tid, s['id'], s['name'], conn_id))
                 admin_db._commit()
                 cursor.close()
                 # Seed auto identity groups for this org
@@ -14998,13 +15136,20 @@ def test_azure_connection():
             'message': msg,
         })
     except Exception as e:
-        try: db.conn.rollback()
-        except Exception: pass
         logger.error(f"Azure connection test failed: {e}", exc_info=True)
+        err_str = str(e)
+        if 'AADSTS7000215' in err_str:
+            hint = 'Invalid client secret. Ensure you are using the secret Value (not the Secret ID).'
+        elif 'AADSTS700016' in err_str:
+            hint = 'Application not found. Verify the Client ID matches your App Registration.'
+        elif 'AADSTS90002' in err_str:
+            hint = 'Tenant not found. Verify the Directory (Tenant) ID.'
+        else:
+            hint = 'Failed to connect. Check your credentials and network access.'
         return jsonify({
             'status': 'error',
             'error': 'Connection test failed',
-            'message': 'Failed to connect. Check your credentials.',
+            'message': hint,
         }), 400
 
 
@@ -15111,9 +15256,9 @@ def create_client_connection():
 
     cloud = (data.get('cloud') or 'azure').strip().lower()
     label = (data.get('label') or '').strip()
-    azure_directory_id = (data.get('azure_directory_id') or data.get('azure_directory_id') or '').strip()
+    azure_directory_id = (data.get('azure_directory_id') or data.get('tenant_id') or '').strip()
     client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
-    client_secret = (data.get('client_secret') or '').strip()
+    client_secret = (data.get('client_secret') or data.get('azure_client_secret') or '').strip()
     connection_type = (data.get('connection_type') or 'entra').strip()
     status = (data.get('status') or 'pending').strip()
 
@@ -15199,10 +15344,10 @@ def create_client_connection():
                         tid, cloud, foreign_conn['id'], group_list)
                     discovered_count += len(group_list)
                     discovered_subs.extend(group_list)
-            except Exception:
+            except Exception as e:
                 try: db.conn.rollback()
                 except Exception: pass
-                pass  # Non-fatal — connection is still saved
+                logger.warning("Azure subscription re-discovery failed for connection %s: %s", conn['id'], e)
         elif cloud == 'aws' and status == 'connected':
             access_key_id = metadata.get('access_key_id') or client_id
             secret_access_key = metadata.get('secret_access_key') or client_secret
@@ -15229,6 +15374,18 @@ def create_client_connection():
                     except Exception: pass
                     pass  # Non-fatal
 
+        # Fallback: if re-discovery yielded nothing, count subs already linked
+        # (e.g. inserted during the test-connection step)
+        if discovered_count == 0:
+            try:
+                existing = db.get_cloud_subscriptions(tid, cloud=cloud, connection_id=conn['id'])
+                if existing:
+                    discovered_count = len(existing)
+                    discovered_subs = [{'id': s.get('account_id', ''), 'name': s.get('account_name', '')} for s in existing]
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+
         _log(db, 'connection_created', f'Created {cloud} connection: {label}',
              {'connection_id': conn['id'], 'cloud': cloud, 'discovered_subs': discovered_count})
 
@@ -15236,9 +15393,8 @@ def create_client_connection():
         from app.entitlements.service import track_usage
         track_usage(db, tid, 'connection', str(conn['id']), 'added', {'cloud': cloud})
 
-        # Auto-trigger initial discovery scan for verified connections
+        # Advance org stage to 'active' for verified connections (no auto-discovery)
         if status == 'connected':
-            # Advance org stage to 'active' so UI unlocks immediately
             try:
                 adm = Database(_admin_reason='create_connection: advance onboarding stage')
                 try:
@@ -15249,23 +15405,6 @@ def create_client_connection():
                     adm.close()
             except Exception:
                 pass
-
-            import threading
-            from app.scheduler import trigger_manual_discovery
-            _conn_id = conn['id']
-            _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
-            def _run_initial_discovery():
-                try:
-                    trigger_manual_discovery(
-                        scan_mode='deep',
-                        db_org_id=tid,
-                        org_name=_org_name,
-                        connection_id=_conn_id,
-                    )
-                except Exception as e:
-                    logging.getLogger(__name__).error(f"Initial discovery after connection save failed: {e}")
-            thread = threading.Thread(target=_run_initial_discovery, daemon=True)
-            thread.start()
 
         # Security event: connector created
         from app.security_events import SecurityEventLogger
@@ -15545,7 +15684,7 @@ def test_client_connection():
     cloud = (data.get('cloud') or 'azure').strip().lower()
 
     if cloud == 'azure':
-        azure_directory_id = (data.get('azure_directory_id') or data.get('azure_directory_id') or '').strip()
+        azure_directory_id = (data.get('azure_directory_id') or data.get('tenant_id') or '').strip()
         azure_client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
         azure_client_secret = (data.get('client_secret') or data.get('azure_client_secret') or '').strip()
 
@@ -21940,25 +22079,6 @@ def activate_client_subscription(subscription_id):
                 adm.close()
         except Exception:
             pass
-
-        # Trigger discovery in background
-        import threading
-        from app.scheduler import trigger_manual_discovery
-        _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
-        _conn_id = result.get('cloud_connection_id')
-
-        def _run_discovery():
-            try:
-                trigger_manual_discovery(
-                    scan_mode='deep',
-                    db_org_id=tid,
-                    org_name=_org_name,
-                    connection_id=_conn_id,
-                )
-            except Exception as e:
-                logging.getLogger(__name__).error(f"Discovery after activation failed: {e}")
-
-        threading.Thread(target=_run_discovery, daemon=True).start()
 
         return jsonify({'activated': True})
     finally:
@@ -34212,9 +34332,11 @@ def _collect_ciso_sources_from_db(db, org_id, run_ids):
     """
     raw = {}
 
-    # Risk
+    # Risk — try with run_ids first, fall back to org-wide latest
     try:
         summary = db.get_latest_risk_summary(org_id, run_ids=run_ids or None)
+        if not summary and run_ids:
+            summary = db.get_latest_risk_summary(org_id, run_ids=None)
         raw['risk'] = {'latest': summary} if summary else {}
     except Exception:
         try: db.conn.rollback()

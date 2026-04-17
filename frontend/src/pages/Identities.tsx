@@ -520,7 +520,7 @@ export default function IdentitiesPage() {
   const agentFilterEnabled = useFeatureFlag('ai_agent_governance');
   const [agentFilter, setAgentFilter] = useState(false);              // filter active
   const [agentCount, setAgentCount] = useState(0);                    // badge count
-  const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
+  const [allGroups, setAllGroups] = useState<{id: number | string; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('recommended_action');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -565,7 +565,7 @@ export default function IdentitiesPage() {
   const [scopeSummary, setScopeSummary] = useState<{ activated: number; discovered: number; tenant_name: string } | null>(null);
 
   // Phase 7: Snapshot selector state
-  const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
+  const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number; component_status?: Record<string, string> }[]>([]);
 
   const { addToast } = useToast();
   const { user, isAdmin, activeOrgId, activeOrgName } = useAuth();
@@ -1040,7 +1040,7 @@ export default function IdentitiesPage() {
       .then(d => {
         const raw = d.groups || [];
         // Deduplicate by group name — combine counts across subscriptions
-        const byName = new Map<string, { id: number; name: string; color: string; group_type: string; member_count: number }>();
+        const byName = new Map<string, { id: number | string; name: string; color: string; group_type: string; member_count: number }>();
         for (const g of raw) {
           const key = (g.name || g.display_name || '').toLowerCase();
           if (byName.has(key)) {
@@ -1059,7 +1059,7 @@ export default function IdentitiesPage() {
   useEffect(() => {
     fetch('/api/runs')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => setSnapshots((d.runs || []).filter((r: any) => r.status === 'completed').slice(0, 10)))
+      .then(d => setSnapshots((d.runs || []).filter((r: any) => r.status === 'completed' || r.status === 'partial' || r.status === 'failed').slice(0, 10)))
       .catch(() => setSnapshots([]));
   }, [activeOrgId]);
 
@@ -1921,6 +1921,74 @@ export default function IdentitiesPage() {
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
         </div>
       )}
+
+      {/* Failed Scan Error Banner */}
+      {snapshots.length > 0 && snapshots[0]?.status === 'failed' && (() => {
+        const cs = snapshots[0].component_status;
+        return (
+          <div className="px-3 py-2 rounded-lg border border-red-300 bg-red-50 text-red-800 text-xs mb-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd"/></svg>
+                <span className="font-semibold">Scan Failed</span>
+                <span>Critical components could not be collected. Data below may be from a previous scan.</span>
+              </div>
+              <button
+                onClick={() => fetch('/api/runs/trigger', { method: 'POST' }).then(() => window.location.reload())}
+                className="ml-3 px-2.5 py-1 bg-red-700 text-white rounded text-xs font-medium hover:bg-red-800 transition flex-shrink-0"
+              >
+                Retry Scan
+              </button>
+            </div>
+            {cs && Object.keys(cs).length > 0 && (
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 ml-6">
+                {Object.entries(cs).map(([name, status]) => (
+                  <span key={name} className="inline-flex items-center gap-1">
+                    <span className="capitalize">{name.replace(/_/g, ' ')}:</span>
+                    <span className={status === 'success' ? 'text-green-700 font-medium' : 'text-red-700 font-medium'}>
+                      {status === 'success' ? 'OK' : status.toUpperCase()} {status === 'success' ? '\u2705' : '\u274C'}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Partial Scan Warning Banner */}
+      {snapshots.length > 0 && snapshots[0]?.status === 'partial' && (() => {
+        const cs = snapshots[0].component_status;
+        return (
+          <div className="px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-xs mb-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/></svg>
+                <span className="font-semibold">Partial Scan</span>
+                <span>Some data could not be collected. Results may not reflect your full environment.</span>
+              </div>
+              <button
+                onClick={() => fetch('/api/runs/trigger', { method: 'POST' }).then(() => window.location.reload())}
+                className="ml-3 px-2.5 py-1 bg-amber-700 text-white rounded text-xs font-medium hover:bg-amber-800 transition flex-shrink-0"
+              >
+                Retry Scan
+              </button>
+            </div>
+            {cs && Object.keys(cs).length > 0 && (
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 ml-6">
+                {Object.entries(cs).map(([name, status]) => (
+                  <span key={name} className="inline-flex items-center gap-1">
+                    <span className="capitalize">{name.replace(/_/g, ' ')}:</span>
+                    <span className={status === 'success' ? 'text-green-700 font-medium' : 'text-amber-700 font-medium'}>
+                      {status === 'success' ? 'OK' : status.toUpperCase()} {status === 'success' ? '\u2705' : '\u26A0\uFE0F'}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Saved Views Bar */}
       {savedViews.length > 0 || !loading ? (
