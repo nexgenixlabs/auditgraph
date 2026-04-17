@@ -231,7 +231,7 @@ function AppContent() {
       <Routes>
         {/* Login route - no nav bar */}
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
-        <Route path="/signup" element={user ? <Navigate to="/onboarding" replace /> : <Signup />} />
+        <Route path="/signup" element={user ? <Navigate to="/onboarding" replace state={{ fromSignup: true }} /> : <Signup />} />
 
         {/* Phase 84: Password reset routes - public, no nav bar */}
         <Route path="/forgot-password" element={<ForgotPassword />} />

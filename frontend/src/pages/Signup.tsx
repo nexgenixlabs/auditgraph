@@ -47,8 +47,8 @@ export default function Signup() {
       // Log in the user (use the auth context)
       await login(email.trim().toLowerCase(), password);
 
-      // Redirect to onboarding wizard
-      navigate('/onboarding');
+      // Redirect to onboarding wizard — skip step 0 (org name already entered)
+      navigate('/onboarding', { state: { fromSignup: true } });
     } catch (err: any) {
       setError(err?.message || 'Signup failed. Please try again.');
     } finally {
@@ -70,7 +70,7 @@ export default function Signup() {
             Your 30-day free trial has started. Let's connect your cloud environment.
           </p>
           <button
-            onClick={() => navigate('/onboarding')}
+            onClick={() => navigate('/onboarding', { state: { fromSignup: true } })}
             className="mt-6 w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors"
           >
             Start Setup
