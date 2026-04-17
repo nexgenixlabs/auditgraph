@@ -98,8 +98,9 @@ export interface PostureV31DriftChange {
 
 export interface PostureV31Response {
   posture_score: number;
-  posture_status: 'STRONG' | 'MODERATE' | 'WEAK';
+  posture_status: 'STRONG' | 'MODERATE' | 'ELEVATED_RISK' | 'WEAK' | 'CRITICAL_EXPOSURE';
   score_delta: number | null;
+  posture_change_pct: number | null;
   narrative_text: string;
   top_risk_narrative: string | null;
   highest_risk_type: string | null;

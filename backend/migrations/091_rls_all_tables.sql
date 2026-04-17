@@ -1,15 +1,17 @@
--- Migration 091: Enable RLS on all tables with organization_id
+-- Migration 091: Enable RLS on ALL tables with organization_id
 --
--- Two groups:
---   A) 46 tables already have org_strict_* policies but rowsecurity=false
---      → Just ENABLE + FORCE RLS
---   B) 52 tables have no policies at all
---      → CREATE org_strict_sel/ins/upd/del + ENABLE + FORCE RLS
+-- Idempotent — safe to re-run on any environment.
 --
--- Uses the same strict pattern already on 46+ tables:
+-- For every public table that has an organization_id column:
+--   1. ENABLE + FORCE ROW LEVEL SECURITY
+--   2. Create org_strict_sel/ins/upd/del policies (skipped if they already exist)
+--
+-- Policy pattern (strict — no null bypass):
 --   organization_id = current_setting('app.current_organization_id', true)::integer
 --
--- Excludes: users (global table, auth lookup needs cross-org access)
+-- Covers 104 org-scoped tables including users (auth uses admin bypass).
+-- Tables with custom-named policies (e.g. agent_cls_sel, ap_org_sel) are left
+-- as-is; only the standard org_strict_* set is created where missing.
 
 BEGIN;
 
@@ -21,8 +23,6 @@ BEGIN
     SELECT t.tablename
     FROM pg_tables t
     WHERE t.schemaname = 'public'
-      AND t.rowsecurity = false
-      AND t.tablename != 'users'
       AND EXISTS (
         SELECT 1
         FROM information_schema.columns c
@@ -30,13 +30,14 @@ BEGIN
           AND c.column_name = 'organization_id'
           AND c.table_schema = 'public'
       )
+    ORDER BY t.tablename
   LOOP
     BEGIN
-      -- Enable RLS
+      -- Enable RLS (idempotent — no-op if already enabled)
       EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
       EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
 
-      -- Create policies only if they don't exist (52 tables need these)
+      -- Create standard policies only if they don't already exist
       IF NOT EXISTS (
         SELECT 1 FROM pg_policies
         WHERE schemaname = 'public' AND tablename = tbl
@@ -81,22 +82,18 @@ BEGIN
           )', tbl);
       END IF;
 
-      RAISE NOTICE 'RLS enabled: %', tbl;
+      RAISE NOTICE 'RLS ensured: %', tbl;
     EXCEPTION WHEN OTHERS THEN
       RAISE NOTICE 'Skipped %: %', tbl, SQLERRM;
     END;
   END LOOP;
 END$$;
 
--- Explicitly keep users table open (auth needs cross-org lookup)
-ALTER TABLE users DISABLE ROW LEVEL SECURITY;
-
--- Verify: count tables still unprotected
-SELECT COUNT(*) as still_unprotected
+-- Verify: zero unprotected org tables
+SELECT COUNT(*) as unprotected_org_tables
 FROM pg_tables t
 WHERE t.schemaname = 'public'
   AND t.rowsecurity = false
-  AND t.tablename != 'users'
   AND EXISTS (
     SELECT 1 FROM information_schema.columns c
     WHERE c.table_name = t.tablename

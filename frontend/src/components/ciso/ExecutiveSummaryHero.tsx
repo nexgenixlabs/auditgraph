@@ -132,17 +132,15 @@ export function PostureScoreHero({ data }: { data: PostureV31Response }) {
         <div className="flex items-baseline gap-1.5">
           <span className="text-xl font-semibold text-gray-100 leading-none font-mono">{score.toFixed(0)}</span>
           <span className={`text-xs font-medium ${band.textCls}`}>&nbsp;&middot; {band.label}</span>
-          {delta == null ? (
-            <span className="text-xs text-gray-500 flex-shrink-0">Baseline established</span>
-          ) : delta === 0 ? (
+          {delta == null ? null : delta === 0 ? (
             <span className="text-xs text-gray-500 flex-shrink-0">&rarr; No change</span>
           ) : delta > 0 ? (
             <span className="text-xs font-medium flex-shrink-0 text-emerald-400">
-              &#9650; +{delta.toFixed(1)} since last scan
+              &#9650; +{(data.posture_change_pct ?? Math.abs(delta)).toFixed(1)}% since last scan
             </span>
           ) : (
-            <span className="text-xs font-medium flex-shrink-0 text-red-400">
-              &#9660; {delta.toFixed(1)} since last scan
+            <span className="text-xs font-medium flex-shrink-0 text-[#f59e0b]">
+              &#9660; &minus;{(data.posture_change_pct ?? Math.abs(delta)).toFixed(1)}% since last scan
             </span>
           )}
         </div>

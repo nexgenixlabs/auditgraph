@@ -127,10 +127,12 @@ if IS_LOCAL:
 # ---------------------------------------------------------------------------
 # 5. Cloud discovery toggles
 # ---------------------------------------------------------------------------
-# Discovery is enabled when credentials are present (works in any tier)
-AZURE_DISCOVERY_ENABLED = bool(os.getenv("AZURE_TENANT_ID") and os.getenv("AZURE_CLIENT_ID"))
-AWS_DISCOVERY_ENABLED = bool(os.getenv("AWS_ACCESS_KEY_ID"))
-GCP_DISCOVERY_ENABLED = bool(os.getenv("GCP_PROJECT_ID"))
+# Multi-tenant SaaS: discovery is always enabled at the platform level.
+# Per-org credentials come from cloud_connections, not env vars.
+# Set DISABLE_<CLOUD>_DISCOVERY=true to explicitly disable a provider.
+AZURE_DISCOVERY_ENABLED = os.getenv("DISABLE_AZURE_DISCOVERY", "").lower() not in ("true", "1", "yes")
+AWS_DISCOVERY_ENABLED = os.getenv("DISABLE_AWS_DISCOVERY", "").lower() not in ("true", "1", "yes")
+GCP_DISCOVERY_ENABLED = os.getenv("DISABLE_GCP_DISCOVERY", "").lower() not in ("true", "1", "yes")
 
 # ---------------------------------------------------------------------------
 # 5b. Connection pooling

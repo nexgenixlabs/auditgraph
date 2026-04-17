@@ -55,6 +55,7 @@ export default function Subscriptions() {
   const [loading, setLoading] = useState(true);
   const [activating, setActivating] = useState<number | null>(null);
   const [activateError, setActivateError] = useState<string | null>(null);
+  const [sortActiveFirst, setSortActiveFirst] = useState(true);
 
   const fetchData = () => {
     Promise.all([
@@ -80,7 +81,7 @@ export default function Subscriptions() {
         method: 'POST',
       });
       if (res.ok) {
-        navigate('/dashboard');
+        fetchData();
       } else {
         const data = await res.json().catch(() => ({}));
         setActivateError(data.error || 'Activation failed');
@@ -106,6 +107,13 @@ export default function Subscriptions() {
     }
   };
 
+  const sortedSubs = [...subs].sort((a, b) => {
+    const aActive = a.monitored ? 1 : 0;
+    const bActive = b.monitored ? 1 : 0;
+    const statusCmp = sortActiveFirst ? bActive - aActive : aActive - bActive;
+    if (statusCmp !== 0) return statusCmp;
+    return (a.account_name || '').localeCompare(b.account_name || '');
+  });
   const unmonitored = subs.filter(s => !s.monitored);
   const isTrial = billing?.trial_active ?? false;
   const netMonthlyCents = billing?.net_monthly_cents ?? 0;
@@ -249,7 +257,7 @@ export default function Subscriptions() {
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Connection</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Cloud</th>
                 {canSeePricing && <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Rate</th>}
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase cursor-pointer select-none hover:text-gray-700" onClick={() => setSortActiveFirst(p => !p)}>Status {sortActiveFirst ? '\u2191' : '\u2193'}</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
@@ -258,7 +266,7 @@ export default function Subscriptions() {
                 <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
               ) : subs.length === 0 ? (
                 <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Capture a snapshot to detect cloud accounts.</td></tr>
-              ) : subs.map(sub => {
+              ) : sortedSubs.map(sub => {
                 const badge = CLOUD_BADGE[sub.cloud] || CLOUD_BADGE.azure;
                 const rateCents = sub.rate_cents ?? SUB_RATES_CENTS[sub.cloud] ?? SUB_RATES_CENTS.azure;
                 return (
