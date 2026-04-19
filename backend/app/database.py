@@ -1683,6 +1683,7 @@ class Database:
     _discovery_connector_col_ensured = False
     _app_reg_lineage_cols_ensured = False
     _last_activity_cols_ensured = False
+    _access_paths_col_ensured = False
     _lineage_verdicts_ensured = False
 
     def backfill_microsoft_flag(self):
@@ -2266,6 +2267,21 @@ class Database:
                     self._rollback()
             Database._last_activity_cols_ensured = True
 
+        # Ensure access_paths column exists (AG-75 inclusion criteria)
+        if not Database._access_paths_col_ensured:
+            try:
+                cursor.execute("SAVEPOINT access_paths_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS access_paths JSONB DEFAULT '{}'::jsonb")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_identities_access_paths ON identities USING GIN (access_paths)")
+                cursor.execute("RELEASE SAVEPOINT access_paths_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT access_paths_ddl")
+                except Exception:
+                    self._rollback()
+            Database._access_paths_col_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -2426,7 +2442,10 @@ class Database:
                 last_observed_ip,
                 last_observed_ip_source,
                 last_observed_ip_date,
-                last_observed_operation
+                last_observed_operation,
+
+                -- Access path provenance (AG-75)
+                access_paths
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -2459,7 +2478,8 @@ class Database:
                 %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 %s, %s, %s,
-                %s, %s, %s, %s
+                %s, %s, %s, %s,
+                %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -2601,6 +2621,8 @@ class Database:
                 last_observed_ip_source = EXCLUDED.last_observed_ip_source,
                 last_observed_ip_date = EXCLUDED.last_observed_ip_date,
                 last_observed_operation = EXCLUDED.last_observed_operation,
+
+                access_paths = EXCLUDED.access_paths,
 
                 created_at = NOW()
             RETURNING id
@@ -2755,6 +2777,9 @@ class Database:
                 identity_data.get("last_observed_ip_source"),
                 identity_data.get("last_observed_ip_date"),
                 identity_data.get("last_observed_operation"),
+
+                # Access path provenance (AG-75)
+                json.dumps(identity_data.get("access_paths", {})),
             ),
         )
 

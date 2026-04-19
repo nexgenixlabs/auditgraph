@@ -615,7 +615,40 @@ class AzureDiscoveryEngine:
         if self._check_time_budget("service_principals"):
             _mark_remaining_timeout()
 
-        # Step 4: Discover ALL users in the tenant
+        # Step 4: Discover Entra Groups (moved before users for AG-75 inclusion criteria)
+        if not _scan_timed_out:
+            logger.info("Discovering Entra Groups...")
+            self._update_job_progress('discovering_groups', 38)
+            try:
+                groups = await self._discover_groups()
+                scan_component_status["groups"] = "success"
+            except Exception as e:
+                logger.error("[scan] groups FAILED org=%s error=%s", self.db_org_id, e, exc_info=True)
+                scan_component_status["groups"] = "failed"
+                groups = []
+            logger.info("Found %s security groups", len(groups))
+            if self._check_time_budget("groups"):
+                _mark_remaining_timeout()
+
+        # Step 4b: Discover Group Memberships (nested up to 3 levels)
+        if not _scan_timed_out:
+            try:
+                group_memberships = await self._discover_group_memberships(groups)
+                self._update_job_progress('discovering_groups', 40)
+                total_memberships = sum(len(v) for v in group_memberships.values())
+                scan_component_status["memberships"] = "success"
+            except Exception as e:
+                logger.error("[scan] memberships FAILED org=%s error=%s", self.db_org_id, e, exc_info=True)
+                scan_component_status["memberships"] = "failed"
+
+        # Step 4c: Collect relevant principal IDs (AG-75 inclusion criteria)
+        all_principal_ids = self._collect_relevant_principal_ids(
+            role_assignments, entra_roles, pim_map,
+            groups, group_memberships, ownership_map, ca_policies,
+            service_principals
+        )
+
+        # Step 5: Discover users (scoped to principals with access paths)
         if not _scan_timed_out:
             logger.info("Discovering Users...")
             try:
@@ -628,57 +661,37 @@ class AzureDiscoveryEngine:
                 )
                 scan_component_status["users"] = "failed"
                 users = []
-            logger.info("Found %s users", len(users))
+            logger.info("Found %s users (from %s relevant principals)", len(users), len(all_principal_ids))
 
-            # Sanity check: if we have SPNs but 0 users, something may be wrong
-            if len(service_principals) > 10 and len(users) == 0:
+            # Sanity check: if we had principals to find but got 0 users
+            if len(all_principal_ids) > 10 and len(users) == 0:
                 logger.error(
-                    "[scan] ANOMALY: %s SPNs discovered but 0 users for org=%s tenant=%s. "
+                    "[scan] ANOMALY: %s relevant principals but 0 users for org=%s tenant=%s. "
                     "Check for throttling, permissions, or pagination failure.",
-                    len(service_principals), self.db_org_id, self.azure_directory_id
+                    len(all_principal_ids), self.db_org_id, self.azure_directory_id
                 )
-            self._update_job_progress('discovering_identities', 40)
+            self._update_job_progress('discovering_identities', 42)
             if self._check_time_budget("users"):
                 _mark_remaining_timeout()
 
-        # Step 5: Discover Managed Identities
+        # Step 5.5: Discover Managed Identities
         logger.info("Discovering Managed Identities...")
         managed_identities = []
         logger.info("Found %s user-assigned managed identities", len(managed_identities))
 
         all_identities = service_principals + users + managed_identities
 
-        # Step 5a: Discover Entra Groups
-        if not _scan_timed_out:
-            logger.info("Discovering Entra Groups...")
-            self._update_job_progress('discovering_groups', 42)
-            try:
-                groups = await self._discover_groups()
-                scan_component_status["groups"] = "success"
-            except Exception as e:
-                logger.error("[scan] groups FAILED org=%s error=%s", self.db_org_id, e, exc_info=True)
-                scan_component_status["groups"] = "failed"
-                groups = []
-            logger.info("Found %s security groups", len(groups))
-            if self._check_time_budget("groups"):
-                _mark_remaining_timeout()
-
-        # Step 5b: Discover Group Memberships (nested up to 3 levels)
+        # Step 5c: Identity-centric memberOf enrichment (needs all_identities)
         if not _scan_timed_out:
             try:
-                group_memberships = await self._discover_group_memberships(groups)
-                self._update_job_progress('discovering_groups', 44)
-
-                # Step 5b2: Identity-centric memberOf enrichment
                 logger.info("Running identity-centric memberOf enrichment...")
                 group_memberships = await self._discover_identity_group_memberships(
                     all_identities, groups, group_memberships
                 )
                 total_memberships = sum(len(v) for v in group_memberships.values())
-                scan_component_status["memberships"] = "success"
             except Exception as e:
-                logger.error("[scan] memberships FAILED org=%s error=%s", self.db_org_id, e, exc_info=True)
-                scan_component_status["memberships"] = "failed"
+                logger.error("[scan] identity memberOf enrichment FAILED org=%s error=%s",
+                            self.db_org_id, e, exc_info=True)
 
         groups_with_members = sum(1 for v in group_memberships.values() if v)
         logger.info("After memberOf enrichment: %s groups with members, %s total memberships",
@@ -694,7 +707,7 @@ class AzureDiscoveryEngine:
             if scan_component_status["memberships"] == "success":
                 scan_component_status["memberships"] = "empty"
 
-        # Step 5c: Compute member/nested counts (rbac_roles populated at save time
+        # Step 5d: Compute member/nested counts (rbac_roles populated at save time
         # from the canonical role_assignments list to avoid JSONB drift — FIX A)
         from app.constants.roles import RBACRole
         PRIVILEGED_ROLES = {
@@ -3164,6 +3177,11 @@ class AzureDiscoveryEngine:
         Sets owned_objects, created_objects, owned_object_count, created_object_count,
         is_platform_spn, platform_spn_evidence on each identity dict.
         """
+        import os
+        if os.environ.get('DISABLE_OWNED_OBJECTS', 'false').lower() == 'true':
+            logger.info("[owned_objects] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
 
@@ -3295,9 +3313,13 @@ class AzureDiscoveryEngine:
         Time-boxed to MAX_PHASE_SECONDS (default 180s) and capped at
         MAX_SPNS_PROCESSED (default 500) to prevent scan stalls.
         """
+        import os
+        if os.environ.get('DISABLE_AUDIT_PROVENANCE', 'false').lower() == 'true':
+            logger.info("[audit_provenance] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
-        import os
         import time as _time
         from urllib.parse import quote
 
@@ -3533,6 +3555,11 @@ class AzureDiscoveryEngine:
         Calls GET /v1.0/auditLogs/signIns with servicePrincipalId filter.
         6-hour cache via setting key. Rate limit 150ms. Bails on 403.
         """
+        import os
+        if os.environ.get('DISABLE_SIGNIN_INTELLIGENCE', 'false').lower() == 'true':
+            logger.info("[signin_intelligence] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
         from urllib.parse import quote
@@ -4942,18 +4969,165 @@ class AzureDiscoveryEngine:
             logger.warning("Could not discover managed identities: %s", e)
         
         return managed_identities
-    
-    async def _discover_users(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
-        """Discover ALL users in the tenant via direct HTTP with pagination.
 
-        Every user is returned regardless of role assignments. The
-        principal_ids_with_roles set is only used to optimise manager lookups
-        (fetching managers for every user would be O(N) API calls).
+    # ── AG-75: Identity Inclusion Criteria ─────────────────────────────
+    def _collect_relevant_principal_ids(
+        self,
+        role_assignments: List[Dict],
+        entra_roles: List[Dict],
+        pim_map: Dict[str, Dict],
+        groups: List[Dict],
+        group_memberships: Dict[str, List[Dict]],
+        ownership_map: Dict[str, List[Dict]],
+        ca_policies: List[Dict],
+        service_principals: List[Dict],
+    ) -> Set[str]:
+        """Compute the canonical set of principal IDs with actionable access.
+
+        Returns a Set[str] of Azure AD object IDs satisfying inclusion criteria.
+        Also populates self._principal_access_paths: Dict[str, Dict] with
+        per-principal access_paths JSONB for persistence.
+        """
+        access_paths: Dict[str, Dict] = {}
+
+        def _ensure(pid: str):
+            if pid not in access_paths:
+                access_paths[pid] = {
+                    'direct_rbac': [],
+                    'direct_entra': [],
+                    'group_membership': [],
+                    'pim_eligible': [],
+                    'ca_targeted': [],
+                    'spn_ownership': [],
+                }
+
+        # 1. Direct RBAC principals
+        for ra in role_assignments:
+            pid = ra.get('principal_id')
+            if pid:
+                _ensure(pid)
+                access_paths[pid]['direct_rbac'].append({
+                    'role': ra.get('role_name', ''),
+                    'scope': ra.get('scope', ''),
+                })
+
+        # 2. Direct Entra role principals
+        for er in entra_roles:
+            pid = er.get('principal_id')
+            if pid:
+                _ensure(pid)
+                access_paths[pid]['direct_entra'].append({
+                    'role': er.get('role_name', ''),
+                })
+
+        # 3. PIM-eligible principals
+        for pid, pim_data in pim_map.items():
+            eligible = pim_data.get('eligible', [])
+            if eligible:
+                _ensure(pid)
+                for e in eligible:
+                    access_paths[pid]['pim_eligible'].append({
+                        'role': e.get('role_name', ''),
+                        'scope': e.get('directory_scope', '/'),
+                    })
+
+        # 4. Group members from role-bearing groups
+        group_id_set = {g['group_id'] for g in groups}
+        group_name_map = {g['group_id']: g.get('display_name', '') for g in groups}
+        role_bearing_group_ids = set(access_paths.keys()) & group_id_set
+
+        # Build group→role index for access_paths provenance
+        group_roles_index: Dict[str, List[str]] = {}
+        for ra in role_assignments:
+            pid = ra.get('principal_id')
+            if pid in role_bearing_group_ids:
+                group_roles_index.setdefault(pid, []).append(ra.get('role_name', ''))
+        for er in entra_roles:
+            pid = er.get('principal_id')
+            if pid in role_bearing_group_ids:
+                group_roles_index.setdefault(pid, []).append(er.get('role_name', ''))
+
+        expanded_from_groups = 0
+        for gid in role_bearing_group_ids:
+            members = group_memberships.get(gid, [])
+            g_name = group_name_map.get(gid, gid)
+            g_roles = group_roles_index.get(gid, [])
+            for member in members:
+                mid = member.get('member_id')
+                if mid and member.get('member_type') != 'group':
+                    _ensure(mid)
+                    access_paths[mid]['group_membership'].append({
+                        'group_id': gid,
+                        'group_name': g_name,
+                        'role': ', '.join(g_roles) if g_roles else '',
+                    })
+                    expanded_from_groups += 1
+
+        # 5. SPN owners (user type only)
+        spn_lookup = {sp.get('identity_id'): sp for sp in service_principals}
+        owner_count = 0
+        for spn_identity_id, owners in ownership_map.items():
+            sp = spn_lookup.get(spn_identity_id)
+            spn_obj_id = sp.get('object_id', '') if sp else ''
+            spn_name = sp.get('display_name', '') if sp else ''
+            for owner in owners:
+                if owner.get('owner_type') == 'user':
+                    oid = owner.get('owner_object_id')
+                    if oid:
+                        _ensure(oid)
+                        access_paths[oid]['spn_ownership'].append({
+                            'spn_id': spn_obj_id,
+                            'spn_name': spn_name,
+                        })
+                        owner_count += 1
+
+        # 6. CA policy targets (named users, not 'All')
+        ca_count = 0
+        for policy in ca_policies:
+            include_users = policy.get('include_users', [])
+            p_name = policy.get('display_name', '')
+            p_id = policy.get('policy_id', '')
+            for uid in include_users:
+                if uid and uid != 'All':
+                    _ensure(uid)
+                    access_paths[uid]['ca_targeted'].append({
+                        'policy_id': p_id,
+                        'policy_name': p_name,
+                    })
+                    ca_count += 1
+
+        self._principal_access_paths = access_paths
+        result_set = set(access_paths.keys())
+
+        logger.info(
+            "[_collect_relevant_principal_ids] %d unique principals "
+            "(RBAC=%d Entra=%d PIM=%d group_expanded=%d SPN_owners=%d CA=%d)",
+            len(result_set),
+            len({ra['principal_id'] for ra in role_assignments if ra.get('principal_id')}),
+            len({er['principal_id'] for er in entra_roles if er.get('principal_id')}),
+            len({pid for pid, d in pim_map.items() if d.get('eligible')}),
+            expanded_from_groups,
+            owner_count,
+            ca_count,
+        )
+
+        return result_set
+
+    async def _discover_users(self, principal_ids: Set[str]) -> List[Dict[str, Any]]:
+        """Discover users scoped to the AG-75 inclusion criteria principal set.
+
+        Only users whose Azure AD object ID is in principal_ids are returned.
+        Pages through all tenant users but filters client-side, with early
+        termination when all principals have been found.
         """
         import aiohttp
 
-        logger.info("[_discover_users] org=%s tenant=%s starting",
-                    self.db_org_id, self.azure_directory_id)
+        if not principal_ids:
+            logger.info("[_discover_users] No relevant principals — skipping user discovery")
+            return []
+
+        logger.info("[_discover_users] org=%s tenant=%s starting (target=%d principals)",
+                    self.db_org_id, self.azure_directory_id, len(principal_ids))
 
         try:
             token = self.credential.get_token("https://graph.microsoft.com/.default")
@@ -5033,14 +5207,24 @@ class AzureDiscoveryEngine:
                         # signInActivity retry — loop back with new URL
                         continue
 
-                    page_count = len(data.get('value', []))
+                    page_users = data.get('value', [])
+                    matched = [u for u in page_users if u.get('id') in principal_ids]
+                    all_users.extend(matched)
+
                     logger.info(
-                        "[_discover_users] org=%s page=%s users_this_page=%s total_so_far=%s",
-                        self.db_org_id, page, page_count, len(all_users) + page_count
+                        "[_discover_users] org=%s page=%s scanned=%s matched=%s found_so_far=%s/%s",
+                        self.db_org_id, page, len(page_users), len(matched),
+                        len(all_users), len(principal_ids)
                     )
 
-                    for u in data.get('value', []):
-                        all_users.append(u)
+                    # Early termination: found all principals
+                    if len(all_users) >= len(principal_ids):
+                        logger.info(
+                            "[_discover_users] All %d relevant principals found — "
+                            "stopping pagination early at page %d",
+                            len(all_users), page
+                        )
+                        break
 
                     url = data.get('@odata.nextLink')
                     if page >= self._MAX_GRAPH_PAGES:
@@ -5063,11 +5247,11 @@ class AzureDiscoveryEngine:
                 except Exception as e:
                     logger.warning("Failed to persist has_p2_license (users): %s", e)
 
-            # Fetch manager info only for users that have roles (optimisation)
+            # Fetch manager info for included users
             manager_map: dict[str, dict] = {}
             for u in all_users:
                 uid = u.get('id')
-                if uid and uid in principal_ids_with_roles:
+                if uid and uid in principal_ids:
                     try:
                         mgr = await asyncio.wait_for(self.graph_client.users.by_user_id(uid).manager.get(), timeout=GRAPH_SDK_TIMEOUT)
                         if mgr:
@@ -5148,13 +5332,13 @@ class AzureDiscoveryEngine:
                     'manager_upn': mgr_info.get('manager_upn'),
                     'account_category': self._classify_account_category(user_proxy, ice_config),
                     '_signin_activity_raw': _signin_raw,
+                    'access_paths': getattr(self, '_principal_access_paths', {}).get(uid, {}),
                 })
 
             guests = sum(1 for i in identities if i['identity_category'] == 'guest')
             humans = sum(1 for i in identities if i['identity_category'] == 'human_user')
-            logger.info("[_discover_users] Complete: org=%s total=%s human_user=%s guest=%s with_roles=%s",
-                        self.db_org_id, len(identities), humans, guests,
-                        sum(1 for i in identities if i['identity_id'] in principal_ids_with_roles))
+            logger.info("[_discover_users] Complete: org=%s total=%s human_user=%s guest=%s",
+                        self.db_org_id, len(identities), humans, guests)
             return identities
         except Exception as e:
             logger.error(
@@ -6554,7 +6738,7 @@ class AzureDiscoveryEngine:
 
         # Process ALL identities - don't filter any out
         for identity in identities:
-            if identity.get('identity_type') == 'user':
+            if identity.get('identity_type') in ('human_user', 'guest'):
                 if not identity.get('identity_category'):
                     identity['identity_category'] = 'human_user'
                 identity['is_microsoft_system'] = False
@@ -6706,7 +6890,7 @@ class AzureDiscoveryEngine:
             # 7. Orphaned identity
             # ============================================================
             if not has_roles and not has_permissions and not identity_app_roles:
-                if identity.get('identity_type') != 'user':
+                if identity.get('identity_type') not in ('human_user', 'guest'):
                     risk_factors.append(make_factor("ORPHANED_IDENTITY", "No role assignments"))
 
             # ============================================================
@@ -7144,9 +7328,23 @@ class AzureDiscoveryEngine:
         Falls back to directory audit log for identities with no ARM activity.
         Runs as a batch enrichment pass after _check_activity().
         """
+        import os
+        if os.environ.get('DISABLE_IP_ENRICHMENT', 'false').lower() == 'true':
+            logger.info("[ip_enrichment] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
+        import time as _time
         from urllib.parse import quote
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('IP_ENRICHMENT_MAX_SECONDS', '120'))
+        MAX_IDENTITIES_PROCESSED = int(os.environ.get('IP_ENRICHMENT_MAX_IDENTITIES', '300'))
+        processed = 0
+        enriched = 0
+        skipped_ms = 0
+        skipped_no_id = 0
 
         sub_ids = [s['id'] for s in self.subscriptions]
         if not sub_ids:
@@ -7171,7 +7369,6 @@ class AzureDiscoveryEngine:
             logger.debug("Graph token acquisition failed for audit fallback: %s", e)
             graph_headers = None
 
-        enriched = 0
         scanner_client_id = getattr(self, 'client_id', None)
         scanner_ip = getattr(self, '_scanner_ip', None)
 
@@ -7278,12 +7475,42 @@ class AzureDiscoveryEngine:
             return False
 
         # ── Main enrichment loop ──
-        async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+        IP_ENRICHMENT_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+        async with aiohttp.ClientSession(timeout=IP_ENRICHMENT_TIMEOUT) as session:
             for identity in identities:
+                processed += 1
+
+                # Progress log every 50 identities
+                if processed % 50 == 0:
+                    elapsed = _time.monotonic() - phase_start
+                    logger.info(
+                        "[ip_enrichment] progress: processed=%d enriched=%d elapsed=%.1fs",
+                        processed, enriched, elapsed
+                    )
+
+                # Phase budget check
+                elapsed = _time.monotonic() - phase_start
+                if elapsed > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[ip_enrichment] TIME BUDGET EXCEEDED at %.1fs — "
+                        "enriched %d/%d identities, skipping remainder",
+                        elapsed, enriched, processed
+                    )
+                    break
+                if processed >= MAX_IDENTITIES_PROCESSED:
+                    logger.warning(
+                        "[ip_enrichment] IDENTITY CAP REACHED (%d) — "
+                        "enriched %d identities, skipping remainder",
+                        MAX_IDENTITIES_PROCESSED, enriched
+                    )
+                    break
+
                 if identity.get('is_microsoft_system'):
+                    skipped_ms += 1
                     continue
                 principal_id = identity.get('object_id') or identity.get('principal_id')
                 if not principal_id:
+                    skipped_no_id += 1
                     continue
 
                 # Scanner self-IP: assign to the discovery SPN (we know our own IP)
@@ -7316,8 +7543,12 @@ class AzureDiscoveryEngine:
                         enriched += 1
                         continue
 
-        if enriched > 0:
-            logger.info("IP enrichment: %s identities enriched (ARM + directory audit + scanner self)", enriched)
+        elapsed = _time.monotonic() - phase_start
+        logger.info(
+            "[ip_enrichment] COMPLETE: processed=%d enriched=%d "
+            "skipped_ms=%d skipped_no_id=%d elapsed=%.1fs",
+            processed, enriched, skipped_ms, skipped_no_id, elapsed
+        )
 
     def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None, pim_map: Dict[str, Dict] = None, ca_policies: List[Dict] = None) -> int:
         """Save all identities to database (customer-owned only, Microsoft system apps excluded at discovery)"""
@@ -7768,7 +7999,7 @@ class AzureDiscoveryEngine:
 
     def _create_result(self, identities: List[Dict], role_assignments: List[Dict], run_id: int) -> DiscoveryResult:
         service_principals = [i for i in identities if i['identity_type'] == 'service_principal']
-        users = [i for i in identities if i['identity_type'] == 'user']
+        users = [i for i in identities if i['identity_type'] in ('human_user', 'guest')]
         managed_identities = [i for i in identities if i['identity_type'] == 'managed_identity']
         
         critical_count = sum(1 for i in identities if i['risk_level'] == 'critical')
