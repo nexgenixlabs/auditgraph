@@ -4247,8 +4247,15 @@ class AzureDiscoveryEngine:
         Returns:
             Dictionary mapping identity_id to list of credentials
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — credentials are Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_credentials] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         credentials_map = {}
-        
+
         logger.info("Discovering SPN Credentials...")
         
         for sp in service_principals:
@@ -4354,6 +4361,13 @@ class AzureDiscoveryEngine:
         Returns:
             Dictionary mapping identity_id to list of permissions
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — permissions are Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_permissions] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         permissions_map: Dict[str, List[Dict]] = {}
         app_perm_total = 0
         delegated_perm_total = 0
@@ -4504,15 +4518,22 @@ class AzureDiscoveryEngine:
         """
         Discover custom application role assignments for service principals.
         Returns assignments to custom apps (NOT Microsoft Graph).
-        
+
         Similar to _discover_permissions but filters OUT Microsoft Graph.
-        
+
         Args:
             service_principals: List of service principal dicts
-            
+
         Returns:
             Dict mapping identity_id to list of app role assignments
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — app roles are Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_app_roles] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         logger.info("Discovering Custom App Roles...")
         app_roles_map = {}
         found_count = 0
@@ -4571,6 +4592,13 @@ class AzureDiscoveryEngine:
         Returns:
             Dict mapping identity_id -> list of owner dicts
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — ownership is Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_ownership] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         logger.info("Discovering Application Owners...")
         ownership_map = {}
         found_count = 0
@@ -5919,27 +5947,27 @@ class AzureDiscoveryEngine:
                     members: list[dict] = []
                     url: str | None = (
                         f"https://graph.microsoft.com/v1.0/groups/{group_id}/members"
-                        f"?$select=id,displayName,@odata.type&$top=999"
+                        f"?$select=id,displayName&$top=999"
                     )
 
                     while url:
                         try:
-                            async with self._graph_semaphore:
-                                async with session.get(url, headers=headers) as resp:
-                                    if resp.status == 403:
-                                        if not first_error_logged:
-                                            logger.error(
-                                                "GROUP MEMBERSHIP FETCH FAILED: 403 Forbidden. "
-                                                "The AuditGraph service principal is missing "
-                                                "GroupMember.Read.All or Directory.Read.All permission. "
-                                                "Grant this permission in Azure Portal → App Registrations → "
-                                                "API Permissions, then re-run discovery."
-                                            )
-                                            first_error_logged = True
-                                        break
-                                    if resp.status != 200:
-                                        break
-                                    data = await resp.json()
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status == 403:
+                                    if not first_error_logged:
+                                        logger.error(
+                                            "GROUP MEMBERSHIP FETCH FAILED: 403 Forbidden. "
+                                            "The AuditGraph service principal is missing "
+                                            "GroupMember.Read.All or Directory.Read.All permission. "
+                                            "Grant this permission in Azure Portal → App Registrations → "
+                                            "API Permissions, then re-run discovery."
+                                        )
+                                        first_error_logged = True
+                                    break
+                                if resp.status != 200:
+                                    logger.warning("[memberships] group %s returned status %s — skipping", group_id, resp.status)
+                                    break
+                                data = await resp.json()
 
                             for m in data.get('value', []):
                                 odata_type = m.get('@odata.type', '')
@@ -5978,19 +6006,31 @@ class AzureDiscoveryEngine:
 
                     return members
 
-                # Fetch memberships sequentially with rate limiting
-                for i, group in enumerate(groups):
+                # Fetch memberships in parallel with concurrency limiter
+                sem = _asyncio.Semaphore(20)
+
+                async def _fetch_group(group):
                     gid = group.get('group_id')
                     if not gid:
+                        return (None, [])
+                    async with sem:
+                        visited: set = set()
+                        members = await _fetch_members(gid, 0, visited)
+                        return (gid, members)
+
+                tasks = [_fetch_group(g) for g in groups]
+                results = await _asyncio.gather(*tasks, return_exceptions=True)
+
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.warning("Group membership task %s failed: %s", i, result)
                         continue
-                    visited: set = set()
-                    members = await _fetch_members(gid, 0, visited)
-                    memberships[gid] = members
+                    gid, members = result
+                    if gid:
+                        memberships[gid] = members
 
-                    if i > 0 and i % 50 == 0:
-                        logger.info("Group membership progress: %s/%s groups", i, len(groups))
-
-                    await _asyncio.sleep(0.15)  # Rate limit
+                    if (i + 1) % 50 == 0:
+                        logger.info("Group membership progress: %s/%s groups", i + 1, len(groups))
 
             return memberships
 
@@ -6144,6 +6184,9 @@ class AzureDiscoveryEngine:
     def _save_entra_groups(self, run_id: int, groups: List[Dict], group_memberships: Dict[str, List[Dict]]):
         """Save discovered groups and their memberships to the database."""
         saved = 0
+        membership_saved = 0
+        membership_failed = 0
+        total_membership_attempted = 0
         for group in groups:
             try:
                 group_db_id = self.db.save_entra_group(run_id, group)
@@ -6154,10 +6197,20 @@ class AzureDiscoveryEngine:
                 # Save memberships for this group
                 members = group_memberships.get(group.get('group_id', ''), [])
                 for member in members:
+                    total_membership_attempted += 1
                     try:
                         self.db.save_entra_group_membership(group_db_id, member, run_id)
+                        membership_saved += 1
                     except Exception as e:
-                        logger.debug("Save membership error: %s", e)
+                        membership_failed += 1
+                        logger.warning(
+                            "Save membership error for group_db_id=%s member=%s: %s",
+                            group_db_id, member.get('member_object_id', '?'), e,
+                        )
+                        try:
+                            self.db._rollback()
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error("Save group error for %s: %s", group.get('display_name'), e)
                 try:
@@ -6165,7 +6218,10 @@ class AzureDiscoveryEngine:
                 except Exception:
                     pass
 
-        logger.info("Saved %s/%s Entra groups with memberships", saved, len(groups))
+        logger.info(
+            "Saved %s/%s Entra groups | memberships: %s saved, %s failed out of %s attempted",
+            saved, len(groups), membership_saved, membership_failed, total_membership_attempted,
+        )
 
     def _enrich_keyvault_metadata(self, role_assignments: List[Dict]) -> None:
         """Fetch key/secret/certificate metadata for vaults found in role assignment scopes.
@@ -6302,58 +6358,77 @@ class AzureDiscoveryEngine:
         tenants typically have ~60-80 built-in role definitions reused across
         many assignments.
         """
+        MAX_ATTEMPTS = 3
+        role_assignments_response = None
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                logger.info("Discovering Entra ID Directory Roles (attempt %s/%s)...", attempt, MAX_ATTEMPTS)
+                role_assignments_response = await asyncio.wait_for(
+                    self.graph_client.role_management.directory.role_assignments.get(),
+                    timeout=GRAPH_SDK_TIMEOUT,
+                )
+                break  # success
+            except Exception as e:
+                logger.warning(
+                    "Entra role assignment fetch attempt %s/%s failed: %s",
+                    attempt, MAX_ATTEMPTS, e, exc_info=True,
+                )
+                if attempt < MAX_ATTEMPTS:
+                    await asyncio.sleep(2 ** attempt)  # exponential backoff: 2s, 4s
+                else:
+                    logger.error("Entra role discovery failed after %s attempts — returning empty", MAX_ATTEMPTS)
+                    return []
+
+        entra_roles = []
+        entra_role_def_cache: Dict[str, str] = {}
+
         try:
-            logger.info("Discovering Entra ID Directory Roles...")
-
-            # Get all directory role assignments
-            role_assignments_response = await asyncio.wait_for(self.graph_client.role_management.directory.role_assignments.get(), timeout=GRAPH_SDK_TIMEOUT)
-
-            entra_roles = []
-            entra_role_def_cache: Dict[str, str] = {}
-
             if role_assignments_response and role_assignments_response.value:
                 for assignment in role_assignments_response.value:
-                    # Include ALL Entra role assignments
-                        rd_id = assignment.role_definition_id
-                        if rd_id in entra_role_def_cache:
-                            role_name = entra_role_def_cache[rd_id]
-                        else:
-                            # Get role definition to get role name
-                            try:
-                                role_def = await asyncio.wait_for(self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(rd_id).get(), timeout=GRAPH_SDK_TIMEOUT)
-                                role_name = role_def.display_name if role_def else "Unknown Role"
-                            except Exception:
-                                role_name = "Unknown Role"
-                            entra_role_def_cache[rd_id] = role_name
+                    rd_id = assignment.role_definition_id
+                    if rd_id in entra_role_def_cache:
+                        role_name = entra_role_def_cache[rd_id]
+                    else:
+                        # Get role definition to get role name
+                        try:
+                            role_def = await asyncio.wait_for(self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(rd_id).get(), timeout=GRAPH_SDK_TIMEOUT)
+                            role_name = role_def.display_name if role_def else "Unknown Role"
+                        except Exception:
+                            role_name = "Unknown Role"
+                        entra_role_def_cache[rd_id] = role_name
 
-                        # Calculate Entra role risk level
-                        risk_level, why_critical = self._calculate_entra_role_risk(role_name)
+                    # Calculate Entra role risk level
+                    risk_level, why_critical = self._calculate_entra_role_risk(role_name)
 
-                        entra_roles.append({
-                            'principal_id': assignment.principal_id,
-                            'role_name': role_name,
-                            'role_definition_id': rd_id,
-                            'directory_scope': assignment.directory_scope_id or '/',
-                            # Usage intelligence fields
-                            'usage_status': 'unknown',
-                            'assigned_on': None,  # Entra doesn't expose this easily
-                            'days_since_assigned': None,
-                            'redundant_with': None,
-                            'role_type': 'entra',
-                            'risk_level': risk_level,
-                            'why_critical': why_critical,
-                        })
+                    entra_roles.append({
+                        'principal_id': assignment.principal_id,
+                        'role_name': role_name,
+                        'role_definition_id': rd_id,
+                        'directory_scope': assignment.directory_scope_id or '/',
+                        # Usage intelligence fields
+                        'usage_status': 'unknown',
+                        'assigned_on': None,  # Entra doesn't expose this easily
+                        'days_since_assigned': None,
+                        'redundant_with': None,
+                        'role_type': 'entra',
+                        'risk_level': risk_level,
+                        'why_critical': why_critical,
+                    })
 
-                        if len(entra_roles) <= 10:
-                            logger.info("Entra role: %s", role_name)
+                    if len(entra_roles) <= 10:
+                        logger.info("Entra role: %s", role_name)
+
+            if len(entra_roles) == 0:
+                logger.warning("Entra role discovery returned ZERO assignments — verify RoleManagement.Read.Directory permission")
 
             logger.info("Found %s Entra ID role assignments (%d unique role defs cached)",
                         len(entra_roles), len(entra_role_def_cache))
             return entra_roles
 
         except Exception as e:
-            logger.error("Error discovering Entra roles: %s", e)
-            return []
+            logger.error("Error processing Entra role assignments: %s", e, exc_info=True)
+            return entra_roles  # return whatever we got so far
 
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
