@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 
 
 interface NavItem {
@@ -107,6 +108,7 @@ const billingIcon = icon('M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 
 
 const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
   const location = useLocation();
+  const { isDemo } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [openSubGroups, setOpenSubGroups] = useState<Record<string, boolean>>({});
   const navGroups: NavGroup[] = useMemo(() => {
@@ -128,7 +130,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#8b5cf6',
         items: [
           { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/ai-agents', label: 'AI Agents', icon: agentBotIcon },
+          { to: '/ai-agents', label: 'AI Identities', icon: agentBotIcon },
           { to: '/service-accounts', label: 'Privileged Access', icon: governanceIcon },
           { to: '/identity-graph', label: 'Identity Graph', icon: accessGraphIcon },
         ],
@@ -320,8 +322,13 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         })}
       </nav>
 
-      {/* Bottom section: Collapse toggle */}
+      {/* Bottom section: Demo badge + Collapse toggle */}
       <div className="border-t px-2 py-2 space-y-1" style={{ borderColor: 'var(--border-subtle)' }}>
+        {isDemo && !collapsed && (
+          <div className="px-3 pb-0.5" style={{ fontSize: 11, color: 'var(--color-text-tertiary, #6b7280)' }}>
+            Demo mode &middot; simulated data
+          </div>
+        )}
         {/* Collapse toggle */}
         <button
           onClick={() => setCollapsed(!collapsed)}

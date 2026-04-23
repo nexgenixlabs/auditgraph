@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { shouldShowRemediation } from '../utils/displayHelpers';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import { getBreachInfo } from '../constants/breachExamples';
 
 // ─── Theme constants ───
 const R = {
@@ -58,6 +59,29 @@ interface PlaybookRef {
 
 const STATUS_OPTIONS = ['all', 'new', 'planned', 'in_progress', 'verified', 'closed'];
 const PRIORITY_OPTIONS = ['all', 'critical', 'high', 'medium', 'low'];
+
+function deriveImpact(action: RemediationAction): string | null {
+  const allRoles = (action.roles || []).concat(action.role_name ? [action.role_name] : []);
+  if (allRoles.length === 0) return null;
+  const joined = allRoles.map(r => r.toLowerCase()).join(' ');
+  const scope = (action.scope || '').toLowerCase();
+  const isSub = /^\/subscriptions\/[^/]+$/.test(scope);
+  if (joined.includes('owner'))
+    return isSub ? 'Full control of IAM, resources, and billing \u2014 complete subscription takeover'
+      : 'Can modify all resources and grant access within scope';
+  if (joined.includes('user access administrator'))
+    return 'Can grant any role to any identity \u2014 privilege escalation to full control';
+  if (joined.includes('global administrator') || joined.includes('privileged role'))
+    return 'Tenant-wide administrative control over all directory objects';
+  if (joined.includes('contributor'))
+    return isSub ? 'Can deploy, modify, or destroy all resources in the subscription'
+      : 'Can create and modify resources within scope';
+  if (joined.includes('key vault'))
+    return 'Can extract encryption keys, certificates, and stored secrets';
+  if (joined.includes('security admin'))
+    return 'Can modify security policies and access security configurations';
+  return 'Elevated access to cloud resources \u2014 review scope and necessity';
+}
 
 // ── Script generation (PowerShell + Azure CLI) ──
 function generateScript(a: RemediationAction, format: 'powershell' | 'azure_cli' | 'terraform_note'): string {
@@ -322,14 +346,26 @@ export default function RemediationCenter() {
   const [priorityFilter, setPriorityFilter] = useState(searchParams.get('priority') || 'all');
   const [selectedAction, setSelectedAction] = useState<RemediationAction | null>(null);
   const [msExcludedCount, setMsExcludedCount] = useState(0);
+  const [currentPostureScore, setCurrentPostureScore] = useState<number | null>(null);
+  const [attackPathCount, setAttackPathCount] = useState<number | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [generatedRes, playbookRes] = await Promise.all([
+      const [generatedRes, playbookRes, overviewRes] = await Promise.all([
         fetch(withConnection('/api/remediation/generated')),
         fetch(withConnection('/api/soar/playbooks')),
+        fetch(withConnection('/api/security/overview')),
       ]);
+
+      // Extract posture score and attack path count from overview
+      if (overviewRes.ok) {
+        try {
+          const ov = await overviewRes.json();
+          setCurrentPostureScore(ov.posture_score ?? null);
+          setAttackPathCount(ov.attack_paths?.identities_with_paths ?? null);
+        } catch { /* silent */ }
+      }
 
       // Primary source: auto-generated remediations from risk tables
       const genData = generatedRes.ok ? await generatedRes.json() : { actions: [], stats: {} };
@@ -448,6 +484,18 @@ export default function RemediationCenter() {
     { label: 'Completed This Week', value: stats.completed_this_week, color: '#4ADE80', filterVal: 'closed' },
   ];
 
+  // ── Projected impact computation ──
+  const criticalItems = actions.filter(r => r.priority === 'critical' && r.status === 'new');
+  const totalRiskReduction = criticalItems.slice(0, 6).reduce((sum, r) => sum + (r.risk_reduction || 0), 0);
+  const projectedPosture = currentPostureScore !== null
+    ? Math.min(100, currentPostureScore + Math.round(totalRiskReduction / 10))
+    : null;
+  const projectedPaths = attackPathCount !== null
+    ? Math.max(0, attackPathCount - criticalItems.slice(0, 6).length * 7)
+    : null;
+  const showImpactBanner = !loading && criticalItems.length > 0
+    && currentPostureScore !== null && attackPathCount !== null;
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
@@ -477,6 +525,32 @@ export default function RemediationCenter() {
           </button>
         ))}
       </div>
+
+      {/* Projected Impact Banner */}
+      {showImpactBanner && (
+        <div
+          className="flex items-center gap-2 rounded-lg px-4 py-2.5 text-xs"
+          style={{
+            backgroundColor: 'rgba(15, 23, 42, 0.5)',
+            borderLeft: '3px solid #14b8a6',
+          }}
+        >
+          <span style={{ color: R.textSecondary }}>Resolve top {Math.min(6, criticalItems.length)} critical items &rarr;</span>
+          <span style={{ color: R.textSecondary }}>
+            Posture Score{' '}
+            <span style={{ color: R.text }}>{currentPostureScore}</span>
+            {' \u2192 '}
+            <span style={{ color: '#22c55e', fontWeight: 600 }}>{projectedPosture}</span>
+          </span>
+          <span style={{ color: R.textMuted }}>&middot;</span>
+          <span style={{ color: R.textSecondary }}>
+            Attack Paths{' '}
+            <span style={{ color: R.text }}>{attackPathCount}</span>
+            {' \u2192 '}
+            <span style={{ color: '#22c55e', fontWeight: 600 }}>{projectedPaths}</span>
+          </span>
+        </div>
+      )}
 
       {/* Microsoft exclusion banner */}
       {msExcludedCount > 0 && (
@@ -698,6 +772,30 @@ export default function RemediationCenter() {
               {selectedAction.description && (
                 <p className="text-sm" style={{ color: R.textSecondary }}>{selectedAction.description}</p>
               )}
+
+              {/* Why this matters */}
+              {deriveImpact(selectedAction) && (() => {
+                const impact = deriveImpact(selectedAction);
+                const roleName = selectedAction.role_name || (selectedAction.roles || [])[0] || '';
+                const breach = getBreachInfo(roleName);
+                return (
+                  <div className="space-y-0 rounded overflow-hidden">
+                    <div className="text-xs p-2 rounded-t" style={{ backgroundColor: 'rgba(255,109,0,0.08)', color: R.priority[selectedAction.priority] || '#FF6D00' }}>
+                      <span className="font-semibold">Why this matters:</span> {impact}
+                    </div>
+                    {breach && (
+                      <>
+                        <div className="text-[11px] px-2 py-1.5" style={{ borderLeft: '2px solid #F59E0B', backgroundColor: 'rgba(245,158,11,0.06)', color: '#92400E' }}>
+                          <span className="font-semibold">Real-world precedent:</span> {breach.breach}
+                        </div>
+                        <div className="text-[11px] px-2 py-1.5 rounded-b" style={{ borderLeft: '2px solid #EF4444', backgroundColor: 'rgba(239,68,68,0.06)', color: '#991B1B' }}>
+                          <span className="font-semibold">Penalty exposure:</span> {breach.penalty}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Metrics */}
               <div className="grid grid-cols-2 gap-3">

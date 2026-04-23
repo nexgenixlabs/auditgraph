@@ -1,6 +1,7 @@
 import React from 'react';
 import type { PostureV31Response } from '../../utils/cisoViewModel';
-import { POSTURE_CONFIDENCE_COLOR } from '../../constants/cisoColors';
+import { POSTURE_CONFIDENCE_COLOR, CONFIDENCE_DISPLAY_LABEL, CONFIDENCE_TOOLTIP } from '../../constants/cisoColors';
+import { useAuth } from '../../contexts/AuthContext';
 
 function formatFreshness(isoString: string | null | undefined): string {
   if (!isoString) return '—';
@@ -20,6 +21,7 @@ function formatFreshness(isoString: string | null | undefined): string {
 }
 
 export function DataIntegrityFooter({ data }: { data: PostureV31Response }) {
+  const { isDemo } = useAuth();
   const scanMeta = data?.scan_metadata;
   const coverage = data?.coverage;
   if (!coverage) return null;
@@ -33,8 +35,12 @@ export function DataIntegrityFooter({ data }: { data: PostureV31Response }) {
 
   return (
     <div className="mx-3 mb-3 px-3 py-2 rounded-md bg-[#111827] border border-white/5 flex items-center justify-between text-xs text-gray-500 flex-shrink-0">
-      {/* Left: freshness */}
-      <span>Last analyzed: <span className="text-gray-400">{freshness}</span></span>
+      {/* Left: demo label + freshness */}
+      <span className="flex items-center gap-2">
+        {isDemo && <span style={{ fontSize: 11, color: 'var(--color-text-tertiary, #6b7280)' }}>Demo mode&nbsp;&middot;&nbsp;simulated data</span>}
+        {isDemo && <span className="text-gray-600">&middot;</span>}
+        <span>Last analyzed: <span className="text-gray-400">{freshness}</span></span>
+      </span>
 
       {/* Center: scope summary */}
       <div className="flex items-center gap-1.5">
@@ -45,10 +51,10 @@ export function DataIntegrityFooter({ data }: { data: PostureV31Response }) {
       </div>
 
       {/* Right: confidence level */}
-      <span className="flex items-center gap-1">
+      <span className="flex items-center gap-1" title={CONFIDENCE_TOOLTIP}>
         <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: confColor }} />
-        <span style={{ color: confColor }} className="capitalize">
-          {confidence} ({activeSources}/{totalSources} Sources Active)
+        <span style={{ color: confColor }}>
+          Confidence: {CONFIDENCE_DISPLAY_LABEL[confidence] || 'Improving'} ({activeSources}/{totalSources} Sources Active)
         </span>
       </span>
     </div>

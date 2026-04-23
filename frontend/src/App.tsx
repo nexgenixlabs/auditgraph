@@ -82,8 +82,9 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
 import Sidebar from './components/layout/Sidebar';
 import TopBar from './components/layout/TopBar';
+import { TrialBanner } from './components/layout/TrialBanner';
 import CopilotPanel from './components/CopilotPanel';
-import DemoBanner from './components/DemoBanner';
+
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { OrganizationProvider, useOrganization } from './contexts/TenantContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
@@ -123,6 +124,8 @@ function AppContent() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [orgStage, setTenantStage] = useState<string>('active');
+  const [tenantPlan, setTenantPlan] = useState<string>('');
+  const [trialExpiresAt, setTrialExpiresAt] = useState<string | null>(null);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -161,8 +164,9 @@ function AppContent() {
     Promise.all([
       fetch('/api/organization/stage').then(r => r.ok ? r.json().catch(() => null) : null),
       fetch('/api/discovery/status').then(r => r.ok ? r.json().catch(() => null) : null),
+      fetch('/api/tenant/config').then(r => r.ok ? r.json().catch(() => null) : null),
     ])
-      .then(([stageData, discData]) => {
+      .then(([stageData, discData, configData]) => {
         const stage = stageData?.stage || 'active';
         const hasSnapshot = discData?.has_snapshot || false;
         // If discovery data exists, unlock the dashboard regardless of onboarding stage
@@ -170,6 +174,11 @@ function AppContent() {
           setTenantStage('active');
         } else {
           setTenantStage(stage);
+        }
+        // Trial/plan info for expiry banner
+        if (configData) {
+          setTenantPlan(configData.plan || '');
+          setTrialExpiresAt(configData.trial_expires_at || null);
         }
       })
       .catch(() => {});
@@ -270,7 +279,6 @@ function AppContent() {
         {/* All other routes - with sidebar + topbar, protected */}
         <Route path="/*" element={
           <ProtectedRoute>
-            <DemoBanner />
             <div className="min-h-screen" style={{ backgroundColor: 'var(--bg-surface)' }}>
               {/* Top Bar */}
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => openCopilot()} />
@@ -283,6 +291,9 @@ function AppContent() {
 
               {/* AI Security Copilot Panel (Phase 79 + Investigation Enhancement) */}
               <CopilotPanel open={copilotState.open} onClose={closeCopilot} />
+
+              {/* Trial Expiry Banner */}
+              <TrialBanner plan={tenantPlan} trialExpiresAt={trialExpiresAt} />
 
               {/* Page Content */}
               <main className="min-h-screen w-full overflow-x-hidden" style={{ paddingLeft: 'var(--sidebar-width, 220px)', paddingTop: 'var(--header-height, 56px)' }}>

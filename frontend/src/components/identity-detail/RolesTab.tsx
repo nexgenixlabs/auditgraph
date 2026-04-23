@@ -9,6 +9,7 @@ import {
 // Role usage primitives are the canonical source for all usage display.
 // Every tab uses the same normalization + badge logic. Do not inline.
 import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../../utils/roleUtils';
+import { getBreachInfo } from '../../constants/breachExamples';
 
 interface RolesTabProps {
   identity: IdentityDetailsResponse['identity'];
@@ -133,9 +134,34 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
           Candidate for removal
         </div>
       )}
-      {r.why_critical && (
-        <div className="text-xs text-gray-700 mt-2 bg-red-50 p-2 rounded">{r.why_critical}</div>
-      )}
+      {r.why_critical && (() => {
+        const breach = getBreachInfo(r.role_name || r.display_name || r.name || '');
+        const isRecentlyActive = r.why_critical &&
+          !r.why_critical.includes('never signed in') &&
+          !r.why_critical.includes('is disabled') &&
+          !r.why_critical.includes('expired') &&
+          !r.why_critical.includes('dormant') &&
+          !r.why_critical.includes('stale');
+        return (
+          <div className="mt-2 space-y-0 rounded overflow-hidden">
+            <div className="text-xs text-gray-700 bg-red-50 p-2">{r.why_critical}</div>
+            {breach && !isRecentlyActive ? (
+              <>
+                <div className="text-[11px] text-amber-800 bg-amber-50/60 border-l-2 border-amber-400 px-2 py-1.5">
+                  <span className="font-semibold">Real-world precedent:</span> {breach.breach}
+                </div>
+                <div className="text-[11px] text-red-800 bg-red-50/60 border-l-2 border-red-400 px-2 py-1.5">
+                  <span className="font-semibold">Penalty exposure:</span> {breach.penalty}
+                </div>
+              </>
+            ) : isRecentlyActive ? (
+              <div className="text-[11px] text-emerald-700 bg-emerald-50/60 border-l-2 border-emerald-400 px-2 py-1.5">
+                Recently active — monitor for anomalous behavior
+              </div>
+            ) : null}
+          </div>
+        );
+      })()}
       {intel && (
         <div className="flex items-center gap-2 mt-2">
           {intel.attack_patterns.length > 0 && (

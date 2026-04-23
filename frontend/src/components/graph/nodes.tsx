@@ -495,6 +495,40 @@ export function KeyVaultItemNode({ data }: NodeProps) {
   );
 }
 
+// Security group node — shows group membership with inherited role badges
+export function SecurityGroupNode({ data }: NodeProps) {
+  const roles = (data.roles as RoleData[]) || [];
+  const memberCount = (data.member_count as number) || 0;
+  const isNested = !!data.is_nested;
+  const isPrivileged = !!data.is_privileged;
+  const borderColor = isPrivileged ? 'border-violet-500' : 'border-violet-300';
+  const bgColor = isPrivileged ? 'bg-violet-100' : 'bg-violet-50';
+  return (
+    <div
+      title={`Security Group: ${data.label}\nMembers: ${memberCount}${isNested ? ' (nested)' : ''}${roles.length ? '\nRoles: ' + roles.map(r => r.name).join(', ') : ''}`}
+      className={`px-4 py-2.5 rounded-lg border-2 ${borderColor} ${bgColor} shadow-sm max-w-[260px]`}
+    >
+      <Handle type="target" position={Position.Left} className="!bg-violet-400" />
+      <div className="flex items-center gap-2">
+        <svg className="w-4 h-4 text-violet-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+        <div className="min-w-0">
+          <div className="text-[9px] font-bold text-violet-600 uppercase">
+            {isNested ? 'Nested Group' : 'Security Group'}
+          </div>
+          <div className="text-xs font-medium text-gray-900 truncate">{data.label as string}</div>
+          {memberCount > 0 && (
+            <div className="text-[9px] text-gray-500">{memberCount} members</div>
+          )}
+        </div>
+      </div>
+      <InlineRoleBadges roles={roles} />
+      <Handle type="source" position={Position.Right} className="!bg-violet-400" />
+    </div>
+  );
+}
+
 export const nodeTypes = {
   identity: IdentityNode,
   risk_summary: RiskSummaryNode,
@@ -512,4 +546,5 @@ export const nodeTypes = {
   ai_agent: AgentNode,
   keyvault: KeyVaultNode,
   keyvault_item: KeyVaultItemNode,
+  security_group: SecurityGroupNode,
 };

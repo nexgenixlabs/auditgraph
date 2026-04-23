@@ -306,6 +306,7 @@ def resolve_last_seen_multisource(row):
         'source': best_label,
         'available': True,
         'confidence': best_conf,
+        'timestamp': best_dt.isoformat(),
     }
 
 
@@ -727,9 +728,11 @@ def build_identity_state(row, roles=None, attack_path_count=0):
     return {
         # Activity signals
         'last_seen': last_seen_info['display'],
+        'last_seen_display': last_seen_info['display'],
         'last_seen_source': last_seen_info['source'],
         'last_seen_available': last_seen_info['available'],
         'last_seen_confidence': last_seen_info['confidence'],
+        'last_seen_timestamp': last_seen_info.get('timestamp'),
         'activity_label': activity_label,
         'activity_detail': activity_detail,
         'auth_activity': auth_activity,

@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react';
 
+interface StageTimingEntry {
+  started: number;
+  elapsed: number;
+}
+
 interface SnapshotJob {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -15,6 +20,8 @@ interface SnapshotJob {
   duration_seconds?: number;
   connection_label?: string;
   connection_cloud?: string;
+  stage_timings?: Record<string, StageTimingEntry>;
+  estimated_remaining_seconds?: number | null;
 }
 
 interface Props {
@@ -143,6 +150,8 @@ export function DiscoveryProgressModal({
   const subscriptions = job?.subscriptions_discovered || 0;
   const label = job?.connection_label || connectionLabel;
   const cloud = job?.connection_cloud || connectionCloud;
+  const eta = job?.estimated_remaining_seconds;
+  const stageTimings = job?.stage_timings || {};
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -205,13 +214,19 @@ export function DiscoveryProgressModal({
                     <span className="w-3 h-3 rounded-full bg-gray-200 dark:bg-slate-600" />
                   )}
                 </span>
-                <span className={`text-sm ${
+                <span className={`text-sm flex-1 ${
                   isDone ? 'text-gray-500 dark:text-slate-400' :
                   isActive ? 'text-blue-700 dark:text-blue-400 font-medium' :
                   'text-gray-400 dark:text-slate-500'
                 }`}>
                   {phase.icon} {phase.label}
                 </span>
+                {/* Per-phase elapsed time */}
+                {(isDone || isActive) && stageTimings[phase.key] && (
+                  <span className="text-[10px] font-mono text-gray-400 dark:text-slate-500 tabular-nums">
+                    {formatDuration(Math.round(stageTimings[phase.key].elapsed))}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -241,6 +256,11 @@ export function DiscoveryProgressModal({
               )}
               <div className="flex items-center gap-1 ml-auto">
                 <span className="font-mono">{formatDuration(job?.duration_seconds || elapsed)}</span>
+                {!completed && !failed && eta != null && eta > 0 && (
+                  <span className="text-blue-500 dark:text-blue-400 font-mono ml-2">
+                    ~{formatDuration(eta)} left
+                  </span>
+                )}
               </div>
             </div>
           </div>

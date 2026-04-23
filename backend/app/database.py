@@ -469,6 +469,7 @@ class Database:
         self._organization_id = organization_id
         self._from_pool = False  # Track whether conn came from pool
         self._is_admin = (organization_id is None)
+        self._batch_mode = False  # Per-instance batch commit flag
 
         # Guard: block or warn if admin mode is used inside a Flask request
         # without an explicit reason.  Catches accidental Database() calls in handlers.
@@ -577,12 +578,36 @@ class Database:
                     f"'{organization_id}', got '{actual}'"
                 )
 
+    # ── Batch commit mode ─────────────────────────────────────────
+    # When _batch_mode is True, _commit() becomes a no-op.
+    # Callers use _force_commit() at batch boundaries and
+    # enter_batch_mode() / exit_batch_mode() to toggle.
+    # NOTE: _batch_mode is set per-instance in __init__ (default False).
+
+    def enter_batch_mode(self):
+        """Suppress per-row commits. Caller must call _force_commit() at batch boundaries."""
+        self._batch_mode = True
+
+    def exit_batch_mode(self):
+        """Re-enable per-row commits and flush any pending transaction."""
+        self._batch_mode = False
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
+
+    def _force_commit(self):
+        """Commit unconditionally, even in batch mode."""
+        self.conn.commit()
+
     def _commit(self):
         """Commit the current transaction.
 
         Session-level RLS context (set_config with is_local=FALSE)
         survives commits — no need to restore after commit.
         """
+        if self._batch_mode:
+            return  # Deferred — caller will _force_commit() at batch boundary
         self.conn.commit()
 
     def _rollback(self):
@@ -1674,6 +1699,7 @@ class Database:
 
     _risk_factors_col_ensured = False
     _permission_plane_col_ensured = False
+    _access_tier_ensured = False
     _deleted_at_col_ensured = False
     _associated_resource_cols_ensured = False
     _ms_flag_backfilled = False
@@ -1886,6 +1912,21 @@ class Database:
         finally:
             cursor.close()
         Database._permission_plane_col_ensured = True
+
+    def ensure_access_tier_column(self):
+        """Startup migration: add access_tier column to identities."""
+        if Database._access_tier_ensured:
+            return
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS access_tier VARCHAR(20) DEFAULT 'control_plane'")
+            self._commit()
+        except Exception as e:
+            self._rollback()
+            logger.warning("access_tier migration error: %s", e)
+        finally:
+            cursor.close()
+        Database._access_tier_ensured = True
 
     def ensure_identity_lineage_columns(self):
         """Startup migration: add discovery connector + app registration lineage columns."""
@@ -2179,6 +2220,15 @@ class Database:
                 self._rollback()
             Database._permission_plane_col_ensured = True
 
+        if not Database._access_tier_ensured:
+            try:
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS access_tier VARCHAR(20) DEFAULT 'control_plane'")
+                self._commit()
+            except Exception:
+                try: self.conn.rollback()
+                except: pass
+            Database._access_tier_ensured = True
+
         # Ensure deleted_at column exists for soft-delete
         if not Database._deleted_at_col_ensured:
             try:
@@ -2344,6 +2394,7 @@ class Database:
                 app_owner_org_id,
 
                 permission_plane,
+                access_tier,
 
                 organization_id,
 
@@ -2458,7 +2509,7 @@ class Database:
                 %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s,
-                %s,
+                %s, %s,
                 %s,
                 %s, %s, %s, %s, %s, %s, %s,
                 %s,
@@ -2526,6 +2577,7 @@ class Database:
                 app_owner_org_id = EXCLUDED.app_owner_org_id,
 
                 permission_plane = EXCLUDED.permission_plane,
+                access_tier = EXCLUDED.access_tier,
 
                 deleted_at = NULL,
 
@@ -2678,6 +2730,7 @@ class Database:
                 identity_data.get("app_owner_org_id"),  # appOwnerOrganizationId from Graph API
 
                 identity_data.get("permission_plane", "entra_id"),
+                identity_data.get("access_tier", "control_plane"),
 
                 self._organization_id,
 
@@ -9125,38 +9178,52 @@ class Database:
     # ---------------------------------------------------------------
     # Identity Groups (Phase 38)
     # ---------------------------------------------------------------
+    _identity_groups_ensured = False
+
     def _ensure_identity_group_tables(self):
         """Create identity_groups and identity_group_members tables if they don't exist."""
+        if Database._identity_groups_ensured:
+            return
         cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS identity_groups (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                description TEXT,
-                color VARCHAR(20) DEFAULT '#3B82F6',
-                group_type VARCHAR(10) NOT NULL DEFAULT 'custom',
-                auto_criteria JSONB,
-                created_by INTEGER REFERENCES users(id),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_groups_type ON identity_groups(group_type)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_groups_name ON identity_groups(name)")
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS identity_group_members (
-                id SERIAL PRIMARY KEY,
-                group_id INTEGER NOT NULL REFERENCES identity_groups(id) ON DELETE CASCADE,
-                identity_id TEXT NOT NULL,
-                added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON identity_group_members(group_id, identity_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_members_identity ON identity_group_members(identity_id)")
-        cursor.execute("ALTER TABLE identity_groups ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        cursor.execute("ALTER TABLE identity_group_members ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        self._commit()
-        cursor.close()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS identity_groups (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    color VARCHAR(20) DEFAULT '#3B82F6',
+                    group_type VARCHAR(10) NOT NULL DEFAULT 'custom',
+                    auto_criteria JSONB,
+                    created_by INTEGER REFERENCES users(id),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_groups_type ON identity_groups(group_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_identity_groups_name ON identity_groups(name)")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS identity_group_members (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES identity_groups(id) ON DELETE CASCADE,
+                    identity_id TEXT NOT NULL,
+                    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON identity_group_members(group_id, identity_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_members_identity ON identity_group_members(identity_id)")
+            cursor.execute("ALTER TABLE identity_groups ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+            cursor.execute("ALTER TABLE identity_group_members ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+            self._commit()
+            Database._identity_groups_ensured = True
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            # Tables already exist (created by admin user) — DDL failed due to privilege, safe to skip
+            Database._identity_groups_ensured = True
+        finally:
+            cursor.close()
 
     def _build_auto_criteria_where(self, criteria: dict) -> tuple:
         """Build WHERE clause fragments from auto_criteria JSON. Returns (clause_parts, params)."""
@@ -11772,7 +11839,8 @@ class Database:
                    scan_mode, status, stage, progress, error_message,
                    retry_count, duration_seconds,
                    identities_discovered, resources_discovered, subscriptions_discovered,
-                   created_at, started_at, completed_at, last_heartbeat_at
+                   created_at, started_at, completed_at, last_heartbeat_at,
+                   stage_timings, estimated_remaining_seconds
             FROM snapshot_jobs
             WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
               AND created_at > NOW() - INTERVAL '90 minutes'
@@ -11799,6 +11867,7 @@ class Database:
                    sj.retry_count, sj.duration_seconds,
                    sj.identities_discovered, sj.resources_discovered, sj.subscriptions_discovered,
                    sj.created_at, sj.started_at, sj.completed_at,
+                   sj.stage_timings, sj.estimated_remaining_seconds,
                    cc.label AS connection_label, cc.cloud AS connection_cloud
             FROM snapshot_jobs sj
             LEFT JOIN cloud_connections cc ON sj.cloud_connection_id = cc.id
@@ -17077,10 +17146,20 @@ class Database:
         addons = settings.get('addons', {
             'extended_retention': False,
         })
+        # Serialize trial/license timestamps
+        trial_expires = org.get('trial_expires_at')
+        if trial_expires and hasattr(trial_expires, 'isoformat'):
+            trial_expires = trial_expires.isoformat()
+        trial_started = org.get('trial_started_at')
+        if trial_started and hasattr(trial_started, 'isoformat'):
+            trial_started = trial_started.isoformat()
+
         return {
             'organization_id': organization_id,
             'org_name': org.get('name'),
             'plan': org.get('plan', 'free'),
+            'trial_started_at': trial_started,
+            'trial_expires_at': trial_expires,
             'cloud_providers': cloud_providers,
             'addons': addons,
         }
@@ -17779,6 +17858,9 @@ class Database:
         """Create sa_attestations table if it doesn't exist."""
         if Database._sa_attestations_ensured:
             return
+        if not self._can_ddl():
+            Database._sa_attestations_ensured = True
+            return
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sa_attestations (
@@ -17866,6 +17948,10 @@ class Database:
 
     def _ensure_governance_decisions_table(self):
         if Database._governance_decisions_ensured:
+            return
+        if not self._can_ddl():
+            # App user cannot run DDL — table must already exist from startup.
+            Database._governance_decisions_ensured = True
             return
         cursor = self.conn.cursor()
         cursor.execute("""
@@ -25900,12 +25986,18 @@ class Database:
     # ── Phase 13: Self-Service SaaS Onboarding ─────────────────────
 
     def signup_create_org_and_user(self, email: str, password_hash: str,
-                                    org_name: str) -> dict:
+                                    org_name: str, plan: str = 'trial') -> dict:
         """Create organization + admin user in a single transaction for signup.
-        Returns {'organization': dict, 'user': dict}."""
+        Returns {'organization': dict, 'user': dict}.
+
+        plan: 'trial' (default, 30-day full access) or 'free' (permanent, limited).
+        """
         import re
         from psycopg2.extras import RealDictCursor
         from datetime import datetime, timedelta, timezone
+
+        if plan not in ('free', 'trial'):
+            plan = 'trial'
 
         # Generate slug from org name
         slug = re.sub(r'[^a-z0-9]+', '-', org_name.lower()).strip('-')
@@ -25928,15 +26020,16 @@ class Database:
                         break
                     suffix += 1
 
-            # Create organization with trial plan
+            # Create organization with selected plan
             now = datetime.now(timezone.utc)
-            trial_expires = now + timedelta(days=30)
+            trial_started = now if plan == 'trial' else None
+            trial_expires = (now + timedelta(days=30)) if plan == 'trial' else None
             cursor.execute("""
                 INSERT INTO organizations (name, slug, plan, trial_started_at, trial_expires_at,
                                            onboarding_stage, billing_status, status)
-                VALUES (%s, %s, 'trial', %s, %s, 'welcome', 'active', 'active')
+                VALUES (%s, %s, %s, %s, %s, 'welcome', 'active', 'active')
                 RETURNING *
-            """, (org_name, slug, now, trial_expires))
+            """, (org_name, slug, plan, trial_started, trial_expires))
             org = dict(cursor.fetchone())
 
             # Check email uniqueness

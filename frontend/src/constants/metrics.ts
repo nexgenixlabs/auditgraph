@@ -266,8 +266,8 @@ export const DATA_EXPLANATIONS = {
 export type PrivilegedLevel = 'privileged' | 'elevated' | 'standard';
 
 export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: string; tooltip: string }> = {
-  privileged: { label: 'Privileged',  color: 'bg-red-100 text-red-800 border-red-200',     tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
-  elevated:   { label: 'Elevated',    color: 'bg-orange-100 text-orange-800 border-orange-200', tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
+  privileged: { label: 'Privileged',  color: 'bg-orange-100 text-orange-700 border-orange-200', tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
+  elevated:   { label: 'Elevated',    color: 'bg-orange-100 text-orange-700 border-orange-200', tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
   standard:   { label: 'Standard',    color: 'bg-gray-100 text-gray-600 border-gray-200',  tooltip: 'Tier 2-3: Limited or no privileged roles' },
 };
 
@@ -306,11 +306,11 @@ export const EFFECTIVE_SCOPE_ORDER: Record<EffectiveScope, number> = {
 };
 
 export const EFFECTIVE_SCOPE_CONFIG: Record<EffectiveScope, { label: string; color: string; icon: string }> = {
-  tenant:         { label: 'Tenant',      color: 'bg-red-100 text-red-700',      icon: 'T' },
-  directory:      { label: 'Directory',   color: 'bg-purple-100 text-purple-700', icon: 'D' },
+  tenant:         { label: 'Tenant',      color: 'bg-orange-100 text-orange-700', icon: 'T' },
+  directory:      { label: 'Directory',   color: 'bg-orange-100 text-orange-700', icon: 'D' },
   subscription:   { label: 'Subscription', color: 'bg-orange-100 text-orange-700', icon: 'S' },
-  resource_group: { label: 'RG',          color: 'bg-yellow-100 text-yellow-700', icon: 'R' },
-  resource:       { label: 'Resource',    color: 'bg-blue-100 text-blue-700',    icon: 'r' },
+  resource_group: { label: 'RG',          color: 'bg-orange-100 text-orange-700', icon: 'R' },
+  resource:       { label: 'Resource',    color: 'bg-orange-100 text-orange-700', icon: 'r' },
   none:           { label: 'None',        color: 'bg-gray-100 text-gray-500',    icon: '-' },
 };
 

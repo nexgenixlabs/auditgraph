@@ -248,6 +248,7 @@ from app.api.handlers import (
     get_admin_billing_summary,
     get_admin_billing_events,
     get_admin_action_log,
+    get_group_waste_stats,
     admin_impersonate,
     admin_end_impersonation,
     get_client_billing_summary,
@@ -468,6 +469,7 @@ from app.api.handlers import (
     manage_agent_delegation,
     delete_agent_delegation,
     get_agent_risk_summary,
+    get_agent_evidence,
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -622,6 +624,24 @@ def _run_full_schema(db_init):
     db_init._commit()
     cursor.close()
     logger.info("Full schema: all tables ensured (CREATE TABLE IF NOT EXISTS)")
+
+
+def _ensure_snapshot_timing_cols(db_init):
+    """Add stage_timings JSONB and estimated_remaining_seconds to snapshot_jobs.
+    Idempotent via ADD COLUMN IF NOT EXISTS."""
+    cursor = db_init.conn.cursor()
+    # Check table exists first
+    cursor.execute("""
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'snapshot_jobs'
+    """)
+    if not cursor.fetchone():
+        cursor.close()
+        return
+    cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS stage_timings JSONB DEFAULT '{}'::jsonb")
+    cursor.execute("ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS estimated_remaining_seconds INTEGER")
+    db_init._commit()
+    cursor.close()
 
 
 def _run_derived_tables(db_init):
@@ -932,6 +952,7 @@ def create_app():
             ('backfill_microsoft_flag', lambda: _db_init.backfill_microsoft_flag()),
             ('cleanup_microsoft_remediations', lambda: _db_init.cleanup_microsoft_remediations()),
             ('permission_plane_column', lambda: _db_init.ensure_permission_plane_column()),
+            ('access_tier_column', lambda: _db_init.ensure_access_tier_column()),
             ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
             ('identity_lineage_columns', lambda: _db_init.ensure_identity_lineage_columns()),
             ('last_activity_columns', lambda: _db_init.ensure_last_activity_columns()),
@@ -963,6 +984,7 @@ def create_app():
             ('copilot', lambda: _db_init._ensure_copilot_tables()),
             ('ai_audit_log', lambda: _db_init._ensure_ai_audit_log_table()),
             ('sa_attestations', lambda: _db_init._ensure_sa_attestations_table()),
+            ('governance_decisions', lambda: _db_init._ensure_governance_decisions_table()),
             ('billing_events', lambda: _db_init._ensure_billing_events_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
             ('agent_classifications', lambda: _db_init._ensure_agent_classifications_table()),
@@ -971,6 +993,7 @@ def create_app():
             ('lineage_verdicts', lambda: _db_init._ensure_lineage_verdicts_table()),
             ('keyvault_metadata', lambda: _db_init._ensure_keyvault_metadata_table()),
             ('role_assignment_group_cols', lambda: _db_init._ensure_role_assignment_group_cols()),
+            ('snapshot_timing_cols', lambda: _ensure_snapshot_timing_cols(_db_init)),
         ]
 
         for label, op in _startup_ops:
@@ -1415,6 +1438,11 @@ def create_app():
     def admin_action_log():
         return get_admin_action_log()
 
+    @app.get("/api/group-waste")
+    @require_role('admin', 'auditor', 'viewer')
+    def group_waste():
+        return get_group_waste_stats()
+
     # ── Admin Alerts & Tenant Operations ──────────────────────────
     @app.get("/api/admin/alerts")
     @require_portal_access()
@@ -1517,6 +1545,10 @@ def create_app():
     @require_role('admin')
     def agent_identities_scan_orphans_route():
         return scan_orphan_agents()
+
+    @app.get("/api/identities/<identity_id>/ai-evidence")
+    def agent_evidence_route(identity_id):
+        return get_agent_evidence(identity_id)
 
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')

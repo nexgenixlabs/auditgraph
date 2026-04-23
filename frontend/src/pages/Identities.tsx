@@ -172,6 +172,7 @@ interface IdentityRow {
   lifecycle_state?: string | null;
   governance_state?: string | null;
   privilege_level?: string | null;
+  access_tier?: 'control_plane' | 'data_plane';
   // Canonical identity state fields (from build_identity_state)
   activity_label?: string | null;
   activity_detail?: string | null;
@@ -395,18 +396,18 @@ function DormantBadge({ status }: { status: DormantStatus }) {
 }
 
 const CATEGORY_BADGE_COLORS: Record<string, string> = {
-  service_principal: 'bg-purple-50 text-purple-700',
-  managed_identity_system: 'bg-cyan-50 text-cyan-700',
-  managed_identity_user: 'bg-teal-50 text-teal-700',
-  human_user: 'bg-indigo-50 text-indigo-700',
-  guest: 'bg-pink-50 text-pink-700',
+  service_principal: 'badge-type-purple',
+  managed_identity_system: 'badge-type-cyan',
+  managed_identity_user: 'badge-type-teal',
+  human_user: 'badge-type-indigo',
+  guest: 'badge-type-pink',
 };
 
 function CategoryBadge({ category, cloud }: { category?: IdentityCategory; cloud?: string }) {
-  const color = CATEGORY_BADGE_COLORS[category || ''] || 'bg-gray-50 text-gray-600';
+  const color = CATEGORY_BADGE_COLORS[category || ''] || 'badge-type-indigo';
   const cloudLabels = cloud && CATEGORY_LABELS_MULTI[cloud.toLowerCase()];
   const label = (cloudLabels && cloudLabels[category || '']) || getCategoryShortLabel(category);
-  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${color}`}>{label}</span>;
+  return <span className={color}>{label}</span>;
 }
 
 function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
@@ -416,14 +417,14 @@ function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
 
 function LifecycleLabel({ state }: { state?: string | null }) {
   const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Provisioned') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Provisioned;
-  const colorMap: Record<string, string> = {
-    Provisioned: 'var(--accent-primary, #60a5fa)',
-    Active: 'var(--accent-success, #4ade80)',
-    Dormant: 'var(--accent-warning, #fbbf24)',
-    Disabled: 'var(--text-tertiary, #9ca3af)',
-  };
+  const isDisabled = state === 'Disabled';
   return (
-    <span style={{ fontSize: '11px', color: colorMap[state || 'Provisioned'] ?? colorMap.Provisioned, opacity: 0.75, fontWeight: 400 }} title={cfg.tooltip}>
+    <span style={{
+      fontSize: '11px',
+      color: isDisabled ? 'var(--text-tertiary, #6b7280)' : 'var(--text-secondary, #9ca3af)',
+      fontWeight: isDisabled ? 500 : 400,
+      opacity: isDisabled ? 0.7 : 0.85,
+    }} title={cfg.tooltip}>
       {cfg.label}
     </span>
   );
@@ -432,19 +433,32 @@ function LifecycleLabel({ state }: { state?: string | null }) {
 function GovernanceBadge({ state }: { state?: string | null }) {
   const key = (state || 'Governed') as GovernanceState;
   const cfg = GOVERNANCE_STATE_DISPLAY[key] || GOVERNANCE_STATE_DISPLAY.Governed;
-  const cssClass = key === 'Policy Violation' ? 'badge-governance-policy-violation'
-    : key === 'Ungoverned' ? 'badge-governance-ungoverned'
-    : key === 'Orphaned' ? 'badge-governance-orphaned'
-    : 'badge-governance-governed';
-  return <span className={cssClass} title={cfg.tooltip}>{cfg.label}</span>;
+  const dotColor: Record<string, string> = {
+    'Policy Violation': '#f87171',
+    'Ungoverned': '#f87171',
+    'Orphaned': '#fbbf24',
+    'Governed': '#6ee7b7',
+  };
+  return (
+    <span style={{ fontSize: '11px', color: 'var(--text-secondary, #9ca3af)', fontWeight: 400, display: 'inline-flex', alignItems: 'center', gap: '4px' }} title={cfg.tooltip}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: dotColor[key] || '#6ee7b7', flexShrink: 0 }} />
+      {cfg.label}
+    </span>
+  );
 }
 
 function PrivilegeLevelBadge({ level }: { level?: string | null }) {
   const key = (level || 'Standard') as PrivilegeLevel;
   const cfg = PRIVILEGE_LEVEL_DISPLAY[key] || PRIVILEGE_LEVEL_DISPLAY.Standard;
-  if (key === 'Highly Privileged') return <span className="badge-privilege-high" title={cfg.tooltip}>{cfg.label}</span>;
-  if (key === 'Privileged') return <span className="badge-privilege-med" title={cfg.tooltip}>{cfg.label}</span>;
-  return <span style={{ color: 'var(--text-tertiary, #9ca3af)', fontSize: '11px' }}>Standard</span>;
+  return (
+    <span style={{
+      fontSize: '11px',
+      color: 'var(--text-secondary, #9ca3af)',
+      fontWeight: key === 'Highly Privileged' ? 600 : 400,
+    }} title={cfg.tooltip}>
+      {cfg.label}
+    </span>
+  );
 }
 
 function ScopeBadge({ scope, cloud }: { scope?: EffectiveScope; cloud?: string }) {
@@ -511,10 +525,10 @@ export default function IdentitiesPage() {
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
-    orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number;
+    orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
   } | null>(null);
   // AI Agent Governance filter state (additive, gated by feature flag)
   const agentFilterEnabled = useFeatureFlag('ai_agent_governance');
@@ -820,6 +834,7 @@ export default function IdentitiesPage() {
             lifecycle_state: raw.lifecycle_state || null,
             governance_state: raw.governance_state || null,
             privilege_level: raw.privilege_level || null,
+            access_tier: raw.access_tier || 'control_plane',
             // Canonical identity state fields
             activity_label: raw.activity_label || null,
             activity_detail: raw.activity_detail || null,
@@ -934,6 +949,7 @@ export default function IdentitiesPage() {
           lifecycle_state: raw.lifecycle_state || null,
           governance_state: raw.governance_state || null,
           privilege_level: raw.privilege_level || null,
+          access_tier: raw.access_tier || 'control_plane',
           // Canonical identity state fields
           activity_label: raw.activity_label || null,
           activity_detail: raw.activity_detail || null,
@@ -1031,29 +1047,26 @@ export default function IdentitiesPage() {
       .catch(() => {});
   }, [agentFilterEnabled]);
 
-  // Load groups for filter (refetch on org/connection switch, deduplicate by name)
+  // Derive static category groups from loaded identities (5 fixed options)
   useEffect(() => {
-    setGroupFilter('all');
-    setMultiGroupFilter([]);
-    fetch(withConnection('/api/groups'))
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => {
-        const raw = d.groups || [];
-        // Deduplicate by group name — combine counts across subscriptions
-        const byName = new Map<string, { id: number | string; name: string; color: string; group_type: string; member_count: number }>();
-        for (const g of raw) {
-          const key = (g.name || g.display_name || '').toLowerCase();
-          if (byName.has(key)) {
-            const existing = byName.get(key)!;
-            existing.member_count = Math.max(existing.member_count, g.member_count || 0);
-          } else {
-            byName.set(key, { id: g.id, name: g.name || g.display_name, color: g.color || '', group_type: g.group_type || '', member_count: g.member_count || 0 });
-          }
-        }
-        setAllGroups(Array.from(byName.values()));
-      })
-      .catch(() => setAllGroups([]));
-  }, [activeOrgId, selectedConnectionId, withConnection]);
+    if (identities.length === 0) { setAllGroups([]); return; }
+    const counts = { guest: 0, human_user: 0, managed_identity: 0, service_principal: 0, nhi_other: 0 };
+    for (const i of identities) {
+      const cat = i.identity_category || '';
+      if (cat === 'guest') counts.guest++;
+      else if (cat === 'human_user') counts.human_user++;
+      else if (cat === 'managed_identity_system' || cat === 'managed_identity_user') counts.managed_identity++;
+      else if (cat === 'service_principal') counts.service_principal++;
+      else counts.nhi_other++;
+    }
+    setAllGroups([
+      { id: 'cat_guest', name: 'All Guest Users', color: '', group_type: 'auto', member_count: counts.guest },
+      { id: 'cat_human_user', name: 'All Human Users', color: '', group_type: 'auto', member_count: counts.human_user },
+      { id: 'cat_managed_identity', name: 'All Managed Identities', color: '', group_type: 'auto', member_count: counts.managed_identity },
+      { id: 'cat_service_principal', name: 'All Service Principals', color: '', group_type: 'auto', member_count: counts.service_principal },
+      { id: 'cat_nhi_other', name: 'All SPNs / Workloads', color: '', group_type: 'auto', member_count: counts.nhi_other },
+    ]);
+  }, [identities]);
 
   // Phase 7: Load snapshots for selector (refetch on org switch)
   useEffect(() => {
@@ -1063,20 +1076,27 @@ export default function IdentitiesPage() {
       .catch(() => setSnapshots([]));
   }, [activeOrgId]);
 
-  // When group filter changes, fetch members (supports multi-group)
+  // When group filter changes, resolve members locally by identity_category
   useEffect(() => {
     const activeGroups = multiGroupFilter.length > 0 ? multiGroupFilter : (groupFilter !== 'all' ? [String(groupFilter)] : []);
     if (activeGroups.length === 0) { setGroupMemberIds(null); return; }
-    Promise.all(activeGroups.map(gid =>
-      fetch(`/api/groups/${gid}`)
-        .then(r => r.ok ? r.json() : Promise.reject())
-        .then(d => (d.members || []).map((m: any) => m.identity_id as string))
-        .catch(() => [] as string[])
-    )).then(results => {
-      const ids = new Set<string>(results.flat());
-      setGroupMemberIds(ids);
-    });
-  }, [groupFilter, multiGroupFilter]);
+    const catMap: Record<string, (cat: string) => boolean> = {
+      cat_guest: (c) => c === 'guest',
+      cat_human_user: (c) => c === 'human_user',
+      cat_managed_identity: (c) => c === 'managed_identity_system' || c === 'managed_identity_user',
+      cat_service_principal: (c) => c === 'service_principal',
+      cat_nhi_other: (c) => c !== 'guest' && c !== 'human_user' && c !== 'managed_identity_system' && c !== 'managed_identity_user' && c !== 'service_principal',
+    };
+    const ids = new Set<string>();
+    for (const i of identities) {
+      const cat = i.identity_category || '';
+      for (const gid of activeGroups) {
+        const matcher = catMap[gid];
+        if (matcher && matcher(cat)) { ids.add(i.identity_id); break; }
+      }
+    }
+    setGroupMemberIds(ids);
+  }, [groupFilter, multiGroupFilter, identities]);
 
   // Fetch query field definitions for advanced mode
   useEffect(() => {
@@ -1175,6 +1195,7 @@ export default function IdentitiesPage() {
           lifecycle_state: raw.lifecycle_state || null,
           governance_state: raw.governance_state || null,
           privilege_level: raw.privilege_level || null,
+          access_tier: raw.access_tier || 'control_plane',
           // Canonical identity state fields
           activity_label: raw.activity_label || null,
           activity_detail: raw.activity_detail || null,
@@ -1467,7 +1488,9 @@ export default function IdentitiesPage() {
       if (activatedSubIds.size > 0) {
         result = result.filter(i => {
           const subId = i.primary_subscription_id || i.subscription_id;
-          return !subId || activatedSubIds.has(subId);
+          if (!subId) return true;
+          // subscription_id may be comma-separated for multi-sub discovery runs
+          return subId.split(',').some(s => activatedSubIds.has(s.trim()));
         });
       }
     }
@@ -1487,9 +1510,16 @@ export default function IdentitiesPage() {
     }
     if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
     if (multiSubscriptionFilter.length > 0) {
-      result = result.filter(i => multiSubscriptionFilter.includes(i.subscription_id || '') || multiSubscriptionFilter.includes(i.primary_subscription_id || ''));
+      result = result.filter(i => {
+        if (multiSubscriptionFilter.includes(i.primary_subscription_id || '')) return true;
+        const subs = (i.subscription_id || '').split(',').map(s => s.trim());
+        return subs.some(s => multiSubscriptionFilter.includes(s));
+      });
     } else if (subscriptionFilter !== 'all') {
-      result = result.filter(i => i.subscription_id === subscriptionFilter);
+      result = result.filter(i => {
+        const subs = (i.subscription_id || '').split(',').map(s => s.trim());
+        return subs.includes(subscriptionFilter) || i.primary_subscription_id === subscriptionFilter;
+      });
     }
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (activityFilter === 'dormant_strict') {
@@ -1552,6 +1582,7 @@ export default function IdentitiesPage() {
       (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
       && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
     );
+    if (signalChip === 'data_plane') result = result.filter(i => i.access_tier === 'data_plane');
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -1634,6 +1665,9 @@ export default function IdentitiesPage() {
       if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
+    if (result.length === 0 && identities.length > 0) {
+      console.warn('[IdentityInventory] 0 filtered from', identities.length, 'total. allSubscriptions:', allSubscriptions, 'sample identity sub:', identities[0]?.primary_subscription_id, identities[0]?.subscription_id);
+    }
     return result;
   }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir]);
 
@@ -2337,7 +2371,7 @@ export default function IdentitiesPage() {
             )}
             {agentFilter && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
-                AI Agents
+                AI Identities
                 <button onClick={() => { setAgentFilter(false); }} className="hover:text-violet-600">&times;</button>
               </span>
             )}
@@ -2494,26 +2528,33 @@ export default function IdentitiesPage() {
         return (
           <div className="mb-3 space-y-2">
             {/* Stat cards */}
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-5 gap-2">
               <button onClick={() => setSignalChip(s => s === 'ungoverned' ? null : 'ungoverned')}
                 className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'ungoverned' ? 'chip-active-ungov' : ''}`}>
                 <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Ungoverned</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'ungoverned' ? '#f87171' : '#f87171' }}>{ungovernedCount}</div>
+                <div className="text-lg font-bold" style={{ color: '#f87171' }}>{ungovernedCount}</div>
               </button>
               <button onClick={() => setSignalChip(s => s === 'orphaned' ? null : 'orphaned')}
                 className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'orphaned' ? 'chip-active-orphan' : ''}`}>
                 <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Orphaned</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'orphaned' ? '#fbbf24' : '#fbbf24' }}>{orphanedCount}</div>
+                <div className="text-lg font-bold" style={{ color: '#fbbf24' }}>{orphanedCount}</div>
               </button>
               <button onClick={() => setSignalChip(s => s === 'privileged' ? null : 'privileged')}
                 className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'privileged' ? 'chip-active-priv' : ''}`}>
                 <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Privileged</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'privileged' ? '#a78bfa' : '#a78bfa' }}>{privilegedCount}</div>
+                <div className="text-lg font-bold" style={{ color: '#a78bfa' }}>{privilegedCount}</div>
               </button>
               <button onClick={() => setSignalChip(s => s === 'priv_ungoverned' ? null : 'priv_ungoverned')}
                 className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'priv_ungoverned' ? 'chip-active-combo' : ''}`}>
                 <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Priv + Ungoverned</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'priv_ungoverned' ? '#fca5a5' : '#fca5a5' }}>{privUngovernedCount}</div>
+                <div className="text-lg font-bold" style={{ color: '#fca5a5' }}>{privUngovernedCount}</div>
+              </button>
+              <button onClick={() => setSignalChip(s => s === 'data_plane' ? null : 'data_plane')}
+                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'data_plane' ? 'chip-active-data' : ''}`}>
+                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Data Plane</div>
+                <div className="text-lg font-bold" style={{ color: '#38bdf8' }}>
+                  {governanceSummary?.data_plane ?? filtered.filter(i => i.access_tier === 'data_plane').length}
+                </div>
               </button>
             </div>
           </div>

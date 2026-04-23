@@ -13,10 +13,10 @@ export interface StatusDisplay {
 }
 
 export const STATUS_BADGE: Record<IdentityStatus, StatusDisplay> = {
-  active:   { label: 'Active',   badge_class: 'bg-green-100 text-green-700' },
-  disabled: { label: 'Disabled', badge_class: 'bg-red-100 text-red-700' },
-  deleted:  { label: 'Deleted',  badge_class: 'bg-gray-100 text-gray-500' },
-  unknown:  { label: 'Unknown',  badge_class: 'bg-yellow-100 text-yellow-700' },
+  active:   { label: 'Active',   badge_class: 'text-gray-400 font-normal' },
+  disabled: { label: 'Disabled', badge_class: 'text-gray-500 font-medium' },
+  deleted:  { label: 'Deleted',  badge_class: 'text-gray-400 font-normal' },
+  unknown:  { label: 'Unknown',  badge_class: 'text-gray-400 font-normal' },
 };
 
 /**

@@ -621,6 +621,7 @@ class AWSDiscoveryEngine:
         counts = {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
 
         # Phase 23: Enforce identity count limit based on organization plan
+        # trial and pro: no identity limit (None). free: capped at max_identities.
         if self.db_org_id:
             try:
                 from app.api.handlers import TIER_LIMITS
@@ -632,8 +633,9 @@ class AWSDiscoveryEngine:
                     plan = row[0] or 'free'
                     limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
                     max_ids = limits.get('max_identities')
-                    if max_ids and len(self._identities) > max_ids:
-                        logger.warning(f"Organization {self.db_org_id} ({plan} plan): truncating {len(self._identities)} identities to {max_ids}")
+                    if max_ids is not None and len(self._identities) > max_ids:
+                        logger.warning(f"Organization {self.db_org_id} ({plan} plan): truncating {len(self._identities)} identities to {max_ids} (keeping highest risk)")
+                        self._identities.sort(key=lambda x: x.get('risk_score', 0), reverse=True)
                         self._identities = self._identities[:max_ids]
             except Exception as e:
                 logger.error(f"Entitlement check failed, proceeding without limit: {e}")

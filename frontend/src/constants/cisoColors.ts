@@ -120,3 +120,13 @@ export const POSTURE_CONFIDENCE_COLOR: Record<string, string> = {
   medium: '#f59e0b',
   low: '#4a6080',
 };
+
+/** User-facing confidence labels: low→Improving, medium→Good, high→High */
+export const CONFIDENCE_DISPLAY_LABEL: Record<string, string> = {
+  high: 'High',
+  medium: 'Good',
+  low: 'Improving',
+};
+
+/** Shared tooltip for all confidence labels in the CISO / Executive Posture area */
+export const CONFIDENCE_TOOLTIP = 'Confidence improves as more data sources activate. Currently log-independent mode.';

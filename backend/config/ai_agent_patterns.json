@@ -1,27 +1,64 @@
 {
   "display_name_patterns": [
-    { "pattern": "(?i)(copilot|copilot-studio|copliot)", "confidence": 0.9, "platform": "copilot_studio" },
-    { "pattern": "(?i)(openai|gpt|azure-ai|azureai)", "confidence": 0.85, "platform": "azure_openai" },
-    { "pattern": "(?i)(langchain|langsmith)", "confidence": 0.8, "platform": "langchain" },
-    { "pattern": "(?i)(power.?automate|pa-ai|flow-ai)", "confidence": 0.8, "platform": "power_automate" },
-    { "pattern": "(?i)(bot|chatbot|agent|assistant)(?!.*human)", "confidence": 0.6, "platform": "generic_bot" },
-    { "pattern": "(?i)(semantic.?kernel|sk-)", "confidence": 0.85, "platform": "semantic_kernel" },
-    { "pattern": "(?i)(autogen|auto-gen)", "confidence": 0.85, "platform": "autogen" }
+    { "pattern": "(?i)\\(Microsoft Copilot Studio\\)", "confidence": 0.85, "platform": "copilot_studio" },
+    { "pattern": "(?i)\\bPower Virtual Agents\\b", "confidence": 0.85, "platform": "power_virtual_agents" },
+    { "pattern": "(?i)^ChatGPT$", "confidence": 0.85, "platform": "openai" },
+    { "pattern": "(?i)^func-claude", "confidence": 0.85, "platform": "anthropic" },
+    { "pattern": "(?i)^ai[-_](startup|eng|dev)[-_]", "confidence": 0.85, "platform": "azure_ai_studio" },
+    { "pattern": "(?i)\\bAML[-_]", "confidence": 0.85, "platform": "azure_ml" },
+    { "pattern": "(?i)\\bsp_exec_agent_cos\\b", "confidence": 0.85, "platform": "azure_ai_studio" },
+    { "pattern": "(?i)\\bCoS[_-](project|service)\\b", "confidence": 0.85, "platform": "azure_ai_studio" },
+    { "pattern": "(?i)^copilot\\b", "confidence": 0.85, "platform": "copilot_studio" }
   ],
   "known_app_ids": [
-    { "app_id": "00000009-0000-0000-c000-000000000000", "platform": "power_bi_service" },
-    { "app_id": "00000003-0000-0ff1-ce00-000000000000", "platform": "sharepoint_online" }
+    { "app_id": "20f506fe-8ab8-4fbb-98fa-1f5912c9c4bc", "platform": "openai" }
   ],
   "api_permission_signals": [
     { "permission": "AiService.ReadWrite.All", "confidence": 0.95, "platform": "azure_ai" },
-    { "permission": "CognitiveServices", "confidence": 0.9, "platform": "azure_cognitive" },
+    { "permission": "CognitiveServices", "confidence": 0.95, "platform": "azure_cognitive" },
     { "permission": "Bot.ReadWrite.All", "confidence": 0.95, "platform": "bot_framework" }
   ],
+  "role_signals": {
+    "role_names": [
+      "Azure AI Administrator",
+      "Azure AI Developer",
+      "Azure AI Project Manager",
+      "Azure AI User",
+      "AzureML Data Scientist",
+      "Cognitive Services User",
+      "Cognitive Services Contributor",
+      "Cognitive Services Speech User",
+      "OpenAI Contributor",
+      "Video Indexer Account Contributor"
+    ],
+    "scope_patterns": [
+      "cognitiveservices",
+      "openai",
+      "machinelearning",
+      "MachineLearningServices",
+      "botservice",
+      "videoindexer",
+      "anomalydetector"
+    ],
+    "confidence": 0.95,
+    "platform": "azure_ai"
+  },
   "exclusion_patterns": [
-    "(?i)human",
-    "(?i)employee",
-    "(?i)user-account"
+    "(?i)agentpool",
+    "(?i)omsagent",
+    "(?i)ASC provisioning",
+    "(?i)datadog",
+    "(?i)syncFunction",
+    "(?i)scaling[-_]task",
+    "(?i)monitoring",
+    "(?i)backup",
+    "(?i)^SVC_",
+    "(?i)^svc_ssrs",
+    "(?i)Adobe Identity",
+    "(?i)Apple Business Manager",
+    "(?i)Databricks-to-Datadog",
+    "(?i)Salesforce Databricks"
   ],
-  "version": "1.0.0",
-  "last_updated": "2026-03-19"
+  "version": "4.0.0",
+  "last_updated": "2026-04-20"
 }

@@ -347,6 +347,21 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
         'severity': 'info',
     }, db_org_id=db_org_id)
 
+    # Background owned objects enrichment (deferred from main scan pipeline)
+    for conn in connected:
+        if conn.get('cloud', 'azure') == 'azure':
+            _launch_owned_objects_background(db_org_id, conn)
+
+    # Background IP enrichment (deferred from main scan pipeline — saves ~121s)
+    for conn in connected:
+        if conn.get('cloud', 'azure') == 'azure':
+            _launch_ip_enrichment_background(db_org_id, conn)
+
+    # Background sign-in intelligence (deferred from main scan pipeline — saves ~205s)
+    for conn in connected:
+        if conn.get('cloud', 'azure') == 'azure':
+            _launch_signin_intelligence_background(db_org_id, conn)
+
 
 def _classify_discovery_error(error):
     """Classify a discovery error as retryable or not. Returns (error_type, is_retryable)."""
@@ -852,6 +867,7 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         db = Database(organization_id=db_org_id)
 
         # Get the two most recent completed runs PER CONNECTION
+        # Guard: only compare runs that actually discovered identities
         cursor = db.conn.cursor()
         cursor.execute("""
             SELECT cloud_connection_id, id,
@@ -859,6 +875,8 @@ def _send_change_notification_if_needed(db_org_id: int = None):
             FROM discovery_runs
             WHERE status = 'completed'
               AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+              AND completed_at IS NOT NULL
+              AND COALESCE(total_identities, 0) > 0
             ORDER BY cloud_connection_id, id DESC
         """)
         rows = cursor.fetchall()
@@ -998,179 +1016,129 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 89: Run resource anomaly detection
         _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
 
-        # Identity exposure detection (persisted to identity_exposures)
-        _track_job('identity_exposures', db_org_id,
-                   _run_identity_exposure_detection, current_run_id, db)
+        # ── Tiered Parallel Post-Processing ─────────────────────────
+        # Jobs grouped by dependency.  Within each tier, jobs run
+        # concurrently in a ThreadPoolExecutor with per-job DB
+        # connections.  This collapses ~33 sequential jobs into
+        # 4 tiers, reducing wall-clock time by ~4-5×.
+        import time as _pp_time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        _pp_start = _pp_time.monotonic()
+        POST_PROCESSING_WORKERS = 6
 
-        # Phase 2: Security findings engine (tracked by Phase 8)
-        _track_job('security_findings', db_org_id,
-                   _run_security_findings, current_run_id, db)
+        def _parallel_job(job_type, func, *args_template):
+            """Run a tracked job with its own DB connection.
 
-        # Identity graph edges (identity→role→scope)
-        _track_job('identity_graph_builder', db_org_id,
-                   _run_identity_graph_builder, db_org_id, db)
+            Replaces any `db` argument with a fresh per-thread connection
+            so concurrent jobs don't share a psycopg2 connection.
+            """
+            job_db = Database(organization_id=db_org_id)
+            try:
+                real_args = tuple(
+                    job_db if (a is db) else a for a in args_template
+                )
+                _track_job(job_type, db_org_id, func, *real_args)
+            except Exception as e:
+                logger.error("Post-processing job %s failed: %s", job_type, e)
+            finally:
+                try:
+                    job_db.close()
+                except Exception:
+                    pass
 
-        # Connection-scoped security findings (3 rules)
-        _track_job('security_findings_engine', db_org_id,
-                   _run_security_findings_engine, db_org_id, db)
+        def _run_tier(tier_name, jobs):
+            """Execute a list of (job_type, func, *args) tuples in parallel."""
+            tier_start = _pp_time.monotonic()
+            with ThreadPoolExecutor(max_workers=POST_PROCESSING_WORKERS) as executor:
+                futures = {}
+                for job_spec in jobs:
+                    job_type, func = job_spec[0], job_spec[1]
+                    args = job_spec[2:]
+                    fut = executor.submit(_parallel_job, job_type, func, *args)
+                    futures[fut] = job_type
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        logger.error("Tier %s job %s exception: %s",
+                                     tier_name, futures[fut], e)
+            tier_elapsed = round(_pp_time.monotonic() - tier_start, 1)
+            logger.info("[post-processing] %s complete: %d jobs in %.1fs",
+                        tier_name, len(jobs), tier_elapsed)
 
-        # Connection-scoped security posture aggregation (from findings)
-        _track_job('connection_security_posture', db_org_id,
-                   _run_connection_security_posture, db_org_id, db)
+        # ── Tier 1: Independent foundation jobs (no dependencies) ──
+        _run_tier('tier1_foundation', [
+            ('identity_exposures', _run_identity_exposure_detection, current_run_id, db),
+            ('security_findings', _run_security_findings, current_run_id, db),
+            ('identity_graph_builder', _run_identity_graph_builder, db_org_id, db),
+            ('security_findings_engine', _run_security_findings_engine, db_org_id, db),
+            ('nhi_security', _run_nhi_analysis, db_org_id, db),
+            ('agent_classification', _run_agent_classification, current_run_id, db_org_id, db),
+            ('nhi_signin_enrichment', _run_nhi_signin_enrichment, current_run_id, db_org_id, db),
+        ])
 
-        # Phase 3: Attack path analysis (tracked by Phase 8)
-        _track_job('attack_paths', db_org_id,
-                   _run_attack_path_analysis, current_run_id, db)
+        # ── Tier 2: Depend on findings/graph/agents from Tier 1 ──
+        _run_tier('tier2_analysis', [
+            ('connection_security_posture', _run_connection_security_posture, db_org_id, db),
+            ('attack_paths', _run_attack_path_analysis, current_run_id, db),
+            ('fix_recommendations', _run_fix_recommendations, current_run_id, db),
+            ('blast_radius', _run_blast_radius_analysis, current_run_id, db),
+            ('risk_evaluation', _run_risk_evaluation, db_org_id, db),
+            ('iam_graph', _run_iam_graph_build, db_org_id, db),
+            ('escalation_detection', _run_escalation_detection, db_org_id, db),
+            ('agent_sp_signin_enrichment', _run_agent_sp_signin_enrichment, current_run_id, db_org_id, db),
+            ('agent_orphan_detection', _run_agent_orphan_detection, current_run_id, db_org_id, db),
+            ('policy_recommendations', _run_policy_recommendations, db_org_id, db),
+            ('auto_remediation', _run_auto_remediation, db_org_id, db),
+        ])
 
-        # Phase 4: Fix recommendations (tracked by Phase 8)
-        _track_job('fix_recommendations', db_org_id,
-                   _run_fix_recommendations, current_run_id, db)
+        # ── Tier 3: Depend on attack paths/blast radius/IAM graph from Tier 2 ──
+        _run_tier('tier3_enrichment', [
+            ('drift_intelligence', _run_drift_intelligence, db_org_id, db),
+            ('posture_metrics', _run_posture_metrics, db_org_id, db),
+            ('security_advisor', _run_security_advisor, db_org_id, db),
+            ('graph_visualization', _run_graph_visualization, db_org_id, db),
+            ('risk_forecast', _run_risk_forecast, db_org_id, db),
+            ('policy_generation', _run_policy_generation, db_org_id, db),
+            ('threat_detection', _run_threat_detection, db_org_id, db),
+            ('activity_ingestion', _run_activity_ingestion, db_org_id, db),
+            ('attack_replay', _run_attack_replay, db_org_id, db),
+            ('security_orchestration', _run_security_orchestration, db_org_id, db),
+            ('attack_prediction', _run_attack_prediction, db_org_id, db),
+            ('graph_intelligence', _run_graph_intelligence, db_org_id, db),
+            ('identity_governance', _run_identity_governance, db_org_id, db),
+            ('integration_dispatch', _run_integration_dispatch, db_org_id, db),
+            ('governance_analytics', _run_governance_analytics, db_org_id, db),
+            ('security_strategy', _run_security_strategy, db_org_id, db),
+            ('security_posture', _run_security_posture, db_org_id, db),
+        ])
 
-        # Phase 5: Blast radius analysis (tracked by Phase 8)
-        _track_job('blast_radius', db_org_id,
-                   _run_blast_radius_analysis, current_run_id, db)
+        # ── Tier 4: Final aggregation (depends on all above) ──
+        _run_tier('tier4_finalization', [
+            ('graph_attack_engine', _run_graph_attack_engine, current_run_id, db_org_id, db),
+            ('findings_normalization', _run_findings_normalization, current_run_id, db),
+        ])
 
-        # Drift intelligence enrichment (after attack paths + blast radius)
-        _track_job('drift_intelligence', db_org_id,
-                   _run_drift_intelligence, db_org_id, db)
+        # ── Tier 5: Scoring + SLA (depends on findings normalization) ──
+        _run_tier('tier5_scoring', [
+            ('posture_score', _run_posture_score, current_run_id, db_org_id, db),
+            ('sla_check', _run_sla_check, db_org_id, db),
+        ])
 
-        # Phase 6: Risk evaluation (rules-based findings per connection)
-        _track_job('risk_evaluation', db_org_id,
-                   _run_risk_evaluation, db_org_id, db)
+        _pp_elapsed = round(_pp_time.monotonic() - _pp_start, 1)
+        logger.info("[post-processing] ALL tiers complete in %.1fs org=%s",
+                    _pp_elapsed, db_org_id)
 
-        # Phase 7: IAM graph rebuild (relationship graph per connection)
-        _track_job('iam_graph', db_org_id,
-                   _run_iam_graph_build, db_org_id, db)
-
-        # Phase 8: Privilege escalation detection (after graph build)
-        _track_job('escalation_detection', db_org_id,
-                   _run_escalation_detection, db_org_id, db)
-
-        # Phase 9: Non-human identity security analysis
-        _track_job('nhi_security', db_org_id,
-                   _run_nhi_analysis, db_org_id, db)
-
-        # AI Agent Governance: classify agent identities (gated by feature flag)
-        _track_job('agent_classification', db_org_id,
-                   _run_agent_classification, current_run_id, db_org_id, db)
-
-        # AI Agent Governance Phase 2 B2-5: enrich agent SP sign-in data
-        _track_job('agent_sp_signin_enrichment', db_org_id,
-                   _run_agent_sp_signin_enrichment, current_run_id, db_org_id, db)
-
-        # NHI sign-in enrichment: backfill signin_pattern via auditLogs/signIns
-        # for identities where signInActivity was empty (no P2 license)
-        _track_job('nhi_signin_enrichment', db_org_id,
-                   _run_nhi_signin_enrichment, current_run_id, db_org_id, db)
-
-        # AI Agent Governance Phase 2: orphaned agent SPN detection
-        _track_job('agent_orphan_detection', db_org_id,
-                   _run_agent_orphan_detection, current_run_id, db_org_id, db)
-
-        # Phase 11: Policy Recommendation Engine
-        _track_job('policy_recommendations', db_org_id,
-                   _run_policy_recommendations, db_org_id, db)
-
-        # Phase 12: Automated Remediation (process approved actions)
-        _track_job('auto_remediation', db_org_id,
-                   _run_auto_remediation, db_org_id, db)
-
-        # Phase 14: Collect tenant posture metrics for benchmarking
-        _track_job('posture_metrics', db_org_id,
-                   _run_posture_metrics, db_org_id, db)
-
-        # Phase 15: AI Security Advisor report
-        _track_job('security_advisor', db_org_id,
-                   _run_security_advisor, db_org_id, db)
-
-        # Phase 16: Graph visualization cache
-        _track_job('graph_visualization', db_org_id,
-                   _run_graph_visualization, db_org_id, db)
-
-        # Phase 18: Risk forecasting
-        _track_job('risk_forecast', db_org_id,
-                   _run_risk_forecast, db_org_id, db)
-
-        # Phase 19: Least-privilege policy generation
-        _track_job('policy_generation', db_org_id,
-                   _run_policy_generation, db_org_id, db)
-
-        # Phase 20: Continuous identity threat detection
-        _track_job('threat_detection', db_org_id,
-                   _run_threat_detection, db_org_id, db)
-
-        # Phase 21: Identity activity data lake ingestion
-        _track_job('activity_ingestion', db_org_id,
-                   _run_activity_ingestion, db_org_id, db)
-
-        # Phase 23: Identity attack replay & forensics
-        _track_job('attack_replay', db_org_id,
-                   _run_attack_replay, db_org_id, db)
-
-        # Phase 24: Autonomous security response orchestration
-        _track_job('security_orchestration', db_org_id,
-                   _run_security_orchestration, db_org_id, db)
-
-        # Phase 26: Identity attack prediction
-        _track_job('attack_prediction', db_org_id,
-                   _run_attack_prediction, db_org_id, db)
-
-        # Phase 27: Identity graph intelligence
-        _track_job('graph_intelligence', db_org_id,
-                   _run_graph_intelligence, db_org_id, db)
-
-        # Phase 28: Identity governance
-        _track_job('identity_governance', db_org_id,
-                   _run_identity_governance, db_org_id, db)
-
-        # Phase 30: Enterprise integrations dispatch
-        _track_job('integration_dispatch', db_org_id,
-                   _run_integration_dispatch, db_org_id, db)
-
-        # Phase 31: Governance analytics
-        _track_job('governance_analytics', db_org_id,
-                   _run_governance_analytics, db_org_id, db)
-
-        # Phase 32: Security strategy advisor
-        _track_job('security_strategy', db_org_id,
-                   _run_security_strategy, db_org_id, db)
-
-        # Phase 33: Security command center posture
-        _track_job('security_posture', db_org_id,
-                   _run_security_posture, db_org_id, db)
-
-        # Phase 8 (v2): BFS graph attack engine (after graph intelligence)
-        _track_job('graph_attack_engine', db_org_id,
-                   _run_graph_attack_engine, current_run_id, db_org_id, db)
-
-        # Normalize all risk pipelines into unified security_findings
-        _track_job('findings_normalization', db_org_id,
-                   _run_findings_normalization, current_run_id, db)
-
-        # Phase 9: Compute security posture score (after graph attack engine)
-        _track_job('posture_score', db_org_id,
-                   _run_posture_score, current_run_id, db_org_id, db)
-
-        # Phase 11: SLA breach check (after findings are persisted)
-        _track_job('sla_check', db_org_id,
-                   _run_sla_check, db_org_id, db)
-
-        # Phase 51: Save compliance snapshot
+        # ── Sequential finalization (lightweight, uses shared db) ──
         _save_compliance_snapshot(current_run_id, db)
-
-        # Compute and persist canonical risk summary (includes AGIRS computation)
         _compute_risk_summary(current_run_id, db_org_id, db)
 
-        # Clean up any stale remediation entries for Microsoft/system identities
         try:
             db.cleanup_microsoft_remediations()
         except Exception as e:
             logger.warning(f"Microsoft remediation cleanup failed (non-blocking): {e}")
 
-        # Validate snapshot completeness (non-blocking)
         _validate_snapshot(current_run_id, db_org_id, db)
-
-        # Phase 8: Evaluate tenant health + discovery integrity (non-blocking)
         _run_platform_health_check(current_run_id, db_org_id, db)
 
         db.close()
@@ -1190,6 +1158,248 @@ def _dispatch_notification(event_type: str, event_data: dict, db_org_id: int = N
         db.close()
     except Exception as e:
         logger.warning(f"Failed to dispatch {event_type} notification: {e}")
+
+
+def _launch_owned_objects_background(db_org_id: int, conn: dict):
+    """Launch background thread to enrich SPNs with owned/created objects.
+
+    Runs after scan completes so it doesn't block the main pipeline (~12 min savings).
+    Uses parallel Graph API calls with semaphore throttling.
+    """
+    import threading
+
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+
+    # Decrypt credential if encrypted
+    from app.encryption import decrypt_field
+    raw_secret = metadata.get('client_secret')
+    client_secret = decrypt_field(raw_secret) if raw_secret else None
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.warning("[owned_objects_bg] Skipping — incomplete credentials for connection %s", conn.get('id'))
+        return
+
+    def _run():
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Find latest completed run for this org
+            db = Database()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                run_id = row[0] if row else None
+            except Exception as e:
+                logger.error("[owned_objects_bg] Failed to find run_id: %s", e)
+                db.close()
+                return
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+            db.close()
+
+            if not run_id:
+                logger.warning("[owned_objects_bg] No completed run found for org=%s", db_org_id)
+                return
+
+            from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+            loop.run_until_complete(
+                AzureDiscoveryEngine.enrich_owned_objects_background(
+                    azure_directory_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db_org_id=db_org_id,
+                    run_id=run_id,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("[owned_objects_bg] Background enrichment failed: %s", e)
+
+    t = threading.Thread(target=_run, name=f"owned_objects_bg_org{db_org_id}", daemon=True)
+    t.start()
+    logger.info("[owned_objects_bg] Background thread launched for org=%s connection=%s",
+                db_org_id, conn.get('id'))
+
+
+def _launch_ip_enrichment_background(db_org_id: int, conn: dict):
+    """Launch background thread to enrich identities with last observed IP.
+
+    Runs after scan completes so it doesn't block the main pipeline (~121s savings).
+    Uses parallel API calls with semaphore throttling.
+    """
+    import threading
+
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+
+    from app.encryption import decrypt_field
+    raw_secret = metadata.get('client_secret')
+    client_secret = decrypt_field(raw_secret) if raw_secret else None
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.warning("[ip_enrichment_bg] Skipping — incomplete credentials for connection %s", conn.get('id'))
+        return
+
+    def _run():
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Find latest completed run for this org
+            db = Database()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                run_id = row[0] if row else None
+            except Exception as e:
+                logger.error("[ip_enrichment_bg] Failed to find run_id: %s", e)
+                db.close()
+                return
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+            db.close()
+
+            if not run_id:
+                logger.warning("[ip_enrichment_bg] No completed run found for org=%s", db_org_id)
+                return
+
+            # Fetch subscription IDs using the service principal
+            sub_ids = []
+            try:
+                from azure.identity import ClientSecretCredential
+                from azure.mgmt.resource import SubscriptionClient
+                cred = ClientSecretCredential(
+                    tenant_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+                sub_client = SubscriptionClient(cred)
+                for sub in sub_client.subscriptions.list():
+                    if sub.state and sub.state.lower() == 'enabled':
+                        sub_ids.append(sub.subscription_id)
+                logger.info("[ip_enrichment_bg] Found %d subscriptions for ARM queries", len(sub_ids))
+            except Exception as e:
+                logger.warning("[ip_enrichment_bg] Failed to list subscriptions: %s", e)
+
+            from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+            loop.run_until_complete(
+                AzureDiscoveryEngine.enrich_ips_background(
+                    azure_directory_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db_org_id=db_org_id,
+                    run_id=run_id,
+                    subscription_ids=sub_ids,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("[ip_enrichment_bg] Background enrichment failed: %s", e)
+
+    t = threading.Thread(target=_run, name=f"ip_enrichment_bg_org{db_org_id}", daemon=True)
+    t.start()
+    logger.info("[ip_enrichment_bg] Background thread launched for org=%s connection=%s",
+                db_org_id, conn.get('id'))
+
+
+def _launch_signin_intelligence_background(db_org_id: int, conn: dict):
+    """Launch background thread to enrich SPNs with sign-in intelligence.
+
+    Runs after scan completes so it doesn't block the main pipeline (~205s savings).
+    Uses parallel API calls with semaphore throttling.
+    """
+    import threading
+
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+
+    from app.encryption import decrypt_field
+    raw_secret = metadata.get('client_secret')
+    client_secret = decrypt_field(raw_secret) if raw_secret else None
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.warning("[signin_intel_bg] Skipping — incomplete credentials for connection %s", conn.get('id'))
+        return
+
+    connection_id = conn.get('id')
+
+    def _run():
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Find latest completed run for this org
+            db = Database()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                run_id = row[0] if row else None
+            except Exception as e:
+                logger.error("[signin_intel_bg] Failed to find run_id: %s", e)
+                db.close()
+                return
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+            db.close()
+
+            if not run_id:
+                logger.warning("[signin_intel_bg] No completed run found for org=%s", db_org_id)
+                return
+
+            from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+            loop.run_until_complete(
+                AzureDiscoveryEngine.enrich_signin_intelligence_background(
+                    azure_directory_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db_org_id=db_org_id,
+                    run_id=run_id,
+                    cloud_connection_id=connection_id,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("[signin_intel_bg] Background enrichment failed: %s", e)
+
+    t = threading.Thread(target=_run, name=f"signin_intel_bg_org{db_org_id}", daemon=True)
+    t.start()
+    logger.info("[signin_intel_bg] Background thread launched for org=%s connection=%s",
+                db_org_id, conn.get('id'))
 
 
 def _save_compliance_snapshot(run_id: int, db: Database):

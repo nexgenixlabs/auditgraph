@@ -1135,6 +1135,11 @@ def get_identities():
                 where_clauses += f" AND COALESCE(i.recommended_action, 'UNKNOWN') IN ({placeholders})"
                 params.extend(vals)
 
+        access_tier_filter = request.args.get("access_tier")
+        if access_tier_filter and access_tier_filter in ('control_plane', 'data_plane'):
+            where_clauses += " AND COALESCE(i.access_tier, 'control_plane') = %s"
+            params.append(access_tier_filter)
+
         subscription_filter = request.args.get("subscription_id")
         if subscription_filter:
             # Check junction table for ANY access (not just primary/discovery subscription)
@@ -1175,7 +1180,7 @@ def get_identities():
         identities = [_map_identity_row(row) for row in rows]
 
         # Compute governance summary counts from mapped identities
-        gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0}
+        gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0, 'data_plane': 0}
         for ident in identities:
             gs = ident.get('governance_state') or 'Governed'
             pl = ident.get('privilege_level') or 'Standard'
@@ -1189,6 +1194,8 @@ def get_identities():
                 gov_counts['privileged'] += 1
             if gs in ('Orphaned', 'Ungoverned', 'Policy Violation') and pl in ('Privileged', 'Highly Privileged'):
                 gov_counts['combo'] += 1
+            if ident.get('access_tier') == 'data_plane':
+                gov_counts['data_plane'] += 1
 
         result = {"count": len(identities), "total": total_count, "identities": identities,
                   "governance_summary": gov_counts}
@@ -1263,7 +1270,9 @@ def get_identity_details(identity_id: str):
                        (SELECT COUNT(*) FROM attack_paths ap
                         WHERE ap.source_entity_id = i.identity_id
                           AND ap.organization_id = i.organization_id)
-                   ) as attack_path_count
+                   ) as attack_path_count,
+                   i.last_activity_date,
+                   i.last_activity_source
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -1342,6 +1351,8 @@ def get_identity_details(identity_id: str):
             "owner_status": row[40] if len(row) > 40 else None,
             "blast_radius_score": float(row[41]) if len(row) > 41 and row[41] is not None else 0,
             "attack_path_count": int(row[42]) if len(row) > 42 and row[42] is not None else 0,
+            "last_activity_date": row[43].isoformat() if len(row) > 43 and row[43] and hasattr(row[43], 'isoformat') else None,
+            "last_activity_source": row[44] if len(row) > 44 else None,
         }
 
         # Compute effective_last_used = MAX(observed, Azure sign-in)
@@ -2337,11 +2348,28 @@ def get_drift_report(run_id: int):
             })
             return jsonify(report)
 
-        # Fall back to live computation: find the previous run (org-scoped)
+        # Validate that the requested run is completed with identities
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT status, COALESCE(total_identities, 0) FROM discovery_runs
+            WHERE id = %s AND organization_id = %s
+        """, (run_id, _org_id()))
+        run_row = cursor.fetchone()
+        cursor.close()
+
+        if not run_row:
+            return jsonify({"error": "Discovery run not found"}), 404
+        if run_row[0] != 'completed':
+            return jsonify({"error": f"Cannot compute drift for run in '{run_row[0]}' status — only completed runs are supported"}), 400
+        if run_row[1] == 0:
+            return jsonify({"error": "Cannot compute drift — run has 0 discovered identities"}), 400
+
+        # Fall back to live computation: find the previous COMPLETED run (org-scoped)
         cursor = db.conn.cursor()
         cursor.execute("""
             SELECT id FROM discovery_runs
             WHERE status = 'completed' AND id < %s AND organization_id = %s
+              AND completed_at IS NOT NULL AND COALESCE(total_identities, 0) > 0
             ORDER BY id DESC
             LIMIT 1
         """, (run_id, _org_id()))
@@ -2451,6 +2479,8 @@ def _backfill_drift_reports(db, org_id):
         SELECT id FROM discovery_runs
         WHERE organization_id = %s AND status = 'completed'
           AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+          AND completed_at IS NOT NULL
+          AND COALESCE(total_identities, 0) > 0
         ORDER BY id ASC
     """, (org_id,))
     run_ids = [r[0] for r in cursor.fetchall()]
@@ -3026,22 +3056,14 @@ def trigger_discovery():
             admin_db.close()
 
     # Phase 13: Plan limit enforcement
+    # Free plan: scanning allowed (identity cap enforced at save time).
+    # Trial expired: scan blocked (data preserved, must upgrade).
     admin_db = Database(_admin_reason='trigger_discovery: plan limits')
     try:
-        limits = admin_db.check_plan_limits(tid)
-        plan = limits.get('plan', 'free')
-        if plan == 'free':
-            return jsonify({
-                'error': 'Discovery is not available on the free plan. Upgrade to trial or pro.',
-                'plan': plan,
-            }), 403
-        if not limits.get('within_limits'):
-            return jsonify({
-                'error': f'Plan limit reached ({limits["identities"]}/{limits["max_identities"]} identities). '
-                         f'Upgrade your plan to continue.',
-                'plan': plan,
-                'limits': limits,
-            }), 403
+        # Trial expiry check — blocks new scans but preserves existing data
+        ok, err = _check_tier_limits(admin_db, tid)
+        if not ok:
+            return jsonify(err), 403
     finally:
         admin_db.close()
 
@@ -3613,6 +3635,7 @@ QUERY_FIELD_MAP = {
     'ca_coverage_status':    "i.ca_coverage_status",
     'ca_mfa_enforced':       "COALESCE(i.ca_mfa_enforced, false)",
     'permission_plane':      "COALESCE(i.permission_plane, 'entra_id')",
+    'access_tier':           "COALESCE(i.access_tier, 'control_plane')",
 }
 
 # Computed fields that require subqueries
@@ -3920,6 +3943,7 @@ def _identity_list_select():
             END as effective_scope,
             COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
             COALESCE(i.permission_plane, 'entra_id') as permission_plane,
+            COALESCE(i.access_tier, 'control_plane') as access_tier,
             i.deleted_at,
             GREATEST(
                 (SELECT COUNT(*) FROM graph_attack_findings gaf
@@ -4110,6 +4134,7 @@ def _map_identity_row(row):
         "effective_scope": row.get('effective_scope') or "none",
         "is_microsoft_system": bool(row.get('is_microsoft_system', False)),
         "permission_plane": row.get('permission_plane') or "entra_id",
+        "access_tier": row.get('access_tier') or "control_plane",
         "privileged_level": "privileged" if privilege_tier == 0 else "elevated" if privilege_tier == 1 else "standard",
         "privilege_level": _derive_privilege_level(privilege_tier),
         "governance_state": _derive_governance_state_from_row(row, privilege_tier),
@@ -7097,7 +7122,7 @@ def get_dashboard_posture():
                     "scope_string": _scope,
                     "role_tier": _tier,
                     "exploitation_text": _exploitation,
-                    "impact_label": "Critical" if _br_level == 'critical' else "High",
+                    "impact_label": _derive_blast_impact(_roles_lower, _br_subs, _tier),
                 }
         except Exception:
             try:
@@ -8034,6 +8059,17 @@ def get_identity_graph_data(identity_id):
         graph_perms = db.get_graph_permissions(db_id)
         app_roles = db.get_app_roles(db_id)
 
+        # Fetch group memberships for human_user/guest identities
+        identity_groups = []
+        if ident["identity_category"] in ("human_user", "guest"):
+            try:
+                identity_groups = db.get_identity_entra_groups(
+                    ident["identity_id"], run_ids
+                )
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
         is_dormant = ident["activity_status"] in ("stale", "never_used")
         has_priv_roles = any(r.get("risk_level") in ("critical", "high") for r in roles)
 
@@ -8465,9 +8501,56 @@ def get_identity_graph_data(identity_id):
                 "label": "directory roles", "style": {"stroke": "#6366f1"}})
             right_y += entra_height + 20
 
+        # ── Security group membership branch (human_user/guest only) ──
+        # Shows: Identity → [member of] → Security Group → [has role] → Sub
+        # Only groups with RBAC roles get rendered (access-relevant groups).
+        group_sub_links = {}  # group_nid → list of subscription_ids
+        if identity_groups:
+            grp_y = max(right_y, 40)
+            grp_count = 0
+            for gi, grp in enumerate(identity_groups):
+                rbac_roles_data = grp.get('rbac_roles') or []
+                if isinstance(rbac_roles_data, str):
+                    import json as _json2
+                    try: rbac_roles_data = _json2.loads(rbac_roles_data)
+                    except Exception: rbac_roles_data = []
+                if not rbac_roles_data:
+                    continue  # skip groups with no RBAC roles
+                grp_nid = f"grp-{gi}"
+                member_count = grp.get('member_count', 0)
+                is_nested = grp.get('is_nested', False)
+                grp_roles_display = [
+                    {"name": r.get("role_name", ""), "risk_level": role_risk_map.get(r.get("role_name", ""), "low")}
+                    for r in rbac_roles_data
+                ]
+                grp_height = 55 + len(grp_roles_display) * 24
+                tech_nodes.append({"id": grp_nid, "type": "security_group",
+                    "position": {"x": cx - 100, "y": grp_y},
+                    "data": {"label": grp.get('display_name', 'Security Group'),
+                             "member_count": member_count,
+                             "is_nested": is_nested,
+                             "is_privileged": grp.get('is_privileged', False),
+                             "roles": grp_roles_display}})
+                edge_label = "nested member" if is_nested else "member of"
+                tech_edges.append({"id": f"e-id-{grp_nid}", "source": "identity",
+                    "target": grp_nid, "label": edge_label,
+                    "style": {"stroke": "#8b5cf6", "strokeDasharray": "5 3"}})
+                # Track which subscriptions this group grants access to
+                for r in rbac_roles_data:
+                    scope = r.get('scope', '')
+                    if '/subscriptions/' in scope:
+                        sub_id = scope.split('/subscriptions/')[1].split('/')[0]
+                        group_sub_links.setdefault(grp_nid, set()).add(sub_id)
+                grp_y += grp_height + 15
+                grp_count += 1
+            if grp_count > 0:
+                right_y = max(right_y, grp_y)
+
         # ── ARM hierarchy tree (roles embedded inside each node) ──
         arm_y = max(right_y, 40)
 
+        # Index subscription node IDs for group→sub linking
+        sub_node_index = {}  # subscription_id → node_id
         for si, sub_entry in enumerate(scope_hierarchy):
             sub_nid = f"sub-{si}"
             sub_label = sub_entry["subscription_id"][:12] + "..."
@@ -8480,6 +8563,7 @@ def get_identity_graph_data(identity_id):
                          "roles": sub_roles_data}})
             tech_edges.append({"id": f"e-id-{sub_nid}", "source": "identity", "target": sub_nid,
                 "label": "", "style": {"stroke": "#3b82f6"}})
+            sub_node_index[sub_entry["subscription_id"]] = sub_nid
             arm_y += sub_height + 10
 
             # Resource groups under this subscription
@@ -8511,6 +8595,18 @@ def get_identity_graph_data(identity_id):
                 arm_y += 10  # spacing between RGs
 
             arm_y += 15  # spacing between subscriptions
+
+        # ── Group → Subscription edges (inherited access paths) ──
+        for grp_nid, sub_ids in group_sub_links.items():
+            for sub_id in sub_ids:
+                sub_nid = sub_node_index.get(sub_id)
+                if sub_nid:
+                    tech_edges.append({
+                        "id": f"e-{grp_nid}-{sub_nid}",
+                        "source": grp_nid, "target": sub_nid,
+                        "label": "has role",
+                        "style": {"stroke": "#8b5cf6", "strokeDasharray": "5 3"},
+                    })
 
         # ── Permissions (Graph API + App Roles) ──
         perm_y = arm_y + 20
@@ -10378,6 +10474,7 @@ def auth_signup():
     email = str(data.get('email', '')).strip().lower()
     password = str(data.get('password', ''))
     org_name = str(data.get('organization_name', '')).strip()
+    plan = str(data.get('plan', 'trial')).strip().lower()
 
     # Validation
     if not email or '@' not in email or '.' not in email.split('@')[-1]:
@@ -10388,6 +10485,8 @@ def auth_signup():
         return jsonify({'error': 'Organization name is required (min 2 characters)'}), 400
     if len(org_name) > 100:
         return jsonify({'error': 'Organization name too long (max 100 characters)'}), 400
+    if plan not in ('free', 'trial'):
+        return jsonify({'error': 'Plan must be "free" or "trial"'}), 400
 
     db = Database(_admin_reason='auth_signup: create org + user')
     try:
@@ -10400,7 +10499,7 @@ def auth_signup():
         password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
         # Create org + user atomically
-        result = db.signup_create_org_and_user(email, password_hash, org_name)
+        result = db.signup_create_org_and_user(email, password_hash, org_name, plan=plan)
         org = result['organization']
         user = result['user']
 
@@ -10411,8 +10510,8 @@ def auth_signup():
         # Log signup event
         try:
             db.log_activity(
-                'signup', f'New signup: {email} / {org_name}',
-                {'email': email, 'org_name': org_name, 'plan': 'trial',
+                'signup', f'New signup: {email} / {org_name} ({plan})',
+                {'email': email, 'org_name': org_name, 'plan': plan,
                  'ip': request.remote_addr},
                 user_id=user['id'], organization_id=org['id'],
             )
@@ -10473,7 +10572,7 @@ def auth_signup():
             'id': org['id'],
             'name': org['name'],
             'slug': org['slug'],
-            'plan': 'trial',
+            'plan': org.get('plan', plan),
             'trial_expires_at': org.get('trial_expires_at'),
         },
     }), 201)
@@ -13020,6 +13119,8 @@ def get_groups_list():
                            is_role_assignable, group_id as azure_object_id
                     FROM entra_groups
                     WHERE discovery_run_id = ANY(%s)
+                      AND rbac_roles IS NOT NULL
+                      AND rbac_roles != '[]'::jsonb
                     ORDER BY display_name ASC
                 """, (run_ids,))
                 for row in cursor.fetchall():
@@ -14053,11 +14154,15 @@ def get_organizations_list():
 
 
 def create_organization_handler():
-    """POST /api/organizations — create a new organization (superadmin only)."""
+    """POST /api/organizations — create a new organization (admin portal).
+
+    Admin portal enrollment defaults to 'pro' plan (no identity limits,
+    no trial expiry). Self-signup via /api/auth/signup uses 'trial'.
+    """
     data = request.get_json(silent=True) or {}
     name = str(data.get('name', '')).strip()
     slug = str(data.get('slug', '')).strip().lower()
-    plan = str(data.get('plan', 'free')).strip().lower()
+    plan = str(data.get('plan', 'pro')).strip().lower()  # admin portal default = pro
 
     if not name:
         return jsonify({'error': 'name is required'}), 400
@@ -14069,8 +14174,8 @@ def create_organization_handler():
         return jsonify({'error': 'slug must be alphanumeric (hyphens and underscores allowed)'}), 400
     if len(slug) > 100:
         return jsonify({'error': 'slug must be 100 characters or less'}), 400
-    if plan not in ('free', 'trial', 'pro'):
-        return jsonify({'error': 'plan must be free, trial, or pro'}), 400
+    if plan not in ('free', 'trial', 'pro', 'enterprise'):
+        return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
 
     # Phase 85: Optional onboarding fields
     primary_cloud = str(data.get('primary_cloud', '')).strip().lower() or None
@@ -17480,9 +17585,9 @@ def get_governance_identities():
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
     tid = _org_id()
-    db._ensure_governance_decisions_table()
 
     try:
+        db._ensure_governance_decisions_table()
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -17973,9 +18078,9 @@ def get_governance_stats():
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
     tid = _org_id()
-    db._ensure_governance_decisions_table()
 
     try:
+        db._ensure_governance_decisions_table()
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -18424,6 +18529,31 @@ _DANGEROUS_ROLES_ORDERED = [
     'key vault administrator', 'key vault secrets officer',
     'storage blob data owner', 'exchange administrator',
 ]
+
+
+def _derive_blast_impact(roles_lower, sub_count, tier):
+    """Derive a one-line business consequence from roles and scope."""
+    if 'owner' in roles_lower:
+        if sub_count > 1:
+            return f"Full control of IAM, resources, and billing across {sub_count} subscriptions"
+        return "Full control of IAM, resources, and billing \u2014 complete subscription takeover"
+    if 'user access administrator' in roles_lower:
+        return "Can grant any role to any identity \u2014 privilege escalation to full control"
+    if 'global administrator' in roles_lower or 'privileged role' in roles_lower:
+        return "Tenant-wide administrative control over all directory objects and subscriptions"
+    if 'contributor' in roles_lower:
+        if sub_count > 1:
+            return f"Can deploy, modify, or destroy all resources across {sub_count} subscriptions"
+        return "Can deploy, modify, or destroy all resources in the subscription"
+    if 'key vault' in roles_lower:
+        return "Can extract encryption keys, certificates, and stored secrets"
+    if 'security admin' in roles_lower:
+        return "Can modify security policies and access security configurations"
+    if tier == 'T0':
+        return "Highest privilege tier \u2014 full administrative control"
+    if tier == 'T1':
+        return "Can modify and deploy resources in production environments"
+    return "Elevated access to cloud resources"
 
 
 def _compute_blast_radius(roles):
@@ -20491,9 +20621,10 @@ def get_scan_modes():
 # ============================================================
 
 TIER_LIMITS = {
-    'free': {'max_identities': 50, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso']},
-    'trial': {'max_identities': 500, 'trial_days': 14, 'blocked_features': []},
-    'pro': {'max_identities': None, 'blocked_features': []},
+    'free': {'max_identities': 500, 'max_subscriptions': 2, 'expires_days': None, 'can_upgrade': True, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso']},
+    'trial': {'max_identities': None, 'max_subscriptions': None, 'expires_days': 30, 'can_upgrade': True, 'blocked_features': []},
+    'pro': {'max_identities': None, 'max_subscriptions': None, 'expires_days': None, 'can_upgrade': False, 'blocked_features': []},
+    'enterprise': {'max_identities': None, 'max_subscriptions': None, 'expires_days': None, 'can_upgrade': False, 'blocked_features': []},
 }
 
 
@@ -20525,17 +20656,24 @@ def _check_tier_limits(db, organization_id):
                 'current_plan': plan,
             }
 
-    # Check trial expiry
-    if plan == 'trial' and org.get('license_activated_at'):
-        activated = org['license_activated_at']
-        if isinstance(activated, str):
-            activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
-        if datetime.now(activated.tzinfo if activated.tzinfo else None) > activated + timedelta(days=14):
-            return False, {
-                'error': 'Trial period has expired. Please upgrade to continue.',
-                'upgrade_required': True,
-                'current_plan': plan,
-            }
+    # Check trial expiry using trial_expires_at (set at signup: NOW() + 30 days)
+    if plan == 'trial':
+        trial_expires = org.get('trial_expires_at')
+        if trial_expires:
+            if isinstance(trial_expires, str):
+                try:
+                    trial_expires = datetime.fromisoformat(trial_expires.replace('Z', '+00:00'))
+                except (ValueError, TypeError):
+                    trial_expires = None
+            if trial_expires:
+                now = datetime.now(trial_expires.tzinfo if trial_expires.tzinfo else timezone.utc)
+                if now > trial_expires:
+                    return False, {
+                        'error': 'Your 30-day trial has ended. Upgrade to Pro to continue.',
+                        'upgrade_required': True,
+                        'current_plan': plan,
+                        'upgrade_url': '/subscriptions',
+                    }
 
     return True, None
 
@@ -22615,6 +22753,87 @@ def get_admin_action_log():
         db.close()
 
 
+def get_group_waste_stats():
+    """GET /api/group-waste — measure group expansion waste for current org.
+
+    Returns counts of groups with/without Azure RBAC or Entra roles,
+    showing how many groups are expanded unnecessarily during scans.
+    Org scoped via JWT — no hardcoding.
+    """
+    org_id = _org_id()
+    if not org_id or org_id == -1:
+        return jsonify({'error': 'No organization context'}), 403
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get latest completed run for this org
+        run_ids = _latest_run_ids(cursor, org_id)
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+        run_id = run_ids[0]
+
+        cursor.execute("""
+            WITH role_bearing AS (
+                SELECT DISTINCT group_id FROM entra_groups
+                WHERE organization_id = %(org)s AND discovery_run_id = ANY(%(runs)s)
+                  AND rbac_roles IS NOT NULL AND rbac_roles != '[]'::jsonb
+            ),
+            entra_role_bearing AS (
+                SELECT DISTINCT i.object_id AS group_id
+                FROM entra_role_assignments era
+                JOIN identities i ON i.id = era.identity_db_id
+                WHERE era.organization_id = %(org)s
+                  AND i.object_id IN (
+                      SELECT group_id FROM entra_groups
+                      WHERE organization_id = %(org)s AND discovery_run_id = ANY(%(runs)s)
+                  )
+            ),
+            all_role_groups AS (
+                SELECT group_id FROM role_bearing
+                UNION
+                SELECT group_id FROM entra_role_bearing
+            ),
+            totals AS (
+                SELECT COUNT(*) AS total FROM entra_groups
+                WHERE organization_id = %(org)s AND discovery_run_id = ANY(%(runs)s)
+            )
+            SELECT
+                (SELECT total FROM totals) AS total_groups,
+                (SELECT COUNT(*) FROM all_role_groups) AS groups_with_roles,
+                (SELECT total FROM totals) - (SELECT COUNT(*) FROM all_role_groups) AS groups_without_roles,
+                CASE WHEN (SELECT total FROM totals) > 0 THEN
+                    ROUND(
+                        ((SELECT total FROM totals) - (SELECT COUNT(*) FROM all_role_groups))
+                        * 100.0 / (SELECT total FROM totals), 1
+                    )
+                ELSE 0 END AS waste_percentage
+        """, {'org': org_id, 'runs': run_ids})
+
+        row = cursor.fetchone()
+        cursor.close()
+
+        return jsonify({
+            'organization_id': org_id,
+            'discovery_run_ids': run_ids,
+            'total_groups': row['total_groups'],
+            'groups_with_roles': row['groups_with_roles'],
+            'groups_without_roles': row['groups_without_roles'],
+            'waste_percentage': float(row['waste_percentage']),
+        })
+    except Exception as e:
+        logger.error("Group waste stats error: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
 def admin_impersonate():
     """POST /api/admin/impersonate — generate org-scoped tokens for admin impersonation.
     Phase 1C: 15-min hard cap, impersonated_by claim, audit logging."""
@@ -23191,6 +23410,13 @@ def get_client_billing_preview():
             cloud = s.get('cloud', 'azure')
             by_cloud[cloud] = by_cloud.get(cloud, 0) + 1
 
+        # Serialize trial expiry for frontend display
+        trial_expires = org.get('trial_expires_at')
+        if trial_expires and hasattr(trial_expires, 'isoformat'):
+            trial_expires = trial_expires.isoformat()
+        elif trial_expires:
+            trial_expires = str(trial_expires)
+
         return jsonify({
             'period_start': period_start,
             'period_end': period_end,
@@ -23200,6 +23426,7 @@ def get_client_billing_preview():
             'platform_fee_cents': invoice_data.get('platform_fee_cents', 0),
             'platform_fee_waiver_cents': invoice_data.get('platform_fee_waiver_cents', 0),
             'trial_active': invoice_data.get('trial_active', False),
+            'trial_expires_at': trial_expires,
             'subscription_total_cents': invoice_data.get('subscription_total_cents', 0),
             'discount_pct': invoice_data.get('discount_pct', 0),
             'subtotal_cents': invoice_data.get('subtotal_cents', 0),
@@ -28089,17 +28316,18 @@ def get_security_overview_handler():
                 db.conn.rollback()
 
         # ── 5. Attack paths ────────────────────────────────────────────────
+        # Use organization_id (not discovery_run_id) — attack_paths may not
+        # be regenerated every run.  Matches get_attack_path_count() canonical source.
         attack_path_identities = 0
-        if run_ids:
-            try:
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT source_entity_id) AS cnt
-                    FROM attack_paths WHERE discovery_run_id = ANY(%s)
-                """, (run_ids,))
-                attack_path_identities = (cursor.fetchone() or {}).get('cnt', 0)
-            except Exception as e:
-                logger.warning("security_overview: attack_paths failed: %s", e)
-                db.conn.rollback()
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT source_entity_id) AS cnt
+                FROM attack_paths WHERE organization_id = %s
+            """, (org_id,))
+            attack_path_identities = (cursor.fetchone() or {}).get('cnt', 0)
+        except Exception as e:
+            logger.warning("security_overview: attack_paths failed: %s", e)
+            db.conn.rollback()
 
         # ── 6. Credential inventory ────────────────────────────────────────
         cred = {'total': 0, 'expired': 0, 'expiring_soon': 0}
@@ -28159,9 +28387,9 @@ def get_security_overview_handler():
                     FROM attack_paths ap
                     JOIN identities i ON i.identity_id = ap.source_entity_id
                         AND i.discovery_run_id = ANY(%s)
-                    WHERE ap.discovery_run_id = ANY(%s)
+                    WHERE ap.organization_id = %s
                     GROUP BY COALESCE(i.source, 'unknown')
-                """, (run_ids, run_ids))
+                """, (run_ids, org_id))
                 for r in cursor.fetchall():
                     _get_provider(_normalize_cloud(r['cloud_provider']))['attack_paths'] += r['cnt']
 
@@ -33117,10 +33345,10 @@ def get_agent_identities():
         order_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
         nulls = 'NULLS LAST' if order_dir == 'DESC' else 'NULLS FIRST'
 
-        # Build WHERE clause
+        # Build WHERE clause — include ai_privileged_human when include_possible
         type_filter = "ac.agent_identity_type = 'ai_agent'"
         if include_possible:
-            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')"
+            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')"
 
         platform_filter = ""
         params = []
@@ -33128,61 +33356,75 @@ def get_agent_identities():
             platform_filter = " AND ac.detected_platform = %s"
             params.append(platform)
 
-        # Count total
-        count_sql = f"""
-            SELECT COUNT(DISTINCT i.id)
-            FROM identities i
-            JOIN agent_classifications ac ON ac.identity_db_id = i.id
-            WHERE {type_filter}{platform_filter}
-              AND NOT COALESCE(i.is_microsoft_system, false)
-              AND i.deleted_at IS NULL
-        """
+        # Deduplicate: same identity_id appears across multiple discovery runs.
+        # Use DISTINCT ON (i.identity_id) keeping the row from the latest run
+        # (highest discovery_run_id), then join the latest classification.
         cursor = db.conn.cursor()
+
+        # Count total (unique identities only)
+        count_sql = f"""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) i.id
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+        """
         cursor.execute(count_sql, params)
         total = _scalar(cursor, 0)
 
-        # Fetch identities + classification metadata
+        # Fetch identities + classification metadata (deduplicated)
         offset = (page - 1) * per_page
         data_sql = f"""
-            SELECT
-                i.identity_id,
-                i.display_name,
-                i.identity_type,
-                COALESCE(i.identity_category, '') as identity_category,
-                i.risk_level,
-                i.risk_score,
-                i.credential_count,
-                i.credential_risk,
-                i.activity_status,
-                i.last_sign_in,
-                i.created_datetime,
-                i.cloud,
-                i.owner_display_name,
-                i.owner_count,
-                i.enabled,
-                COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
-                i.app_id,
-                i.object_id,
-                i.primary_subscription_id,
-                i.additional_subscription_count,
-                i.pim_eligible_count,
-                i.ca_coverage_status,
-                i.privilege_tier,
-                i.blast_radius_score,
-                -- classification fields (additive only)
-                ac.agent_identity_type,
-                ac.classification_confidence,
-                ac.classification_reason,
-                ac.detected_platform,
-                ac.classified_at,
-                ac.pattern_version,
-                ac.last_service_principal_sign_in
-            FROM identities i
-            JOIN agent_classifications ac ON ac.identity_db_id = i.id
-            WHERE {type_filter}{platform_filter}
-              AND NOT COALESCE(i.is_microsoft_system, false)
-              AND i.deleted_at IS NULL
-            ORDER BY {order_col} {order_dir} {nulls}
+            SELECT * FROM (
+                SELECT DISTINCT ON (i.identity_id)
+                    i.identity_id,
+                    i.display_name,
+                    i.identity_type,
+                    COALESCE(i.identity_category, '') as identity_category,
+                    i.risk_level,
+                    i.risk_score,
+                    i.credential_count,
+                    i.credential_risk,
+                    i.activity_status,
+                    i.last_sign_in,
+                    i.created_datetime,
+                    i.cloud,
+                    i.owner_display_name,
+                    i.owner_count,
+                    i.enabled,
+                    COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
+                    i.app_id,
+                    i.object_id,
+                    i.primary_subscription_id,
+                    i.additional_subscription_count,
+                    i.pim_eligible_count,
+                    i.ca_coverage_status,
+                    i.privilege_tier,
+                    i.blast_radius_score,
+                    -- activity fields (canonical SSOT)
+                    i.last_activity_date,
+                    i.last_activity_source,
+                    i.last_activity_confidence,
+                    -- classification fields (additive only)
+                    ac.agent_identity_type,
+                    ac.classification_confidence,
+                    ac.classification_reason,
+                    ac.detected_platform,
+                    ac.classified_at,
+                    ac.pattern_version,
+                    ac.last_service_principal_sign_in
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            ORDER BY {order_col.replace('i.', '').replace('ac.', '')} {order_dir} {nulls}
             LIMIT %s OFFSET %s
         """
         cursor.execute(data_sql, params + [per_page, offset])
@@ -33190,13 +33432,53 @@ def get_agent_identities():
         rows = cursor.fetchall()
         cursor.close()
 
+        # Batch-fetch role activity summaries for all identities in result
+        identity_db_ids = [row[columns.index('identity_id')] for row in rows]  # identity_ids
+        # Build a map of identity_db_id -> row index from raw rows
+        # We need the integer DB id (i.id) — fetch from identities
+        id_col_idx = 0  # first column in data_sql is identity_id (string)
+        # Re-query for role summaries using a subquery approach
+        role_summaries = {}
+        if rows:
+            # Get identity DB ids from the fetched identity_ids
+            id_list_str = [row[0] for row in rows]  # identity_id strings
+            cursor2 = db.conn.cursor()
+            try:
+                cursor2.execute("SAVEPOINT _role_sum")
+                cursor2.execute("""
+                    SELECT i.identity_id,
+                           COUNT(ra.id) as total_roles,
+                           COUNT(CASE WHEN ra.last_used_at IS NULL THEN 1 END) as never_used,
+                           COUNT(CASE WHEN ra.last_used_at IS NOT NULL
+                                      AND ra.last_used_at < NOW() - INTERVAL '90 days' THEN 1 END) as stale_90d,
+                           MAX(ra.last_used_at) as last_role_active
+                    FROM identities i
+                    JOIN role_assignments ra ON ra.identity_db_id = i.id
+                    WHERE i.identity_id = ANY(%s)
+                    GROUP BY i.identity_id
+                """, (id_list_str,))
+                for r in cursor2.fetchall():
+                    role_summaries[r[0]] = {
+                        'total_roles': r[1],
+                        'never_used': r[2],
+                        'stale_90d': r[3],
+                        'last_role_active': r[4].isoformat() if r[4] else None,
+                    }
+                cursor2.execute("RELEASE SAVEPOINT _role_sum")
+            except Exception:
+                try:
+                    cursor2.execute("ROLLBACK TO SAVEPOINT _role_sum")
+                except Exception:
+                    pass
+            cursor2.close()
+
         items = []
         for row in rows:
             item = dict(zip(columns, row))
             # Normalize types for JSON serialization
             for dt_field in ('last_sign_in', 'created_datetime', 'classified_at',
-                             'last_service_principal_sign_in'):
-                if item.get(dt_field):
+                             'last_service_principal_sign_in', 'last_activity_date'):
+                if item.get(dt_field) and hasattr(item[dt_field], 'isoformat'):
                     item[dt_field] = item[dt_field].isoformat()
             item['credential_count'] = int(item.get('credential_count') or 0)
             item['risk_score'] = int(item.get('risk_score') or 0)
@@ -33217,22 +33499,61 @@ def get_agent_identities():
                 item['agent_penalty_reason'] = None
                 item['risk_score_display'] = item['risk_score']
 
-            # Phase 2 B2-7: Compute effective last active from dual sources
+            # Compute effective_last_active from canonical SSOT fields
+            # Priority: 1) last_activity_date 2) last_sign_in 3) last_service_principal_sign_in
+            last_act_date = item.get('last_activity_date')
+            last_act_src = item.get('last_activity_source')
+            last_act_conf = item.get('last_activity_confidence')
             interactive_sign_in = item.get('last_sign_in')
             sp_sign_in = item.get('last_service_principal_sign_in')
-            item['last_interactive_sign_in'] = interactive_sign_in
-            # Compute effective_last_active (both are already ISO strings or None)
-            if interactive_sign_in and sp_sign_in:
-                item['effective_last_active'] = max(interactive_sign_in, sp_sign_in)
+
+            # Normalize last_activity_date to ISO string
+            if last_act_date and hasattr(last_act_date, 'isoformat'):
+                last_act_date = last_act_date.isoformat()
+                item['last_activity_date'] = last_act_date
+
+            # Source label map
+            SOURCE_LABELS = {
+                'role_assignment': 'ARM activity',
+                'entra_noninteractive': 'P2 sign-in',
+                'entra_interactive': 'P2 sign-in',
+                'created_date': 'AuditGraph snapshot',
+                'arm_activity': 'ARM activity',
+                'sign_in_log': 'P2 sign-in',
+            }
+
+            if last_act_date:
+                item['effective_last_active'] = last_act_date
+                item['activity_detection_source'] = SOURCE_LABELS.get(last_act_src or '', last_act_src or 'AuditGraph snapshot')
+                item['last_activity_confidence'] = last_act_conf or 'medium'
+            elif interactive_sign_in:
+                item['effective_last_active'] = interactive_sign_in
+                item['activity_detection_source'] = 'P2 sign-in'
+                item['last_activity_confidence'] = 'high'
+            elif sp_sign_in:
+                item['effective_last_active'] = sp_sign_in
+                item['activity_detection_source'] = 'P2 sign-in'
+                item['last_activity_confidence'] = 'high'
             else:
-                item['effective_last_active'] = interactive_sign_in or sp_sign_in
-            # Determine detection source
-            if sp_sign_in and item['effective_last_active'] == sp_sign_in:
-                item['activity_detection_source'] = 'service_principal_sign_in'
-            elif interactive_sign_in and item['effective_last_active'] == interactive_sign_in:
-                item['activity_detection_source'] = 'interactive_sign_in'
+                item['effective_last_active'] = None
+                item['activity_detection_source'] = None
+                item['last_activity_confidence'] = None
+
+            # Dormancy status from activity_status
+            act_status = item.get('activity_status', '')
+            if act_status in ('active', 'recently_created', 'likely_active'):
+                item['dormancy_status'] = 'Active'
+            elif act_status in ('stale', 'never_used', 'inactive'):
+                item['dormancy_status'] = 'Dormant'
             else:
-                item['activity_detection_source'] = 'no_activity_recorded'
+                item['dormancy_status'] = 'Unknown'
+
+            # Role activity summary
+            rs = role_summaries.get(item['identity_id'])
+            if rs:
+                item['role_summary'] = rs
+            else:
+                item['role_summary'] = {'total_roles': 0, 'never_used': 0, 'stale_90d': 0, 'last_role_active': None}
 
             items.append(item)
 
@@ -33262,15 +33583,16 @@ def get_agent_identity_count():
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT
-                ac.agent_identity_type,
-                COUNT(DISTINCT i.id)
-            FROM agent_classifications ac
-            JOIN identities i ON i.id = ac.identity_db_id
-            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
-              AND NOT COALESCE(i.is_microsoft_system, false)
-              AND i.deleted_at IS NULL
-            GROUP BY ac.agent_identity_type
+            SELECT agent_identity_type, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) ac.agent_identity_type
+                FROM agent_classifications ac
+                JOIN identities i ON i.id = ac.identity_db_id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY agent_identity_type
         """)
         counts = {row[0]: row[1] for row in cursor.fetchall()}
         cursor.close()
@@ -33702,6 +34024,288 @@ def scan_orphan_agents():
         db.close()
 
 
+def get_agent_evidence(identity_id):
+    """GET /api/identities/<identity_id>/ai-evidence — classification proof panel.
+
+    Returns structured evidence explaining WHY this identity was classified as
+    an AI agent, including matched signals, AI resource connections, and risk context.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Resolve identity via org-scoped discovery runs
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.app_id, i.identity_type,
+                   i.identity_category, i.risk_score, i.risk_level,
+                   i.agent_identity_type
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id, display_name, app_id, identity_type, category, risk_score, risk_level, agent_type = ident
+
+        # Get classification record
+        cursor.execute("""
+            SELECT agent_identity_type, classification_confidence,
+                   classification_reason, detected_platform, pattern_version,
+                   classified_at
+            FROM agent_classifications
+            WHERE identity_db_id = %s
+            ORDER BY classified_at DESC LIMIT 1
+        """, (db_id,))
+        classification_row = cursor.fetchone()
+
+        if not classification_row:
+            cursor.close()
+            return jsonify({
+                'classified': False,
+                'agent_identity_type': agent_type or 'unknown',
+                'classification': None,
+                'evidence_signals': [],
+                'ai_connections': [],
+                'risk_context': None,
+            })
+
+        c_type, c_confidence, c_reason, c_platform, c_version, c_at = classification_row
+
+        # Only show evidence for actual AI classifications
+        if c_type not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
+            cursor.close()
+            return jsonify({
+                'classified': False,
+                'agent_identity_type': c_type or 'unknown',
+                'classification': None,
+                'evidence_signals': [],
+                'ai_connections': [],
+                'risk_context': None,
+            })
+
+        # Parse signal type from classification_reason (e.g. "app_id_match: openai")
+        signal_type = c_reason.split(':')[0].strip() if c_reason else 'unknown'
+
+        # Build evidence signals list
+        evidence_signals = []
+
+        # Signal 1: The primary classification signal
+        evidence_text = _build_evidence_text(signal_type, c_platform, display_name, app_id)
+        evidence_signals.append({
+            'signal_type': signal_type,
+            'confidence': c_confidence,
+            'platform': c_platform,
+            'evidence_text': evidence_text,
+            'is_primary': True,
+        })
+
+        # Signal 2: Check for corroborating role assignments on AI scopes
+        try:
+            cursor.execute("SAVEPOINT _ev_roles")
+            cursor.execute("""
+                SELECT role_name, scope, last_used_at FROM role_assignments
+                WHERE identity_db_id = %s
+            """, (db_id,))
+            roles = cursor.fetchall()
+            cursor.execute("RELEASE SAVEPOINT _ev_roles")
+        except Exception:
+            roles = []
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _ev_roles")
+            except Exception:
+                pass
+
+        ai_roles = []
+        from app.engines.discovery.agent_pattern_loader import match_roles
+        if roles:
+            role_dicts = [{'role_name': r[0], 'scope': r[1]} for r in roles]
+            role_platform, role_conf = match_roles(role_dicts)
+            if role_platform:
+                # Find which specific roles matched
+                from app.engines.discovery.agent_pattern_loader import _role_names_set, _scope_patterns_lower
+                for r in roles:
+                    rn = r[0] or ''
+                    scope = (r[1] or '').lower()
+                    last_used = r[2].isoformat() if r[2] else None
+                    if rn in _role_names_set:
+                        ai_roles.append({'role_name': rn, 'scope': r[1], 'match_type': 'role_name', 'last_used_at': last_used})
+                    else:
+                        for pat in _scope_patterns_lower:
+                            if pat in scope:
+                                ai_roles.append({'role_name': rn, 'scope': r[1], 'match_type': 'scope_pattern', 'matched_pattern': pat, 'last_used_at': last_used})
+                                break
+
+                if ai_roles and signal_type != 'role_scope_match':
+                    evidence_signals.append({
+                        'signal_type': 'role_scope_match',
+                        'confidence': role_conf,
+                        'platform': role_platform,
+                        'evidence_text': f"Has {len(ai_roles)} AI-related role assignment(s): {', '.join(r['role_name'] for r in ai_roles[:3])}",
+                        'is_primary': False,
+                    })
+
+        # Signal 3: Check for AI-related permissions
+        try:
+            cursor.execute("SAVEPOINT _ev_perms")
+            cursor.execute("""
+                SELECT permissions FROM identity_permissions
+                WHERE identity_db_id = %s ORDER BY id DESC LIMIT 1
+            """, (db_id,))
+            perm_row = cursor.fetchone()
+            cursor.execute("RELEASE SAVEPOINT _ev_perms")
+        except Exception:
+            perm_row = None
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _ev_perms")
+            except Exception:
+                pass
+
+        ai_permissions = []
+        if perm_row and perm_row[0]:
+            import json as _json
+            perms = perm_row[0]
+            if isinstance(perms, str):
+                perms = _json.loads(perms)
+            if isinstance(perms, list):
+                from app.engines.discovery.agent_pattern_loader import match_permissions
+                perm_strings = []
+                for p in perms:
+                    if isinstance(p, dict):
+                        perm_strings.append(p.get('permission', ''))
+                        perm_strings.append(p.get('resource', ''))
+                    else:
+                        perm_strings.append(str(p))
+                matches = match_permissions(perm_strings)
+                for pname, pconf, pplat in matches:
+                    ai_permissions.append({'permission': pname, 'confidence': pconf, 'platform': pplat})
+
+                if ai_permissions and signal_type != 'permission_match':
+                    evidence_signals.append({
+                        'signal_type': 'permission_match',
+                        'confidence': ai_permissions[0]['confidence'],
+                        'platform': ai_permissions[0]['platform'],
+                        'evidence_text': f"Has {len(ai_permissions)} AI-related API permission(s): {', '.join(p['permission'] for p in ai_permissions[:3])}",
+                        'is_primary': False,
+                    })
+
+        # Build AI connections (role assignments on AI resources)
+        ai_connections = []
+        for ar in ai_roles:
+            last_used = ar.get('last_used_at')
+            if last_used:
+                source = f"P2 sign-in log \u00b7 {last_used[:10]}"
+            else:
+                source = "ARM role assignment \u00b7 Static analysis"
+            ai_connections.append({
+                'type': 'rbac_role',
+                'role_name': ar['role_name'],
+                'scope': ar['scope'],
+                'match_type': ar['match_type'],
+                'last_used_at': last_used,
+                'source_of_evidence': source,
+            })
+        for ap in ai_permissions:
+            ai_connections.append({
+                'type': 'api_permission',
+                'permission': ap['permission'],
+                'platform': ap['platform'],
+                'last_used_at': None,
+                'source_of_evidence': "ARM role assignment \u00b7 Static analysis",
+            })
+
+        # Risk context
+        risk_context = {
+            'risk_score': risk_score,
+            'risk_level': risk_level,
+            'identity_type': identity_type,
+            'identity_category': category,
+            'has_owner': False,
+            'credential_count': 0,
+        }
+        # Fetch owner/cred info
+        try:
+            cursor.execute("SAVEPOINT _ev_ctx")
+            cursor.execute("""
+                SELECT owner_count, credential_count FROM identities WHERE id = %s
+            """, (db_id,))
+            ctx_row = cursor.fetchone()
+            cursor.execute("RELEASE SAVEPOINT _ev_ctx")
+            if ctx_row:
+                risk_context['has_owner'] = (ctx_row[0] or 0) > 0
+                risk_context['credential_count'] = ctx_row[0] or 0
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _ev_ctx")
+            except Exception:
+                pass
+
+        cursor.close()
+
+        return jsonify({
+            'classified': True,
+            'agent_identity_type': c_type,
+            'classification': {
+                'confidence': c_confidence,
+                'reason': c_reason,
+                'platform': c_platform,
+                'pattern_version': c_version,
+                'classified_at': c_at.isoformat() if c_at else None,
+            },
+            'evidence_signals': evidence_signals,
+            'ai_connections': ai_connections,
+            'risk_context': risk_context,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_agent_evidence failed for %s: %s", identity_id, e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def _build_evidence_text(signal_type, platform, display_name, app_id):
+    """Generate human-readable evidence explanation for classification signal."""
+    platform_labels = {
+        'copilot_studio': 'Microsoft Copilot Studio',
+        'power_virtual_agents': 'Power Virtual Agents',
+        'openai': 'OpenAI',
+        'anthropic': 'Anthropic Claude',
+        'azure_ai_studio': 'Azure AI Studio',
+        'azure_ml': 'Azure Machine Learning',
+        'azure_ai': 'Azure AI Services',
+        'azure_cognitive': 'Azure Cognitive Services',
+        'bot_framework': 'Microsoft Bot Framework',
+    }
+    label = platform_labels.get(platform, platform or 'Unknown Platform')
+
+    if signal_type == 'app_id_match':
+        return f"Application ID ({app_id}) is a registered {label} enterprise application"
+    elif signal_type == 'role_scope_match':
+        return f"Has RBAC role assignments on {label} resource scopes, confirming AI workload access"
+    elif signal_type == 'display_name_match':
+        return f"Display name \"{display_name}\" matches known {label} naming pattern"
+    elif signal_type == 'permission_match':
+        return f"Has API permissions granting access to {label} services"
+    else:
+        return f"Classified as {label} AI agent identity"
+
+
 # ============================================================
 # Phase 2A: Entra Group Scanner
 # ============================================================
@@ -33770,16 +34374,22 @@ def get_entra_group_stats():
 
 
 def get_identity_entra_groups(identity_id: str):
-    """GET /api/identities/<id>/entra-groups — groups the identity belongs to."""
+    """GET /api/identities/<id>/entra-groups — groups the identity belongs to.
+
+    Query params:
+      access_only  – 'true' (default) returns only groups with Azure RBAC roles.
+                     'false' returns all groups (for debugging).
+    """
     db = _db()
     try:
         db._ensure_entra_group_tables()
         organization_id = _org_id()
+        access_only = request.args.get('access_only', 'true').lower() != 'false'
         cursor = db.conn.cursor()
         run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
-            return jsonify({'groups': [], 'count': 0})
+            return jsonify({'groups': [], 'count': 0, 'total_groups': 0, 'with_azure_access': 0})
 
         # Look up the identity's object_id — the Graph object ID used as
         # member_object_id in entra_group_memberships. identity_id is app_id for
@@ -33792,13 +34402,27 @@ def get_identity_entra_groups(identity_id: str):
         row = cursor.fetchone()
         cursor.close()
         if not row or not row[0]:
-            return jsonify({'groups': [], 'count': 0})
+            return jsonify({'groups': [], 'count': 0, 'total_groups': 0, 'with_azure_access': 0})
 
         azure_object_id = row[0]
-        groups = db.get_identity_entra_groups(azure_object_id, run_ids)
+        all_groups = db.get_identity_entra_groups(azure_object_id, run_ids)
+        total_groups = len(all_groups)
+        with_azure_access = sum(
+            1 for g in all_groups
+            if g.get('rbac_roles') and len(g['rbac_roles']) > 0
+        )
+
+        if access_only:
+            groups = [g for g in all_groups
+                      if (g.get('rbac_roles') and len(g['rbac_roles']) > 0)]
+        else:
+            groups = all_groups
+
         return jsonify({
             'groups': groups,
             'count': len(groups),
+            'total_groups': total_groups,
+            'with_azure_access': with_azure_access,
         })
     finally:
         db.close()

@@ -235,6 +235,26 @@ interface PimData {
 
 // safeLower and normalizeCategoryFromBackend imported from constants/metrics
 
+function formatLastUsed(iso?: string | null): string {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / TIME_MS.DAY);
+    const absolute = d.toLocaleString(undefined, {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+    });
+    if (diffDays <= 0) return `Today · ${absolute}`;
+    if (diffDays === 1) return `1d ago · ${absolute}`;
+    if (diffDays < 30) return `${diffDays}d ago · ${absolute}`;
+    if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago · ${absolute}`;
+    return `${Math.floor(diffDays / 365)}y ago · ${absolute}`;
+  } catch {
+    return iso;
+  }
+}
+
 function formatDate(iso?: string | null) {
   if (!iso) return '—';
   try {
@@ -343,10 +363,11 @@ function parseEffectiveAccessScope(roles: any[]): { subscriptions: string[]; res
 }
 
 // Tab component
-function TabBar({ activeTab, onTabChange, counts }: {
+function TabBar({ activeTab, onTabChange, counts, labelOverrides }: {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
   counts: Record<TabId, number>;
+  labelOverrides?: Partial<Record<TabId, string>>;
 }) {
   const tabs: { id: TabId; label: string; icon: string }[] = [
     { id: 'overview', label: 'Overview', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
@@ -388,7 +409,7 @@ function TabBar({ activeTab, onTabChange, counts }: {
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={tab.icon} />
               </svg>
-              {tab.label}
+              {labelOverrides?.[tab.id] || tab.label}
               {count > 0 && tab.id !== 'overview' && (
                 <span className={`px-1.5 py-0.5 rounded-full text-xs ${
                   isActive ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
@@ -425,6 +446,7 @@ export default function IdentityDetail() {
   const [lifecycleLoading, setLifecycleLoading] = useState(false);
   const [lifecycleFilter, setLifecycleFilter] = useState<string>('all');
   const [identityGroups, setIdentityGroups] = useState<{id: number; name: string; color: string; group_type: string}[]>([]);
+  const [entraGroupMeta, setEntraGroupMeta] = useState<{total: number; withAccess: number}>({total: 0, withAccess: 0});
   const [anomalyData, setAnomalyData] = useState<{anomalies: any[]; count: number} | null>(null);
   const [anomalyLoading, setAnomalyLoading] = useState(false);
   const [effectiveAccessData, setEffectiveAccessData] = useState<EffectiveAccessData | null>(null);
@@ -435,6 +457,16 @@ export default function IdentityDetail() {
     human_identity: { id: number; display_name: string } | null;
     accounts: { id: number; identity_id?: string; object_id: string; display_name: string; upn: string; account_type: string; enabled: boolean; deleted: boolean; is_zombie: boolean; risk_score: number; risk_level: string; privilege_tier: string; link_method: string; link_confidence: number; verified: boolean }[];
     zombie_persona: boolean;
+  } | null>(null);
+
+  // AI Agent Evidence
+  const [aiEvidence, setAiEvidence] = useState<{
+    classified: boolean;
+    agent_identity_type: string;
+    classification?: { confidence: number; reason: string; platform: string; pattern_version: string; classified_at: string };
+    evidence_signals: { signal_type: string; confidence: number; platform: string; evidence_text: string; is_primary: boolean }[];
+    ai_connections: { type: string; role_name?: string; scope?: string; permission?: string; platform?: string; match_type?: string; last_used_at?: string | null; source_of_evidence?: string }[];
+    risk_context?: { risk_score: number; risk_level: string; identity_type: string; identity_category: string };
   } | null>(null);
 
   // Simulation state (What If tab)
@@ -627,6 +659,31 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [id]);
 
+  // Load entra group counts for tab label
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/entra-groups`))
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(json => {
+        if (cancelled) return;
+        setEntraGroupMeta({ total: json.total_groups || json.count || 0, withAccess: json.with_azure_access || 0 });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [id, withConnection]);
+
+  // Fetch AI agent evidence (non-blocking)
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/ai-evidence`))
+      .then(res => res.ok ? res.json() : null)
+      .then(json => { if (!cancelled && json?.classified) setAiEvidence(json); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [id]);
+
   const handleRemediationAction = async (playbookId: number, status: RemediationStatus, notes?: string) => {
     if (!id) return;
     setActionLoading(playbookId);
@@ -732,7 +789,7 @@ export default function IdentityDetail() {
     compliance: roleIntel.length,
     remediation: remediationData?.summary?.total ?? 0,
     lifecycle: lifecycleData?.total_events ?? 0,
-    entra_groups: identity?.group_count ?? 0,
+    entra_groups: 0,  // count embedded in dynamic tab label
     sensitive_access: 0,
     simulate: 0,
     attack_paths: 0,
@@ -850,43 +907,57 @@ export default function IdentityDetail() {
                 <div className="text-gray-500">Last Used</div>
                 <div className="font-medium">
                   {(() => {
-                    // Canonical state from build_identity_state()
-                    const activityLabel = (identity as any).activity_label;
-                    const lastSeenDisplay = (identity as any).last_seen_display;
-                    const lastSeenSource = (identity as any).last_seen_source;
-                    const lastSeenAvailable = (identity as any).last_seen_available;
                     const authActivity = (identity as any).auth_activity;
+                    const lastSeenAvailable = (identity as any).last_seen_available;
+                    const activityLabel = (identity as any).activity_label;
 
-                    if (lastSeenAvailable && lastSeenDisplay) {
+                    // If canonical state says "Never Used" / "Not Observed", respect it
+                    if (activityLabel === 'Never Used' || activityLabel === 'Not Observed') {
+                      const detail = (identity as any).activity_detail;
+                      return <span className="text-gray-400 italic" title={detail || undefined}>No activity observed</span>;
+                    }
+
+                    // Priority 1: canonical timestamp from build_identity_state()
+                    const lastSeenTs = (identity as any).last_seen_timestamp;
+                    // Priority 2: last_activity_date (direct column)
+                    const lastActivityDate = (identity as any).last_activity_date;
+                    // Priority 3: effective_last_used (legacy computed)
+                    const isConnector = !!identity.is_discovery_connector;
+                    const elu = isConnector
+                      ? (identity.effective_last_used || new Date().toISOString())
+                      : identity.effective_last_used;
+
+                    // Pick best available timestamp
+                    const bestTs = lastSeenTs || lastActivityDate || elu;
+
+                    if (bestTs) {
                       // Determine source badge
                       let srcBadge: React.ReactNode = null;
-                      if (authActivity?.interactive_signin) {
-                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Sign-in</span>;
-                      } else if (authActivity?.arm_activity) {
-                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">ARM</span>;
-                      } else if (lastSeenSource) {
-                        srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-gray-100 text-gray-600">{lastSeenSource}</span>;
+                      if (lastSeenAvailable && authActivity) {
+                        if (authActivity.interactive_signin) {
+                          srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Sign-in</span>;
+                        } else if (authActivity.arm_activity) {
+                          srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">ARM</span>;
+                        } else if (authActivity.non_interactive_signin) {
+                          srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-50 text-blue-600">Non-interactive</span>;
+                        }
+                      }
+                      if (!srcBadge && !lastSeenTs && !lastActivityDate && elu) {
+                        const eluSrc = identity.effective_last_used_source;
+                        if (eluSrc === 'auditgraph') {
+                          srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-emerald-100 text-emerald-700">AG</span>;
+                        } else if (eluSrc === 'azure_signin') {
+                          srcBadge = <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-blue-100 text-blue-700">Azure</span>;
+                        }
                       }
                       return (
                         <span className="text-gray-900 inline-flex items-center gap-1">
-                          {lastSeenDisplay}
+                          {formatLastUsed(bestTs)}
                           {srcBadge}
                         </span>
                       );
                     }
 
-                    // Legacy fallback
-                    const isConnector = !!identity.is_discovery_connector;
-                    const elu = isConnector
-                      ? (identity.effective_last_used || new Date().toISOString())
-                      : identity.effective_last_used;
-                    if (elu) {
-                      const d = new Date(elu);
-                      const now = new Date();
-                      const diffDays = Math.floor((now.getTime() - d.getTime()) / TIME_MS.DAY);
-                      const label = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Yesterday' : `${diffDays}d ago`;
-                      return <span className="text-gray-900">{label}</span>;
-                    }
                     return <span className="text-gray-400 italic">No activity observed</span>;
                   })()}
                 </div>
@@ -941,6 +1012,100 @@ export default function IdentityDetail() {
             )}
           </div>
 
+          {/* AI Agent Evidence Panel — only for classified identities */}
+          {!!aiEvidence && aiEvidence.classified && (
+            <div className="bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-2xl p-5 mb-4">
+              <div className="flex items-center gap-2 mb-3">
+                <svg className="w-5 h-5 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                <h3 className="text-sm font-bold text-violet-900">AI Agent Evidence</h3>
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                  aiEvidence.agent_identity_type === 'ai_agent'
+                    ? 'bg-violet-200 text-violet-800'
+                    : aiEvidence.agent_identity_type === 'ai_privileged_human'
+                    ? 'bg-indigo-200 text-indigo-800'
+                    : 'bg-amber-200 text-amber-800'
+                }`}>
+                  {aiEvidence.agent_identity_type === 'ai_agent' ? 'Confirmed AI Agent'
+                    : aiEvidence.agent_identity_type === 'ai_privileged_human' ? 'AI-Privileged Human'
+                    : 'Possible AI Agent'}
+                </span>
+                {!!aiEvidence.classification && (
+                  <span className="ml-auto text-[10px] text-gray-500">
+                    Patterns v{aiEvidence.classification.pattern_version}
+                  </span>
+                )}
+              </div>
+
+              {/* Evidence signals */}
+              <div className="space-y-2">
+                {aiEvidence.evidence_signals.map((sig, i) => (
+                  <div key={i} className={`flex items-start gap-2 text-sm ${sig.is_primary ? 'text-violet-900' : 'text-gray-700'}`}>
+                    <span className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ${
+                      sig.is_primary ? 'bg-violet-600 text-white' : 'bg-gray-300 text-gray-600'
+                    }`}>
+                      {sig.is_primary ? '!' : '+'}
+                    </span>
+                    <div className="flex-1">
+                      <span className={sig.is_primary ? 'font-semibold' : ''}>{sig.evidence_text}</span>
+                      <span className="ml-2 text-[10px] text-gray-500">
+                        ({Math.round(sig.confidence * 100)}% confidence)
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* AI Connections — per-role evidence */}
+              {aiEvidence.ai_connections.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-violet-200">
+                  <div className="text-[11px] font-semibold text-violet-700 uppercase mb-1.5">AI Service Connections</div>
+                  <div className="space-y-1">
+                    {aiEvidence.ai_connections.slice(0, 6).map((conn, i) => (
+                      <div key={i} className="flex items-center gap-2 px-2 py-1 rounded bg-white border border-violet-100 text-[11px]">
+                        {conn.type === 'rbac_role' ? (
+                          <>
+                            <svg className="w-3 h-3 text-violet-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                            </svg>
+                            <span className="font-medium text-violet-800 truncate max-w-[140px]" title={conn.role_name}>{conn.role_name}</span>
+                            <span className="text-gray-400 truncate max-w-[180px]" title={conn.scope}>{conn.scope ? conn.scope.split('/').slice(-2).join('/') : ''}</span>
+                            <span className="ml-auto text-gray-400 whitespace-nowrap">{(conn as any).source_of_evidence || 'ARM role assignment \u00b7 Static analysis'}</span>
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-3 h-3 text-violet-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                            </svg>
+                            <span className="font-medium text-violet-800">{conn.permission}</span>
+                            <span className="ml-auto text-gray-400 whitespace-nowrap">{(conn as any).source_of_evidence || 'ARM role assignment \u00b7 Static analysis'}</span>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    {aiEvidence.ai_connections.length > 6 && (
+                      <div className="text-[10px] text-gray-500 px-2">
+                        +{aiEvidence.ai_connections.length - 6} more connections
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-1.5 text-[9px] text-gray-400 italic">
+                    Role assignment IS the evidence — no logs needed to prove AI access exists.
+                  </div>
+                </div>
+              )}
+
+              {/* Classification metadata */}
+              {!!aiEvidence.classification && (
+                <div className="mt-3 pt-2 border-t border-violet-200 flex items-center gap-4 text-[10px] text-gray-500">
+                  <span>Platform: <strong className="text-violet-700">{aiEvidence.classification.platform}</strong></span>
+                  <span>Classified: {new Date(aiEvidence.classification.classified_at).toLocaleDateString()}</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Groups */}
           {identityGroups.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
@@ -962,7 +1127,11 @@ export default function IdentityDetail() {
 
           {/* Tabs */}
           <div className="bg-white border rounded-2xl overflow-hidden">
-            <TabBar activeTab={activeTab} onTabChange={setActiveTab} counts={tabCounts} />
+            <TabBar activeTab={activeTab} onTabChange={setActiveTab} counts={tabCounts} labelOverrides={{
+              entra_groups: entraGroupMeta.total > 0
+                ? `Groups (${entraGroupMeta.total})${entraGroupMeta.withAccess > 0 ? ` \u00b7 ${entraGroupMeta.withAccess} with Azure access` : ''}`
+                : undefined,
+            }} />
 
             <div className="p-6">
               {/* ═══ OVERVIEW TAB ═══ */}

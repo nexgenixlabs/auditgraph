@@ -294,7 +294,7 @@ export default function Dashboard() {
   // ── Render ─────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6" style={{ fontFamily: "'Inter', sans-serif" }}>
+    <div className="w-full px-4 sm:px-5 lg:px-6 py-6" style={{ fontFamily: "'Inter', sans-serif" }}>
       {/* Section 1: Header */}
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>

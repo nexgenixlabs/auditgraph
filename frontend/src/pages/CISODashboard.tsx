@@ -38,7 +38,7 @@ import { PriorityActionsPanelV31 } from '../components/ciso/RemediationImpactSec
 import { ImmediateRisksPanelV31 } from '../components/ciso/ImmediateRisksSection';
 import { DataIntegrityFooter } from '../components/ciso/DataIntegrityFooter';
 import { IdentityLegend } from '../components/ciso/IdentityLegend';
-import { POSTURE_CONFIDENCE_COLOR } from '../constants/cisoColors';
+import { POSTURE_CONFIDENCE_COLOR, CONFIDENCE_DISPLAY_LABEL, CONFIDENCE_TOOLTIP } from '../constants/cisoColors';
 
 // ─── Backend status values (SSOT — no frontend derivation) ──
 
@@ -278,8 +278,8 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
               {coverage.cloud_label} &middot; {coverage.sub_count} subscription{coverage.sub_count !== 1 ? 's' : ''}
             </p>
             {/* Line 3: Confidence + visibility qualifier */}
-            <p className="text-[10px] mt-0.5" style={{ color: confColor }}>
-              Confidence: {coverage.confidence_level.charAt(0).toUpperCase() + coverage.confidence_level.slice(1)}{' '}
+            <p className="text-[10px] mt-0.5" style={{ color: confColor }} title={CONFIDENCE_TOOLTIP}>
+              Confidence: {CONFIDENCE_DISPLAY_LABEL[coverage.confidence_level] || 'Improving'}{' '}
               ({coverage.coverage_pct >= 100 ? 'all sources active'
                 : coverage.coverage_pct >= 80 ? 'most sources active'
                 : coverage.coverage_pct >= 50 ? 'some sources inactive'

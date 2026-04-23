@@ -107,6 +107,27 @@ const RISK_COLORS: Record<string, string> = {
   info: 'text-gray-500 bg-gray-50',
 };
 
+/** Ordered risk levels — higher index = higher severity */
+const RISK_LEVEL_ORDER: Record<string, number> = {
+  info: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function riskLevelIndex(level: string): number {
+  return RISK_LEVEL_ORDER[level?.toLowerCase()] ?? -1;
+}
+
+function isRiskEscalation(previous: string, current: string): boolean {
+  return riskLevelIndex(current) > riskLevelIndex(previous);
+}
+
+function isRiskDeescalation(previous: string, current: string): boolean {
+  return riskLevelIndex(current) < riskLevelIndex(previous);
+}
+
 function riskBadge(level: string) {
   const colors = RISK_COLORS[level?.toLowerCase()] || 'text-gray-500 bg-gray-50';
   return (
@@ -614,7 +635,23 @@ function DetailView({
   openSections: Record<string, boolean>;
   onToggleSection: (key: string) => void;
 }) {
+  // Check if any risk changes contain escalations — used to promote that section
+  const hasEscalations = (detail.changes.risk_changes || []).some(
+    rc => isRiskEscalation(rc.previous_risk, rc.current_risk)
+  );
+
+  // Section definitions with priority: lower = displayed first.
+  // Risk escalations get priority 0 (top), then new identities, removed, other changes last.
   const sections = [
+    {
+      key: 'risk_changes',
+      label: 'Risk Changes',
+      count: detail.changes.risk_changes?.length || 0,
+      color: 'text-purple-700',
+      bgHeader: 'bg-purple-50',
+      icon: '!',
+      priority: hasEscalations ? 0 : 4,
+    },
     {
       key: 'new_identities',
       label: 'New Identities',
@@ -622,6 +659,7 @@ function DetailView({
       color: 'text-green-700',
       bgHeader: 'bg-green-50',
       icon: '+',
+      priority: 1,
     },
     {
       key: 'removed_identities',
@@ -630,14 +668,7 @@ function DetailView({
       color: 'text-red-700',
       bgHeader: 'bg-red-50',
       icon: '-',
-    },
-    {
-      key: 'microsoft_removed_identities',
-      label: 'Microsoft Removed',
-      count: detail.changes.microsoft_removed_identities?.length || 0,
-      color: 'text-gray-600',
-      bgHeader: 'bg-gray-100',
-      icon: 'M',
+      priority: 2,
     },
     {
       key: 'permission_changes',
@@ -646,14 +677,7 @@ function DetailView({
       color: 'text-orange-700',
       bgHeader: 'bg-orange-50',
       icon: '~',
-    },
-    {
-      key: 'risk_changes',
-      label: 'Risk Changes',
-      count: detail.changes.risk_changes?.length || 0,
-      color: 'text-purple-700',
-      bgHeader: 'bg-purple-50',
-      icon: '!',
+      priority: 3,
     },
     {
       key: 'credential_changes',
@@ -662,6 +686,16 @@ function DetailView({
       color: 'text-yellow-700',
       bgHeader: 'bg-yellow-50',
       icon: '*',
+      priority: 5,
+    },
+    {
+      key: 'microsoft_removed_identities',
+      label: 'Microsoft Removed',
+      count: detail.changes.microsoft_removed_identities?.length || 0,
+      color: 'text-gray-600',
+      bgHeader: 'bg-gray-100',
+      icon: 'M',
+      priority: 6,
     },
     {
       key: 'classification_changes',
@@ -670,10 +704,13 @@ function DetailView({
       color: 'text-cyan-700',
       bgHeader: 'bg-cyan-50',
       icon: '\u25C9',
+      priority: 7,
     },
   ];
 
-  const nonEmpty = sections.filter(s => s.count > 0);
+  const nonEmpty = sections
+    .filter(s => s.count > 0)
+    .sort((a, b) => a.priority - b.priority);
 
   // Build event lookup by identity_id for section-level badges
   // (must be called unconditionally — React hooks rules)
@@ -828,9 +865,16 @@ function reasonTooltip(reason: string | undefined, tooltips: Record<string, stri
 }
 
 function NewIdentitiesSection({ items, eventsByIdentity }: { items: IdentityData[]; eventsByIdentity?: Record<string, DriftEvent[]> }) {
+  // Sort new identities by risk level, highest first
+  const sorted = useMemo(() => {
+    return [...items].sort((a, b) =>
+      riskLevelIndex(b.risk_level) - riskLevelIndex(a.risk_level)
+    );
+  }, [items]);
+
   return (
     <div className="space-y-2">
-      {items.map((item, i) => {
+      {sorted.map((item, i) => {
         const matchingEvent = eventsByIdentity?.[item.identity_id]?.find(
           e => e.event_type === 'identity_added' || e.event_type === 'identity_resurrection'
         );
@@ -1050,24 +1094,92 @@ function PermissionChangesSection({ items, eventsByIdentity }: { items: FullDrif
 }
 
 function RiskChangesSection({ items }: { items: FullDriftReport['changes']['risk_changes'] }) {
+  // Sort: escalations first (highest severity delta first), then de-escalations, then unchanged
+  const sorted = useMemo(() => {
+    return [...items].sort((a, b) => {
+      const aEsc = isRiskEscalation(a.previous_risk, a.current_risk);
+      const bEsc = isRiskEscalation(b.previous_risk, b.current_risk);
+      const aDeesc = isRiskDeescalation(a.previous_risk, a.current_risk);
+      const bDeesc = isRiskDeescalation(b.previous_risk, b.current_risk);
+      // Escalations first
+      if (aEsc && !bEsc) return -1;
+      if (!aEsc && bEsc) return 1;
+      // Among escalations, higher current risk first
+      if (aEsc && bEsc) {
+        const delta = (riskLevelIndex(b.current_risk) - riskLevelIndex(b.previous_risk))
+          - (riskLevelIndex(a.current_risk) - riskLevelIndex(a.previous_risk));
+        if (delta !== 0) return delta;
+        return riskLevelIndex(b.current_risk) - riskLevelIndex(a.current_risk);
+      }
+      // De-escalations before unchanged
+      if (aDeesc && !bDeesc) return -1;
+      if (!aDeesc && bDeesc) return 1;
+      return 0;
+    });
+  }, [items]);
+
   return (
     <div className="space-y-2">
-      {items.map((item, i) => (
-        <div key={item.identity?.identity_id || i}>
-          <div className="flex items-center gap-3 text-sm">
-            <span className={item.severity === 'escalation' ? 'text-red-500' : 'text-green-500'}>
-              {item.severity === 'escalation' ? '\u2191' : '\u2193'}
-            </span>
-            <IdentityLink identity={item.identity} />
-            {riskBadge(item.previous_risk)}
-            <span className="text-gray-400">{'\u2192'}</span>
-            {riskBadge(item.current_risk)}
+      {sorted.map((item, i) => {
+        const escalated = isRiskEscalation(item.previous_risk, item.current_risk);
+        const deescalated = isRiskDeescalation(item.previous_risk, item.current_risk);
+
+        const rowBg = escalated
+          ? 'bg-red-500/10 border border-red-200/60'
+          : deescalated
+            ? 'bg-green-500/10 border border-green-200/60'
+            : '';
+
+        return (
+          <div
+            key={item.identity?.identity_id || i}
+            className={`rounded-lg px-3 py-2 ${rowBg}`}
+          >
+            <div className="flex items-center gap-3 text-sm">
+              {escalated && (
+                <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+              )}
+              {deescalated && (
+                <svg className="w-4 h-4 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+              {!escalated && !deescalated && (
+                <span className="text-gray-400">{'\u2194'}</span>
+              )}
+              <IdentityLink identity={item.identity} />
+              {riskBadge(item.previous_risk)}
+              <span className="text-gray-400">{'\u2192'}</span>
+              {riskBadge(item.current_risk)}
+              {escalated && (
+                <span className="text-[10px] font-bold uppercase text-red-600 bg-red-50 px-1.5 py-0.5 rounded">
+                  Escalation
+                </span>
+              )}
+              {deescalated && (
+                <span className="text-[10px] font-bold uppercase text-green-600 bg-green-50 px-1.5 py-0.5 rounded">
+                  De-escalation
+                </span>
+              )}
+            </div>
+            {escalated && (
+              <div className="ml-7 mt-1 text-xs font-medium text-red-600">
+                Privilege escalation detected
+              </div>
+            )}
+            {deescalated && (
+              <div className="ml-7 mt-1 text-xs font-medium text-green-600">
+                Risk reduced
+              </div>
+            )}
+            {!!item.change_reason && (
+              <div className="ml-7 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
+            )}
           </div>
-          {!!item.change_reason && (
-            <div className="ml-5 mt-0.5 text-xs text-gray-500 italic">{item.change_reason}</div>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

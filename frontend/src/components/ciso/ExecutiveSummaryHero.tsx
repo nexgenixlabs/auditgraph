@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import type { CISOViewModel } from '../../utils/cisoViewModel';
 import type { PostureV31Response } from '../../utils/cisoViewModel';
 import { DN, ScoreRing } from '../dashboard/ciso-shared';
-import { STATUS_DOT, STATUS_TEXT_CLS, CONFIDENCE_CLS, POSTURE_STATUS_COLOR, POSTURE_STATUS_BORDER, POSTURE_STATUS_LABEL, POSTURE_STATUS_TEXT, POSTURE_CONFIDENCE_COLOR, postureBandFromScore } from '../../constants/cisoColors';
+import { STATUS_DOT, STATUS_TEXT_CLS, CONFIDENCE_CLS, POSTURE_STATUS_COLOR, POSTURE_STATUS_BORDER, POSTURE_STATUS_LABEL, POSTURE_STATUS_TEXT, POSTURE_CONFIDENCE_COLOR, CONFIDENCE_DISPLAY_LABEL, CONFIDENCE_TOOLTIP, postureBandFromScore } from '../../constants/cisoColors';
 
 // ── Narrative helpers (legacy VM path) ───────────────────────
 
@@ -157,8 +157,9 @@ export function PostureScoreHero({ data }: { data: PostureV31Response }) {
           <div className="flex-1 h-1 bg-[#1e2d4a] rounded-full max-w-[60px]">
             <div className="h-1 rounded-full transition-all" style={{ width: `${cov.coverage_pct}%`, backgroundColor: POSTURE_CONFIDENCE_COLOR[cov.confidence_level] || '#4a6080' }} />
           </div>
-          <span className="text-xs capitalize" style={{ color: POSTURE_CONFIDENCE_COLOR[cov.confidence_level] || '#4a6080' }}>
-            Confidence: {cov.confidence_level}
+          <span className="text-xs" style={{ color: POSTURE_CONFIDENCE_COLOR[cov.confidence_level] || '#4a6080' }}
+                title={CONFIDENCE_TOOLTIP}>
+            Confidence: {CONFIDENCE_DISPLAY_LABEL[cov.confidence_level] || 'Improving'}
           </span>
         </div>
       </div>
