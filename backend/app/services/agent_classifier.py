@@ -27,7 +27,8 @@ POSSIBLE_THRESHOLD = 0.6        # 0.6–0.79 → possible_ai_agent
 
 
 def classify_identity(display_name, app_id=None, permissions=None,
-                      role_assignments=None, identity_category=None):
+                      role_assignments=None, identity_category=None,
+                      workload_type=None, identity_type=None):
     """Classify a single identity against the AI agent pattern library.
 
     Args:
@@ -36,6 +37,8 @@ def classify_identity(display_name, app_id=None, permissions=None,
         permissions: list of permission strings or dicts (optional)
         role_assignments: list of dicts with role_name/scope (optional)
         identity_category: identity category string (optional)
+        workload_type: workload type string (optional, e.g. 'ai_service', 'ml_workload')
+        identity_type: identity type string (optional)
 
     Returns:
         dict with classification result:
@@ -58,7 +61,18 @@ def classify_identity(display_name, app_id=None, permissions=None,
                 'detected_platform': platform,
             }
 
-    # 2. Check role_assignments against AI scope/role patterns (high confidence)
+    # 2. Check workload_type — direct AI service indicator
+    if workload_type and not is_human:
+        wt_lower = workload_type.lower()
+        if wt_lower in ('ai_service', 'ml_workload'):
+            return {
+                'agent_identity_type': 'ai_agent',
+                'classification_confidence': 0.95,
+                'classification_reason': f'workload_type_match: {workload_type}',
+                'detected_platform': 'azure_ai' if wt_lower == 'ai_service' else 'azure_ml',
+            }
+
+    # 3. Check role_assignments against AI scope/role patterns (high confidence)
     if role_assignments:
         platform, confidence = match_roles(role_assignments)
         if platform and confidence >= AUTO_CLASSIFY_THRESHOLD:
@@ -77,7 +91,7 @@ def classify_identity(display_name, app_id=None, permissions=None,
                 'detected_platform': platform,
             }
 
-    # 3. Check display_name against patterns (regex)
+    # 4. Check display_name against patterns (regex)
     # Humans never match display_name patterns (those are SPN naming conventions)
     if display_name and not is_human:
         platform, confidence = match_display_name(display_name)
@@ -96,7 +110,25 @@ def classify_identity(display_name, app_id=None, permissions=None,
                 'detected_platform': platform,
             }
 
-    # 4. Check API permissions against permission signals
+    # 5. Check managed identity + AI name signal combination
+    if identity_type and not is_human:
+        it_lower = (identity_type or '').lower()
+        dn_lower = (display_name or '').lower()
+        if 'managed_identity' in it_lower:
+            ai_name_signals = (
+                'copilot', 'openai', 'cognitive', '-ml-', 'aml-',
+                'azure-ai', 'aiservice', 'ai_startup', 'alexander', 'alexedra',
+            )
+            for signal in ai_name_signals:
+                if signal in dn_lower:
+                    return {
+                        'agent_identity_type': 'ai_agent',
+                        'classification_confidence': 0.85,
+                        'classification_reason': f'managed_identity_ai_name: {signal}',
+                        'detected_platform': 'azure_ai',
+                    }
+
+    # 6. Check API permissions against permission signals
     if permissions:
         perm_strings = []
         for p in permissions:
@@ -124,7 +156,7 @@ def classify_identity(display_name, app_id=None, permissions=None,
                 'detected_platform': platform,
             }
 
-    # 5. No match
+    # 7. No match
     return {
         'agent_identity_type': 'unknown',
         'classification_confidence': 0.0,
@@ -160,6 +192,13 @@ def classify_tenant(db, organization_id, run_id=None):
     except Exception:
         pass
 
+    # Re-establish RLS context after rollback (rollback can clear session vars)
+    if hasattr(db, 'set_organization_context') and organization_id:
+        try:
+            db.set_organization_context(organization_id)
+        except Exception:
+            pass
+
     cursor = db.conn.cursor()
     pattern_version = get_version()
     now = datetime.now(timezone.utc)
@@ -180,20 +219,53 @@ def classify_tenant(db, organization_id, run_id=None):
         run_id = row[0]
 
     # Fetch all identities from this run (any category — role signals apply to humans too)
-    cursor.execute("""
-        SELECT i.id, i.identity_id, i.display_name, i.app_id,
-               COALESCE(i.identity_category, '')
-        FROM identities i
-        WHERE i.discovery_run_id = %s
-          AND NOT COALESCE(i.is_microsoft_system, false)
-    """, (run_id,))
-    identities = cursor.fetchall()
+    # Use savepoint so missing columns (workload_type, identity_type) don't poison the tx
+    _has_extra_cols = True
+    try:
+        cursor.execute("SAVEPOINT _classify_cols_check")
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.app_id,
+                   COALESCE(i.identity_category, ''),
+                   COALESCE(i.workload_type, ''),
+                   COALESCE(i.identity_type, '')
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+        """, (run_id,))
+        identities = cursor.fetchall()
+        cursor.execute("RELEASE SAVEPOINT _classify_cols_check")
+    except Exception:
+        _has_extra_cols = False
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _classify_cols_check")
+        except Exception:
+            pass
+        # Fallback: query without workload_type/identity_type
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.app_id,
+                   COALESCE(i.identity_category, ''),
+                   '' AS workload_type,
+                   '' AS identity_type
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+        """, (run_id,))
+        identities = cursor.fetchall()
+        logger.info("classify_tenant: workload_type/identity_type columns missing — using fallback query")
 
     stats = {'total_evaluated': len(identities), 'ai_agent': 0,
              'possible_ai_agent': 0, 'ai_privileged_human': 0, 'unknown': 0,
              'run_id': run_id, 'pattern_version': pattern_version}
 
-    for identity_db_id, identity_id, display_name, app_id, identity_category in identities:
+    for row in identities:
+        identity_db_id = row[0]
+        identity_id = row[1]
+        display_name = row[2]
+        app_id = row[3]
+        identity_category = row[4]
+        workload_type = row[5] or None
+        identity_type = row[6] or None
+
         # Fetch permissions for this identity
         permissions = _get_identity_permissions(cursor, identity_db_id)
 
@@ -201,7 +273,10 @@ def classify_tenant(db, organization_id, run_id=None):
         roles = _get_identity_roles(cursor, identity_db_id)
 
         # Classify
-        result = classify_identity(display_name, app_id, permissions, roles, identity_category)
+        result = classify_identity(
+            display_name, app_id, permissions, roles, identity_category,
+            workload_type=workload_type, identity_type=identity_type,
+        )
         agent_type = result['agent_identity_type']
         stats[agent_type] = stats.get(agent_type, 0) + 1
 

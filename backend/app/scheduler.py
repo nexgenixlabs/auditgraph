@@ -895,114 +895,134 @@ def _send_change_notification_if_needed(db_org_id: int = None):
                 pairs.append((conn_id, run_ids[0], run_ids[1]))
 
         if not pairs:
-            logger.info("Not enough per-connection discovery runs for comparison - skipping change notification")
-            db.close()
-            return
+            logger.info("Not enough per-connection discovery runs for comparison - skipping drift/notification")
+            # First scan for this org — no drift pairs, but post-processing
+            # (agent classification, attack paths, risk scoring, etc.) must
+            # still run.  Resolve current_run_id from the latest completed
+            # run so tiered post-processing has a valid reference.
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND COALESCE(total_identities, 0) > 0
+                ORDER BY id DESC LIMIT 1
+            """, (db_org_id,))
+            _first_row = cursor.fetchone()
+            cursor.close()
+            if not _first_row:
+                logger.info("No completed discovery run with identities for org %s — skipping post-processing", db_org_id)
+                db.close()
+                return
+            current_run_id = _first_row[0]
+            previous_run_id = None
 
-        # Compare runs per-connection and aggregate changes
-        detector = DriftDetector(db)
-        changes: dict = {
-            'new_identities': [], 'removed_identities': [],
-            'microsoft_removed_identities': [],
-            'permission_changes': [], 'risk_changes': [], 'credential_changes': [],
-        }
-        all_events: list = []
-        latest_current_run_id = 0
-        latest_previous_run_id = 0
-        for conn_id, current_run_id, previous_run_id in pairs:
-            logger.info(f"Comparing runs for connection {conn_id}: #{current_run_id} vs #{previous_run_id}")
-            result = detector.compare_runs_v2(current_run_id, previous_run_id)
-            conn_changes = result['legacy']
-            conn_events = result['events']
+        if pairs:
+            # ── Drift detection & notification (requires 2+ runs) ──
+            detector = DriftDetector(db)
+            changes: dict = {
+                'new_identities': [], 'removed_identities': [],
+                'microsoft_removed_identities': [],
+                'permission_changes': [], 'risk_changes': [], 'credential_changes': [],
+            }
+            all_events: list = []
+            latest_current_run_id = 0
+            latest_previous_run_id = 0
+            for conn_id, current_run_id, previous_run_id in pairs:
+                logger.info(f"Comparing runs for connection {conn_id}: #{current_run_id} vs #{previous_run_id}")
+                result = detector.compare_runs_v2(current_run_id, previous_run_id)
+                conn_changes = result['legacy']
+                conn_events = result['events']
 
-            # Persist per-connection drift report with typed events
-            report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes, events=conn_events)
-            logger.info(f"Drift report #{report_id} saved for connection {conn_id} (runs #{current_run_id} vs #{previous_run_id})")
+                # Persist per-connection drift report with typed events
+                report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes, events=conn_events)
+                logger.info(f"Drift report #{report_id} saved for connection {conn_id} (runs #{current_run_id} vs #{previous_run_id})")
 
-            # Aggregate into combined changes
-            for key in changes:
-                changes[key].extend(conn_changes.get(key, []))
-            all_events.extend(conn_events)
+                # Aggregate into combined changes
+                for key in changes:
+                    changes[key].extend(conn_changes.get(key, []))
+                all_events.extend(conn_events)
 
-            if current_run_id > latest_current_run_id:
-                latest_current_run_id = current_run_id
-                latest_previous_run_id = previous_run_id
+                if current_run_id > latest_current_run_id:
+                    latest_current_run_id = current_run_id
+                    latest_previous_run_id = previous_run_id
 
-        current_run_id = latest_current_run_id
-        previous_run_id = latest_previous_run_id
+            current_run_id = latest_current_run_id
+            previous_run_id = latest_previous_run_id
 
-        # Check if there are ANY significant changes (all 5 types)
-        new_count = len(changes.get('new_identities', []))
-        removed_count = len(changes.get('removed_identities', []))
-        perm_count = len(changes.get('permission_changes', []))
-        risk_count = len(changes.get('risk_changes', []))
-        cred_count = len(changes.get('credential_changes', []))
-        total_changes = new_count + removed_count + perm_count + risk_count + cred_count
+            # Check if there are ANY significant changes (all 5 types)
+            new_count = len(changes.get('new_identities', []))
+            removed_count = len(changes.get('removed_identities', []))
+            perm_count = len(changes.get('permission_changes', []))
+            risk_count = len(changes.get('risk_changes', []))
+            cred_count = len(changes.get('credential_changes', []))
+            total_changes = new_count + removed_count + perm_count + risk_count + cred_count
 
-        if total_changes > 0:
-            logger.info(
-                f"Changes detected: {new_count} new, {removed_count} removed, "
-                f"{perm_count} permission, {risk_count} risk, {cred_count} credential"
-            )
+            if total_changes > 0:
+                logger.info(
+                    f"Changes detected: {new_count} new, {removed_count} removed, "
+                    f"{perm_count} permission, {risk_count} risk, {cred_count} credential"
+                )
 
-            # Phase 15: Check notification settings before sending email
-            email_enabled = db.get_system_setting('email_enabled', 'true') == 'true'
-            if not email_enabled:
-                logger.info("Email notifications disabled in settings - skipping")
-            else:
-                # Filter changes based on per-type notification flags
-                filtered_changes = {}
-                notify_map = {
-                    'new_identities': 'notify_new_identities',
-                    'removed_identities': 'notify_removed_identities',
-                    'permission_changes': 'notify_permission_changes',
-                    'risk_changes': 'notify_risk_changes',
-                    'credential_changes': 'notify_credential_changes',
-                }
-                for change_key, setting_key in notify_map.items():
-                    if db.get_system_setting(setting_key, 'true') == 'true':
-                        filtered_changes[change_key] = changes.get(change_key, [])
-                    else:
-                        filtered_changes[change_key] = []
-
-                # Only send if there are still notifiable changes
-                notifiable_count = sum(len(v) for v in filtered_changes.values())
-                if notifiable_count > 0:
-                    category_counts = _get_category_counts(db, current_run_id, previous_run_id)
-
-                    email_service = EmailService()
-                    success = email_service.send_identity_change_report(
-                        changes=filtered_changes,
-                        current_run_id=current_run_id,
-                        previous_run_id=previous_run_id,
-                        category_counts=category_counts
-                    )
-
-                    if success:
-                        logger.info("Change report email sent successfully")
-                    else:
-                        logger.warning("Failed to send change report email")
+                # Phase 15: Check notification settings before sending email
+                email_enabled = db.get_system_setting('email_enabled', 'true') == 'true'
+                if not email_enabled:
+                    logger.info("Email notifications disabled in settings - skipping")
                 else:
-                    logger.info("No notifiable changes after filtering by settings")
-        else:
-            logger.info("No changes detected - no email notification needed")
+                    # Filter changes based on per-type notification flags
+                    filtered_changes = {}
+                    notify_map = {
+                        'new_identities': 'notify_new_identities',
+                        'removed_identities': 'notify_removed_identities',
+                        'permission_changes': 'notify_permission_changes',
+                        'risk_changes': 'notify_risk_changes',
+                        'credential_changes': 'notify_credential_changes',
+                    }
+                    for change_key, setting_key in notify_map.items():
+                        if db.get_system_setting(setting_key, 'true') == 'true':
+                            filtered_changes[change_key] = changes.get(change_key, [])
+                        else:
+                            filtered_changes[change_key] = []
 
-        # Phase 83: Dispatch drift notification
-        if total_changes > 0:
-            _dispatch_notification('drift_detected', {
-                'title': f'{total_changes} Changes Detected in Discovery',
-                'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
-                'severity': 'high' if new_count + removed_count > 0 else 'medium',
-            }, db_org_id=db_org_id)
+                    # Only send if there are still notifiable changes
+                    notifiable_count = sum(len(v) for v in filtered_changes.values())
+                    if notifiable_count > 0:
+                        category_counts = _get_category_counts(db, current_run_id, previous_run_id)
 
-        # Phase 43: SOAR evaluation for drift and change events
-        _evaluate_soar_triggers_for_changes(changes, db)
+                        email_service = EmailService()
+                        success = email_service.send_identity_change_report(
+                            changes=filtered_changes,
+                            current_run_id=current_run_id,
+                            previous_run_id=previous_run_id,
+                            category_counts=category_counts
+                        )
 
-        # Phase 28: Fire webhook events
-        _fire_webhook_events(current_run_id, changes, db)
+                        if success:
+                            logger.info("Change report email sent successfully")
+                        else:
+                            logger.warning("Failed to send change report email")
+                    else:
+                        logger.info("No notifiable changes after filtering by settings")
+            else:
+                logger.info("No changes detected - no email notification needed")
 
-        # Phase 30: Generate in-app notifications
-        _generate_notifications(current_run_id, changes, db)
+            # Phase 83: Dispatch drift notification
+            if total_changes > 0:
+                _dispatch_notification('drift_detected', {
+                    'title': f'{total_changes} Changes Detected in Discovery',
+                    'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
+                    'severity': 'high' if new_count + removed_count > 0 else 'medium',
+                }, db_org_id=db_org_id)
+
+            # Phase 43: SOAR evaluation for drift and change events
+            _evaluate_soar_triggers_for_changes(changes, db)
+
+            # Phase 28: Fire webhook events
+            _fire_webhook_events(current_run_id, changes, db)
+
+            # Phase 30: Generate in-app notifications
+            _generate_notifications(current_run_id, changes, db)
+
+        # ── Post-processing: runs on EVERY scan including first ──────
 
         # Ghost identity detection (disabled/deleted identities retaining roles)
         _run_ghost_detection(current_run_id, db)
@@ -3358,6 +3378,8 @@ def start_scheduler():
 
         logger.info("=" * 70)
         logger.info("INITIALIZING DISCOVERY SCHEDULER")
+        logger.info("[SCHEDULER] Post-processing gate: FIRST-SCAN-AWARE = True")
+        logger.info("[SCHEDULER] File: %s", __file__)
         logger.info("=" * 70)
 
         # Create scheduler (inside lock to prevent double-init race)
@@ -3794,18 +3816,24 @@ def _run_agent_classification(current_run_id, db_org_id, db):
     """
     from app.config import FEATURE_AI_AGENT_GOVERNANCE
     if not FEATURE_AI_AGENT_GOVERNANCE:
+        logger.info("[CLASSIFY] FEATURE_AI_AGENT_GOVERNANCE=False — skipping org=%s run=%s",
+                     db_org_id, current_run_id)
         return
 
+    logger.info("[CLASSIFY] Starting agent classification org=%s run=%s", db_org_id, current_run_id)
     try:
         from app.services.agent_classifier import classify_tenant
         stats = classify_tenant(db, db_org_id, run_id=current_run_id)
         logger.info(
-            "Agent classification for org %s: %d ai_agent, %d possible, %d unknown",
-            db_org_id, stats.get('ai_agent', 0),
+            "[CLASSIFY] Result org=%s run=%s: %d evaluated, %d ai_agent, %d possible, %d unknown (patterns v%s)",
+            db_org_id, current_run_id,
+            stats.get('total_evaluated', 0), stats.get('ai_agent', 0),
             stats.get('possible_ai_agent', 0), stats.get('unknown', 0),
+            stats.get('pattern_version', '?'),
         )
     except Exception as e:
-        logger.warning("Agent classification failed (non-blocking): %s", e)
+        logger.error("[CLASSIFY] FAILED org=%s run=%s: %s", db_org_id, current_run_id, e)
+        logger.exception(e)
 
 
 def _run_agent_sp_signin_enrichment(current_run_id, db_org_id, db):

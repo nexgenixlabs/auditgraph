@@ -1638,14 +1638,17 @@ class Database:
         completed_at = datetime.utcnow()
         cursor = self.conn.cursor()
 
-        # First, get the run's subscription_id and organization_id for hash computation
+        # First, get the run's subscription_id, organization_id, and cloud_connection_id
         cursor.execute(
-            "SELECT subscription_id, organization_id FROM discovery_runs WHERE id = %s",
+            "SELECT subscription_id, organization_id, cloud_connection_id FROM discovery_runs WHERE id = %s",
             (run_id,),
         )
         row = cursor.fetchone()
         subscription_id = row[0] if row else ''
-        organization_id = row[1] if row else None
+        # Use self._organization_id as primary source — the SELECT may return
+        # None when RLS filters discovery_runs before org context is set.
+        organization_id = self._organization_id or (row[1] if row else None)
+        cloud_connection_id = row[2] if row and len(row) > 2 else None
 
         # Get the started_at timestamp
         cursor.execute("SELECT started_at FROM discovery_runs WHERE id = %s", (run_id,))
@@ -1696,6 +1699,76 @@ class Database:
         )
         self._commit()
         cursor.close()
+
+        _db_logger.info(
+            "[POST-SCAN] gate check: org=%s total=%s run=%s conn=%s",
+            organization_id, total_identities, run_id, cloud_connection_id,
+        )
+
+        # ── [POST-SCAN] Synchronous post-processing trigger ──
+        # Fires inline on every completed scan.  No scheduler dependency,
+        # no feature flag gate, no in-memory state.  Classification and
+        # security findings run unconditionally for every org on every scan.
+        # Failures are logged but NEVER raised — scan success is sacrosanct.
+        if organization_id and total_identities and total_identities > 0:
+            _post_agents = 0
+            _post_findings = 0
+
+            _db_logger.info(
+                "[POST-SCAN] START org=%s run=%s",
+                organization_id, run_id,
+            )
+
+            # Step 1: AI agent classification (NO feature flag gate)
+            try:
+                from app.services.agent_classifier import classify_tenant
+                _cls_stats = classify_tenant(self, organization_id, run_id=run_id)
+                _post_agents = _cls_stats.get('ai_agent', 0)
+                _db_logger.info(
+                    "[POST-SCAN] CLASSIFY result=%s", _cls_stats,
+                )
+            except Exception as _cls_e:
+                _db_logger.warning(
+                    "[POST-SCAN] CLASSIFY failed org=%s run=%s: %s",
+                    organization_id, run_id, _cls_e,
+                )
+
+            # Step 2: Security findings — 15-rule policy engine (NO feature flag gate)
+            try:
+                from app.engines.security_findings import SecurityFindingsEngine
+                _sf_engine = SecurityFindingsEngine(self)
+                _sf_results = _sf_engine.analyze(run_id)
+                _sf_saved = self.save_security_findings(run_id, _sf_results)
+                _post_findings += _sf_saved
+                _db_logger.info(
+                    "[POST-SCAN] FINDINGS result=%d", _sf_saved,
+                )
+            except Exception as _sf_e:
+                _db_logger.warning(
+                    "[POST-SCAN] FINDINGS failed org=%s run=%s: %s",
+                    organization_id, run_id, _sf_e,
+                )
+
+            # Step 3: Connection-scoped security findings (3 additional rules)
+            if cloud_connection_id:
+                try:
+                    from app.engines.security_findings_engine import generate_security_findings
+                    _csf = generate_security_findings(cloud_connection_id, self)
+                    _csf_count = _csf.get('findings_count', 0)
+                    _post_findings += _csf_count
+                    _db_logger.info(
+                        "[POST-SCAN] CONNECTION_FINDINGS result=%d", _csf_count,
+                    )
+                except Exception as _csf_e:
+                    _db_logger.warning(
+                        "[POST-SCAN] CONNECTION_FINDINGS failed org=%s conn=%s: %s",
+                        organization_id, cloud_connection_id, _csf_e,
+                    )
+
+            _db_logger.info(
+                "[POST-SCAN] COMPLETE org=%s — agents=%s findings=%s",
+                organization_id, _post_agents, _post_findings,
+            )
 
     _risk_factors_col_ensured = False
     _permission_plane_col_ensured = False
@@ -20943,6 +21016,19 @@ class Database:
         if Database._security_findings_ensured:
             return
         cursor = self.conn.cursor()
+        # Check if table already exists to avoid needing DDL privilege
+        cursor.execute("""
+            SELECT EXISTS(SELECT 1 FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = 'security_findings')
+        """)
+        if cursor.fetchone()[0]:
+            Database._security_findings_ensured = True
+            cursor.close()
+            return
+        if not self._can_ddl():
+            Database._security_findings_ensured = True
+            cursor.close()
+            return
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS security_findings (
                 id SERIAL PRIMARY KEY,
@@ -22858,6 +22944,20 @@ class Database:
         if Database._blast_radius_ensured:
             return
         cursor = self.conn.cursor()
+        # Check if table already exists to avoid needing CREATE privilege
+        cursor.execute("""
+            SELECT EXISTS(SELECT 1 FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = 'blast_radius_results')
+        """)
+        if cursor.fetchone()[0]:
+            Database._blast_radius_ensured = True
+            cursor.close()
+            return
+        if not self._can_ddl():
+            # Non-admin user cannot run DDL — tables must already exist from startup
+            Database._blast_radius_ensured = True
+            cursor.close()
+            return
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS blast_radius_results (
                 id SERIAL PRIMARY KEY,
@@ -23739,6 +23839,10 @@ class Database:
     def _ensure_platform_ops_tables(self):
         """Create job_runs, tenant_health, system_health_metrics, discovery_integrity_metrics."""
         if Database._platform_ops_ensured:
+            return
+        if not self._can_ddl():
+            # Non-admin user cannot run DDL — tables must already exist from startup
+            Database._platform_ops_ensured = True
             return
         cursor = self.conn.cursor()
         try:
@@ -24809,7 +24913,7 @@ class Database:
 
             # ── 4. Privileged identities ──
             cursor.execute("""
-                SELECT COUNT(DISTINCT ra.identity_id)
+                SELECT COUNT(DISTINCT ra.identity_db_id)
                 FROM role_assignments ra
                 WHERE ra.discovery_run_id = %s
                   AND ra.role_name IN (
@@ -26549,6 +26653,19 @@ class Database:
         if Database._agent_classifications_ensured:
             return
         cursor = self.conn.cursor()
+        # Check if table already exists to avoid needing DDL privilege
+        cursor.execute("""
+            SELECT EXISTS(SELECT 1 FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = 'agent_classifications')
+        """)
+        if cursor.fetchone()[0]:
+            Database._agent_classifications_ensured = True
+            cursor.close()
+            return
+        if not self._can_ddl():
+            Database._agent_classifications_ensured = True
+            cursor.close()
+            return
 
         # 1. Add lightweight enum column to identities (nullable, no default)
         cursor.execute("SAVEPOINT agent_col")

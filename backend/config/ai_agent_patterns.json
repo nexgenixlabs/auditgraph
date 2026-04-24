@@ -8,7 +8,14 @@
     { "pattern": "(?i)\\bAML[-_]", "confidence": 0.85, "platform": "azure_ml" },
     { "pattern": "(?i)\\bsp_exec_agent_cos\\b", "confidence": 0.85, "platform": "azure_ai_studio" },
     { "pattern": "(?i)\\bCoS[_-](project|service)\\b", "confidence": 0.85, "platform": "azure_ai_studio" },
-    { "pattern": "(?i)^copilot\\b", "confidence": 0.85, "platform": "copilot_studio" }
+    { "pattern": "(?i)^copilot\\b", "confidence": 0.85, "platform": "copilot_studio" },
+    { "pattern": "(?i)\\bopenai\\b", "confidence": 0.85, "platform": "openai" },
+    { "pattern": "(?i)\\bcognitive[-_]?services?\\b", "confidence": 0.85, "platform": "azure_cognitive" },
+    { "pattern": "(?i)\\bazure[-_]ai\\b", "confidence": 0.85, "platform": "azure_ai_studio" },
+    { "pattern": "(?i)\\baiservice\\b", "confidence": 0.85, "platform": "azure_ai_studio" },
+    { "pattern": "(?i)[-_]ml[-_]", "confidence": 0.80, "platform": "azure_ml" },
+    { "pattern": "(?i)\\balexander\\b", "confidence": 0.80, "platform": "azure_ai_studio" },
+    { "pattern": "(?i)\\balexedra\\b", "confidence": 0.80, "platform": "azure_ai_studio" }
   ],
   "known_app_ids": [
     { "app_id": "20f506fe-8ab8-4fbb-98fa-1f5912c9c4bc", "platform": "openai" }
@@ -16,7 +23,8 @@
   "api_permission_signals": [
     { "permission": "AiService.ReadWrite.All", "confidence": 0.95, "platform": "azure_ai" },
     { "permission": "CognitiveServices", "confidence": 0.95, "platform": "azure_cognitive" },
-    { "permission": "Bot.ReadWrite.All", "confidence": 0.95, "platform": "bot_framework" }
+    { "permission": "Bot.ReadWrite.All", "confidence": 0.95, "platform": "bot_framework" },
+    { "permission": "MachineLearningServices", "confidence": 0.90, "platform": "azure_ml" }
   ],
   "role_signals": {
     "role_names": [
@@ -25,11 +33,14 @@
       "Azure AI Project Manager",
       "Azure AI User",
       "AzureML Data Scientist",
+      "Azure ML Data Scientist",
+      "AzureML Registry User",
       "Cognitive Services User",
       "Cognitive Services Contributor",
       "Cognitive Services Speech User",
       "OpenAI Contributor",
-      "Video Indexer Account Contributor"
+      "Video Indexer Account Contributor",
+      "Key Vault Administrator"
     ],
     "scope_patterns": [
       "cognitiveservices",
@@ -38,7 +49,8 @@
       "MachineLearningServices",
       "botservice",
       "videoindexer",
-      "anomalydetector"
+      "anomalydetector",
+      "aiservices"
     ],
     "confidence": 0.95,
     "platform": "azure_ai"
@@ -59,6 +71,6 @@
     "(?i)Databricks-to-Datadog",
     "(?i)Salesforce Databricks"
   ],
-  "version": "4.0.0",
-  "last_updated": "2026-04-20"
+  "version": "5.0.0",
+  "last_updated": "2026-04-23"
 }

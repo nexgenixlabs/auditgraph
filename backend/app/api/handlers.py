@@ -7192,7 +7192,29 @@ def get_dashboard_posture():
             except Exception:
                 pass
 
-        # ── v3.1 priority_actions: top 3 remediations by risk_reduction ──
+        # ── v3.1 priority_actions: top 3 remediations computed live ──
+        # Computed directly from risk tables (identities, role_assignments,
+        # attack_paths) so the CISO dashboard never depends on the
+        # Remediation Center having been visited first.
+
+        # Guard: ensure cursor is in a clean transaction state before running
+        # priority_actions queries.  Upstream try/except blocks (blast_radius,
+        # microsoft_anomalies, recent_fixes) may have called
+        # cursor.connection.rollback() which leaves the connection usable but
+        # could clear transaction-local state.  A quick SELECT 1 validates it.
+        try:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+        logger.debug(
+            "priority_actions: org=%s run_ids=%s total_identities=%s",
+            org_id, run_ids, total,
+        )
+
         _VERB_MAP = {
             'reduce_privilege': 'REVOKE',
             'break_attack_path': 'MITIGATE',
@@ -7206,59 +7228,213 @@ def get_dashboard_posture():
             'break_attack_path': ['CIS 6.1', 'NIST'],
             'remove_identity': ['CIS 5.3', 'NIST'],
             'disable_identity': ['CIS 5.3', 'CIS 5.1'],
+            'scope_reduction': ['CIS 5.3', 'NIST'],
+            'assign_owner': ['CIS 5.1', 'NIST'],
         }
         _ROUTE_MAP = {
             'reduce_privilege': '/identities?risk=critical,high',
             'break_attack_path': '/attack-paths',
             'remove_identity': '/identities?filter=unowned_nhi',
             'disable_identity': '/identities?activity_status=dormant_strict',
+            'scope_reduction': '/identities?activity_status=never_used',
+            'assign_owner': '/identities?risk=critical,high&filter=unowned',
+        }
+        _DESC_MAP = {
+            'reduce_privilege': 'with excessive privileges',
+            'break_attack_path': 'with active lateral-movement paths',
+            'remove_identity': 'ownerless service principal(s) — unattested risk',
+            'disable_identity': 'dormant privileged account(s) — standing risk',
+            'scope_reduction': 'provisioned but never used — unnecessary attack surface',
+            'assign_owner': 'high-risk identities without an assigned owner',
         }
         priority_actions = []
+        _pa_candidates = []
         try:
+            # 1. Excessive privileges (reduce_privilege)
             cursor.execute("""
-                SELECT gr.action_type,
-                       MAX(gr.title) AS title,
-                       MAX(COALESCE(gr.risk_reduction, 0)) AS risk_reduction,
-                       MIN(gr.priority) AS priority,
-                       MAX(gr.blast_radius) AS blast_radius,
-                       COUNT(DISTINCT gr.identity_id) AS identity_count
-                FROM generated_remediations gr
-                WHERE gr.organization_id = %s
-                  AND gr.status IN ('new', 'pending')
-                GROUP BY gr.action_type
-                ORDER BY risk_reduction DESC, priority ASC
-                LIMIT 3
-            """, (org_id,))
-            for idx, pa_row in enumerate(cursor.fetchall(), 1):
-                _at = pa_row[0] or ''
-                _verb = _VERB_MAP.get(_at, _at.split('_')[0].upper())
-                _title = pa_row[1] or ''
-                _rr = int(pa_row[2]) if pa_row[2] else 0
-                _pri = pa_row[3] or 'medium'
-                _bl = pa_row[4] or ''
-                _ic = int(pa_row[5]) if pa_row[5] else 0
-                _desc = (
-                    f"{_ic} identit{'ies' if _ic != 1 else 'y'} with excessive "
-                    f"privileges \u2014 {_rr}% risk reduction"
-                )
-                priority_actions.append({
-                    "rank": idx,
-                    "action": f"{_verb} {_title}" if _title else _verb,
-                    "title": _title,
-                    "description": _desc,
-                    "risk_reduction_pct": _rr,
-                    "affected_count": _ic,
-                    "compliance_tags": _COMPLIANCE_MAP.get(_at, []),
-                    "impact_level": "HIGH" if _pri == 'critical' or _bl == 'high' else "MEDIUM",
-                    "is_quick_win": _ic <= 3 and _rr >= 50,
-                    "action_type": _at,
-                    "route": _ROUTE_MAP.get(_at, '/identities'),
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND ra.role_name IN %(priv_roles)s
+            """, {'run_ids': run_ids, 'priv_roles': PRIVILEGED_ROLES})
+            _priv_count = cursor.fetchone()[0] or 0
+            if _priv_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'reduce_privilege',
+                    'title': 'Downgrade Excessive Privileges',
+                    'risk_reduction': 90,
+                    'priority': 'critical',
+                    'blast_radius': 'high',
+                    'identity_count': _priv_count,
                 })
-        except Exception:
+        except Exception as _e1:
+            logger.warning("priority_actions query 1 (reduce_privilege) failed: %s", _e1)
             try:
                 cursor.connection.rollback()
             except Exception:
                 pass
+
+        try:
+            # 2. Attack paths (break_attack_path)
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM attack_paths
+                WHERE organization_id = %(org_id)s
+                  AND discovery_run_id = ANY(%(run_ids)s)
+                  AND severity IN ('critical', 'high')
+            """, {'org_id': org_id, 'run_ids': run_ids})
+            _ap_count = cursor.fetchone()[0] or 0
+            if _ap_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'break_attack_path',
+                    'title': 'Lateral Movement',
+                    'risk_reduction': 70,
+                    'priority': 'critical',
+                    'blast_radius': 'high',
+                    'identity_count': _ap_count,
+                })
+        except Exception as _e2:
+            logger.warning("priority_actions query 2 (attack_paths) failed: %s", _e2)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 3. Unowned NHIs (remove_identity) — broadened to all non-human types
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                  AND COALESCE(i.owner_count, 0) = 0
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+            """, {'run_ids': run_ids})
+            _orphan_count = cursor.fetchone()[0] or 0
+            if _orphan_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'remove_identity',
+                    'title': 'Orphaned Service Principal',
+                    'risk_reduction': 65,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _orphan_count,
+                })
+        except Exception as _e3:
+            logger.warning("priority_actions query 3 (unowned NHIs) failed: %s", _e3)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 4. Stale privileged accounts (disable_identity)
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.activity_status IN ('stale', 'inactive', 'never_used')
+                  AND ra.role_name IN %(priv_roles)s
+            """, {'run_ids': run_ids, 'priv_roles': PRIVILEGED_ROLES})
+            _stale_count = cursor.fetchone()[0] or 0
+            if _stale_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'disable_identity',
+                    'title': 'Dormant Privileged Access',
+                    'risk_reduction': 60,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _stale_count,
+                })
+        except Exception as _e4:
+            logger.warning("priority_actions query 4 (stale privileged) failed: %s", _e4)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 5. Never-used identities with elevated risk (scope_reduction)
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.activity_status = 'never_used'
+                  AND i.risk_level IN ('critical', 'high', 'medium')
+            """, {'run_ids': run_ids})
+            _never_count = cursor.fetchone()[0] or 0
+            if _never_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'scope_reduction',
+                    'title': 'Never-Used Identities',
+                    'risk_reduction': 55,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _never_count,
+                })
+        except Exception as _e5:
+            logger.warning("priority_actions query 5 (never-used) failed: %s", _e5)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 6. High/Critical risk identities needing owner assignment (assign_owner)
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.risk_level IN ('critical', 'high')
+                  AND COALESCE(i.owner_count, 0) = 0
+            """, {'run_ids': run_ids})
+            _unowned_risky = cursor.fetchone()[0] or 0
+            if _unowned_risky > 0:
+                _pa_candidates.append({
+                    'action_type': 'assign_owner',
+                    'title': 'Unowned High-Risk Identities',
+                    'risk_reduction': 50,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _unowned_risky,
+                })
+        except Exception as _e6:
+            logger.warning("priority_actions query 6 (unowned risky) failed: %s", _e6)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # Sort by risk_reduction desc, take top 3
+        _pa_candidates.sort(key=lambda c: -c['risk_reduction'])
+        for idx, _c in enumerate(_pa_candidates[:3], 1):
+            _at = _c['action_type']
+            _verb = _VERB_MAP.get(_at, _at.split('_')[0].upper())
+            _ic = _c['identity_count']
+            _rr = _c['risk_reduction']
+            _desc = (
+                f"{_ic} identit{'ies' if _ic != 1 else 'y'} "
+                f"{_DESC_MAP.get(_at, '')} \u2014 {_rr}% risk reduction"
+            )
+            priority_actions.append({
+                "rank": idx,
+                "action": f"{_verb} {_c['title']}",
+                "title": _c['title'],
+                "description": _desc,
+                "risk_reduction_pct": _rr,
+                "affected_count": _ic,
+                "compliance_tags": _COMPLIANCE_MAP.get(_at, []),
+                "impact_level": "HIGH" if _c['priority'] == 'critical' or _c['blast_radius'] == 'high' else "MEDIUM",
+                "is_quick_win": _ic <= 3 and _rr >= 50,
+                "action_type": _at,
+                "route": _ROUTE_MAP.get(_at, '/identities'),
+            })
 
         # ── v3.1 immediate_risks: reuse already-computed metric counts ──
         _risk_items = [

@@ -150,11 +150,13 @@ DB_SLOW_QUERY_MS = int(os.getenv("DB_SLOW_QUERY_MS", "100"))
 # 5c. AI Agent Governance feature flag
 # ---------------------------------------------------------------------------
 # FEATURE_AI_AGENT_GOVERNANCE: Global kill switch for the AI Agent Identity
-# Governance module. When False, all agent governance UI elements, API routes,
-# and background jobs are completely invisible / inactive.
-# Default: True in local/dev (for development), False in prod/stg/qa.
+# Governance module UI routes and API endpoints. When False, agent governance
+# UI elements and API routes return 404.
+# Default: True in ALL environments.  Override via env var to disable.
+# NOTE: The POST-SCAN pipeline (classification + security findings) runs
+# unconditionally regardless of this flag — this flag only gates the UI/API.
 FEATURE_AI_AGENT_GOVERNANCE = os.getenv(
-    "FEATURE_AI_AGENT_GOVERNANCE", str(IS_DEV)
+    "FEATURE_AI_AGENT_GOVERNANCE", "true"
 ).lower() in ("true", "1", "yes")
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,11 @@ def log_startup_banner():
     logger.info("  CONN_POOL:         %s", f"ON (min={DB_POOL_MIN}, max={DB_POOL_MAX})" if DB_POOL_ENABLED else "OFF (1 conn/request)")
     logger.info("  SLOW_QUERY_MS:     %s", DB_SLOW_QUERY_MS)
     logger.info("  FLASK_ENV:         %s", os.getenv("FLASK_ENV"))
-    logger.info("  AI_AGENT_GOV:      %s", _on_off(FEATURE_AI_AGENT_GOVERNANCE))
+    if FEATURE_AI_AGENT_GOVERNANCE:
+        logger.info("  AI_AGENT_GOV:      ENABLED — AI classification active")
+    else:
+        logger.warning("  AI_AGENT_GOV:      DISABLED — AI classification UI/API will return 404")
+    logger.info("  POST-SCAN:         ALWAYS ON — classification + findings run on every scan")
     logger.info("  SECRET_SOURCE:     %s", "env vars (container runtime)" if IS_PRODUCTION else ".env file")
     logger.info("=" * 60)
 
