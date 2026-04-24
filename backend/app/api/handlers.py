@@ -34723,8 +34723,15 @@ def create_remediation_queue_item():
 
 def list_remediation_queue():
     """GET /api/remediation-queue — Paginated queue with optional status/severity filters."""
-    db = _db()
+    _EMPTY_SUMMARY = {
+        'total': 0,
+        'by_status': {'open': 0, 'in_progress': 0, 'resolved': 0, 'dismissed': 0},
+        'by_severity': {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
+        'avg_resolution_days': None,
+    }
+    db = None
     try:
+        db = _db()
         org_id = _org_id()
 
         status = request.args.get('status')
@@ -34743,8 +34750,17 @@ def list_remediation_queue():
         summary = _rq_summary(db, org_id)
 
         return jsonify({'items': items, 'total': total, 'summary': summary})
+    except Exception as exc:
+        logger.warning("remediation-queue list failed: %s", exc)
+        if db:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        return jsonify({'items': [], 'total': 0, 'summary': _EMPTY_SUMMARY})
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def get_remediation_queue_item_detail(item_id):
@@ -34795,13 +34811,28 @@ def patch_remediation_queue_item(item_id):
 
 def get_remediation_queue_summary():
     """GET /api/remediation-queue/summary — Aggregate counts for CISO dashboard tile."""
-    db = _db()
+    db = None
     try:
+        db = _db()
         org_id = _org_id()
         summary = _rq_summary(db, org_id)
         return jsonify(summary)
+    except Exception as exc:
+        logger.warning("remediation-queue summary failed: %s", exc)
+        if db:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        return jsonify({
+            'total': 0,
+            'by_status': {'open': 0, 'in_progress': 0, 'resolved': 0, 'dismissed': 0},
+            'by_severity': {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
+            'avg_resolution_days': None,
+        })
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════

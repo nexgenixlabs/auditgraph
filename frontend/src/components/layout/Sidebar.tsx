@@ -104,6 +104,9 @@ const connectorsIcon = icon('M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 0
 // Billing
 const billingIcon = icon('M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z');
 
+// Feature gate: set to true to reveal pages that require data to be populated
+const SHOW_ADVANCED_FEATURES = false;
+
 // ── Sidebar Component ─────────────────────────────────────────────
 
 const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
@@ -122,7 +125,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
           { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
           { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
-          { to: '/drift', label: 'Drift History', icon: driftIcon },
+          { to: '/remediation-queue', label: 'Change Control Center', icon: remediationIcon },
+          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/drift', label: 'Drift History', icon: driftIcon }] : []),
         ],
       },
       {
@@ -140,8 +144,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#0891b2',
         items: [
           { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
-          { to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon },
-          { to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon },
+          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon }] : []),
+          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon }] : []),
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
         ],
       },
@@ -151,9 +155,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         items: [
           { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
-          { to: '/remediation-queue', label: 'Remediation Queue', icon: remediationIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
-          { to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon },
+          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon }] : []),
         ],
       },
       {
