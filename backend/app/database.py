@@ -611,12 +611,23 @@ class Database:
         self.conn.commit()
 
     def _rollback(self):
-        """Rollback the current transaction.
+        """Rollback the current transaction and restore RLS context.
 
-        Session-level RLS context (set_config with is_local=FALSE)
-        survives rollbacks — no need to restore after rollback.
+        psycopg2 runs with autocommit=False, so set_config() is always
+        inside an implicit transaction.  ROLLBACK reverts the setting,
+        so we must re-apply it immediately.
         """
         self.conn.rollback()
+        if getattr(self, '_organization_id', None):
+            try:
+                cur = self.conn.cursor()
+                cur.execute(
+                    "SELECT set_config('app.current_organization_id', %s, FALSE)",
+                    (str(self._organization_id),),
+                )
+                cur.close()
+            except Exception:
+                pass  # connection may be broken
 
     def safe_commit(self):
         """Alias for _commit(). Kept for backward compatibility."""
@@ -21888,17 +21899,22 @@ class Database:
         if Database._attack_paths_ensured:
             return
         cursor = self.conn.cursor()
-        # Check if table already exists — skip DDL to avoid privilege errors with app user
+        # Check if table already exists — skip ALL DDL to avoid privilege errors
+        # when running as auditgraph_app (non-owner).  DDL (indexes, ALTER TABLE,
+        # RLS policies) is handled at startup by the admin user.
         cursor.execute("""
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables
                 WHERE table_name = 'attack_paths'
             )
         """)
-        if cursor.fetchone()[0]:
+        table_exists = cursor.fetchone()[0]
+        if table_exists:
+            cursor.close()
             Database._attack_paths_ensured = True
             return
-        cursor.execute("""
+        else:
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS attack_paths (
                 id SERIAL PRIMARY KEY,
                 path_id UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -21997,9 +22013,11 @@ class Database:
         except Exception:
             self._rollback()
         # ── v1 attack path data model (role-assignment → blast-radius chains) ──
+        # FK constraints removed — target tables may not exist or lack PKs at
+        # migration time.  Application-level joins are sufficient.
         v1_cols = [
-            ('connection_id', 'INTEGER REFERENCES cloud_connections(id) ON DELETE CASCADE'),
-            ('identity_id', 'INTEGER REFERENCES identities(id) ON DELETE CASCADE'),
+            ('connection_id', 'INTEGER'),
+            ('identity_id', 'INTEGER'),
             ('highest_role', 'VARCHAR(128)'),
             ('highest_scope_level', 'VARCHAR(32)'),
             ('path_risk_score', 'INTEGER DEFAULT 0'),

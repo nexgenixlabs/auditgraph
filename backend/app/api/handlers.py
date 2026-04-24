@@ -28850,21 +28850,26 @@ def get_attack_paths_list():
         limit (int, default 50, max 100)
         severity (critical|high|medium|low)
         path_type (PRIVILEGE_ESCALATION|KEYVAULT_SECRET_ACCESS|...)
+        connection_id (int, optional — filter to specific cloud connection)
     """
-    db = _db()
+    db = None
     try:
+        db = _db()
         from psycopg2.extras import RealDictCursor
         limit = min(request.args.get('limit', 50, type=int), 100)
         severity = request.args.get('severity', '')
         path_type = request.args.get('path_type', '')
+        conn_id = _connection_id()
 
         org_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Attack paths persist across runs — scope by organization_id only
         conditions = ["ap.organization_id = %s"]
         params: list = [org_id]
 
+        if conn_id:
+            conditions.append("ap.connection_id = %s")
+            params.append(conn_id)
         if severity:
             conditions.append("ap.severity = %s")
             params.append(severity.lower())
@@ -28881,10 +28886,20 @@ def get_attack_paths_list():
                    ap.impact, ap.path_length, ap.affected_resource_count,
                    ap.first_detected_at, ap.last_detected_at,
                    ap.occurrence_count, ap.target_resource_id,
-                   ap.target_resource_type
+                   ap.target_resource_type,
+                   ap.highest_role, ap.has_keyvault_access,
+                   ap.has_subscription_scope, ap.has_no_owner
             FROM attack_paths ap
             {where}
-            ORDER BY ap.risk_score DESC
+            ORDER BY
+                CASE ap.severity
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4
+                    ELSE 5
+                END,
+                ap.risk_score DESC
             LIMIT %s
         """, tuple(params + [limit]))
         paths = []
@@ -28901,8 +28916,17 @@ def get_attack_paths_list():
 
         cursor.close()
         return jsonify({'paths': paths, 'count': len(paths), 'total': total})
+    except Exception as exc:
+        logger.warning("attack-paths list failed: %s", exc)
+        if db:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        return jsonify({'paths': [], 'count': 0, 'total': 0})
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def get_attack_path_detail(path_id):

@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useConnection } from '../contexts/ConnectionContext';
 
 interface AttackPath {
   id: number;
@@ -44,8 +43,6 @@ const TYPE_LABELS: Record<string, string> = {
 export default function AttackPaths() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { withConnection } = useConnection();
-
   const [paths, setPaths] = useState<AttackPath[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -61,13 +58,12 @@ export default function AttackPaths() {
     if (typeFilter) params.set('path_type', typeFilter);
     params.set('limit', '100');
 
-    const qs = withConnection(params.toString());
-
-    fetch(`/api/attack-paths?${qs}`).then(r => r.ok ? r.json() : { paths: [] })
+    // Attack paths are org-scoped (not connection-scoped) — do not filter by connection_id
+    fetch(`/api/attack-paths?${params.toString()}`).then(r => r.ok ? r.json() : { paths: [] })
       .then(listData => {
-        setPaths(listData.paths || []);
+        setPaths(listData.paths || listData.items || listData.attack_paths || []);
       }).finally(() => setLoading(false));
-  }, [sevFilter, typeFilter, withConnection]);
+  }, [sevFilter, typeFilter]);
 
   useEffect(() => {
     const p = new URLSearchParams();
@@ -150,9 +146,42 @@ export default function AttackPaths() {
             <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full" />
           </div>
         ) : sorted.length === 0 ? (
-          <div className="text-center py-16 text-sm" style={{ color: 'var(--text-secondary)' }}>
-            No attack paths found{sevFilter || typeFilter ? ' matching filters' : ''}.
-          </div>
+          (sevFilter || typeFilter) ? (
+            <div className="text-center py-16 text-sm" style={{ color: 'var(--text-secondary)' }}>
+              No attack paths found matching filters.
+            </div>
+          ) : (
+            <div className="text-center py-16 px-6">
+              {/* Shield-check icon */}
+              <svg className="w-12 h-12 mx-auto mb-4" fill="none" stroke="var(--accent-success)" strokeWidth={1.5} viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <path d="M9 12l2 2 4-4" />
+              </svg>
+              <h2 className="text-base font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
+                No attack paths detected
+              </h2>
+              <p className="text-sm max-w-lg mx-auto" style={{ color: 'var(--text-secondary)' }}>
+                No privilege escalation or lateral movement paths were found in the last scan.
+              </p>
+              <p className="text-sm font-medium mt-1" style={{ color: 'var(--accent-success)' }}>
+                This is a positive security signal.
+              </p>
+              <div className="flex items-center justify-center gap-3 mt-5">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                  Total Paths: {summary.total_paths}
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                  Critical: {summary.critical_paths}
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                  High: {summary.high_paths}
+                </span>
+              </div>
+            </div>
+          )
         ) : (
           <table className="w-full text-sm">
             <thead>
