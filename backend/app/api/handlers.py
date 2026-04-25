@@ -7621,6 +7621,7 @@ def get_dashboard_posture():
             "has_business_risk": (business_impact["inactive_admin_count"] + business_impact["disabled_live_rbac_count"]) > 0,
             "microsoft_anomalies": microsoft_anomalies,
             "drift": drift,
+            "p2_enabled": db.get_setting('p2_telemetry_enabled', 'false', organization_id=org_id) == 'true',
             # AG-43/44: flat aliases for frontend trend rendering
             "score_delta": score_trend["delta"] if score_trend else None,
             "previous_score": previous_posture_score,
@@ -15399,6 +15400,20 @@ def test_azure_connection():
                         DO UPDATE SET cloud_connection_id = EXCLUDED.cloud_connection_id,
                                       account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
                     """, (tid, s['id'], s['name'], conn_id))
+                # Auto-enable P2 telemetry if connection already has P2 license
+                cursor.execute(
+                    "SELECT has_p2_license FROM cloud_connections WHERE id = %s",
+                    (conn_id,)
+                )
+                p2_row = cursor.fetchone()
+                if p2_row and p2_row[0]:
+                    cursor.execute("""
+                        INSERT INTO settings (key, value, organization_id, updated_at)
+                        VALUES ('p2_telemetry_enabled', 'true', %s, NOW())
+                        ON CONFLICT (organization_id, key) DO UPDATE SET value = 'true', updated_at = NOW()
+                    """, (tid,))
+                    logger.info("P2 auto-enabled for org %s at connection time", tid)
+
                 admin_db._commit()
                 cursor.close()
                 # Seed auto identity groups for this org
@@ -35631,4 +35646,173 @@ def get_inventory_summary():
         }), 500
     finally:
         cursor.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/posture/start-here-summary
+# ---------------------------------------------------------------------------
+
+def get_start_here_summary():
+    """Live risk counts for the Executive Posture 'Start Here' banner.
+
+    Uses the SAME canonical metric queries (metric_queries.py) and
+    discovery_run_id scoping as get_dashboard_posture() so counts
+    are identical to the Immediate Risks / Priority Actions panels.
+    """
+    from app.api.metric_queries import get_metric_count_sql
+
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org, _connection_id())
+        if not run_ids:
+            return jsonify({
+                'unowned_identities': 0, 'ghost_identities': 0,
+                'dormant_privileged': 0, 'risk_reduction_if_fixed': 0,
+                'total_identities': 0, 'open_remediations': 0,
+                'critical_remediations': 0,
+            })
+
+        _mparams = {'run_ids': run_ids}
+
+        def _metric(name):
+            return _safe_query(db, get_metric_count_sql(name), _mparams,
+                               default=0, fetch='scalar') or 0
+
+        # ── Canonical metric counts (same as get_dashboard_posture) ──
+        unowned = _metric('unowned_nhi')
+        ghost = _metric('ghost')
+
+        dormant_privileged = _metric('dormant_privileged')
+
+        # Total identities (excluding Microsoft system)
+        total = _safe_query(
+            db,
+            f"SELECT COUNT(*) FROM identities i "
+            f"WHERE i.discovery_run_id = ANY(%(run_ids)s) {HIDE_MICROSOFT_SQL}",
+            _mparams, default=0, fetch='scalar') or 0
+
+        # ── Risk reduction estimate (weighted formula) ──
+        if total > 0:
+            raw = (unowned * 0.15 + ghost * 0.25 + dormant_privileged * 0.20) / total * 100
+            risk_reduction = min(99, round(raw))
+        else:
+            risk_reduction = 0
+
+        # ── Remediation counts (org-scoped, not run-scoped) ──
+        open_remediations = (
+            (_safe_query(db,
+                "SELECT COUNT(*) FROM approval_requests "
+                "WHERE organization_id = %s "
+                "  AND status NOT IN ('executed','cancelled','dismissed','closed','resolved')",
+                (org,), default=0, fetch='scalar') or 0)
+            + (_safe_query(db,
+                "SELECT COUNT(*) FROM remediation_queue "
+                "WHERE organization_id = %s "
+                "  AND status NOT IN ('resolved','dismissed')",
+                (org,), default=0, fetch='scalar') or 0)
+        )
+
+        critical_remediations = (
+            (_safe_query(db,
+                "SELECT COUNT(*) FROM approval_requests "
+                "WHERE organization_id = %s AND priority = 1",
+                (org,), default=0, fetch='scalar') or 0)
+            + (_safe_query(db,
+                "SELECT COUNT(*) FROM remediation_queue "
+                "WHERE organization_id = %s AND severity = 'CRITICAL'",
+                (org,), default=0, fetch='scalar') or 0)
+        )
+
+        # ── Delta vs previous scan ──
+        unowned_delta = None
+        ghost_delta = None
+        dormant_delta = None
+        try:
+            prev_ids = _previous_run_ids(cursor, org, _connection_id())
+            if prev_ids:
+                _prev = {'run_ids': prev_ids}
+
+                def _prev_metric(name):
+                    return _safe_query(db, get_metric_count_sql(name), _prev,
+                                       default=0, fetch='scalar') or 0
+
+                unowned_delta = unowned - _prev_metric('unowned_nhi')
+                ghost_delta = ghost - _prev_metric('ghost')
+                dormant_delta = dormant_privileged - _prev_metric('dormant_privileged')
+        except Exception:
+            pass  # first scan or broken previous — deltas stay null
+
+        return jsonify({
+            'unowned_identities': unowned,
+            'ghost_identities': ghost,
+            'dormant_privileged': dormant_privileged,
+            'risk_reduction_if_fixed': risk_reduction,
+            'total_identities': total,
+            'open_remediations': open_remediations,
+            'critical_remediations': critical_remediations,
+            'unowned_delta': unowned_delta,
+            'ghost_delta': ghost_delta,
+            'dormant_delta': dormant_delta,
+        })
+    finally:
+        cursor.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/connections/p2-status
+# ---------------------------------------------------------------------------
+
+def get_p2_status():
+    """P2 telemetry status for the current org's connections.
+
+    Returns:
+        p2_capable: true if any connection has_p2_license=true
+        p2_enabled: true if p2_telemetry_enabled setting is 'true'
+    """
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE(bool_or(has_p2_license), false) FROM cloud_connections WHERE organization_id = %s",
+            (org,)
+        )
+        p2_capable = bool(cursor.fetchone()[0])
+        cursor.close()
+
+        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=org) == 'true'
+
+        return jsonify({
+            'p2_capable': p2_capable,
+            'p2_enabled': p2_enabled,
+        })
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/connections/p2-enable
+# ---------------------------------------------------------------------------
+
+def enable_p2_telemetry():
+    """Enable P2 telemetry for the current org."""
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        db.save_settings({'p2_telemetry_enabled': 'true'}, organization_id=org)
+        _log(db, 'p2_telemetry_enabled', 'P2 behavioral intelligence enabled')
+        return jsonify({'status': 'ok', 'p2_enabled': True})
+    finally:
+        db.close()
 

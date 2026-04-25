@@ -543,6 +543,9 @@ from app.api.handlers import (
     recompute_cvss_scores,
     get_identity_top_fixes,
     get_org_remediation_summary,
+    get_start_here_summary,
+    get_p2_status,
+    enable_p2_telemetry,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -3770,6 +3773,19 @@ def create_app():
     # -----------------------
     # Phase 9: Security Posture Command Center
     # -----------------------
+    @app.get("/api/posture/start-here-summary")
+    def posture_start_here():
+        return get_start_here_summary()
+
+    @app.get("/api/connections/p2-status")
+    def connections_p2_status():
+        return get_p2_status()
+
+    @app.post("/api/connections/p2-enable")
+    @require_role('admin', 'security_admin')
+    def connections_p2_enable():
+        return enable_p2_telemetry()
+
     @app.get("/api/posture-score")
     def posture_score():
         return get_posture_score_handler()

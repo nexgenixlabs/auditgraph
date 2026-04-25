@@ -158,6 +158,7 @@ export interface PostureV31Response {
     actions_applied: number;
     risk_reduction_pct: number;
   };
+  p2_enabled?: boolean;
 }
 
 // ── Extended VM Sub-Types ─────────────────────────────────────

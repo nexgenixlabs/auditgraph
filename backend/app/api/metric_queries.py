@@ -94,9 +94,30 @@ METRIC_GHOST = """
 """
 
 METRIC_DORMANT_PRIVILEGED = """
-    AND i.activity_status IN ('stale', 'never_used')
     AND i.identity_category IN ('human_user', 'guest')
-    AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+    AND (
+        -- Tier 1: privilege_tier classified (log-dependent)
+        (i.privilege_tier IN ('T0', 'T1')
+         AND (i.activity_status IN ('stale', 'never_used')
+              OR i.days_since_last_signin > 90))
+        OR
+        -- Tier 2: privilege_tier NULL (log-independent fallback) —
+        -- detect privilege via Owner/Contributor/UAA RBAC roles
+        -- or any Entra directory role assignment.
+        (i.privilege_tier IS NULL
+         AND (i.activity_status IN ('stale', 'never_used')
+              OR i.days_since_last_signin > 90)
+         AND (
+           EXISTS (SELECT 1 FROM role_assignments ra
+                   WHERE ra.identity_db_id = i.id
+                     AND ra.role_name IN (
+                       'Owner', 'Contributor',
+                       'User Access Administrator',
+                       'Global Administrator'))
+           OR EXISTS (SELECT 1 FROM entra_role_assignments era
+                      WHERE era.identity_db_id = i.id)
+         ))
+    )
 """
 
 METRIC_SA_CATEGORIES = "('service_principal', 'managed_identity_system', 'managed_identity_user')"

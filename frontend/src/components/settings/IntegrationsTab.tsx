@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 export interface IntegrationsTabProps {
   ticketingRef: React.RefObject<HTMLDivElement | null>;
@@ -29,6 +29,15 @@ export function IntegrationsTab({
   p2Msg,
   handleP2TelemetrySave,
 }: IntegrationsTabProps) {
+  const [p2Capable, setP2Capable] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetch('/api/connections/p2-status')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setP2Capable(d.p2_capable); })
+      .catch(() => {});
+  }, []);
+
   return (
     <>
       {/* Section 14: Integrations (Phase 83) */}
@@ -37,13 +46,28 @@ export function IntegrationsTab({
       {/* Ticketing Integration */}
       <TicketingSection ticketingRef={ticketingRef} />
 
-      {/* Section 15: P2 Telemetry */}
+      {/* Section 15: Enhanced Behavioral Intelligence */}
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-gray-200 dark:border-slate-700 p-6 space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-base font-semibold text-gray-900 dark:text-white">P2 Telemetry Pipeline</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Enhanced Behavioral Intelligence</h3>
+              {p2Capable === true && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 px-2 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  P2 License Detected
+                </span>
+              )}
+              {p2Capable === false && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-gray-500 dark:text-slate-500 bg-gray-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-gray-400 dark:bg-slate-600" />
+                  P2 License Not Detected
+                </span>
+              )}
+            </div>
             <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-              Ingest Entra ID P2 service principal sign-in logs for behavioral analysis
+              Connect activity logs to confirm identity verdicts and detect behavioral anomalies.
+              Requires <code className="px-1 py-0.5 rounded bg-gray-100 dark:bg-slate-800 text-[10px]">AuditLog.Read.All</code> on your registered app.
             </p>
           </div>
           <button
@@ -55,13 +79,6 @@ export function IntegrationsTab({
               p2Telemetry.p2_telemetry_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
             }`} />
           </button>
-        </div>
-
-        <div className="rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 p-3">
-          <p className="text-xs text-blue-700 dark:text-blue-300">
-            Optional enhanced telemetry. Requires <code className="px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-[10px]">AuditLog.Read.All</code> permission on the registered app.
-            When enabled, sign-in logs supplement the core log-independent analysis with behavioral anomaly detection.
-          </p>
         </div>
 
         {p2Telemetry.p2_telemetry_enabled === 'true' && (
@@ -102,7 +119,7 @@ export function IntegrationsTab({
             className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${
               p2Saving ? 'bg-gray-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'
             }`}>
-            {p2Saving ? 'Saving...' : 'Save P2 Settings'}
+            {p2Saving ? 'Saving...' : 'Save Settings'}
           </button>
           {p2Msg && (
             <span className={`text-xs font-medium ${p2Msg.type === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>

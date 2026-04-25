@@ -68,6 +68,24 @@ const ANOMALY_CONSEQUENCE: Record<string, string> = {
 
 export function AnomalyWidgetV31({ data }: { data: PostureV31Response }) {
   const anomalies = data.anomalies || [];
+  const p2Enabled = data.p2_enabled === true;
+
+  // P2 disabled: show amber inactive state
+  if (!p2Enabled) {
+    return (
+      <div className="bg-[#111827] border border-amber-500/20 rounded-lg p-3 overflow-hidden flex-shrink-0"
+           title="Enable Enhanced Intelligence to detect behavioral anomalies">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">Anomalies</span>
+        </div>
+        <p className="text-xs text-amber-400/80 font-medium">Behavioral analysis inactive</p>
+        <p className="text-[10px] text-gray-500 mt-0.5 leading-relaxed">Enable Enhanced Intelligence to detect behavioral anomalies</p>
+        <DN navigateTo="/settings?tab=integrations">
+          <span className="text-[10px] text-[#24A2A1] cursor-pointer mt-1 inline-block">Enable in Settings &rarr;</span>
+        </DN>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0"
@@ -83,7 +101,7 @@ export function AnomalyWidgetV31({ data }: { data: PostureV31Response }) {
       {anomalies.length === 0 ? (
         <div className="flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
-          <span className="text-xs text-emerald-400 font-medium">Clear</span>
+          <span className="text-xs text-emerald-400 font-medium">No anomalies detected</span>
         </div>
       ) : (
         <div className="space-y-1.5">
