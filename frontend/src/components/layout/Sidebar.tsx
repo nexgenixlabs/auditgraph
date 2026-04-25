@@ -133,10 +133,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Identity Truth',
         color: '#8b5cf6',
         items: [
-          { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/ai-agents', label: 'AI Identities', icon: agentBotIcon },
-          { to: '/service-accounts', label: 'Privileged Access', icon: governanceIcon },
-          { to: '/identity-graph', label: 'Identity Graph', icon: accessGraphIcon },
+          { to: '/identity-explorer', label: 'Identity Explorer', icon: identityIcon },
         ],
       },
       {

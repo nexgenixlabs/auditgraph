@@ -64,6 +64,7 @@ import SecurityFindings from './pages/SecurityFindings';
 import GraphFindings from './pages/GraphFindings';
 import SecurityCommandCenter from './pages/SecurityCommandCenter';
 import IdentityGraph from './pages/IdentityGraph';
+import IdentityExplorer from './pages/IdentityExplorer';
 import IdentityExposures from './pages/IdentityExposures';
 import PrivilegeDrift from './pages/PrivilegeDrift';
 import DriftAnalysis from './pages/DriftAnalysis';
@@ -315,7 +316,8 @@ function AppContent() {
                   <Route path="/command-center" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityCommandCenter /></ErrorBoundary>} />
                   {/* SecurityDashboard removed — consolidated into Executive Posture + Command Center */}
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
-                  <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
+                  <Route path="/identity-explorer" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExplorer /></ErrorBoundary>} />
+                  <Route path="/identity-graph" element={<Navigate to="/identity-explorer?tab=graph" replace />} />
                   <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
                   <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
                   <Route path="/privilege-drift" element={<Navigate to="/drift-analysis" replace />} />
@@ -324,10 +326,10 @@ function AppContent() {
                   <Route path="/remediation-queue" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationQueue /></ErrorBoundary>} />
                   <Route path="/remediation-queue/:itemId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationDetailPage /></ErrorBoundary>} />
                   <Route path="/attack-simulator" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackSimulator /></ErrorBoundary>} />
-                  <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
+                  <Route path="/identities" element={<Navigate to="/identity-explorer?tab=all" replace />} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-                  <Route path="/ai-agents" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAgents /></ErrorBoundary>} />
+                  <Route path="/ai-agents" element={<Navigate to="/identity-explorer?tab=ai" replace />} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
                   <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />
@@ -337,7 +339,7 @@ function AppContent() {
                   <Route path="/role-mining" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RoleMining /></ErrorBoundary>} />
                   <Route path="/groups" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
                   <Route path="/identity-correlation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityCorrelation /></ErrorBoundary>} />
-                  <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
+                  <Route path="/service-accounts" element={<Navigate to="/identity-explorer?tab=privileged" replace />} />
                   <Route path="/workload-identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentities /></ErrorBoundary>} />
                   <Route path="/workload-identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentityDetail /></ErrorBoundary>} />
                   <Route path="/spns" element={<Navigate to="/workload-identities?type=spn" replace />} />
