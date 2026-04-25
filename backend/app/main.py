@@ -546,6 +546,7 @@ from app.api.handlers import (
     get_start_here_summary,
     get_p2_status,
     enable_p2_telemetry,
+    get_drift_baseline,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 from app.middleware.input_sanitizer import sanitize_request
@@ -3785,6 +3786,10 @@ def create_app():
     @require_role('admin', 'security_admin')
     def connections_p2_enable():
         return enable_p2_telemetry()
+
+    @app.get("/api/drift/baseline")
+    def drift_baseline():
+        return get_drift_baseline()
 
     @app.get("/api/posture-score")
     def posture_score():

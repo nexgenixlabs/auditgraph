@@ -35816,3 +35816,83 @@ def enable_p2_telemetry():
     finally:
         db.close()
 
+
+# ---------------------------------------------------------------------------
+# GET /api/drift/baseline
+# ---------------------------------------------------------------------------
+
+def get_drift_baseline():
+    """Drift analysis page state: scan count + baseline summary.
+
+    Returns scan_count so the frontend can decide which state to render:
+      0 = setup prompt, 1 = baseline captured, 2+ = full drift view.
+    When scan_count == 1, includes baseline stats from the single run.
+    """
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cursor = db.conn.cursor()
+    try:
+        conn_id = _connection_id()
+
+        # Count completed scans
+        if conn_id:
+            cursor.execute("""
+                SELECT COUNT(*) FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND cloud_connection_id = %s
+                  AND completed_at IS NOT NULL
+                  AND COALESCE(total_identities, 0) > 0
+            """, (org, conn_id))
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+                  AND completed_at IS NOT NULL
+                  AND COALESCE(total_identities, 0) > 0
+            """, (org,))
+        scan_count = cursor.fetchone()[0]
+
+        result: dict = {'scan_count': scan_count}
+
+        # For single-scan orgs, provide baseline stats
+        if scan_count == 1:
+            run_ids = _latest_run_ids(cursor, org, conn_id)
+            if run_ids:
+                _p = {'run_ids': run_ids}
+
+                cursor.execute("""
+                    SELECT completed_at FROM discovery_runs WHERE id = ANY(%s) ORDER BY completed_at DESC LIMIT 1
+                """, (run_ids,))
+                ts_row = cursor.fetchone()
+                result['baseline_date'] = ts_row[0].isoformat() if ts_row and ts_row[0] else None
+
+                cursor.execute(f"""
+                    SELECT COUNT(*) FROM identities i
+                    WHERE i.discovery_run_id = ANY(%(run_ids)s) {HIDE_MICROSOFT_SQL}
+                """, _p)
+                result['total_identities'] = cursor.fetchone()[0]
+
+                cursor.execute(f"""
+                    SELECT COUNT(*) FROM identities i
+                    WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                      AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+                      {HIDE_MICROSOFT_SQL}
+                """, _p)
+                result['privileged_identities'] = cursor.fetchone()[0]
+
+                cursor.execute("""
+                    SELECT COUNT(*) FROM role_assignments ra
+                    JOIN identities i ON i.id = ra.identity_db_id
+                    WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                """, _p)
+                result['role_assignments'] = cursor.fetchone()[0]
+
+        return jsonify(result)
+    finally:
+        cursor.close()
+        db.close()
+

@@ -97,7 +97,7 @@ export default function RecentChanges({
       {/* View History link */}
       <div className="mt-3 pt-3 border-t">
         <Link
-          to="/drift"
+          to="/drift-analysis"
           className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-medium flex items-center gap-1"
         >
           View History

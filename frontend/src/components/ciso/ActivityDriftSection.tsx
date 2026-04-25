@@ -28,7 +28,7 @@ export function DriftWidget({ vm }: { vm: CISOViewModel }) {
          title={d.available ? (d.has_drift ? `${d.total_changes} changes` : 'No drift') : 'Need second scan'}>
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">Drift</span>
-        <DN navigateTo="/drift">
+        <DN navigateTo="/drift-analysis">
           <span className="text-xs text-[#24A2A1] cursor-pointer">History →</span>
         </DN>
       </div>
@@ -81,7 +81,7 @@ export function DriftWidgetV31({ data }: { data: PostureV31Response }) {
       <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 transition flex-shrink-0">
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">Drift</span>
-          <DN navigateTo="/drift">
+          <DN navigateTo="/drift-analysis">
             <span className="text-xs text-[#24A2A1] cursor-pointer">History →</span>
           </DN>
         </div>
@@ -96,7 +96,7 @@ export function DriftWidgetV31({ data }: { data: PostureV31Response }) {
       <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 transition flex-shrink-0">
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">Drift</span>
-          <DN navigateTo="/drift">
+          <DN navigateTo="/drift-analysis">
             <span className="text-xs text-[#24A2A1] cursor-pointer">History →</span>
           </DN>
         </div>
@@ -122,7 +122,7 @@ export function DriftWidgetV31({ data }: { data: PostureV31Response }) {
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0">
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">Drift</span>
-        <DN navigateTo="/drift">
+        <DN navigateTo="/drift-analysis">
           <span className="text-xs text-[#24A2A1] cursor-pointer">History →</span>
         </DN>
       </div>

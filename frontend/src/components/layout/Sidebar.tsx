@@ -123,10 +123,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
           { to: '/command-center', label: 'Command Center', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
+          { to: '/drift-analysis', label: 'Drift Analysis', icon: driftIcon },
           { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
           { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
           { to: '/remediation-queue', label: 'Change Control Center', icon: remediationIcon },
-          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/drift', label: 'Drift History', icon: driftIcon }] : []),
         ],
       },
       {
@@ -156,7 +156,6 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
-          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon }] : []),
         ],
       },
       {

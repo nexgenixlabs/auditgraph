@@ -66,7 +66,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
               borderRadius: 8, padding: '10px 14px', textAlign: 'center' as const,
             }}>
               <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: COLORS.textSecondary, fontFamily: FONT.ui }}>30-Day</div>
-              <DN navigateTo="/drift">
+              <DN navigateTo="/drift-analysis">
                 <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONT.mono, color: getScoreColor(predicted30d), marginTop: 2 }}>{predicted30d.toFixed(1)}</div>
               </DN>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>projected</div>
@@ -76,7 +76,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
               borderRadius: 8, padding: '10px 14px', textAlign: 'center' as const,
             }}>
               <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: COLORS.textSecondary, fontFamily: FONT.ui }}>90-Day</div>
-              <DN navigateTo="/drift">
+              <DN navigateTo="/drift-analysis">
                 <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONT.mono, color: getScoreColor(predicted90d), marginTop: 2 }}>{predicted90d.toFixed(1)}</div>
               </DN>
               <div style={{ fontSize: 9, color: COLORS.textSecondary, fontFamily: FONT.ui }}>projected</div>
@@ -145,7 +145,7 @@ export function RiskMovementTab({ d }: RiskMovementTabProps) {
             </div>
             <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, fontFamily: FONT.ui, marginTop: 6 }}>{d.riskMovement.mostChanged.name}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 6 }}>
-              <DN navigateTo="/drift">
+              <DN navigateTo="/drift-analysis">
                 <span style={{ fontSize: 22, fontWeight: 700, fontFamily: FONT.mono, color: d.riskMovement.mostChanged.score === 0 ? COLORS.textMuted : COLORS.danger }}>{d.riskMovement.mostChanged.score}</span>
               </DN>
               <span style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>/10 risk score</span>
