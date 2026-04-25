@@ -28903,7 +28903,8 @@ def get_attack_paths_list():
                    ap.occurrence_count, ap.target_resource_id,
                    ap.target_resource_type,
                    ap.highest_role, ap.has_keyvault_access,
-                   ap.has_subscription_scope, ap.has_no_owner
+                   ap.has_subscription_scope, ap.has_no_owner,
+                   ap.path_nodes
             FROM attack_paths ap
             {where}
             ORDER BY

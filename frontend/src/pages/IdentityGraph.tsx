@@ -2,6 +2,33 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 
+/* ─── Focused View Types ───────────────────────────────────────────── */
+
+interface TopAttackPath {
+  id: number;
+  source_entity_id: string;
+  source_entity_name: string;
+  source_entity_type: string;
+  path_type: string;
+  severity: string;
+  risk_score: number;
+  description: string;
+  narrative: string | null;
+  impact: string | null;
+  path_length: number;
+  affected_resource_count: number;
+  first_detected_at: string;
+  last_detected_at: string;
+  occurrence_count: number;
+  target_resource_id: string | null;
+  target_resource_type: string | null;
+  highest_role: string | null;
+  has_keyvault_access: boolean;
+  has_subscription_scope: boolean;
+  has_no_owner: boolean;
+  path_nodes: Array<{ type: string; id: string; label: string; detail?: string }>;
+}
+
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
 interface IdentityTooltip {
@@ -225,6 +252,13 @@ const IdentityGraph: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [highlightedNode, setHighlightedNode] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'identity' | 'attack'>('identity');
+
+  // Page mode: focused (top paths) or full (canvas graph)
+  const [pageMode, setPageMode] = useState<'focused' | 'full'>('focused');
+  const [topPaths, setTopPaths] = useState<TopAttackPath[]>([]);
+  const [topPathsTotal, setTopPathsTotal] = useState(0);
+  const [topPathsLoading, setTopPathsLoading] = useState(false);
+  const [expandedPathId, setExpandedPathId] = useState<number | null>(null);
   const [simulationId, setSimulationId] = useState('');
   const [connectionId, setConnectionId] = useState('');
   const [identityId, setIdentityId] = useState('');
@@ -270,6 +304,35 @@ const IdentityGraph: React.FC = () => {
       } catch { /* ignore */ }
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch top attack paths for focused view
+  useEffect(() => {
+    if (pageMode !== 'focused') return;
+    (async () => {
+      setTopPathsLoading(true);
+      try {
+        const res = await fetch(withConnection('/api/attack-paths?limit=5'));
+        if (res.ok) {
+          const data = await res.json();
+          setTopPaths(data.paths || []);
+          setTopPathsTotal(data.total || 0);
+        }
+      } catch { /* ignore */ }
+      setTopPathsLoading(false);
+    })();
+  }, [pageMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-load graph when switching to full mode with a connection but no data
+  const autoLoadRef = useRef(false);
+  useEffect(() => {
+    if (pageMode === 'full' && connectionId && !graphData && !loading && !autoLoadRef.current) {
+      autoLoadRef.current = true;
+      fetchIdentityGraph();
+    }
+    if (pageMode === 'focused') {
+      autoLoadRef.current = false;
+    }
+  }, [pageMode, connectionId, graphData, loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const computeLayout = useCallback((data: GraphData) => {
     const positions: Record<string, { x: number; y: number }> = {};
@@ -785,6 +848,35 @@ const IdentityGraph: React.FC = () => {
     );
   };
 
+  /* ─── Focused View helpers ─────────────────────────────────────────── */
+
+  const SEVERITY_BADGE: Record<string, string> = {
+    critical: 'bg-red-500/20 text-red-400 border-red-500/30',
+    high: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+    medium: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+    low: 'bg-green-500/20 text-green-400 border-green-500/30',
+  };
+
+  const PATH_TYPE_LABEL: Record<string, string> = {
+    direct_escalation: 'Privilege Escalation',
+    ownership_chain: 'Ownership Chain',
+    pim_escalation: 'PIM Escalation',
+    lateral_movement: 'Lateral Movement',
+    sensitive_data_exposure: 'Sensitive Data',
+    external_identity_risk: 'External Identity',
+  };
+
+  const NODE_TYPE_ICON: Record<string, string> = {
+    identity: '\u{1F464}',
+    entra_role: '\u{1F6E1}',
+    role: '\u{1F6E1}',
+    target: '\u{1F3AF}',
+    resource: '\u{1F4E6}',
+    permission: '\u{1F511}',
+    keyvault: '\u{1F512}',
+    subscription: '\u2601',
+  };
+
   /* ─── Render ──────────────────────────────────────────────────────── */
 
   return (
@@ -796,52 +888,277 @@ const IdentityGraph: React.FC = () => {
           <p className="text-sm text-slate-400 mt-1">Cloud IAM attack path visualization</p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => { setViewMode('identity'); setActiveAttackPath(null); }}
-            className={`px-3 py-1.5 text-sm rounded ${viewMode === 'identity' ? 'bg-blue-500/20 text-blue-400' : 'bg-slate-800 text-slate-400'}`}
-          >
-            Identity Graph
-          </button>
-          <button
-            onClick={() => setViewMode('attack')}
-            className={`px-3 py-1.5 text-sm rounded ${viewMode === 'attack' ? 'bg-red-500/20 text-red-400' : 'bg-slate-800 text-slate-400'}`}
-          >
-            Attack Paths
-          </button>
-          <span className="text-slate-600">|</span>
-          <button
-            onClick={() => setColorMode(m => m === 'type' ? 'risk' : 'type')}
-            className="px-3 py-1.5 text-sm rounded bg-slate-800 text-slate-400 hover:text-white"
-          >
-            Color: {colorMode === 'type' ? 'Type' : 'Risk'}
-          </button>
+          {/* Page mode toggle */}
+          <div className="flex items-center bg-slate-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setPageMode('focused')}
+              className={`px-3 py-1.5 text-sm rounded-md transition ${pageMode === 'focused' ? 'bg-blue-500/20 text-blue-400 font-medium' : 'text-slate-400 hover:text-slate-300'}`}
+            >
+              Focused View
+            </button>
+            <button
+              onClick={() => setPageMode('full')}
+              className={`px-3 py-1.5 text-sm rounded-md transition ${pageMode === 'full' ? 'bg-blue-500/20 text-blue-400 font-medium' : 'text-slate-400 hover:text-slate-300'}`}
+            >
+              Full Graph
+            </button>
+          </div>
+          {pageMode === 'full' && (
+            <>
+              <span className="text-slate-600">|</span>
+              <button
+                onClick={() => { setViewMode('identity'); setActiveAttackPath(null); }}
+                className={`px-3 py-1.5 text-sm rounded ${viewMode === 'identity' ? 'bg-blue-500/20 text-blue-400' : 'bg-slate-800 text-slate-400'}`}
+              >
+                Identity Graph
+              </button>
+              <button
+                onClick={() => setViewMode('attack')}
+                className={`px-3 py-1.5 text-sm rounded ${viewMode === 'attack' ? 'bg-red-500/20 text-red-400' : 'bg-slate-800 text-slate-400'}`}
+              >
+                Attack Paths
+              </button>
+              <span className="text-slate-600">|</span>
+              <button
+                onClick={() => setColorMode(m => m === 'type' ? 'risk' : 'type')}
+                className="px-3 py-1.5 text-sm rounded bg-slate-800 text-slate-400 hover:text-white"
+              >
+                Color: {colorMode === 'type' ? 'Type' : 'Risk'}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Attack Path Alert Banner */}
+      {/* ═══════════ Focused View ═══════════ */}
+      {pageMode === 'focused' && (
+        <div className="space-y-4">
+          {topPathsLoading ? (
+            <div className="flex items-center justify-center h-64 text-slate-400">Loading top attack paths...</div>
+          ) : topPaths.length === 0 ? (
+            <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-8 text-center">
+              <div className="text-4xl mb-3">{'\u{1F6E1}'}</div>
+              <h3 className="text-lg font-semibold text-white mb-1">No Attack Paths Detected</h3>
+              <p className="text-sm text-slate-400 mb-4 max-w-md mx-auto">
+                Run a discovery scan to analyze your environment for privilege escalation paths, lateral movement, and misconfigurations.
+              </p>
+              <button
+                onClick={() => setPageMode('full')}
+                className="px-4 py-2 text-sm bg-blue-500/20 text-blue-400 rounded-lg hover:bg-blue-500/30 transition"
+              >
+                Open Full Graph
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* Summary banner */}
+              <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center text-lg">
+                    {'\u{1F6A8}'}
+                  </div>
+                  <div>
+                    <div className="text-white font-semibold text-sm">
+                      {topPathsTotal} Attack Path{topPathsTotal !== 1 ? 's' : ''} Detected
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      Showing top {topPaths.length} highest-risk paths &middot; Ranked by severity and risk score
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setPageMode('full')}
+                  className="px-3 py-1.5 text-xs bg-slate-700 text-slate-300 rounded hover:bg-slate-600 transition flex-shrink-0"
+                >
+                  View Full Graph
+                </button>
+              </div>
+
+              {/* Path cards */}
+              <div className="space-y-3">
+                {topPaths.map((path, idx) => {
+                  const isExpanded = expandedPathId === path.id;
+                  return (
+                    <div
+                      key={path.id}
+                      className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden hover:border-slate-600/50 transition"
+                    >
+                      {/* Card header */}
+                      <div
+                        className="p-4 cursor-pointer"
+                        onClick={() => setExpandedPathId(isExpanded ? null : path.id)}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-start gap-3 min-w-0">
+                            <div className="flex-shrink-0 w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold text-slate-300">
+                              {idx + 1}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className={`px-2 py-0.5 text-[10px] font-medium rounded border ${SEVERITY_BADGE[path.severity] || SEVERITY_BADGE.medium}`}>
+                                  {path.severity.toUpperCase()}
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  {PATH_TYPE_LABEL[path.path_type] || path.path_type.replace(/_/g, ' ')}
+                                </span>
+                                <span className="text-[10px] font-mono text-slate-500">
+                                  Score: {path.risk_score}
+                                </span>
+                              </div>
+                              <p className="text-sm text-white font-medium mt-1.5 truncate">{path.description}</p>
+                              {/* Warning badges */}
+                              <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                                {path.has_keyvault_access && (
+                                  <span className="px-1.5 py-0.5 text-[10px] rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">
+                                    {'\u{1F512}'} Key Vault Access
+                                  </span>
+                                )}
+                                {path.has_no_owner && (
+                                  <span className="px-1.5 py-0.5 text-[10px] rounded bg-amber-500/15 text-amber-400 border border-amber-500/20">
+                                    {'\u26A0'} No Owner
+                                  </span>
+                                )}
+                                {path.has_subscription_scope && (
+                                  <span className="px-1.5 py-0.5 text-[10px] rounded bg-red-500/15 text-red-400 border border-red-500/20">
+                                    {'\u2601'} Subscription Scope
+                                  </span>
+                                )}
+                                {path.occurrence_count > 1 && (
+                                  <span className="px-1.5 py-0.5 text-[10px] rounded bg-slate-500/15 text-slate-400 border border-slate-500/20">
+                                    Seen {path.occurrence_count}x
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setViewMode('attack');
+                                if (connections.length > 0 && !connectionId) {
+                                  setConnectionId(String(connections[0].id));
+                                }
+                                setPageMode('full');
+                              }}
+                              className="px-3 py-1.5 text-xs bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30 transition"
+                            >
+                              Investigate
+                            </button>
+                            <svg
+                              className={`w-4 h-4 text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                              fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Expanded detail */}
+                      {isExpanded && (
+                        <div className="border-t border-slate-700/50 p-4 bg-slate-900/30">
+                          {/* Path chain */}
+                          {path.path_nodes && path.path_nodes.length > 0 && (
+                            <div className="mb-4">
+                              <div className="text-xs text-slate-400 font-medium mb-2">Escalation Chain</div>
+                              <div className="flex items-center gap-1 flex-wrap">
+                                {path.path_nodes.map((node, ni) => (
+                                  <React.Fragment key={ni}>
+                                    {ni > 0 && (
+                                      <svg className="w-4 h-4 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                      </svg>
+                                    )}
+                                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 border border-slate-700/50 text-xs">
+                                      <span>{NODE_TYPE_ICON[node.type] || '\u2022'}</span>
+                                      <span className="text-white">{node.label}</span>
+                                      {node.detail && (
+                                        <span className="text-slate-500 text-[10px]">({node.detail})</span>
+                                      )}
+                                    </span>
+                                  </React.Fragment>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Narrative & Impact */}
+                          <div className="grid grid-cols-2 gap-4">
+                            {path.narrative && (
+                              <div>
+                                <div className="text-xs text-slate-400 font-medium mb-1">Narrative</div>
+                                <p className="text-xs text-slate-300 leading-relaxed">{path.narrative}</p>
+                              </div>
+                            )}
+                            {path.impact && (
+                              <div>
+                                <div className="text-xs text-slate-400 font-medium mb-1">Impact</div>
+                                <p className="text-xs text-slate-300 leading-relaxed">{path.impact}</p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Metadata row */}
+                          <div className="flex items-center gap-4 mt-3 pt-3 border-t border-slate-700/30 text-[10px] text-slate-500">
+                            <span>Source: {path.source_entity_name || path.source_entity_id}</span>
+                            <span>Type: {path.source_entity_type?.replace(/_/g, ' ')}</span>
+                            <span>Hops: {path.path_length}</span>
+                            {path.affected_resource_count > 0 && (
+                              <span>Resources at risk: {path.affected_resource_count}</span>
+                            )}
+                            {path.highest_role && <span>Highest role: {path.highest_role}</span>}
+                            <span>First seen: {new Date(path.first_detected_at).toLocaleDateString()}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* "View all" footer */}
+              {topPathsTotal > 5 && (
+                <div className="text-center">
+                  <button
+                    onClick={() => setPageMode('full')}
+                    className="text-xs text-blue-400 hover:text-blue-300"
+                  >
+                    View all {topPathsTotal} attack paths in Full Graph &rarr;
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ═══════════ Full Graph View ═══════════ */}
+      {pageMode === 'full' && (<>
+
+      {/* Attack Path Info Banner (amber/informational) */}
       {!!graphData && graphData.attackPathCount > 0 && (
         <div
           className="rounded-lg border flex items-center justify-between"
-          style={{ background: 'rgba(127,29,29,0.8)', borderColor: '#DC2626', padding: '10px 16px' }}
+          style={{ background: 'rgba(120,53,15,0.4)', borderColor: '#d97706', padding: '10px 16px' }}
         >
           <div className="flex items-center gap-3">
-            <span className="text-lg">&#9888;&#65039;</span>
+            <span className="text-lg">{'\u{1F6E1}'}</span>
             <div>
-              <div className="text-red-200 font-bold text-sm">
-                CRITICAL: {graphData.attackPathCount.toLocaleString()} Lateral Movement Path{graphData.attackPathCount > 1 ? 's' : ''} Detected
+              <div className="text-amber-200 font-semibold text-sm">
+                {graphData.attackPathCount.toLocaleString()} Lateral Movement Path{graphData.attackPathCount > 1 ? 's' : ''} Identified
               </div>
-              <div className="text-red-300/80 text-xs mt-0.5">
-                An attacker with access to any identity below could escalate to privileged access across connected resources.
+              <div className="text-amber-300/70 text-xs mt-0.5">
+                Privilege escalation paths detected across connected resources. Select a path to highlight.
               </div>
             </div>
           </div>
           <div className="flex gap-2 flex-shrink-0">
             <button
               onClick={() => setShowPathPanel(true)}
-              className="px-3 py-1.5 rounded text-xs font-medium text-white"
-              style={{ backgroundColor: '#DC2626' }}
+              className="px-3 py-1.5 rounded text-xs font-medium text-white bg-amber-600 hover:bg-amber-500 transition"
             >
-              View Top Paths
+              View Paths
             </button>
             {activeAttackPath && (
               <button
@@ -1263,6 +1580,8 @@ const IdentityGraph: React.FC = () => {
           ))}
         </div>
       )}
+
+      </>)}
     </div>
   );
 };
