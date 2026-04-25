@@ -153,7 +153,6 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Attack Surface',
         color: '#dc2626',
         items: [
-          { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
         ],

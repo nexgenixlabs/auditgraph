@@ -316,7 +316,7 @@ function AppContent() {
                   {/* SecurityDashboard removed — consolidated into Executive Posture + Command Center */}
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
-                  <Route path="/identity-exposures" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExposures /></ErrorBoundary>} />
+                  <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
                   <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
                   <Route path="/privilege-drift" element={<Navigate to="/drift-analysis" replace />} />
                   <Route path="/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPaths /></ErrorBoundary>} />
