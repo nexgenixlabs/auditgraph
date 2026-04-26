@@ -214,6 +214,7 @@ from app.api.handlers import (
     copilot_chat,
     copilot_conversations_list,
     copilot_suggestions,
+    get_identity_signin_events,
     get_identity_timeline,
     get_identity_attack_paths,
     get_identity_effective_access,
@@ -2991,6 +2992,13 @@ def create_app():
     @rate_limit(max_requests=20, window_seconds=60)
     def copilot_graph_query_route():
         return copilot_graph_query_handler()
+
+    # -----------------------
+    # Authentication History (Sign-In Events)
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/signin-events")
+    def identity_signin_events(identity_id):
+        return get_identity_signin_events(identity_id)
 
     # -----------------------
     # Phase 80: Identity Timeline

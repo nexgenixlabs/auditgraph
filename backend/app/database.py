@@ -20179,6 +20179,7 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_status_time ON workload_signin_events(identity_db_id, status, created_datetime DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_created ON workload_signin_events(created_datetime)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_wse_identity_id ON workload_signin_events(identity_id)")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_wse_sign_in_id ON workload_signin_events(sign_in_id) WHERE sign_in_id IS NOT NULL")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workload_activity_stats (

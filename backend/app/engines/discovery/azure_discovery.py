@@ -1190,6 +1190,7 @@ class AzureDiscoveryEngine:
                 telemetry = P2TelemetryService(self.credential, self.db)
                 org_id = self.db._organization_id
                 telemetry.ingest_signin_logs(run_id, org_id)
+                telemetry.ingest_user_signin_logs(run_id, org_id)
                 telemetry.compute_activity_stats(run_id, org_id)
                 telemetry.backfill_last_sign_in(run_id)
                 logger.info("P2 telemetry ingested -- activity stats ready for scoring")

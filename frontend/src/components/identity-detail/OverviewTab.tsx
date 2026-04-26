@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -238,6 +238,231 @@ function LineageSection({ lineage, identityCategory }: { lineage?: LineageData |
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Authentication History Section ───────────────────────────
+
+interface SignInEvent {
+  sign_in_id: string;
+  timestamp: string | null;
+  status: string;
+  error_code: number | null;
+  failure_reason: string | null;
+  resource: string | null;
+  resource_id: string | null;
+  ip_address: string | null;
+  location_city: string | null;
+  location_country: string | null;
+  app: string | null;
+  client_app: string | null;
+  is_interactive: boolean;
+  risk_level: string | null;
+  risk_detail: string | null;
+  ca_status: string | null;
+}
+
+interface SignInSummary {
+  total_events: number;
+  success_count: number;
+  failure_count: number;
+  interactive_count: number;
+  non_interactive_count: number;
+  unique_ips: number;
+  unique_locations: number;
+  risky_count: number;
+  earliest: string | null;
+  latest: string | null;
+}
+
+function AuthHistorySection({ identityId }: { identityId: string }) {
+  const [events, setEvents] = useState<SignInEvent[]>([]);
+  const [summary, setSummary] = useState<SignInSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [showAll, setShowAll] = useState(false);
+
+  const fetchEvents = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: '20' });
+      if (statusFilter) params.set('status', statusFilter);
+      const resp = await fetch(`/api/identities/${identityId}/signin-events?${params}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setEvents(data.events || []);
+        setSummary(data.summary || null);
+      }
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [identityId, statusFilter]);
+
+  useEffect(() => { fetchEvents(); }, [fetchEvents]);
+
+  if (loading) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="text-sm font-semibold text-gray-900 mb-2">Authentication History</div>
+        <div className="text-xs text-gray-400 animate-pulse">Loading sign-in events...</div>
+      </div>
+    );
+  }
+
+  if (!summary || summary.total_events === 0) return null;
+
+  const failRate = summary.total_events > 0
+    ? Math.round((summary.failure_count / summary.total_events) * 100)
+    : 0;
+
+  const displayEvents = showAll ? events : events.slice(0, 8);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-gray-900">Authentication History</div>
+        <div className="flex items-center gap-1.5">
+          {['', 'success', 'failure'].map(f => (
+            <button
+              key={f}
+              onClick={() => setStatusFilter(f)}
+              className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
+                statusFilter === f
+                  ? 'bg-gray-800 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {f === '' ? 'All' : f === 'success' ? 'Success' : 'Failed'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary strip */}
+      <div className="flex flex-wrap gap-4 mb-3 text-xs">
+        <div>
+          <span className="text-gray-500">Total</span>{' '}
+          <span className="font-semibold text-gray-800">{summary.total_events.toLocaleString()}</span>
+        </div>
+        <div>
+          <span className="text-gray-500">Success</span>{' '}
+          <span className="font-semibold text-green-600">{summary.success_count.toLocaleString()}</span>
+        </div>
+        <div>
+          <span className="text-gray-500">Failed</span>{' '}
+          <span className={`font-semibold ${summary.failure_count > 0 ? 'text-red-600' : 'text-gray-600'}`}>
+            {summary.failure_count.toLocaleString()}
+          </span>
+          {failRate > 10 && (
+            <span className="ml-1 px-1 py-0.5 bg-red-50 text-red-600 rounded text-[10px] font-medium">
+              {failRate}% fail rate
+            </span>
+          )}
+        </div>
+        <div>
+          <span className="text-gray-500">IPs</span>{' '}
+          <span className="font-semibold text-gray-800">{summary.unique_ips}</span>
+        </div>
+        <div>
+          <span className="text-gray-500">Locations</span>{' '}
+          <span className="font-semibold text-gray-800">{summary.unique_locations}</span>
+        </div>
+        {summary.risky_count > 0 && (
+          <div>
+            <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded text-[10px] font-medium border border-amber-200">
+              {summary.risky_count} risky sign-in{summary.risky_count !== 1 ? 's' : ''}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Events table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-gray-100">
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Time</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Status</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Application</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Resource</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">IP / Location</th>
+              <th className="text-left py-1.5 text-gray-500 font-medium">Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayEvents.map((evt, idx) => {
+              const isRisky = evt.risk_level && !['none', ''].includes(evt.risk_level);
+              return (
+                <tr key={evt.sign_in_id || idx} className={`border-b border-gray-50 ${isRisky ? 'bg-amber-50/40' : ''}`}>
+                  <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">
+                    {evt.timestamp ? new Date(evt.timestamp).toLocaleString(undefined, {
+                      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                    }) : '—'}
+                    {evt.is_interactive && (
+                      <span className="ml-1 text-[10px] text-blue-500" title="Interactive sign-in">INT</span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    {evt.status === 'success' ? (
+                      <span className="inline-flex items-center gap-0.5 text-green-600">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        OK
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-0.5 text-red-600" title={evt.failure_reason || ''}>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        {evt.error_code || 'Fail'}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-gray-700 max-w-[140px] truncate" title={evt.app || ''}>
+                    {evt.app || '—'}
+                  </td>
+                  <td className="py-1.5 pr-3 text-gray-700 max-w-[140px] truncate" title={evt.resource || ''}>
+                    {evt.resource || '—'}
+                  </td>
+                  <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">
+                    {evt.ip_address || '—'}
+                    {evt.location_country && (
+                      <span className="ml-1 text-gray-400">{evt.location_city ? `${evt.location_city}, ` : ''}{evt.location_country}</span>
+                    )}
+                  </td>
+                  <td className="py-1.5">
+                    {isRisky ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                        {evt.risk_level}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {events.length > 8 && !showAll && (
+        <button
+          onClick={() => setShowAll(true)}
+          className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
+        >
+          Show all {events.length} events
+        </button>
+      )}
+      {showAll && events.length > 8 && (
+        <button
+          onClick={() => setShowAll(false)}
+          className="mt-2 text-xs text-gray-500 hover:text-gray-700 font-medium"
+        >
+          Collapse
+        </button>
+      )}
     </div>
   );
 }
@@ -964,6 +1189,9 @@ export default function OverviewTab({
 
       {/* NHI Lineage section */}
       <LineageSection lineage={(data as any)?.lineage} identityCategory={identity.identity_category as string} />
+
+      {/* Authentication History */}
+      <AuthHistorySection identityId={identity.identity_id as string} />
 
       {/* Risk reasons */}
       <div>

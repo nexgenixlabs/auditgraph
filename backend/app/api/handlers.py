@@ -21293,6 +21293,128 @@ def get_identity_usage(identity_id):
         cursor.close()
 
 
+# ── Authentication History (P2 Sign-In Events) ───────────────
+
+def get_identity_signin_events(identity_id):
+    """GET /api/identities/<id>/signin-events — paginated sign-in event history."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Resolve identity DB id
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        se_sql = """
+            SELECT i.id FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+        """
+        se_params = [identity_id, run_ids]
+        se_sql, se_params = _apply_sub_filter(se_sql, se_params, cursor, _org_id(), _connection_id())
+        se_sql += " ORDER BY i.discovery_run_id DESC LIMIT 1"
+        cursor.execute(se_sql, tuple(se_params))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return jsonify({'events': [], 'summary': {}, 'total': 0})
+        db_id = row[0]
+
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        status_filter = request.args.get('status')
+        risk_filter = request.args.get('risk_level')
+
+        # Build summary from all events for this identity
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total_events,
+                    COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+                    COUNT(*) FILTER (WHERE status = 'failure') AS failure_count,
+                    COUNT(*) FILTER (WHERE is_interactive = true) AS interactive_count,
+                    COUNT(*) FILTER (WHERE is_interactive = false) AS non_interactive_count,
+                    COUNT(DISTINCT ip_address) AS unique_ips,
+                    COUNT(DISTINCT location_country) AS unique_locations,
+                    COUNT(*) FILTER (WHERE risk_level NOT IN ('none', '')) AS risky_count,
+                    MIN(created_datetime) AS earliest,
+                    MAX(created_datetime) AS latest
+                FROM workload_signin_events
+                WHERE identity_db_id = %s
+            """, (db_id,))
+            srow = cursor.fetchone()
+            summary = {
+                'total_events': srow[0] or 0,
+                'success_count': srow[1] or 0,
+                'failure_count': srow[2] or 0,
+                'interactive_count': srow[3] or 0,
+                'non_interactive_count': srow[4] or 0,
+                'unique_ips': srow[5] or 0,
+                'unique_locations': srow[6] or 0,
+                'risky_count': srow[7] or 0,
+                'earliest': srow[8].isoformat() if srow[8] else None,
+                'latest': srow[9].isoformat() if srow[9] else None,
+            }
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+            summary = {}
+
+        # Fetch paginated events
+        where_clauses = ["identity_db_id = %s"]
+        params = [db_id]
+
+        if status_filter and status_filter in ('success', 'failure'):
+            where_clauses.append("status = %s")
+            params.append(status_filter)
+        if risk_filter and risk_filter != 'none':
+            where_clauses.append("risk_level NOT IN ('none', '')")
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Count
+        cursor.execute(f"SELECT COUNT(*) FROM workload_signin_events WHERE {where_sql}", tuple(params))
+        total = cursor.fetchone()[0] or 0
+
+        # Events
+        cursor.execute(f"""
+            SELECT sign_in_id, created_datetime, status, error_code, failure_reason,
+                   resource_display_name, resource_id, ip_address, location_city,
+                   location_country, app_display_name, client_app_type,
+                   is_interactive, risk_level, risk_detail, conditional_access_status
+            FROM workload_signin_events
+            WHERE {where_sql}
+            ORDER BY created_datetime DESC
+            LIMIT %s OFFSET %s
+        """, tuple(params) + (limit, offset))
+
+        events = []
+        for r in cursor.fetchall():
+            events.append({
+                'sign_in_id': r[0],
+                'timestamp': r[1].isoformat() if r[1] else None,
+                'status': r[2],
+                'error_code': r[3],
+                'failure_reason': r[4],
+                'resource': r[5],
+                'resource_id': r[6],
+                'ip_address': r[7],
+                'location_city': r[8],
+                'location_country': r[9],
+                'app': r[10],
+                'client_app': r[11],
+                'is_interactive': r[12],
+                'risk_level': r[13],
+                'risk_detail': r[14],
+                'ca_status': r[15],
+            })
+
+        cursor.close()
+        return jsonify({'events': events, 'summary': summary, 'total': total})
+
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': str(e)}), 500
+
+
 # ── Phase 80: Identity Timeline / Forensic View ───────────────
 
 def get_identity_timeline(identity_id):
