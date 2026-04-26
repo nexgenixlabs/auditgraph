@@ -120,7 +120,13 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
       <div className="text-xs text-gray-500 mt-1 break-all">{r.scope}</div>
       <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-gray-500">
         {r.days_since_assigned != null && (
-          <span>Assigned {r.days_since_assigned}d ago</span>
+          <span className={
+            r.days_since_assigned > 365 ? 'text-red-600 font-medium' :
+            r.days_since_assigned > 90 ? 'text-amber-600' :
+            ''
+          }>
+            {r.days_since_assigned > 365 ? `Assigned over 1 year ago` : `Assigned ${r.days_since_assigned}d ago`}
+          </span>
         )}
         {r.resource_type && <span>· {r.resource_type}</span>}
         {!r.scope_exists && <span className="text-red-600">· Resource deleted</span>}
@@ -262,6 +268,30 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
         </div>
       )}
 
+      {/* Role summary strip */}
+      {allRoles.length > 0 && (() => {
+        const neverUsed = allRoles.filter((r: any) => {
+          if (!roleUsage) return false;
+          const usage = roleUsage[normalizeRoleKey(r.role_name || r.display_name || r.name || '')];
+          return usage && !usage.used;
+        }).length;
+        const active = allRoles.filter((r: any) => {
+          if (!roleUsage) return false;
+          const usage = roleUsage[normalizeRoleKey(r.role_name || r.display_name || r.name || '')];
+          return usage?.used;
+        }).length;
+        const pending = allRoles.length - neverUsed - active;
+        return (
+          <div className="mt-3 flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+            <span className="font-medium text-gray-700">{allRoles.length} roles</span>
+            <span className="text-gray-300">·</span>
+            {neverUsed > 0 && <><span className="text-red-600 font-medium">{neverUsed} never used</span><span className="text-gray-300">·</span></>}
+            {active > 0 && <><span className="text-green-600 font-medium">{active} active (inferred)</span><span className="text-gray-300">·</span></>}
+            {pending > 0 && <span className="text-gray-400">{pending} pending analysis</span>}
+          </div>
+        );
+      })()}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-3">
         {/* Azure RBAC */}
         <div>
@@ -315,6 +345,16 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
           )}
         </div>
       </div>
+
+      {/* Usage methodology note */}
+      {allRoles.length > 0 && (
+        <div className="mt-3 text-xs text-gray-400 flex items-start gap-1.5">
+          <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          Active status is inferred from static role analysis. For exact role last-use dates, ARM activity collection is required.
+        </div>
+      )}
 
       {/* Per-role script modal */}
       {roleScript && (

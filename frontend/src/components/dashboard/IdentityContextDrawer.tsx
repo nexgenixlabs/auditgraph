@@ -1557,6 +1557,29 @@ function PrivilegeComparison({ detail }: { detail: IdentityDetail }) {
   );
 }
 
+// ─── Risk Score Normalization ────────────────────────────────────
+// V2 composite scores (unbounded integer sums) → 0.0-10.0 CVSS-aligned.
+// Uses piecewise linear mapping that preserves risk level boundaries:
+//   0 → 0.0 | 1-199 → 1.0-3.9 (LOW) | 200-499 → 4.0-6.9 (MEDIUM) |
+//   500-899 → 7.0-8.9 (HIGH) | 900+ → 9.0-10.0 (CRITICAL, capped at 10)
+
+function normalizeRiskScore(raw: number): number {
+  if (raw <= 0) return 0;
+  if (raw < 200)  return 1.0 + (raw / 200) * 2.9;          // 1.0-3.9
+  if (raw < 500)  return 4.0 + ((raw - 200) / 300) * 2.9;  // 4.0-6.9
+  if (raw < 900)  return 7.0 + ((raw - 500) / 400) * 1.9;  // 7.0-8.9
+  // 900+ → 9.0-10.0 (soft cap at 2000 raw for 10.0)
+  return Math.min(10, 9.0 + ((raw - 900) / 1100) * 1.0);
+}
+
+function getRiskSeverity(score: number): { label: string; color: string } {
+  if (score >= 9.0) return { label: 'CRITICAL', color: COLORS.danger };
+  if (score >= 7.0) return { label: 'HIGH', color: '#FF8C42' };
+  if (score >= 4.0) return { label: 'MEDIUM', color: COLORS.warning };
+  if (score > 0)    return { label: 'LOW', color: COLORS.success };
+  return { label: 'INFO', color: COLORS.textMuted };
+}
+
 // ─── Recent Risk Changes ─────────────────────────────────────────
 
 function deriveChangeReasons(detail: IdentityDetail): string[] {
@@ -1595,95 +1618,145 @@ function deriveChangeReasons(detail: IdentityDetail): string[] {
 
 function RecentRiskChanges({ detail }: { detail: IdentityDetail }) {
   const trend = detail.trend;
+  const reasons = deriveChangeReasons(detail);
+
+  // CASE 3: First scan — no previous data
+  const isNew = trend?.is_new === true || trend?.risk_direction === 'new';
+  if (isNew) {
+    const normCurrent = normalizeRiskScore(detail.risk_score ?? 0);
+    const severity = getRiskSeverity(normCurrent);
+    return (
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, fontFamily: FONT.ui, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Risk Score Change
+        </div>
+        <div style={{ padding: '12px 14px', borderRadius: 8, background: COLORS.surfaceAlt || '#0f1729', border: `1px solid ${COLORS.border}` }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 3, background: `${severity.color}20`, color: severity.color, fontFamily: FONT.ui }}>{severity.label}</span>
+            <span style={{ fontSize: 20, fontWeight: 700, fontFamily: FONT.mono, color: severity.color }}>{normCurrent.toFixed(1)}</span>
+            <span style={{ fontSize: 12, color: COLORS.textDim, fontFamily: FONT.mono }}>/10</span>
+          </div>
+          <div style={{ fontSize: 11, color: COLORS.textDim, fontFamily: FONT.ui, marginTop: 6 }}>
+            First scan — baseline established
+          </div>
+          {reasons.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 }}>
+              <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Reason</div>
+              {reasons.map((r, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                  <span style={{ width: 4, height: 4, borderRadius: '50%', background: severity.color, flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{r}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // No trend data at all — hide section
   if (!trend || trend.previous_risk_score == null) return null;
 
-  const current = detail.risk_score ?? 0;
-  const previous = trend.previous_risk_score;
-  const delta = current - previous;
-  const direction = trend.risk_direction || (delta > 0 ? 'worsened' : delta < 0 ? 'improved' : 'unchanged');
+  const rawCurrent = detail.risk_score ?? 0;
+  const rawPrevious = trend.previous_risk_score;
+  const normCurrent = normalizeRiskScore(rawCurrent);
+  const normPrevious = normalizeRiskScore(rawPrevious);
+  const normDelta = Math.round((normCurrent - normPrevious) * 10) / 10;
+  const direction = trend.risk_direction || (normDelta > 0 ? 'worsened' : normDelta < 0 ? 'improved' : 'unchanged');
 
-  if (direction === 'unchanged' && delta === 0) return null;
+  const currentSeverity = getRiskSeverity(normCurrent);
+  const previousSeverity = getRiskSeverity(normPrevious);
 
-  const isNew = trend.is_new === true;
-  const deltaColor = delta > 0 ? COLORS.danger : delta < 0 ? COLORS.success : COLORS.textSecondary;
-  const directionLabel = isNew ? 'New Identity' : direction === 'worsened' ? 'Increased' : direction === 'improved' ? 'Decreased' : 'Unchanged';
-  const reasons = deriveChangeReasons(detail);
+  // CASE 2: No change (UNCHANGED)
+  if (direction === 'unchanged' || Math.abs(normDelta) < 0.1) {
+    return (
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, fontFamily: FONT.ui, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Risk Score Change
+        </div>
+        <div style={{ padding: '12px 14px', borderRadius: 8, background: COLORS.surfaceAlt || '#0f1729', border: `1px solid ${COLORS.border}` }}>
+          <div style={{ fontSize: 12, color: COLORS.textDim, fontFamily: FONT.ui }}>
+            → No change since last scan
+          </div>
+          {reasons.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 }}>
+              <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Reason</div>
+              {reasons.map((r, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                  <span style={{ width: 4, height: 4, borderRadius: '50%', background: COLORS.textDim, flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{r}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // CASE 1: Score changed between scans
+  const absDelta = Math.abs(normDelta);
+  const improved = normDelta < 0;
+  let deltaLabel: string;
+  let deltaColor: string;
+  let arrow: string;
+  if (improved) {
+    arrow = '↓';
+    deltaColor = COLORS.success;
+    deltaLabel = absDelta > 2.0 ? 'Significant improvement' : 'Improvement';
+  } else {
+    arrow = '↑';
+    deltaColor = absDelta > 2.0 ? COLORS.danger : '#FF8C42';
+    deltaLabel = absDelta > 2.0 ? 'Significant risk increase' : 'Risk increased';
+  }
 
   return (
     <div style={{ marginTop: 16 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, fontFamily: FONT.ui, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        Recent Risk Changes
+        Risk Score Change
       </div>
-      <div style={{
-        padding: '12px 14px', borderRadius: 8,
-        background: COLORS.surfaceAlt || '#0f1729',
-        border: `1px solid ${COLORS.border}`,
-      }}>
-        {/* Score delta row */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <div style={{ fontSize: 10, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Risk Score Change</div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 2 }}>
-              <span style={{ fontSize: 22, fontWeight: 700, fontFamily: FONT.mono, color: deltaColor }}>
-                {isNew ? 'NEW' : `${delta > 0 ? '+' : ''}${delta}`}
-              </span>
-              <span style={{
-                fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 3,
-                background: `${deltaColor}15`, color: deltaColor,
-                fontFamily: FONT.ui, textTransform: 'uppercase',
-              }}>
-                {directionLabel}
-              </span>
-            </div>
-          </div>
-          {/* Previous → Current */}
-          {!isNew && (
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui }}>Previous</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 1 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, fontFamily: FONT.mono, color: COLORS.textSecondary }}>{previous}</span>
-                <span style={{ fontSize: 10, color: COLORS.textDim }}>{'\u2192'}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, fontFamily: FONT.mono, color: riskDot(detail.risk_level) }}>{current}</span>
-              </div>
-            </div>
-          )}
+      <div style={{ padding: '12px 14px', borderRadius: 8, background: COLORS.surfaceAlt || '#0f1729', border: `1px solid ${COLORS.border}` }}>
+        {/* Current score with severity badge */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 3, background: `${currentSeverity.color}20`, color: currentSeverity.color, fontFamily: FONT.ui }}>{currentSeverity.label}</span>
+          <span style={{ fontSize: 20, fontWeight: 700, fontFamily: FONT.mono, color: currentSeverity.color }}>{normCurrent.toFixed(1)}</span>
+          <span style={{ fontSize: 12, color: COLORS.textDim, fontFamily: FONT.mono }}>/10</span>
         </div>
+
+        {/* Previous + delta */}
+        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ fontSize: 11, color: COLORS.textSecondary, fontFamily: FONT.ui }}>
+            Previous: <span style={{ fontWeight: 600, color: previousSeverity.color }}>{previousSeverity.label}</span> <span style={{ fontFamily: FONT.mono }}>{normPrevious.toFixed(1)}/10</span>
+          </div>
+          <div style={{ fontSize: 11, fontFamily: FONT.ui, color: deltaColor, fontWeight: 600 }}>
+            {arrow} {absDelta.toFixed(1)} points — {deltaLabel}
+          </div>
+        </div>
+
+        {/* Level change badge */}
+        {trend.previous_risk_level && trend.previous_risk_level !== detail.risk_level && (
+          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 3, background: riskDot(trend.previous_risk_level) + '22', color: riskDot(trend.previous_risk_level), fontFamily: FONT.ui, textTransform: 'uppercase' }}>
+              {trend.previous_risk_level}
+            </span>
+            <span style={{ fontSize: 10, color: COLORS.textDim }}>{'\u2192'}</span>
+            <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 3, background: riskDot(detail.risk_level) + '22', color: riskDot(detail.risk_level), fontFamily: FONT.ui, textTransform: 'uppercase' }}>
+              {detail.risk_level}
+            </span>
+          </div>
+        )}
 
         {/* Change reasons */}
         {reasons.length > 0 && (
           <div style={{ marginTop: 10, borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 }}>
-            <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.03em' }}>
-              Reason
-            </div>
+            <div style={{ fontSize: 9, color: COLORS.textDim, fontFamily: FONT.ui, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Reason</div>
             {reasons.map((r, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
                 <span style={{ width: 4, height: 4, borderRadius: '50%', background: deltaColor, flexShrink: 0 }} />
                 <span style={{ fontSize: 11, color: COLORS.text, fontFamily: FONT.ui }}>{r}</span>
               </div>
             ))}
-          </div>
-        )}
-
-        {/* Level change badge */}
-        {!isNew && trend.previous_risk_level && trend.previous_risk_level !== detail.risk_level && (
-          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{
-              fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 3,
-              background: riskDot(trend.previous_risk_level) + '22',
-              color: riskDot(trend.previous_risk_level),
-              fontFamily: FONT.ui, textTransform: 'uppercase',
-            }}>
-              {trend.previous_risk_level}
-            </span>
-            <span style={{ fontSize: 10, color: COLORS.textDim }}>{'\u2192'}</span>
-            <span style={{
-              fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 3,
-              background: riskDot(detail.risk_level) + '22',
-              color: riskDot(detail.risk_level),
-              fontFamily: FONT.ui, textTransform: 'uppercase',
-            }}>
-              {detail.risk_level}
-            </span>
           </div>
         )}
       </div>

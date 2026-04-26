@@ -9070,6 +9070,46 @@ class AzureDiscoveryEngine:
                     from datetime import datetime
                     identity['created_datetime'] = datetime.utcnow().isoformat()
 
+            # ── AG-78: Compute privilege_tier from roles before persist ──
+            if 'privilege_tier' not in identity:
+                _roles = list(identity.get('roles', [])) + list(identity.get('entra_roles', []))
+                _pt = 3
+                _T0_ENTRA = {'global administrator', 'privileged role administrator',
+                             'privileged authentication administrator', 'security operator',
+                             'application administrator', 'cloud application administrator',
+                             'hybrid identity administrator', 'domain name administrator',
+                             'external identity provider administrator'}
+                _T0_ARM = {'owner', 'user access administrator'}
+                _T1_ENTRA = {'user administrator', 'exchange administrator',
+                             'sharepoint administrator', 'teams administrator',
+                             'intune administrator', 'conditional access administrator',
+                             'authentication administrator', 'groups administrator',
+                             'license administrator', 'password administrator',
+                             'security administrator', 'compliance administrator',
+                             'billing administrator', 'helpdesk administrator'}
+                _T1_ARM = {'owner', 'contributor', 'user access administrator'}
+                for r in _roles:
+                    rn = (r.get('role_name') or '').lower()
+                    rt = (r.get('role_type') or '').lower()
+                    if rt == 'entra' and rn in _T0_ENTRA:
+                        _pt = 0; break
+                    st = (r.get('scope_type') or '').lower()
+                    if rt == 'azure' and rn in _T0_ARM and st in ('subscription', 'tenant', ''):
+                        _pt = 0; break
+                if _pt > 0:
+                    for r in _roles:
+                        rn = (r.get('role_name') or '').lower()
+                        rt = (r.get('role_type') or '').lower()
+                        if rt == 'entra' and rn in _T1_ENTRA:
+                            _pt = 1; break
+                        if rt == 'azure' and rn in _T1_ARM:
+                            _pt = 1; break
+                if _pt > 1:
+                    for r in _roles:
+                        if (r.get('role_type') or '').lower() in ('entra', 'azure'):
+                            _pt = 2; break
+                identity['privilege_tier'] = f'T{_pt}'
+
             try:
                 identity_db_id = self.db.save_identity(run_id, identity)
                 identity['_db_id'] = identity_db_id

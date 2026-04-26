@@ -16,6 +16,7 @@ const R = {
   status: {
     new: '#FF6D00', planned: '#42A5F5', in_progress: '#FFB300',
     verified: '#4ADE80', closed: '#94A3B8',
+    accepted_risk: '#D97706', dismissed: '#6B7280',
   } as Record<string, string>,
   priority: { critical: '#FF1744', high: '#FF6D00', medium: '#FFB300', low: '#4ADE80' } as Record<string, string>,
 };
@@ -57,7 +58,7 @@ interface PlaybookRef {
   enabled: boolean;
 }
 
-const STATUS_OPTIONS = ['all', 'new', 'planned', 'in_progress', 'verified', 'closed'];
+const STATUS_OPTIONS = ['all', 'new', 'planned', 'in_progress', 'verified', 'closed', 'accepted_risk', 'dismissed'];
 const PRIORITY_OPTIONS = ['all', 'critical', 'high', 'medium', 'low'];
 
 function deriveImpact(action: RemediationAction): string | null {
@@ -149,11 +150,17 @@ if ($existing${i}) {
 }`).join('\n\n');
 
       return `# ============================================
-# AuditGraph Trust AI — Remove RBAC Role(s)
+# AuditGraph Remediation Prescription
+# Action:    Remove RBAC Role(s)
 # Identity:  ${name}
 # Roles:     ${roleDisplay}  (${roles.length} role(s))
 # Scope:     ${scope}
 # Audit ID:  ${auditId}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# This script was generated as a recommendation.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-AzAccount
@@ -188,8 +195,10 @@ az role assignment list --assignee "${objId}" \\
 
   if (a.action_type === 'rotate_credential') {
     return ps
-? `# AuditGraph Trust AI — Rotate Credential
+? `# AuditGraph Remediation Prescription — Rotate Credential
 # Identity: ${name} (${objId}) | Audit ID: ${auditId}
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
 
 Connect-MgGraph -Scopes "Application.ReadWrite.All"
 
@@ -217,8 +226,10 @@ az ad app credential reset --id "$APP_ID" --years 1`;
 
   if (a.action_type === 'remove_identity') {
     return ps
-? `# AuditGraph Trust AI — Remove Orphaned SPN
+? `# AuditGraph Remediation Prescription — Remove Orphaned SPN
 # Identity: ${name} (${objId}) | Audit ID: ${auditId}
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
 
 Connect-AzAccount
 
@@ -242,8 +253,10 @@ az ad sp delete --id "${objId}"`;
 
   if (a.action_type === 'access_review') {
     return ps
-? `# AuditGraph Trust AI — Access Review
+? `# AuditGraph Remediation Prescription — Access Review
 # Identity: ${name} (${objId}) | Roles: ${roleDisplay} | Audit ID: ${auditId}
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
 
 Connect-MgGraph -Scopes "AccessReview.ReadWrite.All"
 
@@ -267,8 +280,10 @@ az role assignment list --assignee "${objId}" -o table
 
   if (a.action_type === 'break_attack_path') {
     return ps
-? `# AuditGraph Trust AI — Break Attack Path
+? `# AuditGraph Remediation Prescription — Break Attack Path
 # Identity: ${name} (${objId}) | Audit ID: ${auditId}
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
 
 Connect-AzAccount
 
@@ -299,8 +314,10 @@ az role assignment list --assignee "${objId}" \\
 
   if (a.action_type === 'disable_identity') {
     return ps
-? `# AuditGraph Trust AI — Disable Stale Identity
+? `# AuditGraph Remediation Prescription — Disable Stale Identity
 # Identity: ${name} (${objId}) | Audit ID: ${auditId}
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
 
 Connect-MgGraph -Scopes "User.ReadWrite.All"
 
@@ -336,6 +353,8 @@ export default function RemediationCenter() {
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [scriptTab, setScriptTab] = useState<'powershell' | 'azure_cli' | 'terraform_note'>('powershell');
   const [scriptCopied, setScriptCopied] = useState(false);
+  const [showAcceptRiskModal, setShowAcceptRiskModal] = useState(false);
+  const [acceptRiskReason, setAcceptRiskReason] = useState('');
 
   const [stats, setStats] = useState<RemediationStats>({ open: 0, critical: 0, in_progress: 0, completed_this_week: 0 });
   const [actions, setActions] = useState<RemediationAction[]>([]);
@@ -449,14 +468,16 @@ export default function RemediationCenter() {
     finally { setIsGenerating(false); }
   }, [withConnection]);
 
-  const updateStatus = useCallback(async (actionId: number, newStatus: string) => {
+  const updateStatus = useCallback(async (actionId: number, newStatus: string, reason?: string) => {
     // Optimistic update
     setActions(prev => prev.map(a => a.id === actionId ? { ...a, status: newStatus } : a));
     try {
+      const body: Record<string, string> = { status: newStatus };
+      if (reason) body.reason = reason;
       await fetch(withConnection(`/api/remediation/generated/${actionId}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(body),
       });
     } catch { /* revert on error would go here */ }
   }, [withConnection]);
@@ -725,6 +746,8 @@ export default function RemediationCenter() {
                         <option value="in_progress">In Progress</option>
                         <option value="verified">Verified</option>
                         <option value="closed">Closed</option>
+                        <option value="accepted_risk">Accepted Risk</option>
+                        <option value="dismissed">Dismissed</option>
                       </select>
                     </td>
                   </tr>
@@ -739,7 +762,7 @@ export default function RemediationCenter() {
           <div className="w-[400px] flex-shrink-0 rounded-xl border overflow-y-auto" style={{
             backgroundColor: R.surface, borderColor: R.surfaceBorder, maxHeight: 'calc(100vh - 240px)',
           }}>
-            <div className="p-5 space-y-5">
+            <div className="p-5 space-y-4">
               {/* Header */}
               <div className="flex items-start justify-between">
                 <div>
@@ -755,97 +778,125 @@ export default function RemediationCenter() {
                 </button>
               </div>
 
-              {/* Identity name link */}
-              {selectedAction.identity_name && selectedAction.identity_id && (
-                <p className="text-sm" style={{ color: R.textSecondary }}>
-                  Identity:{' '}
-                  <span
-                    onClick={() => navigate(`/identities/${selectedAction.identity_id}`)}
-                    style={{ color: R.accent, cursor: 'pointer', opacity: 0.9 }}
-                  >
-                    {selectedAction.identity_name}
-                  </span>
-                </p>
-              )}
+              {/* ── Section 1: Risk Finding ── */}
+              <div className="space-y-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Risk Finding</p>
+                {selectedAction.identity_name && selectedAction.identity_id && (
+                  <p className="text-sm" style={{ color: R.textSecondary }}>
+                    Identity:{' '}
+                    <span
+                      onClick={() => navigate(`/identities/${selectedAction.identity_id}`)}
+                      style={{ color: R.accent, cursor: 'pointer', opacity: 0.9 }}
+                    >
+                      {selectedAction.identity_name}
+                    </span>
+                  </p>
+                )}
+                {selectedAction.description && (
+                  <p className="text-sm" style={{ color: R.textSecondary }}>{selectedAction.description}</p>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-lg p-2.5 border" style={{ borderColor: R.surfaceBorder }}>
+                    <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Risk Reduction</p>
+                    <p className="text-lg font-bold" style={{ color: '#4ADE80' }}>+{selectedAction.risk_reduction}</p>
+                  </div>
+                  <div className="rounded-lg p-2.5 border" style={{ borderColor: R.surfaceBorder }}>
+                    <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>AI Confidence</p>
+                    <p className="text-lg font-bold" style={{ color: selectedAction.confidence >= 85 ? '#4ADE80' : selectedAction.confidence >= 65 ? '#FFB300' : '#FF6D00' }}>{selectedAction.confidence}%</p>
+                  </div>
+                </div>
+              </div>
 
-              {/* Description */}
-              {selectedAction.description && (
-                <p className="text-sm" style={{ color: R.textSecondary }}>{selectedAction.description}</p>
-              )}
+              <div className="border-t" style={{ borderColor: R.surfaceBorder }} />
 
-              {/* Why this matters */}
+              {/* ── Section 2: Recommended Remediation ── */}
+              <div className="space-y-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Recommended Remediation</p>
+                <div className="rounded-lg p-3 border-l-2" style={{ borderColor: '#14B8A6', backgroundColor: 'rgba(20,184,166,0.06)' }}>
+                  <p className="text-sm font-medium" style={{ color: R.text }}>
+                    {selectedAction.action_type?.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()) || 'Review and Remediate'}
+                  </p>
+                  {selectedAction.role_name && (
+                    <p className="text-xs mt-1" style={{ color: R.textSecondary }}>Role: {selectedAction.role_name}</p>
+                  )}
+                  {selectedAction.scope && (
+                    <p className="text-xs mt-0.5" style={{ color: R.textMuted }}>Scope: {selectedAction.scope}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => { setScriptTab('powershell'); setScriptCopied(false); setShowPreviewModal(true); }}
+                  className="w-full px-3 py-2 rounded-lg text-xs font-medium border transition hover:bg-gray-50 dark:hover:bg-slate-800 flex items-center justify-center gap-1.5"
+                  style={{ borderColor: R.surfaceBorder, color: R.text }}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
+                  Preview Script
+                </button>
+              </div>
+
+              <div className="border-t" style={{ borderColor: R.surfaceBorder }} />
+
+              {/* ── Section 3: Security Impact If Unchanged ── */}
               {deriveImpact(selectedAction) && (() => {
                 const impact = deriveImpact(selectedAction);
                 const roleName = selectedAction.role_name || (selectedAction.roles || [])[0] || '';
                 const breach = getBreachInfo(roleName);
                 return (
-                  <div className="space-y-0 rounded overflow-hidden">
-                    <div className="text-xs p-2 rounded-t" style={{ backgroundColor: 'rgba(255,109,0,0.08)', color: R.priority[selectedAction.priority] || '#FF6D00' }}>
-                      <span className="font-semibold">Why this matters:</span> {impact}
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Security Impact If Unchanged</p>
+                    <div className="space-y-0 rounded overflow-hidden">
+                      <div className="text-xs p-2 rounded-t" style={{ backgroundColor: 'rgba(255,109,0,0.08)', color: R.priority[selectedAction.priority] || '#FF6D00' }}>
+                        {impact}
+                      </div>
+                      {breach && (
+                        <>
+                          <div className="text-[11px] px-2 py-1.5" style={{ borderLeft: '2px solid #F59E0B', backgroundColor: 'rgba(245,158,11,0.06)', color: '#92400E' }}>
+                            <span className="font-semibold">Real-world precedent:</span> {breach.breach}
+                          </div>
+                          <div className="text-[11px] px-2 py-1.5 rounded-b" style={{ borderLeft: '2px solid #EF4444', backgroundColor: 'rgba(239,68,68,0.06)', color: '#991B1B' }}>
+                            <span className="font-semibold">Penalty exposure:</span> {breach.penalty}
+                          </div>
+                        </>
+                      )}
                     </div>
-                    {breach && (
-                      <>
-                        <div className="text-[11px] px-2 py-1.5" style={{ borderLeft: '2px solid #F59E0B', backgroundColor: 'rgba(245,158,11,0.06)', color: '#92400E' }}>
-                          <span className="font-semibold">Real-world precedent:</span> {breach.breach}
-                        </div>
-                        <div className="text-[11px] px-2 py-1.5 rounded-b" style={{ borderLeft: '2px solid #EF4444', backgroundColor: 'rgba(239,68,68,0.06)', color: '#991B1B' }}>
-                          <span className="font-semibold">Penalty exposure:</span> {breach.penalty}
-                        </div>
-                      </>
-                    )}
                   </div>
                 );
               })()}
 
-              {/* Metrics */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
-                  <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Risk Reduction</p>
-                  <p className="text-xl font-bold" style={{ color: '#4ADE80' }}>+{selectedAction.risk_reduction}</p>
-                </div>
-                <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
-                  <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>AI Confidence</p>
-                  <p className="text-xl font-bold" style={{ color: selectedAction.confidence >= 85 ? '#4ADE80' : selectedAction.confidence >= 65 ? '#FFB300' : '#FF6D00' }}>{selectedAction.confidence}%</p>
-                </div>
-                <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
-                  <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Affected</p>
-                  <p className="text-xl font-bold" style={{ color: R.text }}>{selectedAction.affected_count}</p>
-                </div>
-                <div className="rounded-lg p-3 border" style={{ borderColor: R.surfaceBorder }}>
-                  <p className="text-[10px] uppercase tracking-wider" style={{ color: R.textMuted }}>Status</p>
-                  <p className="text-sm font-bold" style={{ color: R.status[selectedAction.status] || '#64748B' }}>
-                    {selectedAction.status.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                  </p>
-                </div>
-              </div>
+              {deriveImpact(selectedAction) && <div className="border-t" style={{ borderColor: R.surfaceBorder }} />}
 
-              {/* Identity link */}
-              {selectedAction.identity_id && (
-                <button
-                  onClick={() => navigate(`/identities/${selectedAction.identity_id}`)}
-                  className="w-full px-4 py-2.5 rounded-lg border text-sm font-medium transition hover:shadow-sm"
-                  style={{ borderColor: R.surfaceBorder, color: R.accent }}
-                >
-                  View Identity Detail
-                </button>
-              )}
-
-              {/* Action buttons */}
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowTicketModal(true)}
-                  className="flex-1 px-4 py-2 rounded-lg text-xs font-medium text-white transition hover:opacity-90"
-                  style={{ backgroundColor: R.accent }}
-                >
-                  Create Ticket
-                </button>
-                <button
-                  onClick={() => { setScriptTab('powershell'); setScriptCopied(false); setShowPreviewModal(true); }}
-                  className="flex-1 px-4 py-2 rounded-lg text-xs font-medium border transition hover:bg-gray-50 dark:hover:bg-slate-800"
-                  style={{ borderColor: R.surfaceBorder, color: R.text }}
-                >
-                  Preview Script
-                </button>
+              {/* ── Section 4: Decision ── */}
+              <div className="space-y-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: R.textMuted }}>Decision</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setShowAcceptRiskModal(true); setAcceptRiskReason(''); }}
+                    className="flex-1 px-3 py-2 rounded-lg text-xs font-medium border transition hover:opacity-90"
+                    style={{ borderColor: '#D97706', color: '#D97706' }}
+                  >
+                    Accept Risk
+                  </button>
+                  <button
+                    onClick={() => setShowTicketModal(true)}
+                    className="flex-1 px-3 py-2 rounded-lg text-xs font-medium text-white transition hover:opacity-90"
+                    style={{ backgroundColor: R.accent }}
+                  >
+                    Plan Remediation &rarr;
+                  </button>
+                </div>
+                {selectedAction.identity_id && (
+                  <button
+                    onClick={() => navigate(`/identities/${selectedAction.identity_id}`)}
+                    className="w-full px-3 py-2 rounded-lg border text-xs font-medium transition hover:shadow-sm"
+                    style={{ borderColor: R.surfaceBorder, color: R.textSecondary }}
+                  >
+                    View Identity Detail
+                  </button>
+                )}
+                <p className="text-[10px] text-center" style={{ color: R.textMuted }}>
+                  Status: <span style={{ color: R.status[selectedAction.status] || '#64748B', fontWeight: 600 }}>
+                    {selectedAction.status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                  </span>
+                </p>
               </div>
             </div>
           </div>
@@ -942,9 +993,18 @@ export default function RemediationCenter() {
               </div>
               <button onClick={() => { setShowPreviewModal(false); setScriptTab('powershell'); }} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', fontSize: 20, lineHeight: 1 }}>✕</button>
             </div>
+            {/* Governance metadata */}
+            <div className="mx-5 mt-3 px-3.5 py-2.5 rounded-md text-xs space-y-1" style={{ backgroundColor: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', color: '#93C5FD' }}>
+              <div className="flex items-center gap-1.5">
+                <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
+                <span className="font-medium">AI-Prescribed Remediation</span>
+                <span style={{ color: '#64748B' }}>|</span>
+                <span style={{ color: '#94A3B8' }}>Requires human approval before execution</span>
+              </div>
+            </div>
             {/* Warning banner */}
-            <div className="mx-5 mt-3 px-3.5 py-2 rounded-md text-xs" style={{ backgroundColor: 'rgba(217,119,6,0.1)', border: '1px solid rgba(217,119,6,0.3)', color: '#FDE68A' }}>
-              Review carefully before executing. This script will modify Azure IAM configuration.
+            <div className="mx-5 mt-2 px-3.5 py-2 rounded-md text-xs" style={{ backgroundColor: 'rgba(217,119,6,0.1)', border: '1px solid rgba(217,119,6,0.3)', color: '#FDE68A' }}>
+              This script has been generated by AuditGraph as a recommended remediation artifact. Execution occurs only after organizational approval and operator action. Review carefully before use.
             </div>
             {/* Tabs */}
             <div className="flex gap-1 px-5 pt-3 pb-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
@@ -996,6 +1056,65 @@ export default function RemediationCenter() {
         </div>
         );
       })()}
+
+      {/* ── Accept Risk Modal ── */}
+      {showAcceptRiskModal && selectedAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backdropFilter: 'blur(4px)' }}>
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowAcceptRiskModal(false)} />
+          <div className="relative w-full max-w-md rounded-xl shadow-2xl p-6 space-y-4"
+            style={{ backgroundColor: R.surface, border: `1px solid ${R.surfaceBorder}` }}>
+            <div>
+              <h3 className="text-base font-semibold" style={{ color: R.text }}>Accept Risk</h3>
+              <p className="text-xs mt-1" style={{ color: R.textSecondary }}>
+                Acknowledge this finding and accept the associated risk. A reason is required for audit trail.
+              </p>
+            </div>
+            <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.2)', color: '#D97706' }}>
+              <span className="font-semibold">{selectedAction.title}</span>
+              {selectedAction.identity_name && <span style={{ color: R.textSecondary }}> — {selectedAction.identity_name}</span>}
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1.5" style={{ color: R.textSecondary }}>
+                Justification <span style={{ color: '#EF4444' }}>*</span>
+              </label>
+              <textarea
+                value={acceptRiskReason}
+                onChange={e => setAcceptRiskReason(e.target.value)}
+                placeholder="Business justification for accepting this risk..."
+                rows={3}
+                className="w-full rounded-lg border px-3 py-2 text-sm resize-none"
+                style={{ backgroundColor: 'transparent', borderColor: R.surfaceBorder, color: R.text }}
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShowAcceptRiskModal(false)}
+                className="px-4 py-2 rounded-lg text-xs font-medium border transition hover:bg-gray-50 dark:hover:bg-slate-800"
+                style={{ borderColor: R.surfaceBorder, color: R.textSecondary }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (!acceptRiskReason.trim()) return;
+                  updateStatus(selectedAction.id, 'accepted_risk', acceptRiskReason.trim());
+                  setShowAcceptRiskModal(false);
+                  setSelectedAction(null);
+                }}
+                disabled={!acceptRiskReason.trim()}
+                className="px-4 py-2 rounded-lg text-xs font-medium text-white transition"
+                style={{
+                  backgroundColor: acceptRiskReason.trim() ? '#D97706' : '#6B7280',
+                  opacity: acceptRiskReason.trim() ? 1 : 0.5,
+                  cursor: acceptRiskReason.trim() ? 'pointer' : 'not-allowed',
+                }}
+              >
+                Accept Risk
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

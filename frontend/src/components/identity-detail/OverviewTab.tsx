@@ -6,6 +6,7 @@ import {
 } from 'recharts';
 import {
   type IdentityDetailsResponse,
+  type LineageData,
   type Owner,
   type RoleIntelligence,
   type PimData,
@@ -85,6 +86,157 @@ function ComputeFindings({ identityId }: { identityId: string }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ─── NHI Lineage Section ─────────────────────────────────────────
+const NHI_CATEGORIES = ['service_principal', 'managed_identity_system', 'managed_identity_user', 'workload_identity'];
+
+const ORIGIN_SOURCE_LABELS: Record<string, string> = {
+  heuristic_terraform: '(inferred from roles + naming)',
+  heuristic_naming: '(inferred from naming pattern)',
+  app_reg_name: '(from app registration)',
+  none: '(source unknown)',
+};
+
+const VERDICT_BADGES: Record<string, { bg: string; text: string }> = {
+  UNUSED:    { bg: 'bg-red-100', text: 'text-red-700' },
+  ORPHANED:  { bg: 'bg-red-100', text: 'text-red-700' },
+  GHOST_MSI: { bg: 'bg-red-100', text: 'text-red-700' },
+  HEALTHY:   { bg: 'bg-green-100', text: 'text-green-700' },
+  AT_RISK:   { bg: 'bg-amber-100', text: 'text-amber-700' },
+  STALE:     { bg: 'bg-amber-100', text: 'text-amber-700' },
+  NEEDS_REVIEW: { bg: 'bg-amber-100', text: 'text-amber-700' },
+};
+
+function LineageSection({ lineage, identityCategory }: { lineage?: LineageData | null; identityCategory?: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!lineage) return null;
+  if (!NHI_CATEGORIES.includes((identityCategory || '').toLowerCase())) return null;
+
+  // At least some lineage data should exist
+  const hasContent = lineage.narrative || lineage.workload_origin || lineage.verdict || lineage.contributing_factors;
+  if (!hasContent) return null;
+
+  const verdictStyle = VERDICT_BADGES[(lineage.verdict || '').toUpperCase()] || { bg: 'bg-gray-100', text: 'text-gray-600' };
+  const originSource = ORIGIN_SOURCE_LABELS[lineage.workload_origin_source || ''] || (lineage.workload_origin_source ? `(${lineage.workload_origin_source})` : '');
+  const factors = Array.isArray(lineage.contributing_factors) ? lineage.contributing_factors : [];
+  const confidence = lineage.confidence;
+
+  // Provisioned by display
+  const provisionedBy = lineage.provisioned_by;
+  const creationMethod = lineage.creation_method;
+
+  // Narrative truncation
+  const narrative = lineage.narrative || '';
+  const narrativeTruncated = narrative.length > 150 && !expanded;
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm p-5">
+      {/* Header with verdict badge */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-gray-900">Lineage</div>
+        {lineage.verdict && (
+          <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${verdictStyle.bg} ${verdictStyle.text}`}>
+            {lineage.verdict}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {/* Row 1: Origin */}
+        <div>
+          <div className="text-xs text-gray-500 font-medium">Origin</div>
+          {(!lineage.workload_origin || lineage.workload_origin === 'Unknown') ? (
+            <div className="text-sm text-gray-400 mt-0.5">No confirmed workload binding</div>
+          ) : (
+            <div className="mt-0.5">
+              <div className="text-sm text-gray-900">{lineage.workload_origin}</div>
+              {originSource && <div className="text-xs text-gray-400 mt-0.5">{originSource}</div>}
+            </div>
+          )}
+        </div>
+
+        {/* Row 2: Provisioned by */}
+        {provisionedBy && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium">Provisioned by</div>
+            <div className="text-sm text-gray-900 mt-0.5">
+              {provisionedBy}{creationMethod ? ` via ${creationMethod}` : ''}
+            </div>
+          </div>
+        )}
+
+        {/* Row 3: Analysis / Narrative */}
+        {narrative && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium">Analysis</div>
+            <div className="text-sm text-gray-500 italic mt-0.5 leading-relaxed">
+              {narrativeTruncated ? narrative.slice(0, 150) + '...' : narrative}
+              {narrativeTruncated && (
+                <button onClick={() => setExpanded(true)} className="text-blue-600 font-medium ml-1 not-italic text-xs">
+                  Show more
+                </button>
+              )}
+              {expanded && narrative.length > 150 && (
+                <button onClick={() => setExpanded(false)} className="text-blue-600 font-medium ml-1 not-italic text-xs">
+                  Show less
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Row 4: Evidence chips */}
+        {factors.length > 0 && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium mb-1.5">Evidence</div>
+            <div className="flex flex-wrap gap-1.5">
+              {factors.slice(0, 4).map((f, i) => {
+                const w = f.weight ?? 0;
+                const chipColor = w > 0 ? 'bg-teal-50 text-teal-700 border-teal-200' :
+                                  w < 0 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                                           'bg-gray-50 text-gray-600 border-gray-200';
+                const detail = (f.detail || '').length > 50 ? f.detail.slice(0, 50) + '...' : f.detail || '';
+                return (
+                  <span key={i} className={`inline-flex items-center px-2 py-0.5 rounded text-xs border ${chipColor}`} title={f.detail}>
+                    {detail}
+                  </span>
+                );
+              })}
+              {factors.length > 4 && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-50 text-gray-500 border border-gray-200">
+                  +{factors.length - 4} more
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Row 5: Confidence */}
+        {confidence != null && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium">Lineage confidence</div>
+            <div className="flex items-center gap-2 mt-1">
+              <div className="flex-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{
+                  width: `${Math.round(confidence * 100)}%`,
+                  backgroundColor: confidence >= 0.8 ? '#10B981' : confidence >= 0.4 ? '#F59E0B' : '#EF4444',
+                }} />
+              </div>
+              <span className="text-xs text-gray-600 font-mono whitespace-nowrap">
+                {Math.round(confidence * 100)}% — {
+                  confidence >= 0.8 ? 'High confidence' :
+                  confidence >= 0.4 ? 'Low confidence' :
+                  confidence > 0 ? 'Unverified' : 'Unverified'
+                }
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -809,6 +961,9 @@ export default function OverviewTab({
           <div className="text-xs text-gray-500 mt-1">Owners</div>
         </button>
       </div>
+
+      {/* NHI Lineage section */}
+      <LineageSection lineage={(data as any)?.lineage} identityCategory={identity.identity_category as string} />
 
       {/* Risk reasons */}
       <div>

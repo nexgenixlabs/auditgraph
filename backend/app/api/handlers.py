@@ -1813,6 +1813,47 @@ def get_identity_details(identity_id: str):
         except Exception as e:
             logger.warning("build_identity_state failed: %s", e)
 
+        # ── NHI lineage data (from identities table + lineage_verdicts) ──
+        lineage = None
+        _nhi_cats = ('service_principal', 'managed_identity_system',
+                     'managed_identity_user', 'workload_identity')
+        if (identity.get('identity_category') or identity.get('identity_type', '')).lower() in _nhi_cats:
+            try:
+                _lid = identity.get('_db_id') or identity_db_id
+                cursor.execute("""
+                    SELECT i.lineage_narrative, i.workload_origin, i.workload_origin_source,
+                           i.audit_created_by, i.audit_creation_method,
+                           lv.verdict, lv.confidence_score, lv.contributing_factors,
+                           lv.verdict_source
+                    FROM identities i
+                    LEFT JOIN LATERAL (
+                        SELECT verdict, confidence_score, contributing_factors, verdict_source
+                        FROM lineage_verdicts
+                        WHERE identity_id = i.id
+                        ORDER BY scored_at DESC
+                        LIMIT 1
+                    ) lv ON true
+                    WHERE i.id = %s
+                    LIMIT 1
+                """, (_lid,))
+                _row = cursor.fetchone()
+
+                lineage = {
+                    "narrative": (_row[0] if _row else None) or None,
+                    "workload_origin": (_row[1] if _row else None) or None,
+                    "workload_origin_source": (_row[2] if _row else None) or None,
+                    "provisioned_by": (_row[3] if _row else None) or None,
+                    "creation_method": (_row[4] if _row else None) or None,
+                    "verdict": (_row[5] if _row else None) or None,
+                    "confidence": float(_row[6]) if _row and _row[6] is not None else None,
+                    "contributing_factors": (_row[7] if _row else None) or None,
+                    "verdict_source": (_row[8] if _row else None) or None,
+                }
+            except Exception as e:
+                try: db.conn.rollback()
+                except Exception: pass
+                logger.warning("Lineage fetch failed: %s", e)
+
         return jsonify(
             {
                 "identity": identity,
@@ -1824,6 +1865,7 @@ def get_identity_details(identity_id: str):
                 "database_admin_context": database_admin_context,
                 "analytics_context": analytics_context,
                 "devops_context": devops_context,
+                "lineage": lineage,
                 "trend": trend,
                 "evidence": {
                     "run_id": identity.get("discovery_run_id"),
@@ -9980,11 +10022,16 @@ def update_generated_remediation_handler(remediation_id):
     try:
         data = request.get_json(silent=True) or {}
         new_status = data.get('status', '').strip()
-        if new_status not in ('new', 'acknowledged', 'in_progress', 'resolved'):
-            return jsonify({'error': 'Invalid status. Use: new, acknowledged, in_progress, resolved'}), 400
+        reason = data.get('reason', '').strip() or None
+        if new_status not in ('new', 'acknowledged', 'in_progress', 'resolved',
+                              'accepted_risk', 'dismissed'):
+            return jsonify({'error': 'Invalid status. Use: new, acknowledged, in_progress, resolved, accepted_risk, dismissed'}), 400
+        # accepted_risk and dismissed both require a reason for audit trail
+        if new_status in ('accepted_risk', 'dismissed') and not reason:
+            return jsonify({'error': f'{new_status.replace("_", " ").title()} requires a reason'}), 400
         user_id = _current_user_id()
         success = db.update_generated_remediation_status(
-            int(remediation_id), new_status, resolved_by=user_id
+            int(remediation_id), new_status, resolved_by=user_id, reason=reason
         )
         if not success:
             return jsonify({'error': 'Remediation not found'}), 404
@@ -10065,11 +10112,16 @@ if ($existing{i}) {{
 }}""")
 
         ps = f"""# ============================================
-# AuditGraph Trust AI — Remove RBAC Role(s)
+# AuditGraph Remediation Prescription
+# Action:    Remove RBAC Role(s)
 # Identity:  {identity}
 # Roles:     {role_display}  ({role_count} role(s))
 # Scope:     {scope}
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 # Connect to Azure (skip if already connected)
@@ -10111,9 +10163,14 @@ az role assignment list --assignee "{obj_id}" \\
 
     elif action in ('disable_identity', 'disable_account'):
         ps = f"""# ============================================
-# AuditGraph Trust AI — Disable Identity
+# AuditGraph Remediation Prescription
+# Action:    Disable Identity
 # Identity:  {identity} ({obj_id})
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-MgGraph -Scopes "User.ReadWrite.All"
@@ -10137,9 +10194,14 @@ az ad user show --id "{obj_id}" --query accountEnabled"""
 
     elif action == 'remove_identity':
         ps = f"""# ============================================
-# AuditGraph Trust AI — Remove Orphaned SPN
+# AuditGraph Remediation Prescription
+# Action:    Remove Orphaned SPN
 # Identity:  {identity} ({obj_id})
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-AzAccount
@@ -10174,9 +10236,14 @@ az ad sp delete --id "{obj_id}" """
 
     elif action == 'rotate_credential':
         ps = f"""# ============================================
-# AuditGraph Trust AI — Rotate Credential
+# AuditGraph Remediation Prescription
+# Action:    Rotate Credential
 # Identity:  {identity} ({obj_id})
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-MgGraph -Scopes "Application.ReadWrite.All"
@@ -10222,10 +10289,15 @@ az ad app credential reset --id "$APP_ID" --years 1"""
 
     elif action == 'access_review':
         ps = f"""# ============================================
-# AuditGraph Trust AI — Access Review
+# AuditGraph Remediation Prescription
+# Action:    Access Review
 # Identity:  {identity} ({obj_id})
 # Role:      {role}
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-MgGraph -Scopes "AccessReview.ReadWrite.All"
@@ -10305,11 +10377,16 @@ az role assignment list --assignee "{obj_id}" -o table
         _tf_scope = '#   scope                = "{}"'.format(scope) if scope else '#   scope                = "<find in Azure Portal>"'
 
         ps = f"""# ============================================
-# AuditGraph Trust AI — Break Attack Path
+# AuditGraph Remediation Prescription
+# Action:    Break Attack Path
 # Identity:  {identity} ({obj_id})
 # Role:      {role}
 # Scope:     {scope if scope else 'See Step 1'}
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-AzAccount

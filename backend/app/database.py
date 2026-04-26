@@ -2580,7 +2580,10 @@ class Database:
                 last_observed_operation,
 
                 -- Access path provenance (AG-75)
-                access_paths
+                access_paths,
+
+                -- Privilege tier (AG-78)
+                privilege_tier
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -2614,6 +2617,7 @@ class Database:
                 %s, %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s, %s, %s,
+                %s,
                 %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
@@ -2759,6 +2763,8 @@ class Database:
                 last_observed_operation = EXCLUDED.last_observed_operation,
 
                 access_paths = EXCLUDED.access_paths,
+
+                privilege_tier = EXCLUDED.privilege_tier,
 
                 created_at = NOW()
             RETURNING id
@@ -2917,6 +2923,9 @@ class Database:
 
                 # Access path provenance (AG-75)
                 json.dumps(identity_data.get("access_paths", {})),
+
+                # Privilege tier (AG-78)
+                identity_data.get("privilege_tier"),
             ),
         )
 
@@ -2989,7 +2998,9 @@ class Database:
                 _il_ms,
                 _il_gov,
                 identity_data.get("lifecycle_state", "Active"),
-                identity_data.get("privilege_level", "standard"),
+                # Derive privilege_level from privilege_tier (AG-78)
+                {"T0": "privileged", "T1": "elevated"}.get(
+                    identity_data.get("privilege_tier", ""), "standard"),
                 identity_data.get("risk_level", "low"),
                 identity_data.get("risk_score", 0),
                 _il_class,
@@ -27091,6 +27102,13 @@ class Database:
             # Add columns if table already existed without them
             cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS role_name TEXT")
             cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS scope TEXT")
+            # Risk acceptance / dismissal columns (Phase 88)
+            cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS risk_accepted_by INTEGER")
+            cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS risk_accepted_at TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS risk_acceptance_reason TEXT")
+            cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS dismissed_by INTEGER")
+            cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE generated_remediations ADD COLUMN IF NOT EXISTS dismissed_reason TEXT")
             self.conn.commit()
             cursor.close()
             Database._generated_remediations_ensured_cls = True
@@ -27172,7 +27190,8 @@ class Database:
                     r[k] = str(r[k])
         return rows
 
-    def update_generated_remediation_status(self, remediation_id, status, resolved_by=None):
+    def update_generated_remediation_status(self, remediation_id, status, resolved_by=None,
+                                             reason=None):
         """Update status of a generated remediation."""
         self._ensure_generated_remediations_table()
         cursor = self.conn.cursor()
@@ -27183,6 +27202,22 @@ class Database:
                 WHERE id = %s
                 RETURNING id
             """, (status, resolved_by, remediation_id))
+        elif status == 'accepted_risk':
+            cursor.execute("""
+                UPDATE generated_remediations
+                SET status = %s, risk_accepted_at = NOW(), risk_accepted_by = %s,
+                    risk_acceptance_reason = %s
+                WHERE id = %s
+                RETURNING id
+            """, (status, resolved_by, reason, remediation_id))
+        elif status == 'dismissed':
+            cursor.execute("""
+                UPDATE generated_remediations
+                SET status = %s, dismissed_at = NOW(), dismissed_by = %s,
+                    dismissed_reason = %s
+                WHERE id = %s
+                RETURNING id
+            """, (status, resolved_by, reason, remediation_id))
         else:
             cursor.execute("""
                 UPDATE generated_remediations
