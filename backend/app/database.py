@@ -3233,7 +3233,9 @@ class Database:
                 ra.resource_type,
                 ra.resource_name,
                 ra.last_used_at,
-                ra.last_used_operation
+                ra.last_used_operation,
+                ra.group_display_name,
+                ra.group_principal_azure_object_id
             FROM role_assignments ra
             LEFT JOIN role_permissions rp
                 ON rp.role_name = ra.role_name AND rp.role_type = 'azure'

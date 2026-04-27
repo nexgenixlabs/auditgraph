@@ -276,10 +276,10 @@ export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: 
 export type LifecycleState = 'Provisioned' | 'Active' | 'Dormant' | 'Disabled';
 
 export const LIFECYCLE_STATE_DISPLAY: Record<LifecycleState, { label: string; color: string; tooltip: string }> = {
-  Provisioned: { label: 'Provisioned', color: 'text-blue-500',  tooltip: 'Identity exists but has no observed activity' },
+  Provisioned: { label: 'Provisioned', color: 'text-blue-500',  tooltip: 'Identity has been provisioned and granted access but has no observed authentication or activity since creation' },
   Active:      { label: 'Active',      color: 'text-green-500', tooltip: 'Identity has recent sign-in or usage activity' },
-  Dormant:     { label: 'Dormant',     color: 'text-amber-500', tooltip: 'Identity has been stale or never used' },
-  Disabled:    { label: 'Disabled',    color: 'text-gray-400',  tooltip: 'Identity is disabled in the directory' },
+  Dormant:     { label: 'Dormant',     color: 'text-amber-500', tooltip: 'No observed authentication or activity in the past 90 days (default \u2014 configurable) while retaining active access' },
+  Disabled:    { label: 'Disabled',    color: 'text-gray-400',  tooltip: 'Identity is disabled or deprovisioned in the identity provider \u2014 classified as Ghost if access remains' },
 };
 
 export type GovernanceState = 'Governed' | 'Ungoverned' | 'Orphaned' | 'Policy Violation';

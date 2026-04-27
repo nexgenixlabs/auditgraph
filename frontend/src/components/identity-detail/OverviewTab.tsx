@@ -566,6 +566,27 @@ export default function OverviewTab({
         </div>
       )}
 
+      {/* Ghost Access Warning — disabled account with group-inherited access */}
+      {identity.enabled === false && ((identity as any).groups_with_roles_count > 0 || (identity as any).group_count > 0) && (
+        <div className="border border-amber-300 bg-amber-50 rounded-xl p-4">
+          <div className="flex items-start gap-2">
+            <span className="text-amber-600 text-sm mt-0.5">{'\u26A0'}</span>
+            <div>
+              <div className="text-sm font-semibold text-amber-800">Group Access Remains Active</div>
+              <div className="text-xs text-amber-700 mt-1">
+                This disabled account is still a member of {(identity as any).groups_with_roles_count || (identity as any).group_count} group{((identity as any).groups_with_roles_count || (identity as any).group_count) !== 1 ? 's' : ''} with role assignments. Group membership may grant inherited role access even though the account is disabled.
+              </div>
+              <button
+                onClick={() => onTabChange('entra_groups' as any)}
+                className="mt-2 text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+              >
+                View Groups {'\u2192'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Identity Security Posture — 4-quadrant view */}
       <div>
         <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>
@@ -575,6 +596,26 @@ export default function OverviewTab({
             const isConnector = !!identity.is_discovery_connector;
             const authActivity = (identity as any).auth_activity;
             const hasCanonicalState = !!(identity as any).activity_label && !!authActivity;
+
+            // Priority 1: disabled accounts always show "Disabled" regardless of activity signals
+            if (identity.enabled === false && !isConnector) {
+              const activityDetail = (identity as any).activity_detail as string | undefined;
+              // Extract last-active date from detail text if available
+              let lastActiveNote = 'No prior activity recorded';
+              if (activityDetail) {
+                lastActiveNote = `Last active ${activityDetail.replace(/^Last active\s*/i, '').replace(/\s*via\s+.*$/i, '')} prior to disablement`;
+              }
+
+              return (
+                <div className="border rounded-xl p-4 relative group" title="Account is disabled">
+                  <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
+                  <span className="px-2 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">Disabled</span>
+                  <div className="text-[10px] text-gray-500 mt-2">
+                    {lastActiveNote}
+                  </div>
+                </div>
+              );
+            }
 
             // Use canonical state from backend when available
             if (hasCanonicalState && !isConnector) {
@@ -838,6 +879,8 @@ export default function OverviewTab({
         const lastNI = (identity as any).last_noninteractive_signin;
         if (!isHuman) return null;
 
+        const isDisabled = identity.enabled === false;
+
         const fmtDate = (iso: string | null | undefined) => {
           if (!iso) return null;
           try {
@@ -848,11 +891,16 @@ export default function OverviewTab({
         };
         const daysBadge = (iso: string | null | undefined) => {
           if (!iso) return null;
+          // Disabled accounts: never show "Today" — it implies current active use
+          if (isDisabled) return null;
           const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
           if (days === 0) return 'Today';
           if (days === 1) return 'Yesterday';
           return `${days} days ago`;
         };
+
+        const badge = daysBadge(lastSignin);
+        const badgeColor = isDisabled ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600';
 
         return (
           <div className="border border-gray-200 rounded-xl p-4">
@@ -861,8 +909,13 @@ export default function OverviewTab({
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-800">{fmtDate(lastSignin)}</span>
-                  <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">{daysBadge(lastSignin)}</span>
+                  {badge && <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeColor}`}>{badge}</span>}
                 </div>
+                {isDisabled && (
+                  <div className="text-xs text-amber-600 mt-1">
+                    Account disabled after this sign-in. Current access revoked.
+                  </div>
+                )}
                 {lastNI && lastNI !== lastSignin && (
                   <div className="text-xs text-gray-500">
                     Non-interactive: {fmtDate(lastNI)}

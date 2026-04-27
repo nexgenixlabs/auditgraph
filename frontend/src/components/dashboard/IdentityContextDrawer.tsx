@@ -29,6 +29,9 @@ const FILTER_LABELS: Record<string, string> = {
   'metric=high_risk': 'High Risk Identities',
   'metric=critical': 'Critical Identities',
   'metric=credential_expired': 'Expired Credentials',
+  'metric=over_permissioned': 'Over-Privileged Identities',
+  'metric=dormant_privileged': 'Dormant Privileged Accounts',
+  'metric=provisioned_unowned': 'Provisioned \u2014 Never Used',
   // Pillar filters
   'pillar=effective-privilege': 'Effective Privilege Risk',
   'pillar=credential-risk': 'Credential Exposure',
@@ -63,6 +66,9 @@ const DRIVER_LABELS: Record<string, string> = {
   'metric=dormant': 'Dormant Privileged',
   'metric=ghost': 'Ghost Identities',
   'metric=unowned_nhi': 'Unowned SPNs',
+  'metric=over_permissioned': 'Over-Privileged',
+  'metric=dormant_privileged': 'Dormant Privileged',
+  'metric=provisioned_unowned': 'Provisioned Never Used',
   'status=Disabled&hasRoles=true': 'Ghost Identities',
   'workload=true&owner=none': 'Unowned SPNs',
   'activity_status=dormant_strict': 'Dormant Privileged',
@@ -113,7 +119,7 @@ function categoryLabel(cat: string): string {
 
 /** Resolve status from the enabled boolean — matches backend SSOT. */
 function resolveRowStatus(row: IdentityRow): { label: string; color: string } | null {
-  if (row.enabled === false) return { label: 'Disabled', color: '#ef4444' };
+  if (row.enabled === false) return { label: 'Ghost', color: '#ef4444' };
   if (row.activity_status === 'stale' || row.activity_status === 'never_used')
     return { label: 'Dormant', color: '#f59e0b' };
   return null; // active — no extra badge needed

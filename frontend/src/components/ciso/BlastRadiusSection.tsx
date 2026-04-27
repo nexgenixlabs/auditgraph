@@ -98,11 +98,16 @@ export function BlastRadiusCardV31({ data }: { data: PostureV31Response }) {
               style={{ cursor: 'help', borderBottom: '1px dotted currentColor' }}>
           Blast Radius
         </span>
-        <DN navigateTo={`/identities/${br.identity_string_id || br.identity_id}`}>
-          <span className="text-xs text-gray-500 truncate max-w-[120px] cursor-pointer hover:text-gray-300 transition">{br.identity_name}</span>
-        </DN>
+        <div className="flex items-center gap-2 min-w-0 max-w-[60%] justify-end">
+          <DN navigateTo={`/identities/${br.identity_string_id || br.identity_id}`}>
+            <span className="text-xs text-gray-500 truncate cursor-pointer hover:text-gray-300 transition">{br.identity_name}</span>
+          </DN>
+          {!!br.more_count && br.more_count > 0 && (
+            <span className="text-[10px] font-mono text-gray-500 shrink-0">+{br.more_count} more</span>
+          )}
+        </div>
       </div>
-      <span className="text-xs font-semibold text-gray-300 mb-1">If compromised:</span>
+      <span className="text-xs font-semibold text-gray-300 mb-1 mt-1">If compromised:</span>
       <p className="text-xs text-gray-400 truncate">
         <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
       </p>

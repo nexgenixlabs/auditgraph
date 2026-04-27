@@ -1119,7 +1119,8 @@ def get_identities():
                 where_clauses += " AND COALESCE(i.owner_count, 0) > 0"
 
         # FIX1B: Direct canonical metric filter — uses same WHERE as dashboard count
-        metric_filter = request.args.get("metric")
+        # Accepts both ?metric=X and ?filter=X (IdentityRiskCardV31 uses filter=)
+        metric_filter = request.args.get("metric") or request.args.get("filter")
         if metric_filter:
             from app.api.metric_queries import get_metric_where, METRIC_REGISTRY
             if metric_filter in METRIC_REGISTRY:
@@ -1705,11 +1706,23 @@ def get_identity_details(identity_id: str):
                     'highest_scope': pg[3] or 'none',
                 })
             identity['privileged_groups'] = priv_groups
+
+            # Count groups with active rbac_roles (for ghost access warning)
+            cursor.execute("""
+                SELECT COUNT(DISTINCT egm.group_db_id)
+                FROM entra_group_memberships egm
+                JOIN entra_groups eg ON eg.id = egm.group_db_id
+                WHERE egm.member_object_id = %s
+                  AND eg.discovery_run_id = ANY(%s)
+                  AND eg.rbac_roles != '[]'::jsonb
+            """, (row[1], run_ids))
+            identity['groups_with_roles_count'] = _scalar(cursor, 0)
         except Exception:
             try: db.conn.rollback()
             except Exception: pass
             identity['group_count'] = 0
             identity['privileged_groups'] = []
+            identity['groups_with_roles_count'] = 0
 
         # Resource context for SAMIs (associated resource info)
         try:
@@ -7073,23 +7086,28 @@ def get_dashboard_posture():
         dormant_priv_count = _scalar(cursor, 0)
 
         # B3: Provisioned unowned — never authenticated, no owner assigned
+        # Excludes disabled accounts (those are Ghost Identities, not Provisioned Never Used)
         cursor.execute(f"""
             SELECT COUNT(*)
             FROM identities i
             WHERE i.discovery_run_id = ANY(%(run_ids)s)
               AND i.activity_status = 'never_used'
               AND COALESCE(i.owner_count, 0) = 0
+              AND i.enabled IS NOT FALSE
+              AND i.deleted_at IS NULL
               {HIDE_MICROSOFT_SQL}
         """, _mparams)
         provisioned_unowned_count = _scalar(cursor, 0)
 
-        # A4: Excess privilege — T0/T1 with critical/high risk
+        # A4: Excess privilege — T0/T1 with critical/high risk (excludes Ghost)
         cursor.execute(f"""
             SELECT COUNT(*)
             FROM identities i
             WHERE i.discovery_run_id = ANY(%(run_ids)s)
               AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
               AND i.risk_level IN ('critical', 'high')
+              AND i.enabled IS NOT FALSE
+              AND i.deleted_at IS NULL
               {HIDE_MICROSOFT_SQL}
         """, _mparams)
         excess_privilege_count = _scalar(cursor, 0)
@@ -7196,6 +7214,24 @@ def get_dashboard_posture():
             except Exception:
                 pass
 
+        # v3.1 blast_radius_count: total critical/high identities for "+N more" badge
+        try:
+            cursor.execute(f"""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND i.risk_level IN ('critical', 'high')
+                  {HIDE_MICROSOFT_SQL}
+            """, _mparams)
+            _br_total = _scalar(cursor, 0)
+            if blast_radius and _br_total > 1:
+                blast_radius['more_count'] = _br_total - 1
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
         # A3: Microsoft system anomalies — unexpected privilege (MITRE T1078.004)
         microsoft_anomalies = []
         try:
@@ -7219,6 +7255,58 @@ def get_dashboard_posture():
                     "scope": ma_row[3],
                     "mitre_technique": "T1078.004",
                 })
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # v3.1 attack_paths: top paths for Privilege Exposure tile
+        _attack_paths_list = []
+        _attack_path_total = 0
+        _attack_path_source_count = 0
+        try:
+            cursor.execute("""
+                SELECT ap.id, ap.source_entity_id, ap.source_entity_name,
+                       ap.source_entity_type, ap.path_type, ap.severity,
+                       ap.risk_score, ap.description, ap.narrative,
+                       ap.affected_resource_count
+                FROM attack_paths ap
+                WHERE ap.organization_id = %(org_id)s
+                  AND ap.discovery_run_id = ANY(%(run_ids)s)
+                ORDER BY
+                    CASE ap.severity
+                        WHEN 'critical' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3
+                        ELSE 4
+                    END,
+                    ap.risk_score DESC
+                LIMIT 5
+            """, {'org_id': org_id, 'run_ids': run_ids})
+            for ap_row in cursor.fetchall():
+                _attack_paths_list.append({
+                    "id": ap_row[0],
+                    "identity_string_id": ap_row[1],
+                    "identity_name": ap_row[2] or 'Unknown',
+                    "actor": ap_row[3] or 'Identity',
+                    "path_type": ap_row[4],
+                    "severity": ap_row[5],
+                    "risk_score": ap_row[6] or 0,
+                    "description": ap_row[7] or '',
+                    "narrative": ap_row[8],
+                    "affected_resource_count": ap_row[9] or 0,
+                })
+            # Total count and distinct source count
+            cursor.execute("""
+                SELECT COUNT(*), COUNT(DISTINCT source_entity_id)
+                FROM attack_paths
+                WHERE organization_id = %(org_id)s
+                  AND discovery_run_id = ANY(%(run_ids)s)
+            """, {'org_id': org_id, 'run_ids': run_ids})
+            _ap_counts = cursor.fetchone()
+            _attack_path_total = _ap_counts[0] or 0
+            _attack_path_source_count = _ap_counts[1] or 0
         except Exception:
             try:
                 cursor.connection.rollback()
@@ -7316,13 +7404,15 @@ def get_dashboard_posture():
         priority_actions = []
         _pa_candidates = []
         try:
-            # 1. Excessive privileges (reduce_privilege)
+            # 1. Excessive privileges (reduce_privilege) — excludes Ghost
             cursor.execute("""
                 SELECT COUNT(DISTINCT i.id)
                 FROM identities i
                 JOIN role_assignments ra ON ra.identity_db_id = i.id
                 WHERE i.discovery_run_id = ANY(%(run_ids)s)
                   AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
                   AND ra.role_name IN %(priv_roles)s
             """, {'run_ids': run_ids, 'priv_roles': PRIVILEGED_ROLES})
             _priv_count = cursor.fetchone()[0] or 0
@@ -7370,12 +7460,15 @@ def get_dashboard_posture():
 
         try:
             # 3. Unowned NHIs (remove_identity) — broadened to all non-human types
+            # Excludes Ghost (disabled/deleted) — Ghost is its own category
             cursor.execute("""
                 SELECT COUNT(*)
                 FROM identities i
                 WHERE i.discovery_run_id = ANY(%(run_ids)s)
                   AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
                   AND COALESCE(i.owner_count, 0) = 0
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
                   AND NOT COALESCE(i.is_microsoft_system, FALSE)
             """, {'run_ids': run_ids})
             _orphan_count = cursor.fetchone()[0] or 0
@@ -7396,7 +7489,7 @@ def get_dashboard_posture():
                 pass
 
         try:
-            # 4. Stale privileged accounts (disable_identity)
+            # 4. Stale privileged accounts (disable_identity) — excludes Ghost
             cursor.execute("""
                 SELECT COUNT(DISTINCT i.id)
                 FROM identities i
@@ -7404,6 +7497,8 @@ def get_dashboard_posture():
                 WHERE i.discovery_run_id = ANY(%(run_ids)s)
                   AND NOT COALESCE(i.is_microsoft_system, FALSE)
                   AND i.activity_status IN ('stale', 'inactive', 'never_used')
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
                   AND ra.role_name IN %(priv_roles)s
             """, {'run_ids': run_ids, 'priv_roles': PRIVILEGED_ROLES})
             _stale_count = cursor.fetchone()[0] or 0
@@ -7424,13 +7519,15 @@ def get_dashboard_posture():
                 pass
 
         try:
-            # 5. Never-used identities with elevated risk (scope_reduction)
+            # 5. Never-used identities with elevated risk (scope_reduction) — excludes Ghost
             cursor.execute("""
                 SELECT COUNT(*)
                 FROM identities i
                 WHERE i.discovery_run_id = ANY(%(run_ids)s)
                   AND NOT COALESCE(i.is_microsoft_system, FALSE)
                   AND i.activity_status = 'never_used'
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
                   AND i.risk_level IN ('critical', 'high', 'medium')
             """, {'run_ids': run_ids})
             _never_count = cursor.fetchone()[0] or 0
@@ -7451,7 +7548,7 @@ def get_dashboard_posture():
                 pass
 
         try:
-            # 6. High/Critical risk identities needing owner assignment (assign_owner)
+            # 6. High/Critical risk identities needing owner assignment (assign_owner) — excludes Ghost
             cursor.execute("""
                 SELECT COUNT(*)
                 FROM identities i
@@ -7459,6 +7556,8 @@ def get_dashboard_posture():
                   AND NOT COALESCE(i.is_microsoft_system, FALSE)
                   AND i.risk_level IN ('critical', 'high')
                   AND COALESCE(i.owner_count, 0) = 0
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
             """, {'run_ids': run_ids})
             _unowned_risky = cursor.fetchone()[0] or 0
             if _unowned_risky > 0:
@@ -7575,6 +7674,7 @@ def get_dashboard_posture():
         has_overlapping = (dormant_priv_count + ghost_count + no_owner_count) > if_unaddressed_count if if_unaddressed_count > 0 else False
 
         # ── v3.1 drift: mini-widget data from latest drift report ──
+        posture_anomalies = []
         drift = None
         try:
             cursor.execute("""
@@ -7625,6 +7725,32 @@ def get_dashboard_posture():
                     ],
                     "report_date": dr_drift[2].isoformat() if dr_drift[2] else None,
                 }
+                # FIX F: Build anomalies from drift events for Anomalies tile
+                _ANOMALY_EVENT_MAP = {
+                    'risk_escalated': 'risk_score_spike',
+                    'privilege_escalated': 'permission_escalation',
+                    'identity_resurrection': 'dormant_reactivation',
+                    'identity_reactivated': 'dormant_reactivation',
+                    'spn_credential_expired': 'credential_surge',
+                    'spn_credential_added': 'credential_surge',
+                    'mfa_disabled': 'credential_surge',
+                    'attack_path_created': 'permission_escalation',
+                }
+                _HIGH_EVENTS = {'risk_escalated', 'privilege_escalated', 'mfa_disabled', 'attack_path_created'}
+                _anom_id = 0
+                for ev in _drift_events:
+                    _et = ev.get('event_type') or ev.get('type', '')
+                    _anom_type = _ANOMALY_EVENT_MAP.get(_et)
+                    if _anom_type:
+                        _anom_id += 1
+                        posture_anomalies.append({
+                            "id": _anom_id,
+                            "type": _anom_type,
+                            "severity": 'high' if _et in _HIGH_EVENTS else 'medium',
+                            "identity_name": ev.get('identity_name') or ev.get('display_name', 'Unknown'),
+                            "identity_id": ev.get('identity_id'),
+                            "created_at": dr_drift[2].isoformat() if dr_drift[2] else None,
+                        })
             elif dr_drift:
                 # Drift report exists but no events → stable
                 drift = {"has_drift": False, "total_changes": 0, "changes": []}
@@ -7686,6 +7812,10 @@ def get_dashboard_posture():
             "business_impact": business_impact,
             "has_business_risk": (business_impact["inactive_admin_count"] + business_impact["disabled_live_rbac_count"]) > 0,
             "microsoft_anomalies": microsoft_anomalies,
+            "attack_paths": _attack_paths_list,
+            "attack_path_total": _attack_path_total,
+            "attack_path_source_count": _attack_path_source_count,
+            "anomalies": posture_anomalies,
             "drift": drift,
             "p2_enabled": db.get_setting('p2_telemetry_enabled', 'false', organization_id=org_id) == 'true',
             # AG-43/44: flat aliases for frontend trend rendering
@@ -35169,7 +35299,7 @@ _GAP_PRIORITY = [
 _SOURCE_CHECKS = {
     'risk': lambda d: bool(isinstance(d, dict) and d.get('latest', {}) and isinstance(d['latest'], dict) and d['latest'].get('total_identities')),
     'trends': lambda d: bool(isinstance(d, dict) and d.get('runs')),
-    'anomalies': lambda d: isinstance(d, dict) and (d.get('unresolved', 0) > 0 or bool(d.get('top_anomalies'))),
+    'anomalies': lambda d: isinstance(d, dict) and (d.get('unresolved', 0) > 0 or bool(d.get('top_anomalies')) or bool(d.get('items'))),
     'remediation': lambda d: isinstance(d, dict) and d.get('total', 0) > 0,
     'drift': lambda d: isinstance(d, dict) and d.get('total_changes', 0) > 0,
     'spn': lambda d: isinstance(d, dict) and d.get('total_custom', 0) > 0,
@@ -35214,16 +35344,24 @@ def _safe_collect(fn, label='', *args):
 
 # ── Pure data builders (no DB — operate on pre-collected sources dicts) ──
 
+_RISK_SUMMARY_DEFAULT = {
+    'identity_counts': {'total': 0, 'customer': 0, 'microsoft': 0, 'human': 0, 'nhi': 0, 'guest': 0},
+    'agirs': None,
+    'computed_at': None,
+    'risk_counts': {'dormant_privileged': 0, 'ghost_accounts': 0, 'orphaned_spns': 0, 'over_privileged': 0, 'external_exposure': 0},
+    'exposure': {'subscriptions': 0, 'active_subscriptions': 0},
+}
+
 def _build_risk_summary_data(sources: dict):
-    """Extract risk summary from sources dict. Returns None if unavailable."""
+    """Extract risk summary from sources dict. Returns default if unavailable."""
     if not isinstance(sources, dict):
-        return None
+        return dict(_RISK_SUMMARY_DEFAULT)
     risk = sources.get('risk')
     if not isinstance(risk, dict):
-        return None
+        return dict(_RISK_SUMMARY_DEFAULT)
     latest = risk.get('latest')
     if not isinstance(latest, dict) or not latest.get('total_identities'):
-        return None
+        return dict(_RISK_SUMMARY_DEFAULT)
     # Build standardised output
     agirs_data = None
     if latest.get('agirs_score') is not None:
@@ -35279,19 +35417,71 @@ def _build_trends_data(sources: dict) -> dict:
 
 
 def _build_anomaly_data(sources: dict) -> dict:
-    """Extract anomaly data from sources dict."""
+    """Extract anomaly data — reads from anomalies table, drift events, and attack paths."""
     if not isinstance(sources, dict):
-        return {'available': False}
-    anomalies = sources.get('anomalies')
-    if not isinstance(anomalies, dict):
-        return {'available': False}
-    if anomalies.get('unresolved', 0) == 0 and not anomalies.get('top_anomalies'):
-        return {'available': False}
+        return {'available': False, 'items': []}
+
+    items = []
+
+    # Source 1: anomalies table
+    anomalies = sources.get('anomalies', {})
+    if isinstance(anomalies, dict):
+        for a in anomalies.get('top_anomalies', []):
+            items.append({
+                'type': a.get('type', 'unknown'), 'severity': a.get('severity', 'medium'),
+                'identity': a.get('description', ''), 'description': a.get('description', ''),
+                'source': 'anomaly_engine',
+            })
+
+    # Source 2: drift events JSONB
+    drift = sources.get('drift', {})
+    events = drift.get('events', [])
+    if isinstance(events, str):
+        import json as _json
+        try: events = _json.loads(events)
+        except Exception: events = []
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            etype = event.get('event_type', '')
+            if etype == 'risk_escalated':
+                items.append({
+                    'type': 'risk_escalation', 'severity': event.get('severity', 'medium'),
+                    'identity': event.get('display_name', ''), 'description': event.get('description', ''),
+                    'source': 'drift_detection', 'mitre': 'T1078.004',
+                })
+            elif etype in ('credential_expired', 'credential_added'):
+                items.append({
+                    'type': 'credential_anomaly', 'severity': 'medium',
+                    'identity': event.get('display_name', ''), 'description': event.get('description', ''),
+                    'source': 'drift_detection', 'mitre': 'T1098',
+                })
+
+    # Source 3: attack paths
+    ap = sources.get('attack_paths', {})
+    if isinstance(ap, dict) and ap.get('total', 0) > 0:
+        sev = 'high' if ap.get('high_severity', 0) > 0 else 'medium'
+        items.append({
+            'type': 'attack_paths_detected', 'severity': sev,
+            'identity': 'Multiple identities',
+            'description': f"{ap.get('total', 0)} attack paths — {ap.get('direct_escalation', 0)} direct escalation, {ap.get('lateral_movement', 0)} lateral movement",
+            'source': 'attack_path_analysis', 'mitre': 'T1078',
+        })
+
+    if not items:
+        return {'available': False, 'items': []}
+
     return {
         'available': True,
-        'unresolved': anomalies.get('unresolved', 0),
-        'bySeverity': anomalies.get('by_severity', {}),
-        'topAnomalies': anomalies.get('top_anomalies', []),
+        'unresolved': len(items),
+        'bySeverity': {
+            'high': sum(1 for i in items if i.get('severity') == 'high'),
+            'medium': sum(1 for i in items if i.get('severity') == 'medium'),
+            'critical': sum(1 for i in items if i.get('severity') == 'critical'),
+        },
+        'topAnomalies': items[:5],
+        'items': items,
     }
 
 
@@ -35412,7 +35602,7 @@ def _ciso_empty_envelope() -> dict:
     """Return empty CISO envelope for no-data state."""
     unavailable = {'available': False}
     data = {
-        'riskSummary': None,
+        'riskSummary': dict(_RISK_SUMMARY_DEFAULT),
         'trends': dict(unavailable),
         'anomalies': dict(unavailable),
         'remediation': dict(unavailable),
@@ -35556,20 +35746,52 @@ def _collect_ciso_sources_from_db(db, org_id, run_ids):
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT total_changes, permission_changes_count, risk_changes_count, credential_changes_count
+            SELECT total_changes, permission_changes_count, risk_changes_count, credential_changes_count,
+                   events, max_severity, privilege_escalation_count, attack_path_created_count
             FROM drift_reports WHERE organization_id = %s ORDER BY created_at DESC LIMIT 1
         """, (org_id,))
         row = cursor.fetchone()
         cursor.close()
         if row:
-            raw['drift'] = {'total_changes': row[0] or 0, 'permission_changes': row[1] or 0,
-                            'role_changes': row[2] or 0, 'credential_changes': row[3] or 0}
+            raw['drift'] = {
+                'total_changes': row[0] or 0, 'permission_changes': row[1] or 0,
+                'role_changes': row[2] or 0, 'credential_changes': row[3] or 0,
+                'events': row[4] or [], 'max_severity': row[5] or 'low',
+                'privilege_escalation_count': row[6] or 0, 'attack_path_created_count': row[7] or 0,
+            }
         else:
             raw['drift'] = {}
     except Exception:
         try: db.conn.rollback()
         except Exception: pass
         raw['drift'] = {}
+
+    # Attack paths
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE path_type = 'direct_escalation') AS direct_escalation,
+                   COUNT(*) FILTER (WHERE path_type = 'lateral_movement') AS lateral_movement,
+                   COUNT(*) FILTER (WHERE severity IN ('high', 'critical')) AS high_severity,
+                   COUNT(DISTINCT source_entity_id) AS source_count
+            FROM attack_paths WHERE organization_id = %s
+        """, (org_id,))
+        ap_row = cursor.fetchone()
+        cursor.close()
+        if ap_row and ap_row[0]:
+            raw['attack_paths'] = {
+                'total': ap_row[0] or 0, 'direct_escalation': ap_row[1] or 0,
+                'lateral_movement': ap_row[2] or 0, 'high_severity': ap_row[3] or 0,
+                'source_count': ap_row[4] or 0,
+            }
+        else:
+            raw['attack_paths'] = {'total': 0, 'direct_escalation': 0, 'lateral_movement': 0, 'high_severity': 0, 'source_count': 0}
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.warning("attack_paths collect: %s", e)
+        raw['attack_paths'] = {'total': 0, 'direct_escalation': 0, 'lateral_movement': 0, 'high_severity': 0, 'source_count': 0}
 
     # SPN
     try:
@@ -35633,6 +35855,7 @@ def get_ciso_summary():
         raw_sources = _collect_ciso_sources_from_db(db, org_id, run_ids)
 
         # Build transformed data using pure builders
+        _ap = raw_sources.get('attack_paths', {})
         data = {
             'riskSummary': _build_risk_summary_data(raw_sources),
             'trends': _build_trends_data(raw_sources),
@@ -35640,13 +35863,21 @@ def get_ciso_summary():
             'remediation': _build_remediation_data(raw_sources),
             'drift': _build_drift_data(raw_sources),
             'spn': _build_spn_data(raw_sources),
+            'attackPaths': {
+                'total': _ap.get('total', 0),
+                'directEscalation': _ap.get('direct_escalation', 0),
+                'lateralMovement': _ap.get('lateral_movement', 0),
+                'highSeverity': _ap.get('high_severity', 0),
+            },
         }
+        # Inject blast_radius_more_count into riskSummary
+        data['riskSummary']['blast_radius_more_count'] = max(0, _ap.get('source_count', 0) - 1)
 
         # Detect gaps
         gaps = []
         if not _SOURCE_CHECKS['risk'](raw_sources.get('risk', {})):
             gaps.append('RISK_SUMMARY_FAILED')
-        if not _SOURCE_CHECKS['anomalies'](raw_sources.get('anomalies', {})):
+        if not data['anomalies'].get('available'):
             gaps.append('ANOMALY_DISABLED')
         if not _SOURCE_CHECKS['drift'](raw_sources.get('drift', {})):
             gaps.append('DRIFT_NOT_ENABLED')

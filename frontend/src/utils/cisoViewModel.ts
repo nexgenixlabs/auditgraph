@@ -38,6 +38,7 @@ export interface PostureV31BlastRadius {
   scope_string: string;
   exploitation_text: string;
   impact_label?: string;
+  more_count?: number;
 }
 
 export interface PostureV31AttackPath {
@@ -1271,9 +1272,13 @@ export function mapSummaryToViewModel(response: any): CISOViewModel {
   const data = response.data || {};
   const { riskSummary, trends, anomalies, remediation, drift, spn } = data;
 
+  // Default-merge exposure so absent keys → 0 (not undefined)
+  const rawExposure = riskSummary?.exposure ?? {};
+  const exposure = { subscriptions: 0, active_subscriptions: 0, ...rawExposure };
+
   // SSOT: validate required fields from backend
-  const exposureSubs = riskSummary?.exposure?.subscriptions;
-  const exposureActiveSubs = riskSummary?.exposure?.active_subscriptions;
+  const exposureSubs = exposure.subscriptions;
+  const exposureActiveSubs = exposure.active_subscriptions;
   if (exposureSubs === undefined) {
     console.error('SSOT violation: exposure.subscriptions missing from backend response');
   }
