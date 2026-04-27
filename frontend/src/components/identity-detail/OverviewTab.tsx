@@ -831,6 +831,114 @@ export default function OverviewTab({
         </div>
       )}
 
+      {/* Last Sign-In — exact datetime from Graph signInActivity */}
+      {(() => {
+        const isHuman = identity.identity_category === 'human_user' || identity.identity_category === 'guest';
+        const lastSignin = (identity as any).last_signin_at || identity.last_sign_in;
+        const lastNI = (identity as any).last_noninteractive_signin;
+        if (!isHuman) return null;
+
+        const fmtDate = (iso: string | null | undefined) => {
+          if (!iso) return null;
+          try {
+            const d = new Date(iso);
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+              + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+          } catch { return iso; }
+        };
+        const daysBadge = (iso: string | null | undefined) => {
+          if (!iso) return null;
+          const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+          if (days === 0) return 'Today';
+          if (days === 1) return 'Yesterday';
+          return `${days} days ago`;
+        };
+
+        return (
+          <div className="border border-gray-200 rounded-xl p-4">
+            <div className="text-sm font-semibold text-gray-900 mb-2">Last Sign-In</div>
+            {lastSignin ? (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-800">{fmtDate(lastSignin)}</span>
+                  <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">{daysBadge(lastSignin)}</span>
+                </div>
+                {lastNI && lastNI !== lastSignin && (
+                  <div className="text-xs text-gray-500">
+                    Non-interactive: {fmtDate(lastNI)}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-400">No sign-in recorded</div>
+            )}
+            <div className="mt-2 text-[10px] text-gray-400">
+              Source: Microsoft Graph {'\u2014'} no logs required
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Last 3 Connections — from ARM activity logs (no P2 required) */}
+      {(() => {
+        const connections = (identity as any).arm_connections as Array<{
+          event_timestamp: string;
+          caller_ip_address: string | null;
+          operation_short: string;
+          resource_name: string | null;
+          status: string;
+        }> | undefined;
+
+        return (
+          <div className="border border-gray-200 rounded-xl p-4">
+            <div className="text-sm font-semibold text-gray-900 mb-2">Last 3 Connections</div>
+            {connections && connections.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-gray-400 text-[10px] uppercase tracking-wider">
+                      <th className="pb-1.5 pr-3">Date/Time</th>
+                      <th className="pb-1.5 pr-3">Source IP</th>
+                      <th className="pb-1.5 pr-3">Operation</th>
+                      <th className="pb-1.5">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {connections.map((c, i) => {
+                      const d = c.event_timestamp ? new Date(c.event_timestamp) : null;
+                      const dateStr = d
+                        ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          + ' ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                        : '\u2014';
+                      const isSuccess = (c.status || '').toLowerCase().includes('succeed')
+                        || (c.status || '').toLowerCase().includes('success');
+                      return (
+                        <tr key={i} className="border-t border-gray-100">
+                          <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">{dateStr}</td>
+                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]">{c.caller_ip_address || '\u2014'}</td>
+                          <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.operation_short}</td>
+                          <td className="py-1.5">
+                            {isSuccess
+                              ? <span className="text-green-600">{'\u2713'}</span>
+                              : <span className="text-red-500">{'\u2717'}</span>
+                            }
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-xs text-gray-400">No ARM activity recorded in last 90 days</div>
+            )}
+            <div className="mt-2 text-[10px] text-gray-400">
+              Source: Azure ARM activity logs {'\u2014'} available without sign-in logs
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Activity source mismatch warning — identity authenticated but
           no role-scoped activity detected. Same visual style as the
           "No owners assigned" amber banner. */}

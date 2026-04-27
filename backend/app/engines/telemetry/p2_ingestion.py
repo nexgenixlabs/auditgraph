@@ -149,6 +149,7 @@ class P2TelemetryService:
         with identity_category IN ('human_user', 'guest'). Uses the same
         workload_signin_events table; deduplication is via UNIQUE sign_in_id.
         """
+        logger.debug("ingest_user_signin_logs called: run_id=%s, org=%s", run_id, organization_id)
         session = self._get_graph_client()
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 

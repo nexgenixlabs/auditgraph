@@ -215,6 +215,7 @@ from app.api.handlers import (
     copilot_conversations_list,
     copilot_suggestions,
     get_identity_signin_events,
+    get_identity_connections,
     get_identity_timeline,
     get_identity_attack_paths,
     get_identity_effective_access,
@@ -968,6 +969,7 @@ def create_app():
             ('attack_paths', lambda: _db_init._ensure_attack_paths_table()),
             ('fix_recommendations', lambda: _db_init._ensure_fix_recommendations_table()),
             ('blast_radius', lambda: _db_init._ensure_blast_radius_table()),
+            ('arm_connections', lambda: _db_init._ensure_identity_arm_connections_table()),
             ('access_reviews', lambda: _db_init._ensure_access_reviews_tables()),
             ('reports', lambda: _db_init._ensure_reports_tables()),
             ('notifications', lambda: _db_init._ensure_notifications_table()),
@@ -2994,6 +2996,12 @@ def create_app():
         return copilot_graph_query_handler()
 
     # -----------------------
+    # ARM Activity Connections
+    # -----------------------
+    @app.get("/api/identities/<identity_id>/connections")
+    def identity_connections(identity_id):
+        return get_identity_connections(identity_id)
+
     # Authentication History (Sign-In Events)
     # -----------------------
     @app.get("/api/identities/<identity_id>/signin-events")

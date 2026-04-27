@@ -128,6 +128,15 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
             {r.days_since_assigned > 365 ? `Assigned over 1 year ago` : `Assigned ${r.days_since_assigned}d ago`}
           </span>
         )}
+        {r.last_used_at ? (() => {
+          const d = new Date(r.last_used_at);
+          const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+          const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+          const color = days < 30 ? 'text-green-600' : days < 90 ? 'text-amber-600' : 'text-red-600';
+          return <span className={color}>· Last used: {dateStr}{r.last_used_operation ? ` (${r.last_used_operation})` : ''}</span>;
+        })() : r.last_used_display ? (
+          <span className="text-gray-400">· {r.last_used_display}</span>
+        ) : null}
         {r.resource_type && <span>· {r.resource_type}</span>}
         {!r.scope_exists && <span className="text-red-600">· Resource deleted</span>}
         {r.redundant_with && <span className="text-yellow-600">· Redundant with {r.redundant_with}</span>}

@@ -1423,6 +1423,30 @@ def get_identity_details(identity_id: str):
         identity["last_signin_ip"] = last_signin_ip
         identity["auth_source"] = auth_source
 
+        # ── ARM connections (last 3 activity events — no P2 required) ──
+        arm_connections = []
+        try:
+            arm_connections = db.get_identity_arm_connections(identity_db_id, limit=3)
+            for c in arm_connections:
+                if c.get('event_timestamp') and hasattr(c['event_timestamp'], 'isoformat'):
+                    c['event_timestamp'] = c['event_timestamp'].isoformat()
+                op = c.get('operation_name', '')
+                if '/' in op:
+                    parts = op.split('/')
+                    c['operation_short'] = '/'.join(parts[-2:]) if len(parts) >= 2 else op
+                else:
+                    c['operation_short'] = op
+                rid = c.get('resource_id', '')
+                if rid:
+                    segments = rid.strip('/').split('/')
+                    c['resource_name'] = segments[-1] if segments else rid
+                else:
+                    c['resource_name'] = None
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+        identity["arm_connections"] = arm_connections
+
         # ── Rule 2: override misleading activity_status for federated identities ──
         if fed_wt_raw and identity.get("activity_status") in ('never_used', 'unknown', 'stale', None):
             if eff_src == 'inferred_federated':
@@ -1592,7 +1616,7 @@ def get_identity_details(identity_id: str):
                         role["last_used_display"] = f"{delta // 365}+ years ago"
                 else:
                     role["last_used_display"] = "Unknown"
-                role["last_used_source"] = "identity sign-in (proxy)"
+                role["last_used_source"] = "ARM activity logs" if role.get("last_used_operation") else "identity sign-in (proxy)"
             else:
                 role["last_used_at"] = None
                 role["days_since_used"] = None
@@ -1601,7 +1625,7 @@ def get_identity_details(identity_id: str):
                 # misleading "Never used" (which implies the identity
                 # itself was never used).
                 if identity_has_effective_activity:
-                    role["last_used_display"] = "No activity on record"
+                    role["last_used_display"] = "No activity in 90 days"
                 else:
                     role["last_used_display"] = "Never used"
                 role["last_used_source"] = "static analysis"
@@ -21294,6 +21318,56 @@ def get_identity_usage(identity_id):
 
 
 # ── Authentication History (P2 Sign-In Events) ───────────────
+
+def get_identity_connections(identity_id):
+    """GET /api/identities/<id>/connections — last 3 ARM activity events for this identity."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({"connections": []}), 200
+
+        cursor.execute(
+            "SELECT id FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) ORDER BY discovery_run_id DESC LIMIT 1",
+            (identity_id, run_ids)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"connections": []}), 200
+
+        identity_db_id = row[0]
+        connections = db.get_identity_arm_connections(identity_db_id, limit=3)
+
+        # Serialize timestamps
+        for c in connections:
+            if c.get('event_timestamp') and hasattr(c['event_timestamp'], 'isoformat'):
+                c['event_timestamp'] = c['event_timestamp'].isoformat()
+            # Shorten operation name for display
+            op = c.get('operation_name', '')
+            if '/' in op:
+                parts = op.split('/')
+                c['operation_short'] = '/'.join(parts[-2:]) if len(parts) >= 2 else op
+            else:
+                c['operation_short'] = op
+            # Extract resource name from resource_id
+            rid = c.get('resource_id', '')
+            if rid:
+                segments = rid.strip('/').split('/')
+                c['resource_name'] = segments[-1] if segments else rid
+            else:
+                c['resource_name'] = None
+
+        cursor.close()
+        return jsonify({"connections": connections}), 200
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_identity_connections error: %s", e)
+        return jsonify({"connections": []}), 200
+
 
 def get_identity_signin_events(identity_id):
     """GET /api/identities/<id>/signin-events — paginated sign-in event history."""

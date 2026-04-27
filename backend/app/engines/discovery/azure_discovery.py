@@ -1179,19 +1179,32 @@ class AzureDiscoveryEngine:
 
         self._update_job_progress('discovering_resources', 68)
 
+        # Step 9.7: ARM Activity Log collection (no P2 required)
+        # Fetches recent ARM management events per subscription, matches to
+        # known identities, stores top 3 per identity in identity_arm_connections,
+        # and backfills role_assignments.last_used_at.
+        try:
+            self._collect_arm_activity(run_id, final_identities)
+        except Exception as e:
+            logger.warning("ARM activity collection error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
         # MUST run before exposure scoring so fresh sign-in data is available
         p2_enabled = False
         try:
-            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', organization_id=self.db._organization_id) == 'true'
+            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', organization_id=self.db_org_id) == 'true'
+            logger.debug("P2 telemetry enabled=%s for org_id=%s", p2_enabled, self.db_org_id)
             if p2_enabled:
                 logger.info("Ingesting P2 sign-in telemetry...")
                 from app.engines.telemetry.p2_ingestion import P2TelemetryService
                 telemetry = P2TelemetryService(self.credential, self.db)
-                org_id = self.db._organization_id
-                telemetry.ingest_signin_logs(run_id, org_id)
-                telemetry.ingest_user_signin_logs(run_id, org_id)
-                telemetry.compute_activity_stats(run_id, org_id)
+                telemetry.ingest_signin_logs(run_id, self.db_org_id)
+                telemetry.ingest_user_signin_logs(run_id, self.db_org_id)
+                telemetry.compute_activity_stats(run_id, self.db_org_id)
                 telemetry.backfill_last_sign_in(run_id)
                 logger.info("P2 telemetry ingested -- activity stats ready for scoring")
         except Exception as e:
@@ -5885,6 +5898,61 @@ class AzureDiscoveryEngine:
                         break
 
             logger.info("Fetched %s users across %s page(s) (signInActivity=%s)", len(all_users), page, sign_in_available)
+
+            # ── Beta endpoint fallback for signInActivity ─────────────
+            # If v1.0 stripped signInActivity (no P2 on v1.0), try beta endpoint
+            # which may expose signInActivity on some tenants.
+            if not sign_in_available and all_users:
+                logger.info("[_discover_users] Attempting beta endpoint for signInActivity (%d users)", len(all_users))
+                beta_enriched = 0
+                try:
+                    # Batch fetch via beta with signInActivity in $select
+                    beta_select = ','.join(['id', 'signInActivity'])
+                    beta_url: str | None = (
+                        f"https://graph.microsoft.com/beta/users"
+                        f"?$select={beta_select}&$top=999"
+                    )
+                    user_ids_needed = {u['id'] for u in all_users}
+                    sia_map: dict[str, dict] = {}
+                    beta_page = 0
+
+                    async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as beta_session:
+                        while beta_url and beta_page < 10:
+                            beta_page += 1
+                            async with self._graph_semaphore:
+                                async with beta_session.get(beta_url, headers=headers) as bresp:
+                                    if bresp.status != 200:
+                                        body = await bresp.text()
+                                        if 'signInActivity' in body or bresp.status == 403:
+                                            logger.info("[_discover_users] Beta endpoint also lacks signInActivity — giving up")
+                                        else:
+                                            logger.debug("[_discover_users] Beta /users error: %s %s", bresp.status, body[:200])
+                                        break
+                                    bdata = await bresp.json()
+
+                            for bu in bdata.get('value', []):
+                                uid = bu.get('id')
+                                if uid in user_ids_needed and bu.get('signInActivity'):
+                                    sia_map[uid] = bu['signInActivity']
+
+                            # If we've gathered enough, stop
+                            if len(sia_map) >= len(user_ids_needed):
+                                break
+                            beta_url = bdata.get('@odata.nextLink')
+
+                    # Merge signInActivity back into all_users
+                    if sia_map:
+                        sign_in_available = True
+                        for u in all_users:
+                            uid = u.get('id')
+                            if uid in sia_map:
+                                u['signInActivity'] = sia_map[uid]
+                                beta_enriched += 1
+                        logger.info("[_discover_users] Beta enriched %d/%d users with signInActivity",
+                                    beta_enriched, len(all_users))
+                except Exception as e:
+                    logger.warning("[_discover_users] Beta signInActivity fallback failed: %s", e)
+
             # Persist P2 license availability on the cloud connection (only upgrade, never downgrade)
             if sign_in_available:
                 try:
@@ -5987,6 +6055,8 @@ class AzureDiscoveryEngine:
                     'enabled': u.get('accountEnabled', True),
                     'created_datetime': created,
                     'last_sign_in': last_sign_in,
+                    'last_signin_datetime': sia.get('lastSignInDateTime') if sia else None,
+                    'last_noninteractive_signin_datetime': sia.get('lastNonInteractiveSignInDateTime') if sia else None,
                     'on_premises_sync_enabled': u.get('onPremisesSyncEnabled'),
                     'mail': u.get('mail'),
                     'assigned_licenses': u.get('assignedLicenses', []),
@@ -8234,6 +8304,314 @@ class AzureDiscoveryEngine:
         except Exception as e:
             logger.warning("ARM Activity Log validation failed: %s", e)
             return False
+
+    # Noisy Azure platform operations that add no security signal
+    _ARM_SKIP_OPERATION_PREFIXES = (
+        'Microsoft.Resources/deployments/',
+        'Microsoft.Resources/tags/',
+        'Microsoft.Authorization/policies/',
+        'Microsoft.Authorization/policyAssignments/',
+        'Microsoft.Advisor/',
+        'Microsoft.Security/assessments/',
+        'Microsoft.Security/subAssessments/',
+        'Microsoft.Insights/diagnosticSettings/',
+        'Microsoft.Insights/autoscalesettings/',
+        'Microsoft.Compute/restorePointCollections/',
+        'Microsoft.AlertsManagement/',
+    )
+
+    def _collect_arm_activity(self, run_id: int, identities: list) -> None:
+        """Collect ARM management activity events per subscription (no P2 required).
+
+        For each subscription:
+        1. Fetches recent management events from ARM Activity Log API
+        2. Matches events to known identity principal IDs
+        3. Stores top events in identity_arm_connections table
+        4. Updates role_assignments.last_used_at from matched events
+
+        Uses ARM Reader token (same as role assignment reads).
+        Rate limit: ~12,000 requests/hour. One request per subscription.
+        """
+        import time as _time
+        from urllib.parse import quote
+
+        phase_start = _time.monotonic()
+        sub_ids = [s['id'] for s in self.subscriptions]
+        if not sub_ids:
+            logger.debug("[arm_activity] No subscriptions — skipping")
+            return
+
+        # Build caller → identity_db_id lookup
+        # ARM Activity Log caller is: UPN for humans, object_id for SPNs
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            "SELECT id, object_id, principal_id, identity_id, display_name, upn "
+            "FROM identities WHERE discovery_run_id = %s",
+            (run_id,)
+        )
+        pid_map = {}  # caller string → identity_db_id
+        for row in cursor.fetchall():
+            db_id, obj_id, principal_id, identity_id, display_name, upn = row
+            if obj_id:
+                pid_map[obj_id] = db_id
+            if principal_id:
+                pid_map[principal_id] = db_id
+            # For human users, ARM uses UPN as caller (looks like email)
+            if identity_id and '@' in str(identity_id):
+                pid_map[identity_id] = db_id
+                pid_map[str(identity_id).lower()] = db_id
+            # UPN column (most reliable for human user ARM matching)
+            if upn and '@' in str(upn):
+                pid_map[upn] = db_id
+                pid_map[str(upn).lower()] = db_id
+            # Also try display_name as UPN (some identities store UPN there)
+            if display_name and '@' in str(display_name):
+                pid_map[display_name] = db_id
+                pid_map[str(display_name).lower()] = db_id
+        cursor.close()
+        logger.info("[arm_activity] Starting for org=%s, run=%s: %d caller_map entries, %d subscriptions",
+                     self.db_org_id, run_id, len(pid_map), len(sub_ids))
+
+        if not pid_map:
+            logger.debug("[arm_activity] No identities with principal IDs — skipping")
+            return
+
+        # Get ARM token
+        try:
+            arm_token = self.credential.get_token("https://management.azure.com/.default")
+        except Exception as e:
+            logger.warning("[arm_activity] ARM token acquisition failed: %s", e)
+            return
+
+        import requests
+        session = requests.Session()
+        session.headers.update({
+            "Authorization": f"Bearer {arm_token.token}",
+            "Content-Type": "application/json",
+        })
+
+        cutoff = (datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        all_events = []  # list of dicts for identity_arm_connections
+        role_updates = {}  # (principal_id, subscription_id) → best event
+
+        for sub_id in sub_ids:
+            elapsed = _time.monotonic() - phase_start
+            if elapsed > 180:  # 3 minute budget
+                logger.warning("[arm_activity] Time budget exceeded at %.1fs — processed %d/%d subs",
+                               elapsed, sub_ids.index(sub_id), len(sub_ids))
+                break
+
+            filter_str = f"eventTimestamp ge '{cutoff}'"
+            url = (
+                f"https://management.azure.com"
+                f"/subscriptions/{sub_id}"
+                f"/providers/microsoft.insights"
+                f"/eventtypes/management/values"
+                f"?api-version=2015-04-01"
+                f"&$filter={quote(filter_str)}"
+                f"&$top=500"
+            )
+
+            try:
+                resp = session.get(url, timeout=30)
+                if resp.status_code == 403:
+                    logger.debug("[arm_activity] Permission denied for sub %s -- skipping", sub_id[:8])
+                    continue
+                if resp.status_code != 200:
+                    logger.debug("[arm_activity] HTTP %s for sub %s: %s",
+                                resp.status_code, sub_id[:8], resp.text[:300])
+                    continue
+                data = resp.json()
+            except Exception as e:
+                logger.warning("[arm_activity] Request failed for sub %s: %s", sub_id[:8], e)
+                continue
+
+            events = data.get('value', [])
+            raw_event_count = len(events)
+            logger.info("[arm_activity] Sub %s: %d raw events before filtering",
+                        sub_id[:8], raw_event_count)
+
+            # Per-identity event counters to limit to 5 per identity per subscription
+            identity_event_counts = {}
+            noise_skipped = 0
+            matched_count = 0
+            unmatched_callers = []
+
+            for evt in events:
+                # ── 1. Extract claims (may be str in some API versions) ──
+                claims = evt.get('claims') or {}
+                if isinstance(claims, str):
+                    try:
+                        claims = json.loads(claims)
+                    except Exception:
+                        claims = {}
+
+                # ── 2. Extract IP FIRST — claims.ipaddr has real human IPs ──
+                ip_addr = None
+                if isinstance(claims, dict):
+                    ip_addr = claims.get('ipaddr')
+                if not ip_addr:
+                    ip_addr = evt.get('callerIpAddress')
+
+                # ── 3. Extract operation name ──
+                op_name_raw = evt.get('operationName', {})
+                if isinstance(op_name_raw, dict):
+                    op_name = op_name_raw.get('localizedValue') or op_name_raw.get('value', '')
+                else:
+                    op_name = str(op_name_raw)
+
+                # ── 4. Operation prefix filter (skip noisy platform ops) ──
+                if any(op_name.startswith(pfx) for pfx in self._ARM_SKIP_OPERATION_PREFIXES):
+                    noise_skipped += 1
+                    continue
+
+                # ── 5. Extract caller + OID from claims ──
+                caller = evt.get('caller', '')
+                oid_from_claims = ''
+                if isinstance(claims, dict):
+                    oid_from_claims = (
+                        claims.get('oid')
+                        or claims.get('http://schemas.microsoft.com/identity/claims/objectidentifier')
+                        or ''
+                    )
+
+                # Skip only if BOTH caller AND ip are empty (pure system noise)
+                if not caller and not ip_addr:
+                    continue
+
+                # ── 6. Caller matching: direct → lowercase → claims.oid ──
+                identity_db_id = (
+                    pid_map.get(caller)
+                    or (pid_map.get(caller.lower()) if caller else None)
+                    or (pid_map.get(oid_from_claims) if oid_from_claims else None)
+                )
+                if not identity_db_id:
+                    if len(unmatched_callers) < 10:
+                        unmatched_callers.append(caller or oid_from_claims or '(empty)')
+                    continue
+
+                matched_count += 1
+
+                # Limit events per identity
+                count = identity_event_counts.get(identity_db_id, 0)
+                if count >= 5:
+                    continue
+                identity_event_counts[identity_db_id] = count + 1
+
+                status_raw = evt.get('status', {})
+                if isinstance(status_raw, dict):
+                    status_val = status_raw.get('localizedValue') or status_raw.get('value', '')
+                else:
+                    status_val = str(status_raw)
+
+                resource_id = evt.get('resourceId', '')
+                resource_type_raw = evt.get('resourceType', {})
+                if isinstance(resource_type_raw, dict):
+                    resource_type = resource_type_raw.get('value', '')
+                else:
+                    resource_type = str(resource_type_raw) if resource_type_raw else ''
+
+                event_ts = evt.get('eventTimestamp')
+
+                all_events.append({
+                    'identity_db_id': identity_db_id,
+                    'principal_id': caller,
+                    'event_timestamp': event_ts,
+                    'caller_ip_address': ip_addr,
+                    'operation_name': op_name,
+                    'resource_id': resource_id,
+                    'resource_type': resource_type,
+                    'subscription_id': sub_id,
+                    'status': status_val,
+                })
+
+                # Track best (most recent) event per (principal, subscription) for role updates
+                key = (caller, sub_id)
+                if key not in role_updates or event_ts > role_updates[key]['last_used_at']:
+                    role_updates[key] = {
+                        'principal_id': caller,
+                        'subscription_id': sub_id,
+                        'last_used_at': event_ts,
+                        'last_used_operation': op_name,
+                    }
+
+            # ── Diagnostic logging per subscription ──
+            logger.info("[arm_activity] Sub %s: %d after noise filter (%d skipped), %d matched to %d identities",
+                        sub_id[:8], raw_event_count - noise_skipped, noise_skipped,
+                        matched_count, len(identity_event_counts))
+            if matched_count == 0 and raw_event_count > 0:
+                logger.warning("[arm_activity] Sub %s: 0 matches — sample unmatched callers: %s",
+                               sub_id[:8], unmatched_callers[:5])
+                logger.warning("[arm_activity] Sub %s: sample caller_map keys: %s",
+                               sub_id[:8], list(pid_map.keys())[:10])
+
+        # Batch-insert into identity_arm_connections
+        if all_events:
+            try:
+                inserted = self.db.save_arm_connections_batch(
+                    self.db_org_id, run_id, all_events
+                )
+                logger.info("[arm_activity] Stored %d ARM connection events for %d identities",
+                            inserted, len({e['identity_db_id'] for e in all_events}))
+            except Exception as e:
+                logger.warning("[arm_activity] Failed to save ARM connections: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        # Update role_assignments.last_used_at from ARM events
+        if role_updates:
+            try:
+                updated = self.db.update_role_last_used_from_arm(
+                    self.db_org_id, list(role_updates.values())
+                )
+                logger.info("[arm_activity] Updated last_used_at on %d role assignments", updated)
+            except Exception as e:
+                logger.warning("[arm_activity] Failed to update role last_used_at: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        # Update identities.last_observed_ip from ARM events (most recent per identity)
+        best_per_identity = {}
+        for evt in all_events:
+            iid = evt['identity_db_id']
+            if evt.get('caller_ip_address') and (
+                iid not in best_per_identity or evt['event_timestamp'] > best_per_identity[iid]['event_timestamp']
+            ):
+                best_per_identity[iid] = evt
+
+        if best_per_identity:
+            cursor = self.db.conn.cursor()
+            for iid, evt in best_per_identity.items():
+                try:
+                    cursor.execute("""
+                        UPDATE identities SET
+                            last_observed_ip = %s,
+                            last_observed_ip_source = 'arm_activity_log',
+                            last_observed_ip_date = %s,
+                            last_observed_operation = %s
+                        WHERE id = %s AND (last_observed_ip IS NULL OR last_observed_ip_date < %s)
+                    """, (
+                        evt['caller_ip_address'],
+                        evt['event_timestamp'],
+                        evt['operation_name'],
+                        iid,
+                        evt['event_timestamp'],
+                    ))
+                except Exception:
+                    pass
+            try:
+                self.db._commit()
+            except Exception:
+                pass
+            cursor.close()
+
+        elapsed = _time.monotonic() - phase_start
+        logger.info("[arm_activity] COMPLETE: %d events, %d role updates, %.1fs",
+                    len(all_events), len(role_updates), elapsed)
 
     async def _fetch_last_observed_ips(self, identities: List[Dict]) -> None:
         """Fetch last observed IP from ARM Activity Log for all identities.

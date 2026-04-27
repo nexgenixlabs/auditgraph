@@ -1793,6 +1793,7 @@ class Database:
     _discovery_connector_col_ensured = False
     _app_reg_lineage_cols_ensured = False
     _last_activity_cols_ensured = False
+    _signin_datetime_cols_ensured = False
     _access_paths_col_ensured = False
     _lineage_verdicts_ensured = False
 
@@ -2401,6 +2402,27 @@ class Database:
                     self._rollback()
             Database._last_activity_cols_ensured = True
 
+        # Ensure exact signInActivity datetime columns exist
+        # Uses information_schema check — class flag alone can't guarantee DDL ran
+        if not Database._signin_datetime_cols_ensured:
+            try:
+                cursor.execute("SAVEPOINT signin_dt_ddl")
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'identities' AND column_name = 'last_signin_datetime'"
+                )
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_signin_datetime TIMESTAMPTZ")
+                    cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS last_noninteractive_signin_datetime TIMESTAMPTZ")
+                cursor.execute("RELEASE SAVEPOINT signin_dt_ddl")
+                self._commit()
+                Database._signin_datetime_cols_ensured = True
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT signin_dt_ddl")
+                except Exception:
+                    self._rollback()
+
         # Ensure access_paths column exists (AG-75 inclusion criteria)
         if not Database._access_paths_col_ensured:
             try:
@@ -2518,6 +2540,9 @@ class Database:
                 last_noninteractive_signin,
                 days_since_last_signin,
 
+                last_signin_datetime,
+                last_noninteractive_signin_datetime,
+
                 verdict_confidence,
                 verdict_score,
                 workload_origin,
@@ -2605,6 +2630,7 @@ class Database:
                 %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
+                %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s,
                 %s, %s,
@@ -2704,6 +2730,9 @@ class Database:
                 last_delegated_signin = EXCLUDED.last_delegated_signin,
                 last_noninteractive_signin = EXCLUDED.last_noninteractive_signin,
                 days_since_last_signin = EXCLUDED.days_since_last_signin,
+
+                last_signin_datetime = EXCLUDED.last_signin_datetime,
+                last_noninteractive_signin_datetime = EXCLUDED.last_noninteractive_signin_datetime,
 
                 verdict_confidence = EXCLUDED.verdict_confidence,
                 verdict_score = EXCLUDED.verdict_score,
@@ -2859,6 +2888,9 @@ class Database:
                 identity_data.get("last_delegated_signin"),
                 identity_data.get("last_noninteractive_signin"),
                 identity_data.get("days_since_last_signin"),
+
+                identity_data.get("last_signin_datetime"),
+                identity_data.get("last_noninteractive_signin_datetime"),
 
                 identity_data.get("verdict_confidence"),
                 identity_data.get("verdict_score"),
@@ -3200,7 +3232,8 @@ class Database:
                 ra.redundant_with,
                 ra.resource_type,
                 ra.resource_name,
-                ra.last_used_at
+                ra.last_used_at,
+                ra.last_used_operation
             FROM role_assignments ra
             LEFT JOIN role_permissions rp
                 ON rp.role_name = ra.role_name AND rp.role_type = 'azure'
@@ -3236,7 +3269,8 @@ class Database:
                 era.redundant_with,
                 NULL as resource_type,
                 NULL as resource_name,
-                era.last_used_at
+                era.last_used_at,
+                era.last_used_operation
             FROM entra_role_assignments era
             LEFT JOIN role_permissions rp
                 ON rp.role_name = era.role_name AND rp.role_type = 'entra'
@@ -19719,6 +19753,151 @@ class Database:
         self._commit()
         cursor.close()
         Database._isa_ensured = True
+
+    # ================================================================
+    # Identity ARM Connections (last 3 ARM activity events per identity)
+    # ================================================================
+
+    _arm_connections_ensured = False
+
+    def _ensure_identity_arm_connections_table(self):
+        """Create identity_arm_connections table for storing recent ARM activity events."""
+        if Database._arm_connections_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS identity_arm_connections (
+                id BIGSERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL,
+                identity_db_id BIGINT NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+                principal_id TEXT,
+                event_timestamp TIMESTAMPTZ NOT NULL,
+                caller_ip_address TEXT,
+                operation_name TEXT,
+                resource_id TEXT,
+                resource_type TEXT,
+                subscription_id TEXT,
+                status TEXT,
+                discovery_run_id BIGINT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_arm_conn_identity ON identity_arm_connections(identity_db_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_arm_conn_org ON identity_arm_connections(organization_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_arm_conn_run ON identity_arm_connections(discovery_run_id)")
+        self._commit()
+        cursor.close()
+        Database._arm_connections_ensured = True
+
+    def save_arm_connections_batch(self, org_id: int, run_id: int, events: list):
+        """Batch-insert ARM activity events and keep only top 3 per identity.
+
+        Args:
+            org_id: Organization ID
+            run_id: Discovery run ID
+            events: List of dicts with keys: identity_db_id, principal_id,
+                    event_timestamp, caller_ip_address, operation_name,
+                    resource_id, resource_type, subscription_id, status
+        """
+        self._ensure_identity_arm_connections_table()
+        if not events:
+            return 0
+        cursor = self.conn.cursor()
+        from psycopg2.extras import execute_values
+        rows = [
+            (org_id, e['identity_db_id'], e.get('principal_id'),
+             e['event_timestamp'], e.get('caller_ip_address'),
+             e.get('operation_name'), e.get('resource_id'),
+             e.get('resource_type'), e.get('subscription_id'),
+             e.get('status'), run_id)
+            for e in events
+        ]
+        execute_values(cursor, """
+            INSERT INTO identity_arm_connections
+            (organization_id, identity_db_id, principal_id,
+             event_timestamp, caller_ip_address, operation_name,
+             resource_id, resource_type, subscription_id, status,
+             discovery_run_id)
+            VALUES %s
+        """, rows)
+        inserted = cursor.rowcount
+
+        # Prune: keep only 3 most recent per identity
+        identity_ids = list({e['identity_db_id'] for e in events})
+        for iid in identity_ids:
+            cursor.execute("""
+                DELETE FROM identity_arm_connections
+                WHERE identity_db_id = %s
+                  AND id NOT IN (
+                    SELECT id FROM identity_arm_connections
+                    WHERE identity_db_id = %s
+                    ORDER BY event_timestamp DESC
+                    LIMIT 3
+                  )
+            """, (iid, iid))
+        self._commit()
+        cursor.close()
+        return inserted
+
+    def get_identity_arm_connections(self, identity_db_id: int, limit: int = 3) -> list:
+        """Get recent ARM activity events for an identity."""
+        self._ensure_identity_arm_connections_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT event_timestamp, caller_ip_address, operation_name,
+                   resource_id, resource_type, subscription_id, status
+            FROM identity_arm_connections
+            WHERE identity_db_id = %s
+            ORDER BY event_timestamp DESC
+            LIMIT %s
+        """, (identity_db_id, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def update_role_last_used_from_arm(self, org_id: int, updates: list):
+        """Batch-update role_assignments.last_used_at from ARM activity events.
+
+        Matches on principal_id (ARM caller = Azure object_id for SPNs / UPN for users).
+        If a principal performed ARM operations, all their role assignments are considered
+        recently used (the role enabled the access regardless of scope hierarchy).
+
+        Args:
+            org_id: Organization ID
+            updates: List of dicts with keys: principal_id, subscription_id,
+                     last_used_at, last_used_operation
+        """
+        if not updates:
+            return 0
+        cursor = self.conn.cursor()
+        count = 0
+        for u in updates:
+            cursor.execute("""
+                UPDATE role_assignments SET
+                    last_used_at = GREATEST(last_used_at, %s),
+                    last_used_operation = CASE
+                        WHEN last_used_at IS NULL OR %s > last_used_at THEN %s
+                        ELSE last_used_operation
+                    END,
+                    usage_status = CASE
+                        WHEN %s > NOW() - INTERVAL '30 days' THEN 'active'
+                        WHEN %s > NOW() - INTERVAL '90 days' THEN 'dormant'
+                        ELSE COALESCE(usage_status, 'stale')
+                    END
+                WHERE organization_id = %s
+                  AND principal_id = %s
+            """, (
+                u['last_used_at'],
+                u['last_used_at'], u['last_used_operation'],
+                u['last_used_at'],
+                u['last_used_at'],
+                org_id,
+                u['principal_id'],
+            ))
+            count += cursor.rowcount
+        self._commit()
+        cursor.close()
+        return count
 
     def save_identity_subscription_access(self, identity_db_id, identity_id, role_assignment, subscription_id, subscription_name, run_id):
         """Insert one identity ↔ subscription RBAC access row (upsert on conflict)."""
