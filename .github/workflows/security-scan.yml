@@ -96,7 +96,7 @@ jobs:
 
       # ── React: ESLint Security ──────────────────────────────────────
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -230,7 +230,7 @@ jobs:
           cat ../security-reports/pip-audit-summary.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -502,7 +502,7 @@ jobs:
             -o cyclonedx-json=security-reports/sbom-frontend.cdx.json
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
