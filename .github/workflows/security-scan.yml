@@ -43,7 +43,7 @@ jobs:
     name: "Static Analysis (Bandit + ESLint)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # ── Python: Bandit ──────────────────────────────────────────────
       - name: Set up Python 3.11
@@ -183,7 +183,7 @@ jobs:
     name: "Dependency Scan (pip-audit + npm audit)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -280,7 +280,7 @@ jobs:
     name: "Secret Scan (Gitleaks)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0        # Full history for scanning all commits
 
@@ -359,7 +359,7 @@ jobs:
             context: .
             image_name: auditgraph-admin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build Docker image (${{ matrix.image_name }})
         run: |
@@ -430,7 +430,7 @@ jobs:
     name: "Infrastructure Scan (Checkov)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run Checkov on Bicep files
         uses: bridgecrewio/checkov-action@v12
@@ -482,7 +482,7 @@ jobs:
     name: "SBOM & License Audit"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@v0
@@ -608,7 +608,7 @@ jobs:
       - sbom-generation
     if: always()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all scan artifacts
         uses: actions/download-artifact@v4
