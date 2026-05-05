@@ -8,6 +8,7 @@ completion, snapshot hashes, and AGIRS score consistency.
 
 import logging
 from datetime import datetime
+from psycopg2 import sql as psycopg2_sql
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +428,7 @@ def data_source_map():
             },
             'dormant_privileged': {
                 'canonical_source': 'risk_summary.dormant_privileged',
-                'definition': 'Stale/never-used identities with active role assignments',
+                'definition': 'Stale/no-activity-observed identities with active role assignments',
                 'computed_by': 'RiskSummaryEngine at discovery time',
             },
             'high_blast_radius': {
@@ -632,8 +633,9 @@ def _compute_live_metrics(cursor, run_ids, organization_id):
         try:
             cursor.execute("SAVEPOINT mid_%s" % key)
             cursor.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE discovery_run_id = ANY(%s)",
-                (run_ids,)
+                psycopg2_sql.SQL("SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)")
+                .format(tbl=psycopg2_sql.Identifier(table)),
+                (run_ids,),
             )
             live[key] = cursor.fetchone()[0] or 0
             cursor.execute("RELEASE SAVEPOINT mid_%s" % key)

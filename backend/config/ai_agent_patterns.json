@@ -39,8 +39,7 @@
       "Cognitive Services Contributor",
       "Cognitive Services Speech User",
       "OpenAI Contributor",
-      "Video Indexer Account Contributor",
-      "Key Vault Administrator"
+      "Video Indexer Account Contributor"
     ],
     "scope_patterns": [
       "cognitiveservices",
@@ -51,6 +50,15 @@
       "videoindexer",
       "anomalydetector",
       "aiservices"
+    ],
+    "excluded_role_names": [
+      "Key Vault Administrator",
+      "Key Vault Secrets Officer",
+      "Key Vault Secrets User",
+      "Key Vault Reader",
+      "Contributor",
+      "Owner",
+      "Reader"
     ],
     "confidence": 0.95,
     "platform": "azure_ai"
@@ -71,6 +79,6 @@
     "(?i)Databricks-to-Datadog",
     "(?i)Salesforce Databricks"
   ],
-  "version": "5.0.0",
-  "last_updated": "2026-04-23"
+  "version": "5.1.0",
+  "last_updated": "2026-05-01"
 }

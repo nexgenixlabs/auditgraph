@@ -74,6 +74,7 @@ DELETE_ORDER = [
     ('tenant_health',               'organization_id'),
     ('tenant_posture_metrics',      'organization_id'),
     ('tenant_posture_scores',       'organization_id'),
+    ('pipeline_stage_metrics',      'organization_id'),
 
     # ── Phase 2: Workload / telemetry tables ──
     ('workload_anomaly_events',     'organization_id'),
@@ -86,8 +87,10 @@ DELETE_ORDER = [
     ('soar_playbooks',              'organization_id'),
     ('auto_remediation_actions',    'organization_id'),
     ('remediation_actions',         'organization_id'),
+    ('remediation_queue',           'organization_id'),
     ('generated_remediations',      'organization_id'),
     ('fix_recommendations',         'organization_id'),
+    ('optimization_recommendations','organization_id'),
 
     # ── Phase 4: Anomaly / findings / analysis tables ──
     ('anomalies',                   'organization_id'),
@@ -139,10 +142,13 @@ DELETE_ORDER = [
     ('agent_classifications',       'organization_id'),
     ('identity_access_history',     'organization_id'),
     ('identity_activity_events',    'organization_id'),
+    ('identity_arm_connections',    'organization_id'),
     ('identity_credentials',        'organization_id'),
+    ('identity_exposures',          'organization_id'),
     ('identity_group_members',      'organization_id'),
     ('identity_groups',             'organization_id'),
     ('identity_links',              'organization_id'),
+    ('identity_reachability',       'organization_id'),
     ('identity_risk_scores',        'organization_id'),
     ('identity_role_history',       'organization_id'),
     ('identity_subscription_access','organization_id'),
@@ -153,15 +159,18 @@ DELETE_ORDER = [
     ('agirs_scores',                'organization_id'),
     ('ai_audit_log',                'organization_id'),
     ('rbac_hygiene_scans',          'organization_id'),
+    ('privilege_drift_events',      'organization_id'),
 
     # ── Phase 9: Role / credential / permission tables ──
     ('sp_app_roles',                'organization_id'),
     ('sp_ownership',                'organization_id'),
     ('graph_api_permissions',       'organization_id'),
+    ('connector_permissions',       'organization_id'),
     ('role_assignments',            'organization_id'),
     ('entra_role_assignments',      'organization_id'),
     ('identity_roles',              'organization_id'),
     ('credentials',                 'organization_id'),
+    ('federated_credentials',       'organization_id'),
     ('pim_activations',             '@fk:identity_db_id:identities'),
     ('pim_eligible_assignments',    '@fk:identity_db_id:identities'),
     ('lineage_verdicts',            'organization_id'),
@@ -172,9 +181,13 @@ DELETE_ORDER = [
 
     # ── Phase 11: Resource tables ──
     ('resource_risk_history',       'organization_id'),
+    ('discovered_resources',        'organization_id'),
     ('azure_storage_accounts',      'organization_id'),
     ('azure_key_vaults',            'organization_id'),
     ('app_registrations',           'organization_id'),
+
+    # ── Phase 11b: Workload attributions ──
+    ('workload_attributions',       'organization_id'),
 
     # ── Phase 12: Snapshot & drift ──
     ('snapshot_jobs',               'organization_id'),

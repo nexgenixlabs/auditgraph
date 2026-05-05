@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -10,11 +11,11 @@ from app.entitlements.registry import FEATURES, FEATURE_ALIASES, PLAN_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
-# ── In-memory entitlement cache (TTL = 60s) ────────────────────────────────
+# ── In-memory entitlement cache ─────────────────────────────────────────────
 
 _cache_lock = threading.Lock()
 _cache = {}       # key: (org_id, feature_key) → {'result': (bool, err_or_None), 'expires': float}
-_CACHE_TTL = 60   # seconds
+_CACHE_TTL = int(os.environ.get('ENTITLEMENT_CACHE_TTL', '10'))  # seconds (AG-111)
 
 
 def _cache_get(org_id, feature_key):

@@ -43,45 +43,61 @@ def get_sso_config_for_org(db, organization_id):
     return config
 
 
-def build_saml_settings(sso_config, base_url):
-    """Transform DB SSO config into python3-saml settings dict."""
-    sp_entity_id = f"{base_url}/api/auth/saml/metadata"
-    acs_url = f"{base_url}/api/auth/saml/acs"
-    slo_url = f"{base_url}/api/auth/saml/slo"
+def build_saml_settings(sso_config, base_url, *, org_settings=None):
+    """Transform DB SSO config into python3-saml settings dict.
 
-    return {
-        'strict': True,
-        'debug': False,
-        'sp': {
-            'entityId': sp_entity_id,
-            'assertionConsumerService': {
-                'url': acs_url,
-                'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
+    AG-95: Delegates to build_secure_saml_settings() for hardened defaults.
+    AG-95-v2: Passes org_settings for per-org encryption overrides.
+    Kept as thin wrapper for backward compatibility with existing callers.
+    """
+    from app.security.sso_security import build_secure_saml_settings, SamlConfigError
+    try:
+        return build_secure_saml_settings(sso_config, base_url, org_settings=org_settings)
+    except SamlConfigError:
+        # Fallback for configs missing required IdP fields (e.g., during setup).
+        # Still enforce strict mode and mandatory signing requirements.
+        sp_entity_id = f"{base_url}/api/auth/saml/metadata"
+        acs_url = f"{base_url}/api/auth/saml/acs"
+        slo_url = f"{base_url}/api/auth/saml/slo"
+
+        return {
+            'strict': True,
+            'debug': False,
+            'sp': {
+                'entityId': sp_entity_id,
+                'assertionConsumerService': {
+                    'url': acs_url,
+                    'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
+                },
+                'singleLogoutService': {
+                    'url': slo_url,
+                    'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+                },
+                'NameIDFormat': 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
             },
-            'singleLogoutService': {
-                'url': slo_url,
-                'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+            'idp': {
+                'entityId': sso_config.get('sso_idp_entity_id', ''),
+                'singleSignOnService': {
+                    'url': sso_config.get('sso_idp_sso_url', ''),
+                    'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+                },
+                'singleLogoutService': {
+                    'url': sso_config.get('sso_idp_slo_url', ''),
+                    'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+                },
+                'x509cert': sso_config.get('sso_idp_x509_cert', ''),
             },
-            'NameIDFormat': 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
-        },
-        'idp': {
-            'entityId': sso_config.get('sso_idp_entity_id', ''),
-            'singleSignOnService': {
-                'url': sso_config.get('sso_idp_sso_url', ''),
-                'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+            'security': {
+                'authnRequestsSigned': True,
+                'wantAssertionsSigned': True,
+                'wantMessagesSigned': True,
+                'rejectDeprecatedAlgorithm': True,
+                'wantNameIdEncrypted': True,
+                'wantAssertionsEncrypted': True,
+                'signatureAlgorithm': 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
+                'digestAlgorithm': 'http://www.w3.org/2001/04/xmlenc#sha256',
             },
-            'singleLogoutService': {
-                'url': sso_config.get('sso_idp_slo_url', ''),
-                'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
-            },
-            'x509cert': sso_config.get('sso_idp_x509_cert', ''),
-        },
-        'security': {
-            'authnRequestsSigned': True,
-            'wantAssertionsSigned': True,
-            'wantNameIdEncrypted': False,
-        },
-    }
+        }
 
 
 def prepare_flask_request(flask_request):
@@ -97,9 +113,9 @@ def prepare_flask_request(flask_request):
     }
 
 
-def get_saml_auth(sso_config, flask_request, base_url):
+def get_saml_auth(sso_config, flask_request, base_url, *, org_settings=None):
     """Build a OneLogin_Saml2_Auth from config + request."""
-    settings = build_saml_settings(sso_config, base_url)
+    settings = build_saml_settings(sso_config, base_url, org_settings=org_settings)
     req = prepare_flask_request(flask_request)
     return OneLogin_Saml2_Auth(req, settings)
 

@@ -23,7 +23,7 @@ function usageNoteFor(roleName: string, roleUsage?: Record<string, RoleUsageEntr
   if (!roleUsage) return 'unknown';
   const entry = roleUsage[normalizeRoleKey(roleName)];
   if (!entry) return 'no inference data';
-  return entry.used ? `used (${entry.confidence})` : 'no evidence';
+  return entry.used ? `used (${entry.confidence})` : 'no activity signal';
 }
 
 function generateCleanupScript(identityName: string, roles: any[], roleUsage?: Record<string, RoleUsageEntry>): string {
@@ -146,7 +146,7 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
           </svg>
-          Candidate for removal
+          No activity signal — review
         </div>
       )}
       {r.why_critical && (() => {
@@ -204,7 +204,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
   const allRoles = useMemo(() => [...groupedRoles.azure, ...groupedRoles.entra], [groupedRoles]);
   const removableCount = useMemo(() => allRoles.filter((r: any) => r.is_removable).length, [allRoles]);
 
-  // Count roles with no usage evidence (from canonical inference)
+  // Count roles with no observable activity signal (from canonical inference)
   const rolesWithNoEvidence = useMemo(() => {
     if (!roleUsage) return [];
     return allRoles.filter((r: any) => {
@@ -233,7 +233,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <span className="text-sm font-medium text-amber-800">
-              {rolesWithNoEvidence.length} role{rolesWithNoEvidence.length > 1 ? 's' : ''} with no usage evidence — review for removal
+              {rolesWithNoEvidence.length} role{rolesWithNoEvidence.length > 1 ? 's' : ''} with no observable activity signal — review before removal
             </span>
           </div>
         </div>
@@ -245,7 +245,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
             </svg>
             <span className="text-sm font-medium text-green-800">
-              All roles have usage evidence (inferred from activity signals)
+              All roles show activity signals (inferred from ARM management plane)
             </span>
           </div>
         </div>
@@ -259,10 +259,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
             <span className="text-sm font-medium text-orange-800">
-              {removableCount} role{removableCount > 1 ? 's' : ''} can be safely removed
-            </span>
-            <span className="text-xs text-orange-600">
-              (stale, dormant, or never used)
+              {removableCount} role{removableCount > 1 ? 's' : ''} with no activity signal — review before removal
             </span>
           </div>
           <button
@@ -294,7 +291,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
           <div className="mt-3 flex items-center gap-2 text-xs text-gray-500 flex-wrap">
             <span className="font-medium text-gray-700">{allRoles.length} roles</span>
             <span className="text-gray-300">·</span>
-            {neverUsed > 0 && <><span className="text-red-600 font-medium">{neverUsed} never used</span><span className="text-gray-300">·</span></>}
+            {neverUsed > 0 && <><span className="text-red-600 font-medium" title="No ARM management plane activity observed in the last 90 days. AuditGraph cannot confirm these roles were unused — only that no activity was detectable.">{neverUsed} no activity observed</span><span className="text-gray-300">·</span></>}
             {active > 0 && <><span className="text-green-600 font-medium">{active} active (inferred)</span><span className="text-gray-300">·</span></>}
             {pending > 0 && <span className="text-gray-400">{pending} pending analysis</span>}
           </div>
@@ -361,7 +358,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
           <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          Active status is inferred from static role analysis. For exact role last-use dates, ARM activity collection is required.
+          Usage status is inferred from ARM management plane signals only. AuditGraph cannot confirm a role was unused — only that no detectable activity was observed. Verify with workload owners before removing roles.
         </div>
       )}
 

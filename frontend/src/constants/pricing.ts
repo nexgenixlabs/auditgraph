@@ -30,10 +30,6 @@ export const BASE_FEATURES: Record<string, { label: string; description: string 
   identity_governance:   { label: 'Identity Governance',             description: 'Service account attestation and lifecycle management' },
 };
 
-// ── Coming Soon Features (visible but disabled) ─────────────────────────────
-export const COMING_SOON_FEATURES: Record<string, { label: string; description: string }> = {
-  terraform_export: { label: 'Terraform/Bicep Export & Bot', description: 'Export infrastructure as Terraform/Bicep with bot integration' },
-};
 
 // ── Subscription Terms & Progressive Discounts ──────────────────────────────
 // Monthly = no discount. Longer commitments get progressive discounts.

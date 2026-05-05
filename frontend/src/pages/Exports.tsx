@@ -117,6 +117,7 @@ export default function Exports() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [latestSnapshot, setLatestSnapshot] = useState<SnapshotInfo | null>(null);
+  const [hasRuns, setHasRuns] = useState<boolean | null>(null);
 
   const orgId = activeOrgId ?? user?.organization_id ?? null;
   const orgName = activeOrgName ?? user?.org_name ?? null;
@@ -128,9 +129,12 @@ export default function Exports() {
         const runs = data?.runs || data || [];
         if (Array.isArray(runs) && runs.length > 0) {
           setLatestSnapshot({ id: runs[0].id, completed_at: runs[0].completed_at, total_identities: runs[0].total_identities });
+          setHasRuns(true);
+        } else {
+          setHasRuns(false);
         }
       })
-      .catch(() => {});
+      .catch(() => { setHasRuns(false); });
   }, [withConnection]);
 
   function getMeta() {
@@ -148,7 +152,10 @@ export default function Exports() {
         const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
         if (!res.ok) {
           const errData = await res.json().catch(() => null);
-          throw new Error(errData?.error || `Export failed (${res.status})`);
+          if (res.status === 404) {
+            throw new Error('Export unavailable — no identity data found for the current filters.');
+          }
+          throw new Error(errData?.error || 'Export interrupted. Try reducing your filter scope or contact support if this persists.');
         }
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
@@ -163,7 +170,10 @@ export default function Exports() {
         const res = await fetch(withConnection(`/api/export/${exportType}`) + dateParams);
         if (!res.ok) {
           const errData = await res.json().catch(() => null);
-          throw new Error(errData?.error || `Export failed (${res.status})`);
+          if (res.status === 404) {
+            throw new Error('Export unavailable — no identity data found for the current filters.');
+          }
+          throw new Error(errData?.error || 'Export interrupted. Try reducing your filter scope or contact support if this persists.');
         }
         const data = await res.json();
 
@@ -209,7 +219,7 @@ export default function Exports() {
       setLastExported(prev => ({ ...prev, [dlKey]: new Date().toLocaleTimeString() }));
       addToast(`${exportType} exported as ${format.toUpperCase()}`, 'success');
     } catch (e: any) {
-      addToast(e?.message || 'Export failed', 'error');
+      addToast(e?.message || 'Export failed — try reducing your filter scope or contact support.', 'error');
     } finally {
       setDownloading(null);
     }
@@ -224,6 +234,13 @@ export default function Exports() {
           Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
         </p>
       </div>
+
+      {hasRuns === false && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+          No data to export yet. Run your first discovery scan to generate exportable data.{' '}
+          <a href="/settings" className="font-medium text-amber-900 underline hover:no-underline">Go to Discovery</a>
+        </div>
+      )}
 
       {/* Export Metadata Strip */}
       <div className="rounded-xl border px-5 py-4" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>

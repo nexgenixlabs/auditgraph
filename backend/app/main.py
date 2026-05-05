@@ -72,6 +72,8 @@ from app.api.handlers import (
     trigger_remediation_generation_handler,
     get_remediation_script_handler,
     post_bulk_remediation,
+    post_bulk_create_ticket,
+    post_bulk_disable,
     get_role_usage_stats,
     get_role_mining,
     get_webhooks_list,
@@ -276,6 +278,21 @@ from app.api.handlers import (
     cleanup_inactive_connections_handler,
     rotate_connector_credentials,
     check_connector_credential_expiry_handler,
+    get_connector_permissions_handler,
+    get_telemetry_coverage_handler,
+    get_role_usage_summary_handler,
+    get_optimization_summary_handler,
+    get_optimization_recommendations_handler,
+    get_optimization_recommendation_detail_handler,
+    patch_optimization_recommendation_handler,
+    get_privilege_drift_summary_handler,
+    get_identity_drift_handler,
+    get_workload_attribution_summary_handler,
+    get_identity_workload_handler,
+    get_reachability_summary_handler,
+    get_identity_reachability_handler,
+    get_blast_radius_details_handler,
+    get_discovered_resources_handler,
     test_client_connection,
     discover_client_connection,
     get_rbac_hygiene_combined,
@@ -445,6 +462,7 @@ from app.api.handlers import (
     get_report_runs_handler,
     download_report_handler,
     get_platform_health_handler,
+    get_pipeline_health_handler,
     get_system_jobs_handler,
     get_system_job_detail_handler,
     get_system_tenants_health_handler,
@@ -737,12 +755,93 @@ def create_app():
         "allow_headers": ["Content-Type", "Authorization", "X-Portal-Context",
                           "X-Organization-Id", "X-API-Key", "Idempotency-Key",
                           "X-CSRF-Token", "X-Tenant-ID"],
-        "expose_headers": ["Content-Type", "X-Idempotency-Key", "X-Idempotent-Replayed"],
+        "expose_headers": ["Content-Type", "X-Idempotency-Key", "X-Idempotent-Replayed", "X-Export-Total-Count"],
         "supports_credentials": True,
     }})
 
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
+
+    # ── AG-110: Demo write guard — block ALL mutations for demo tenants ──
+    # Read-like POST routes that use POST for complex query payloads,
+    # not actual data mutation.  These are safe for demo users.
+    DEMO_GUARD_READ_LIKE_POSTS = frozenset({
+        '/api/identities/query',                # Advanced query builder
+        '/api/identities/risk-history/batch',    # Batch sparkline data
+        '/api/identities/exposure-graph',        # Exposure graph visualization
+        '/api/risk-rules/preview',               # Preview rule match count
+        '/api/security/risk-simulation',         # What-if risk simulation
+        '/api/security/copilot-query',           # AI copilot (read + activity log)
+        '/api/attack-paths/analyze',             # Attack path computation
+        '/api/graph-attack/analyze',             # Graph attack analysis
+        '/api/ai/explain-attack-path',           # AI explanation (stateless)
+        '/api/ai/executive-narrative',           # AI narrative (stateless)
+        '/api/ai/investigate-assistant',         # AI investigation (stateless)
+        '/api/ai/remediation-plan',              # AI plan (stateless)
+        '/api/ai/least-privilege-role',          # AI role suggestion (stateless)
+        '/api/attack-path/simulate',             # Attack simulation (read-only)
+        '/api/attack/simulate',                  # Attack simulation alias
+        '/api/onboarding/test-connection',       # Test creds without saving
+        '/api/client/connections/test',          # Test connection (read-only)
+        '/api/settings/test-email',              # Send test email (no mutation)
+        '/api/settings/test-connection',         # Test connection (read-only)
+        '/api/settings/sso/parse-metadata',      # Parse IdP metadata (read-only)
+    })
+    # Exact-path exemptions for unauthenticated auth flows.
+    # These are public POST routes that must work before/without
+    # a demo user context (login, signup, SSO, token exchange).
+    DEMO_GUARD_EXEMPT_AUTH_POSTS = frozenset({
+        '/api/auth/login',              # Public login
+        '/api/auth/signup',             # Public signup
+        '/api/auth/verify-email',       # Email verification (public)
+        '/api/auth/refresh',            # Token refresh (public)
+        '/api/auth/logout',             # Logout (session teardown, not a data mutation)
+        '/api/auth/forgot-password',    # Password reset request (public)
+        '/api/auth/reset-password',     # Password reset (public, uses reset token)
+        '/api/auth/accept-invitation',  # Invitation acceptance (public, uses invite token)
+        '/api/auth/saml/acs',           # SAML assertion consumer (public)
+        '/api/auth/saml/token',         # SAML one-time code exchange (public)
+    })
+    # Prefix-based exemptions for external auth/provisioning protocols
+    DEMO_GUARD_EXEMPT_PREFIXES = (
+        '/api/scim/',      # SCIM provisioning (own bearer token auth)
+        '/api/auth/oidc/', # OIDC callback flow (public)
+    )
+
+    @app.before_request
+    def _enforce_demo_write_guard():
+        """Block all mutations (POST/PUT/PATCH/DELETE) for demo tenants.
+
+        Runs after auth_middleware so g.current_user is populated.
+        Returns 403 JSON for demo orgs; None (pass-through) otherwise.
+        """
+        if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
+            return None
+
+        path = request.path
+
+        # Skip public auth endpoints (exact match)
+        if path in DEMO_GUARD_EXEMPT_AUTH_POSTS:
+            return None
+
+        # Skip external protocol prefixes (SCIM, OIDC)
+        if any(path.startswith(p) for p in DEMO_GUARD_EXEMPT_PREFIXES):
+            return None
+
+        # Skip read-like POST endpoints (exact match)
+        if request.method == 'POST' and path in DEMO_GUARD_READ_LIKE_POSTS:
+            return None
+
+        # Skip simulate endpoints with dynamic identity_id segments
+        if request.method == 'POST' and '/simulate' in path:
+            return None
+
+        # Check demo flag from authenticated user context
+        user = getattr(g, 'current_user', None)
+        if user and user.get('is_demo'):
+            return jsonify({'error': 'Demo tenant is read-only.'}), 403
+
+        return None
 
     # Phase 1 Security Hardening: Input sanitization (XSS/SQLi defense-in-depth)
     app.before_request(sanitize_request)
@@ -1048,7 +1147,24 @@ def create_app():
             _db_init.conn.commit()
             _rc.close()
         except Exception as e:
-            logger.warning("Role usage columns DDL skipped: %s", e)
+            logger.debug("Role usage columns DDL skipped (likely exists): %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # CRITICAL: Unique index required for ON CONFLICT upsert in save_entra_role_assignment().
+        # Separated from ALTER TABLE above to prevent transaction poisoning from blocking index creation.
+        try:
+            _rc2 = _db_init.conn.cursor()
+            _rc2.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_entra_roles_upsert
+                ON entra_role_assignments (identity_db_id, role_definition_id, COALESCE(directory_scope, '/'))
+            """)
+            _db_init.conn.commit()
+            _rc2.close()
+        except Exception as e:
+            logger.error("CRITICAL: idx_entra_roles_upsert creation FAILED — Entra role saves will fail: %s", e)
             try:
                 _db_init._rollback()
             except Exception:
@@ -1077,6 +1193,353 @@ def create_app():
             pass
         _perf_cursor.close()
 
+        # Optimization recommendations table
+        try:
+            _opt_cur = _db_init.conn.cursor()
+            _opt_cur.execute("""
+                CREATE TABLE IF NOT EXISTS optimization_recommendations (
+                    id BIGSERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    identity_db_id BIGINT,
+                    display_name TEXT,
+                    identity_category TEXT,
+                    role_name TEXT NOT NULL,
+                    role_type TEXT NOT NULL DEFAULT 'azure',
+                    scope TEXT DEFAULT '/',
+                    scope_type TEXT,
+                    classification TEXT NOT NULL,
+                    reason TEXT,
+                    advisory TEXT,
+                    evidence_summary JSONB DEFAULT '{}'::jsonb,
+                    review_status TEXT NOT NULL DEFAULT 'open',
+                    reviewer TEXT,
+                    reviewed_at TIMESTAMPTZ,
+                    review_note TEXT,
+                    discovery_run_id BIGINT,
+                    observation_window_days INTEGER DEFAULT 90,
+                    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(organization_id, identity_id, role_name, role_type, scope, classification)
+                )
+            """)
+            _opt_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_opt_rec_org_status
+                ON optimization_recommendations(organization_id, review_status)
+            """)
+            _opt_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_opt_rec_identity
+                ON optimization_recommendations(identity_id)
+            """)
+            # Backfill generated_at column for existing tables
+            _opt_cur.execute("""
+                ALTER TABLE optimization_recommendations
+                ADD COLUMN IF NOT EXISTS generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            """)
+            _db_init.conn.commit()
+            _opt_cur.close()
+        except Exception as e:
+            logger.warning("Optimization recommendations DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Privilege drift events table
+        try:
+            _drift_cur = _db_init.conn.cursor()
+            _drift_cur.execute("""
+                CREATE TABLE IF NOT EXISTS privilege_drift_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    identity_db_id BIGINT,
+                    display_name TEXT,
+                    identity_category TEXT,
+                    drift_type TEXT NOT NULL,
+                    role_name TEXT,
+                    role_type TEXT NOT NULL DEFAULT 'azure',
+                    scope TEXT,
+                    prior_scope TEXT,
+                    prior_risk_level TEXT,
+                    current_risk_level TEXT,
+                    prior_risk_score INTEGER,
+                    current_risk_score INTEGER,
+                    is_privileged BOOLEAN DEFAULT FALSE,
+                    details JSONB DEFAULT '{}'::jsonb,
+                    discovery_run_id BIGINT NOT NULL,
+                    previous_run_id BIGINT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            _drift_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_priv_drift_org_run
+                ON privilege_drift_events(organization_id, discovery_run_id)
+            """)
+            _drift_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_priv_drift_identity
+                ON privilege_drift_events(identity_id)
+            """)
+            _drift_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_priv_drift_type
+                ON privilege_drift_events(organization_id, drift_type)
+            """)
+            _db_init.conn.commit()
+            _drift_cur.close()
+        except Exception as e:
+            logger.warning("Privilege drift events DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Workload attributions table
+        try:
+            _wa_cur = _db_init.conn.cursor()
+            _wa_cur.execute("""
+                CREATE TABLE IF NOT EXISTS workload_attributions (
+                    id BIGSERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    identity_db_id BIGINT,
+                    workload_type TEXT NOT NULL,
+                    workload_name TEXT,
+                    workload_resource_id TEXT,
+                    workload_resource_group TEXT,
+                    workload_subscription_id TEXT,
+                    attribution_confidence INTEGER NOT NULL DEFAULT 0,
+                    attribution_basis TEXT NOT NULL,
+                    attribution_signals JSONB DEFAULT '[]'::jsonb,
+                    is_ai_workload BOOLEAN DEFAULT FALSE,
+                    discovery_run_id BIGINT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(organization_id, identity_db_id, workload_resource_id, attribution_basis)
+                )
+            """)
+            _wa_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wa_org_type
+                ON workload_attributions(organization_id, workload_type)
+            """)
+            _wa_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wa_identity
+                ON workload_attributions(identity_db_id)
+            """)
+            _wa_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wa_org_run
+                ON workload_attributions(organization_id, discovery_run_id)
+            """)
+            _db_init.conn.commit()
+            _wa_cur.close()
+        except Exception as e:
+            logger.warning("Workload attributions DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Identity reachability table
+        try:
+            _ir_cur = _db_init.conn.cursor()
+            _ir_cur.execute("""
+                CREATE TABLE IF NOT EXISTS identity_reachability (
+                    id BIGSERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    identity_db_id BIGINT NOT NULL,
+                    display_name TEXT,
+                    identity_category TEXT,
+                    reachable_resource_count INTEGER NOT NULL DEFAULT 0,
+                    reachable_privileged_resource_count INTEGER NOT NULL DEFAULT 0,
+                    subscriptions_reachable INTEGER NOT NULL DEFAULT 0,
+                    resource_groups_reachable INTEGER NOT NULL DEFAULT 0,
+                    high_value_targets_reachable INTEGER NOT NULL DEFAULT 0,
+                    has_privileged_roles BOOLEAN DEFAULT FALSE,
+                    privileged_role_names JSONB DEFAULT '[]'::jsonb,
+                    highest_scope_type TEXT,
+                    flag_broad_blast_radius BOOLEAN DEFAULT FALSE,
+                    flag_privileged_wide_reach BOOLEAN DEFAULT FALSE,
+                    flag_ai_excessive_blast BOOLEAN DEFAULT FALSE,
+                    flag_dormant_high_blast BOOLEAN DEFAULT FALSE,
+                    risk_flag_count INTEGER NOT NULL DEFAULT 0,
+                    risk_flag_details JSONB DEFAULT '[]'::jsonb,
+                    blast_radius_risk_score INTEGER DEFAULT 0,
+                    blast_radius_exposure_level TEXT DEFAULT 'LOW',
+                    agent_identity_type TEXT,
+                    activity_status TEXT,
+                    discovery_run_id BIGINT NOT NULL,
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(identity_db_id, discovery_run_id)
+                )
+            """)
+            _ir_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ir_org_run
+                ON identity_reachability(organization_id, discovery_run_id)
+            """)
+            _ir_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ir_identity
+                ON identity_reachability(identity_db_id)
+            """)
+            _ir_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ir_flags
+                ON identity_reachability(organization_id, risk_flag_count DESC)
+                WHERE risk_flag_count > 0
+            """)
+            _ir_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ir_exposure
+                ON identity_reachability(organization_id, blast_radius_exposure_level)
+            """)
+            _db_init.conn.commit()
+            _ir_cur.close()
+        except Exception as e:
+            logger.warning("Identity reachability DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Discovered resources table (scope-derived resource inventory)
+        try:
+            _dr_cur = _db_init.conn.cursor()
+            _dr_cur.execute("""
+                CREATE TABLE IF NOT EXISTS discovered_resources (
+                    id BIGSERIAL PRIMARY KEY,
+                    organization_id INTEGER NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    resource_name TEXT,
+                    resource_type TEXT NOT NULL,
+                    provider_type TEXT NOT NULL,
+                    subscription_id TEXT,
+                    resource_group TEXT,
+                    is_high_value BOOLEAN DEFAULT FALSE,
+                    high_value_reason TEXT,
+                    data_classification TEXT,
+                    risk_level TEXT,
+                    identity_count INTEGER DEFAULT 0,
+                    privileged_identity_count INTEGER DEFAULT 0,
+                    discovery_source TEXT NOT NULL DEFAULT 'rbac_scope',
+                    discovery_run_id BIGINT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(organization_id, resource_id, discovery_run_id)
+                )
+            """)
+            _dr_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_dr_org_run
+                ON discovered_resources(organization_id, discovery_run_id)
+            """)
+            _dr_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_dr_type
+                ON discovered_resources(organization_id, resource_type)
+            """)
+            _dr_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_dr_subscription
+                ON discovered_resources(organization_id, subscription_id)
+            """)
+            _dr_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_dr_high_value
+                ON discovered_resources(organization_id, discovery_run_id)
+                WHERE is_high_value = true
+            """)
+            _db_init.conn.commit()
+            _dr_cur.close()
+        except Exception as e:
+            logger.warning("Discovered resources DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Migration 109: Add metadata columns to discovered_resources
+        try:
+            _dr_meta_cur = _db_init.conn.cursor()
+            _dr_meta_cur.execute("""
+                ALTER TABLE discovered_resources
+                    ADD COLUMN IF NOT EXISTS location TEXT,
+                    ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '{}',
+                    ADD COLUMN IF NOT EXISTS sku TEXT,
+                    ADD COLUMN IF NOT EXISTS kind TEXT,
+                    ADD COLUMN IF NOT EXISTS managed_by TEXT,
+                    ADD COLUMN IF NOT EXISTS parent_resource_id TEXT,
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()
+            """)
+            _dr_meta_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_dr_location
+                ON discovered_resources(organization_id, location)
+                WHERE location IS NOT NULL
+            """)
+            _db_init.conn.commit()
+            _dr_meta_cur.close()
+        except Exception as e:
+            logger.debug("Discovered resources metadata columns DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Migration 110: Pipeline health metrics table
+        try:
+            _ph_cur = _db_init.conn.cursor()
+            _ph_cur.execute("""
+                CREATE TABLE IF NOT EXISTS pipeline_stage_metrics (
+                    id BIGSERIAL PRIMARY KEY,
+                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    organization_id INTEGER NOT NULL,
+                    stage_name TEXT NOT NULL,
+                    stage_order INTEGER NOT NULL DEFAULT 0,
+                    records_fetched INTEGER NOT NULL DEFAULT 0,
+                    records_matched INTEGER NOT NULL DEFAULT 0,
+                    records_persisted INTEGER NOT NULL DEFAULT 0,
+                    records_failed INTEGER NOT NULL DEFAULT 0,
+                    records_skipped INTEGER NOT NULL DEFAULT 0,
+                    failure_rate NUMERIC(5,2) DEFAULT 0,
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    duration_ms INTEGER DEFAULT 0,
+                    health_status TEXT NOT NULL DEFAULT 'healthy',
+                    degradation_reason TEXT,
+                    error_message TEXT,
+                    prior_run_persisted INTEGER,
+                    delta_vs_prior NUMERIC(5,2),
+                    extra JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT uq_pipeline_stage_run UNIQUE (discovery_run_id, stage_name)
+                )
+            """)
+            _ph_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_psm_org_run
+                ON pipeline_stage_metrics(organization_id, discovery_run_id DESC)
+            """)
+            _ph_cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_psm_health_status
+                ON pipeline_stage_metrics(organization_id, health_status)
+                WHERE health_status != 'healthy'
+            """)
+            _db_init.conn.commit()
+            _ph_cur.close()
+        except Exception as e:
+            logger.debug("Pipeline stage metrics DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
+        # Add pipeline_health_summary column to discovery_runs
+        try:
+            _phs_cur = _db_init.conn.cursor()
+            _phs_cur.execute("""
+                ALTER TABLE discovery_runs
+                    ADD COLUMN IF NOT EXISTS pipeline_health_summary JSONB DEFAULT NULL
+            """)
+            _db_init.conn.commit()
+            _phs_cur.close()
+        except Exception as e:
+            logger.debug("discovery_runs pipeline_health_summary DDL skipped: %s", e)
+            try:
+                _db_init._rollback()
+            except Exception:
+                pass
+
         # Backfill NULL role_name/scope in generated_remediations
         try:
             _bf_count = _db_init.backfill_generated_remediations_roles()
@@ -1091,6 +1554,17 @@ def create_app():
 
         _db_init.close()
         _DbInit._migration_in_progress = False
+
+    # AG-95-v2: Validate SAML settings for all SSO-enabled orgs at boot.
+    # Runs AFTER DB init, BEFORE serving traffic.
+    try:
+        from app.security.sso_security import validate_saml_settings_at_boot
+        validate_saml_settings_at_boot()
+    except Exception as _boot_err:
+        from app.security.sso_security import BootValidationError
+        if isinstance(_boot_err, BootValidationError):
+            raise  # Fatal in staging/production — abort startup
+        logger.warning("SAML boot validation error (non-fatal): %s", _boot_err)
 
     # -----------------------
     # Health & Monitoring (Phase 68 + Phase 4A)
@@ -1145,6 +1619,7 @@ def create_app():
         return auth_signup()
 
     @app.post("/api/auth/verify-email")
+    @rate_limit(max_requests=10, window_seconds=300)  # AG-95: 10 per 5 min per IP
     def verify_email():
         return auth_verify_email()
 
@@ -1183,6 +1658,7 @@ def create_app():
         return forgot_password_handler()
 
     @app.get("/api/auth/validate-reset-token")
+    @rate_limit(max_requests=10, window_seconds=300)  # AG-95: 10 per 5 min per IP
     def validate_reset_token():
         return validate_reset_token_handler()
 
@@ -1796,10 +2272,12 @@ def create_app():
         return saml_login()
 
     @app.post("/api/auth/saml/acs")
+    @rate_limit(max_requests=10, window_seconds=60)   # AG-95: 10 ACS per min per IP
     def saml_acs_route():
         return saml_acs()
 
     @app.post("/api/auth/saml/token")
+    @rate_limit(max_requests=10, window_seconds=300)   # AG-95: 10 exchanges per 5 min per IP
     def saml_token_route():
         return saml_token_exchange()
 
@@ -2378,6 +2856,16 @@ def create_app():
     def bulk_remediation():
         return post_bulk_remediation()
 
+    @app.post("/api/bulk/create-ticket")
+    @require_role('auditor', 'admin')
+    def bulk_create_ticket():
+        return post_bulk_create_ticket()
+
+    @app.post("/api/bulk/disable")
+    @require_role('admin')
+    def bulk_disable():
+        return post_bulk_disable()
+
     # -----------------------
     # Dashboard Charts (Phase 26)
     # -----------------------
@@ -2509,6 +2997,82 @@ def create_app():
     @require_role('admin', 'security_admin')
     def connector_expiring_credentials():
         return check_connector_credential_expiry_handler()
+
+    @app.get("/api/connectors/permissions")
+    @require_role('admin', 'security_admin')
+    def connector_permissions():
+        return get_connector_permissions_handler()
+
+    @app.get("/api/telemetry/coverage")
+    @require_role('admin', 'security_admin', 'auditor')
+    def telemetry_coverage():
+        return get_telemetry_coverage_handler()
+
+    @app.get("/api/role-usage/summary")
+    @require_role('admin', 'security_admin', 'auditor')
+    def role_usage_summary():
+        return get_role_usage_summary_handler()
+
+    @app.get("/api/optimization/summary")
+    @require_role('admin', 'security_admin', 'auditor')
+    def optimization_summary():
+        return get_optimization_summary_handler()
+
+    @app.get("/api/optimization/recommendations")
+    @require_role('admin', 'security_admin', 'auditor')
+    def optimization_recommendations_list():
+        return get_optimization_recommendations_handler()
+
+    @app.get("/api/optimization/recommendations/<int:rec_id>")
+    @require_role('admin', 'security_admin', 'auditor')
+    def optimization_recommendation_detail(rec_id):
+        return get_optimization_recommendation_detail_handler(rec_id)
+
+    @app.patch("/api/optimization/recommendations/<int:rec_id>")
+    @require_role('admin', 'security_admin')
+    def optimization_recommendation_review(rec_id):
+        return patch_optimization_recommendation_handler(rec_id)
+
+    # -----------------------
+    # Privilege Drift / Delta Engine
+    # -----------------------
+    @app.get("/api/drift/summary")
+    def privilege_drift_summary():
+        return get_privilege_drift_summary_handler()
+
+    @app.get("/api/identities/<identity_id>/drift")
+    def identity_drift_events(identity_id):
+        return get_identity_drift_handler(identity_id)
+
+    # -----------------------
+    # Workload Attribution
+    # -----------------------
+    @app.get("/api/workload-attributions/summary")
+    def workload_attribution_summary():
+        return get_workload_attribution_summary_handler()
+
+    @app.get("/api/identities/<identity_id>/workload")
+    def identity_workload(identity_id):
+        return get_identity_workload_handler(identity_id)
+
+    # -----------------------
+    # Identity Reachability
+    # -----------------------
+    @app.get("/api/reachability/summary")
+    def reachability_summary():
+        return get_reachability_summary_handler()
+
+    @app.get("/api/identities/<identity_id>/reachability")
+    def identity_reachability(identity_id):
+        return get_identity_reachability_handler(identity_id)
+
+    @app.get("/api/identities/<identity_id>/blast-radius/details")
+    def blast_radius_details(identity_id):
+        return get_blast_radius_details_handler(identity_id)
+
+    @app.get("/api/discovered-resources")
+    def discovered_resources_list():
+        return get_discovered_resources_handler()
 
     # -----------------------
     # Webhooks (Phase 28 - Admin only for writes)
@@ -3954,6 +4518,11 @@ def create_app():
     @require_role('admin', 'security_admin')
     def platform_health_overview():
         return get_platform_health_handler()
+
+    @app.get("/api/platform/health/pipelines")
+    @require_role('admin', 'security_admin')
+    def platform_pipeline_health():
+        return get_pipeline_health_handler()
 
     @app.get("/api/platform/jobs")
     @require_role('admin', 'security_admin')

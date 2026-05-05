@@ -135,13 +135,13 @@ def _seed_benchmark_tenant(db, size_name, size_config):
                 (identity_id, display_name, identity_type, identity_category,
                  risk_score, risk_level, discovery_run_id, app_id, object_id,
                  activity_status, last_sign_in, created_at, enabled,
-                 is_microsoft_system)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), true, false)
+                 is_microsoft_system, organization_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), true, false, %s)
             RETURNING id
         """, (identity_id, f"identity-{size_name}-{i:04d}", 'servicePrincipal', cat,
               random.randint(10, 90), random.choice(['low', 'medium', 'high']),
               run_id, _gen_uuid(), identity_id, 'active',
-              NOW - timedelta(days=random.randint(0, 30))))
+              NOW - timedelta(days=random.randint(0, 30)), org_id))
         db_id = cursor.fetchone()[0]
 
     # Agent identities
@@ -156,14 +156,14 @@ def _seed_benchmark_tenant(db, size_name, size_config):
                 (identity_id, display_name, identity_type, identity_category,
                  risk_score, risk_level, discovery_run_id, app_id, object_id,
                  activity_status, last_sign_in, created_at, enabled,
-                 is_microsoft_system, agent_identity_type)
+                 is_microsoft_system, agent_identity_type, organization_id)
             VALUES (%s, %s, 'servicePrincipal', 'service_principal',
-                    %s, %s, %s, %s, %s, %s, %s, NOW(), true, false, 'ai_agent')
+                    %s, %s, %s, %s, %s, %s, %s, NOW(), true, false, 'ai_agent', %s)
             RETURNING id
         """, (identity_id, f"ai-agent-{size_name}-{random.choice(SPN_NAMES)}-{i:03d}",
               risk_score, 'critical' if risk_score >= 76 else 'high' if risk_score >= 51 else 'medium',
               run_id, _gen_uuid(), identity_id,
-              'stale' if is_orphan else 'active', last_sign_in))
+              'stale' if is_orphan else 'active', last_sign_in, org_id))
         db_id = cursor.fetchone()[0]
         agent_db_ids.append(db_id)
         agent_identity_ids.append(identity_id)

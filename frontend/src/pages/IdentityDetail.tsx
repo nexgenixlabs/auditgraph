@@ -891,6 +891,20 @@ export default function IdentityDetail() {
                       Microsoft Internal
                     </span>
                   )}
+                  {!!(identity as any).telemetry_coverage && (
+                    <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                      (identity as any).telemetry_coverage === 'full' ? 'bg-green-50 text-green-700 border border-green-200' :
+                      (identity as any).telemetry_coverage === 'partial' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' :
+                      'bg-red-50 text-red-700 border border-red-200'
+                    }`} title={
+                      (identity as any).telemetry_coverage === 'full' ? 'All telemetry sources active' :
+                      (identity as any).telemetry_coverage === 'partial' ? 'Some telemetry sources active' :
+                      'No telemetry — activity cannot be determined'
+                    }>
+                      {(identity as any).telemetry_coverage === 'full' ? 'Full Telemetry' :
+                       (identity as any).telemetry_coverage === 'partial' ? 'Partial Telemetry' : 'Telemetry Blind'}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -1307,6 +1321,7 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string }> = {
   pim_activation: { dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200' },
   soar_action: { dot: 'bg-purple-500', bg: 'bg-purple-50 border-purple-200' },
   remediation: { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200' },
+  security_finding: { dot: 'bg-cyan-500', bg: 'bg-cyan-50 border-cyan-200' },
 };
 
 const EVENT_LABELS: Record<string, string> = {
@@ -1316,6 +1331,7 @@ const EVENT_LABELS: Record<string, string> = {
   pim_activation: 'PIM Activation',
   soar_action: 'SOAR Action',
   remediation: 'Remediation',
+  security_finding: 'Security Finding',
 };
 
 const SENS_CLASS_COLORS: Record<string, { bg: string; fg: string }> = {

@@ -19,7 +19,7 @@ export default function Signup() {
   const [error, setError] = useState<string | null>(null);
 
   const infoValid =
-    email.includes('@') &&
+    /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(email.trim()) &&
     password.length >= 8 &&
     password === confirmPassword &&
     orgName.trim().length >= 2;

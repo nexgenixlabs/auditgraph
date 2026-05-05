@@ -91,7 +91,7 @@ function formatPlatform(p: string | null): string {
 function roleSummaryText(rs: RoleSummary): string {
   if (!rs || rs.total_roles === 0) return '0 roles';
   const parts = [`${rs.total_roles} role${rs.total_roles !== 1 ? 's' : ''}`];
-  if (rs.never_used > 0) parts.push(`${rs.never_used} never used`);
+  if (rs.never_used > 0) parts.push(`${rs.never_used} no activity observed`);
   if (rs.stale_90d > 0) parts.push(`${rs.stale_90d} used >90d ago`);
   if (rs.never_used === 0 && rs.stale_90d === 0 && !rs.last_role_active) {
     parts.push('activity via ARM snapshot');

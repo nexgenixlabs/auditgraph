@@ -19,8 +19,6 @@ interface ChecklistItem {
 
 const CLOUD_OPTIONS = [
   { key: 'azure', label: 'Microsoft Azure', desc: 'Entra ID, Azure RBAC, Key Vaults, Storage' },
-  { key: 'aws', label: 'Amazon Web Services', desc: 'IAM, Organizations, S3, KMS (coming soon)' },
-  { key: 'gcp', label: 'Google Cloud', desc: 'Cloud IAM, Projects, GCS, KMS (coming soon)' },
 ];
 
 /** SessionStorage key for persisting wizard step across refreshes. */
@@ -101,7 +99,7 @@ export default function OnboardingWizard() {
       return false; // AWS/GCP not yet supported
     }
     if (step === 3) return testResult?.status === 'success';
-    if (step === 4) return !emailEnabled || (emailTo.includes('@'));
+    if (step === 4) return !emailEnabled || /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(emailTo.trim());
     return true;
   }, [step, orgName, selectedCloud, azureTenantId, azureClientId, azureClientSecret, testResult, emailEnabled, emailTo]);
 
@@ -299,19 +297,14 @@ export default function OnboardingWizard() {
               </p>
             </div>
             <div className="space-y-3">
-              {CLOUD_OPTIONS.map(cloud => {
-                const disabled = cloud.key !== 'azure';
-                return (
+              {CLOUD_OPTIONS.map(cloud => (
                   <button
                     key={cloud.key}
-                    onClick={() => !disabled && setSelectedCloud(cloud.key)}
-                    disabled={disabled}
+                    onClick={() => setSelectedCloud(cloud.key)}
                     className={`w-full text-left p-4 rounded-xl border-2 transition ${
                       selectedCloud === cloud.key
                         ? 'border-blue-500 bg-blue-900/20'
-                        : disabled
-                          ? 'border-gray-700 bg-gray-800/30 opacity-50 cursor-not-allowed'
-                          : 'border-gray-700 hover:border-gray-500'
+                        : 'border-gray-700 hover:border-gray-500'
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -322,13 +315,9 @@ export default function OnboardingWizard() {
                       {selectedCloud === cloud.key && (
                         <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">{'\u2713'}</div>
                       )}
-                      {disabled && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-gray-600 text-gray-300">Coming Soon</span>
-                      )}
                     </div>
                   </button>
-                );
-              })}
+              ))}
             </div>
           </div>
         )}

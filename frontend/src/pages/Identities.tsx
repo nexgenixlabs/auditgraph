@@ -160,6 +160,8 @@ interface IdentityRow {
   // Federated credential classification
   federated_workload_type?: string | null;
   federated_workload_name?: string | null;
+  has_federated_credentials?: boolean;
+  federated_issuer_types?: string[];
   // Dependency impact
   dependency_impact?: string | null;
   // Observed usage tracking
@@ -728,7 +730,7 @@ export default function IdentitiesPage() {
     // AGIRS factor banners
     const AGIRS_BANNER: Record<string, string> = {
       h1_ghost: 'HIRI — Ghost Humans: disabled/deleted accounts with active role assignments',
-      h2_dormant_priv: 'HIRI — Dormant Privileged: stale/never-used humans with privileged roles',
+      h2_dormant_priv: 'HIRI — Dormant Privileged: stale/no-activity humans with privileged roles',
       h3_over_priv: 'HIRI — Over-Privileged: humans with risk score \u226570 or T0 tier',
       h4_ext_guest: 'HIRI — Privileged Guests: external guests with privileged role assignments',
       n1_orphaned: 'NHIRI — Orphaned: non-human identities with no assigned owner',
@@ -739,9 +741,9 @@ export default function IdentitiesPage() {
     if (agirsParam && AGIRS_BANNER[agirsParam]) {
       setContextBanner(AGIRS_BANNER[agirsParam]);
     } else if (activityParamForBanner === 'dormant_strict' && params.get('privileged') === 'true') {
-      setContextBanner('Dormant accounts with active privileged roles (stale or never used)');
+      setContextBanner('Dormant accounts with active privileged roles (stale or no activity observed)');
     } else if (activityParamForBanner === 'dormant_strict') {
-      setContextBanner('Dormant identities (stale or never used — excludes idle)');
+      setContextBanner('Dormant identities (stale or no activity observed — excludes idle)');
     } else if (statusParamForBanner?.toLowerCase() === 'disabled' && hasRolesParam === 'true') {
       setContextBanner('Ghost identities — disabled in Entra ID but retain active RBAC roles');
     } else if (catParamForBanner === 'guest' && hasRolesParam === 'true') {
@@ -792,6 +794,8 @@ export default function IdentitiesPage() {
             created_datetime: raw.created_datetime || null,
             last_seen_auth: raw.last_sign_in || null,
             last_sign_in: raw.last_sign_in || null,
+            last_activity_date: raw.last_activity_date || null,
+            last_activity_source: raw.last_activity_source || null,
             credential_count: raw.credential_count ?? 0,
             credential_status: raw.credential_risk || raw.credential_status || null,
             owner_display_name: raw.owner_display_name || null,
@@ -818,6 +822,8 @@ export default function IdentitiesPage() {
             recommended_action: raw.recommended_action || null,
             federated_workload_type: raw.federated_workload_type || null,
             federated_workload_name: raw.federated_workload_name || null,
+            has_federated_credentials: raw.has_federated_credentials ?? false,
+            federated_issuer_types: raw.federated_issuer_types || [],
             dependency_impact: raw.dependency_impact || null,
             is_discovery_connector: raw.is_discovery_connector ?? false,
             app_registration_object_id: raw.app_registration_object_id || null,
@@ -879,6 +885,8 @@ export default function IdentitiesPage() {
           created_datetime: raw.created_datetime || null,
           last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
           last_sign_in: raw.last_sign_in || null,
+          last_activity_date: raw.last_activity_date || null,
+          last_activity_source: raw.last_activity_source || null,
           api_permission_count: raw.api_permission_count ?? 0,
           role_count: raw.role_count ?? 0,
           rbac_role_count: raw.rbac_role_count ?? 0,
@@ -940,6 +948,8 @@ export default function IdentitiesPage() {
           verdict_risk_summary: raw.verdict_risk_summary || [],
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
+          has_federated_credentials: raw.has_federated_credentials ?? false,
+          federated_issuer_types: raw.federated_issuer_types || [],
           dependency_impact: raw.dependency_impact || null,
           observed_last_used: raw.observed_last_used || null,
           last_signin_at: raw.last_signin_at || null,
@@ -1137,6 +1147,8 @@ export default function IdentitiesPage() {
           created_datetime: raw.created_datetime || null,
           last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
           last_sign_in: raw.last_sign_in || null,
+          last_activity_date: raw.last_activity_date || null,
+          last_activity_source: raw.last_activity_source || null,
           api_permission_count: raw.api_permission_count ?? 0,
           role_count: raw.role_count ?? 0,
           rbac_role_count: raw.rbac_role_count ?? 0,
@@ -1189,6 +1201,8 @@ export default function IdentitiesPage() {
           recommended_action: raw.recommended_action || null,
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
+          has_federated_credentials: raw.has_federated_credentials ?? false,
+          federated_issuer_types: raw.federated_issuer_types || [],
           dependency_impact: raw.dependency_impact || null,
           observed_last_used: raw.observed_last_used || null,
           // Three-dimension governance fields — SSOT from backend
@@ -2759,6 +2773,18 @@ export default function IdentitiesPage() {
                             : i.federated_workload_name || i.federated_workload_type;
                           return lineageBtn(
                             <span className="text-[10px] text-purple-700 font-semibold truncate group-hover:text-purple-800">{fedLabel}</span>,
+                            'Federated Credential'
+                          );
+                        }
+
+                        // P2.5: AG-148 — has_federated_credentials but no federated_workload_type
+                        if (i.has_federated_credentials && !i.federated_workload_type) {
+                          const issuerTypes = i.federated_issuer_types || [];
+                          const label = Array.isArray(issuerTypes) && issuerTypes.length > 0
+                            ? issuerTypes[0].replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())
+                            : 'External OIDC';
+                          return lineageBtn(
+                            <span className="text-[10px] text-purple-700 font-semibold truncate group-hover:text-purple-800">{label}</span>,
                             'Federated Credential'
                           );
                         }

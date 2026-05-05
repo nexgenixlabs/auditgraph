@@ -1,6 +1,11 @@
 import React from 'react';
 import { SettingsData, StatusData, WebhookData, WebhookDelivery } from './types';
 
+const REPORT_FREQUENCY_OPTIONS = [
+  { value: 'weekly', label: 'Weekly (Mon 8:00 UTC)' },
+  { value: 'monthly', label: 'Monthly (1st 8:00 UTC)' },
+] as const;
+
 interface NotificationsTabProps {
   settings: SettingsData;
   status: StatusData | null;
@@ -157,29 +162,39 @@ export function NotificationsTab({
             )}
           </div>
 
-          {/* Section 4: Scheduled Reports */}
+          {/* Section 4: Report Schedule */}
           <div className="bg-white rounded-xl border shadow-sm p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <div className="text-lg font-semibold text-gray-900">Scheduled Reports</div>
-              <button
-                onClick={() => toggleBool('report_schedule_enabled')}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  settings.report_schedule_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    settings.report_schedule_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
+              <div className="text-lg font-semibold text-gray-900">Report Schedule</div>
+              {status?.report_schedule_allowed !== false && (
+                <button
+                  onClick={() => toggleBool('report_schedule_enabled')}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    settings.report_schedule_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300'
                   }`}
-                />
-              </button>
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      settings.report_schedule_enabled === 'true' ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              )}
             </div>
 
             <p className="text-sm text-gray-500">
               Automatically send an executive summary report on a recurring schedule.
             </p>
 
-            {settings.report_schedule_enabled === 'true' && (
+            {/* Entitlement lock — visible but disabled for free-tier orgs */}
+            {status?.report_schedule_allowed === false ? (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <p className="text-sm text-gray-600">
+                  Scheduled reports are available on Pro and Trial plans.
+                  Contact sales to upgrade.
+                </p>
+              </div>
+            ) : settings.report_schedule_enabled === 'true' ? (
               <>
                 {/* Frequency selector */}
                 <div>
@@ -187,10 +202,7 @@ export function NotificationsTab({
                     Delivery Frequency
                   </label>
                   <div className="flex gap-3">
-                    {([
-                      { value: 'weekly', label: 'Weekly (Mon 8:00 UTC)' },
-                      { value: 'monthly', label: 'Monthly (1st 8:00 UTC)' },
-                    ] as const).map(opt => (
+                    {REPORT_FREQUENCY_OPTIONS.map(opt => (
                       <button
                         key={opt.value}
                         onClick={() => update('report_schedule_frequency', opt.value)}
@@ -204,15 +216,12 @@ export function NotificationsTab({
                       </button>
                     ))}
                   </div>
-                  <p className="text-xs text-gray-400 mt-2">
-                    Schedule changes take effect on next scheduler restart.
-                  </p>
                 </div>
 
                 {/* Report recipient */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Report Recipient
+                    Delivery Email
                   </label>
                   <input
                     type="email"
@@ -226,17 +235,27 @@ export function NotificationsTab({
                   </p>
                 </div>
 
-                {/* Next delivery time */}
-                {status?.next_report && (
+                {/* Schedule status: next + last delivery */}
+                <div className="space-y-1.5">
                   <div className="flex items-center gap-2 text-sm">
                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                     <span className="text-gray-600">
-                      Next delivery: {new Date(status.next_report).toLocaleString()}
+                      Next delivery: {status?.next_report
+                        ? new Date(status.next_report).toLocaleString()
+                        : 'Pending scheduler start'}
                     </span>
                   </div>
-                )}
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2 h-2 rounded-full bg-gray-400" />
+                    <span className="text-gray-500">
+                      Last delivery: {status?.last_report
+                        ? new Date(status.last_report).toLocaleString()
+                        : 'Never'}
+                    </span>
+                  </div>
+                </div>
               </>
-            )}
+            ) : null}
           </div>
 
           {/* Section 5: Webhooks */}

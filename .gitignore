@@ -65,3 +65,15 @@ diagnostics.sh
 backend/=*
 test-results/
 backend/test-results/
+
+# =====================
+# Backup files — use git history for version recovery
+# =====================
+*.backup
+*.tsx.backup
+*.ts.backup
+*_backup.tsx
+*_backup.ts
+*_backup.py
+*_simplified_backup*
+*_Phase*_backup*

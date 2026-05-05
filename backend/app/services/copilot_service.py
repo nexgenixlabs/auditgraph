@@ -9,11 +9,15 @@ Phase 12 additions:
 - get_remediation_advice() — type-specific remediation guidance
 - translate_security_query() — natural language → API mapping
 - generate_security_summary() — tenant-wide security summary
+
+AG-132: All data-gathering methods enforce org_id (CWE-639, OWASP A01:2021).
 """
 import json
 import logging
 import os
 from datetime import datetime
+
+from app.security.tenant_scope import requires_org_id, TenantScopeError
 
 logger = logging.getLogger(__name__)
 
@@ -179,19 +183,24 @@ When providing answers:
             raise CircuitBreakerOpenError("LLM API circuit breaker is OPEN")
         return self.client
 
-    def gather_context(self, db) -> str:
-        """Gather current AuditGraph data as context for the AI."""
+    @requires_org_id
+    def gather_context(self, db, *, org_id: int) -> str:
+        """Gather current AuditGraph data as context for the AI.
+
+        AG-132: All queries scoped to org_id. No cross-tenant data leaks.
+        """
         context_parts = []
 
         try:
             cursor = db.conn.cursor()
 
-            # Latest run stats
+            # Latest run stats — scoped to org
             cursor.execute("""
                 SELECT id, completed_at, total_identities, critical_count, high_count, medium_count
-                FROM discovery_runs WHERE status = 'completed'
+                FROM discovery_runs
+                WHERE status = 'completed' AND organization_id = %s
                 ORDER BY id DESC LIMIT 1
-            """)
+            """, (org_id,))
             run = cursor.fetchone()
             if run:
                 context_parts.append(
@@ -204,15 +213,16 @@ When providing answers:
                 context_parts.append("No completed discovery runs found.")
                 run_id = None
 
-            # Anomaly stats
+            # Anomaly stats — scoped to org
             if run_id:
                 cursor.execute("""
                     SELECT COUNT(*) as total,
                            COUNT(*) FILTER (WHERE resolved = false) as unresolved,
                            COUNT(*) FILTER (WHERE severity = 'critical') as critical,
                            COUNT(*) FILTER (WHERE severity = 'high') as high
-                    FROM anomalies WHERE run_id = %s
-                """, (run_id,))
+                    FROM anomalies
+                    WHERE run_id = %s AND organization_id = %s
+                """, (run_id, org_id))
                 anom = cursor.fetchone()
                 if anom and anom[0] > 0:
                     context_parts.append(
@@ -220,37 +230,41 @@ When providing answers:
                         f"({anom[2]} critical, {anom[3]} high)"
                     )
 
-            # Credential health
+            # Credential health — scoped to org
             if run_id:
                 cursor.execute("""
                     SELECT
                         COUNT(*) FILTER (WHERE credential_status = 'expired') as expired,
                         COUNT(*) FILTER (WHERE credential_status = 'expiring_soon') as expiring,
                         COUNT(*) FILTER (WHERE credential_status = 'healthy') as healthy
-                    FROM identities WHERE discovery_run_id = %s
-                """, (run_id,))
+                    FROM identities
+                    WHERE discovery_run_id = %s AND organization_id = %s
+                """, (run_id, org_id))
                 creds = cursor.fetchone()
                 if creds:
                     context_parts.append(
                         f"Credential health: {creds[0]} expired, {creds[1]} expiring soon, {creds[2]} healthy"
                     )
 
-            # Risk distribution
+            # Risk distribution — scoped to org
             if run_id:
                 cursor.execute("""
                     SELECT identity_category, COUNT(*) as cnt
-                    FROM identities WHERE discovery_run_id = %s
+                    FROM identities
+                    WHERE discovery_run_id = %s AND organization_id = %s
                     GROUP BY identity_category ORDER BY cnt DESC
-                """, (run_id,))
+                """, (run_id, org_id))
                 cats = cursor.fetchall()
                 if cats:
                     cat_str = ", ".join(f"{c[0]}: {c[1]}" for c in cats)
                     context_parts.append(f"Identity categories: {cat_str}")
 
-            # Recent drift
+            # Recent drift — scoped to org
             cursor.execute("""
-                SELECT changes FROM drift_reports ORDER BY id DESC LIMIT 1
-            """)
+                SELECT changes FROM drift_reports
+                WHERE organization_id = %s
+                ORDER BY id DESC LIMIT 1
+            """, (org_id,))
             drift_row = cursor.fetchone()
             if drift_row:
                 try:
@@ -262,6 +276,8 @@ When providing answers:
                     pass
 
             cursor.close()
+        except TenantScopeError:
+            raise
         except Exception as e:
             logger.warning(f"Error gathering copilot context: {e}")
             try:
@@ -270,10 +286,24 @@ When providing answers:
                 pass
             context_parts.append("(Some context data unavailable)")
 
+        # AG-132: Log fingerprint of data passed to LLM for audit trail
+        logger.info(
+            "copilot_context_gathered",
+            extra={
+                "event": "copilot_context_gathered",
+                "org_id": org_id,
+                "context_line_count": len(context_parts),
+            },
+        )
+
         return "\n".join(context_parts)
 
-    def get_suggestions(self, db) -> list:
-        """Return contextual quick-ask suggestions based on current posture."""
+    @requires_org_id
+    def get_suggestions(self, db, *, org_id: int) -> list:
+        """Return contextual quick-ask suggestions based on current posture.
+
+        AG-132: All queries scoped to org_id. No cross-tenant data leaks.
+        """
         suggestions = [
             "What is our current security posture?",
             "Which identities need immediate attention?",
@@ -282,45 +312,58 @@ When providing answers:
         try:
             cursor = db.conn.cursor()
 
-            # Check for anomalies
-            cursor.execute("SELECT COUNT(*) FROM anomalies WHERE resolved = false")
+            # Check for anomalies — scoped to org
+            cursor.execute(
+                "SELECT COUNT(*) FROM anomalies WHERE resolved = false AND organization_id = %s",
+                (org_id,),
+            )
             unresolved = cursor.fetchone()[0]
             if unresolved > 0:
                 suggestions.append(f"Explain the {unresolved} unresolved anomalies")
 
-            # Check for expired credentials
+            # Check for expired credentials — scoped to org
             cursor.execute("""
                 SELECT COUNT(*) FROM identities i
                 JOIN discovery_runs r ON i.discovery_run_id = r.id
-                WHERE r.status = 'completed' AND i.credential_status = 'expired'
-                ORDER BY r.id DESC LIMIT 1
-            """)
+                WHERE r.status = 'completed'
+                  AND r.organization_id = %s
+                  AND i.organization_id = %s
+                  AND i.credential_status = 'expired'
+            """, (org_id, org_id))
             expired = cursor.fetchone()
             if expired and expired[0] > 0:
                 suggestions.append("How do I fix expired credentials?")
 
-            # Check for critical identities
+            # Check for critical identities — scoped to org
             cursor.execute("""
                 SELECT COUNT(*) FROM identities i
                 JOIN discovery_runs r ON i.discovery_run_id = r.id
-                WHERE r.status = 'completed' AND i.risk_level = 'critical'
-                ORDER BY r.id DESC LIMIT 1
-            """)
+                WHERE r.status = 'completed'
+                  AND r.organization_id = %s
+                  AND i.organization_id = %s
+                  AND i.risk_level = 'critical'
+            """, (org_id, org_id))
             critical = cursor.fetchone()
             if critical and critical[0] > 0:
                 suggestions.append(f"What makes {critical[0]} identities critical risk?")
 
             cursor.close()
+        except TenantScopeError:
+            raise
         except Exception:
             pass
 
         suggestions.append("What remediation steps should we prioritize?")
         return suggestions[:6]
 
-    def ask(self, question: str, conversation_history: list, db) -> str:
-        """Send a question to Claude with AuditGraph context."""
+    @requires_org_id
+    def ask(self, question: str, conversation_history: list, db, *, org_id: int) -> str:
+        """Send a question to Claude with AuditGraph context.
+
+        AG-132: org_id required; context is scoped to the caller's org.
+        """
         client = self._get_client()
-        context = self.gather_context(db)
+        context = self.gather_context(db, org_id=org_id)
 
         messages = []
         for msg in conversation_history[-10:]:  # Keep last 10 messages
@@ -1337,7 +1380,7 @@ Return ONLY valid JSON with exactly these fields:
             actions.append({
                 'priority': priority,
                 'action_type': 'disable_identity',
-                'title': 'Disable dormant and never-used identities',
+                'title': 'Disable dormant and no-activity-observed identities',
                 'description': 'Disable identities with no recent activity to eliminate standing risk from unused accounts.',
                 'target_identities': dormant_identities[:5],
                 'agirs_impact': f'{"NHIRI" if is_nhi else "HIRI"} +{min(len(dormant_identities) * 2, 10)}',

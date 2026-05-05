@@ -1,0 +1,1059 @@
+file,line,function,table,classification,reason
+backend/app/engines/discovery/azure_discovery.py,6110,_load_ice_config,settings,LEAK,Engine/service uses admin Database() without org filter
+backend/app/api/handlers.py,581,_latest_run_ids,discovery_runs,REVIEW,"Superadmin fallback — no org_id filter, but guarded by is_superadmin check at line 578"
+backend/app/api/handlers.py,581,_latest_run_ids,cloud_connections,REVIEW,"Superadmin fallback — no org_id filter, but guarded by is_superadmin check at line 578"
+backend/app/api/handlers.py,678,get_stats,discovery_runs,REVIEW,"Superadmin path — SELECT COUNT(*) FROM discovery_runs without org_id filter (line 678)"
+backend/app/api/handlers.py,15127,get_cross_org_analytics,discovery_runs,REVIEW,Admin analytics endpoint — intentionally cross-tenant (Database(_admin_reason=...))
+backend/app/api/handlers.py,15259,get_cross_org_trends,discovery_runs,REVIEW,Admin analytics endpoint — intentionally cross-tenant
+backend/app/api/handlers.py,26087,g27,settings,REVIEW,Superadmin-only path with admin DB connection
+backend/app/api/integrity.py,113,_check_latest_snapshot,discovery_runs,REVIEW,Integrity check — admin DB for cross-org validation
+backend/app/api/integrity.py,187,_check_discovery_stages,discovery_runs,REVIEW,Integrity check — admin DB for cross-org validation
+backend/app/api/integrity.py,233,_check_snapshot_integrity,discovery_runs,REVIEW,Integrity check — admin DB for cross-org validation
+backend/app/api/integrity.py,234,_check_snapshot_integrity,discovery_runs,REVIEW,Integrity check — admin DB for cross-org validation
+backend/app/api/integrity.py,273,_check_agirs_consistency,risk_summary,REVIEW,Integrity check — admin DB for cross-org validation
+backend/app/api/integrity.py,274,_check_agirs_consistency,risk_summary,REVIEW,Integrity check — admin DB for cross-org validation
+backend/app/scheduler.py,2152,_run_drift_intelligence,drift_reports,SAFE,"Scheduler _run_tier creates Database(organization_id=db_org_id) per thread — RLS enforced"
+backend/scripts/backfill_all_orgs.py,82,find_affected_orgs,discovery_runs,REVIEW,Script — manual admin context
+backend/scripts/backfill_first_scan_orgs.py,50,find_affected_orgs,discovery_runs,REVIEW,Script — manual admin context
+backend/scripts/benchmark_agent_blast_radius.py,207,<module>,role_assignments,REVIEW,Script — manual admin context
+backend/scripts/benchmark_agent_blast_radius.py,229,<module>,azure_storage_accounts,REVIEW,Script — manual admin context
+backend/scripts/migrate_to_cloud_dev.py,425,main,cloud_connections,REVIEW,Script — manual admin context
+backend/scripts/migrate_to_cloud_dev.py,433,main,discovery_runs,REVIEW,Script — manual admin context
+backend/scripts/seed_ai_agent_test_tenant.py,248,_seed_identities,role_assignments,REVIEW,Script — manual admin context
+backend/scripts/seed_ai_agent_test_tenant.py,310,_cleanup_previous,discovery_runs,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_org.py,754,seed_credentials,credentials,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_org.py,1191,seed_drift_reports,drift_reports,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_org.py,1241,seed_drift_reports,drift_reports,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_org.py,1518,seed_graph_api_permissions,graph_api_permissions,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_tenant.py,448,seed_credentials,credentials,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_tenant.py,610,seed_storage_accounts,azure_storage_accounts,REVIEW,Script — manual admin context
+backend/scripts/seed_demo_tenant.py,690,seed_key_vaults,azure_key_vaults,REVIEW,Script — manual admin context
+backend/app/ai/investigation_tools.py,352,InvestigationToolExecutor._exec_timeline,anomalies,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/ai/investigation_tools.py,374,InvestigationToolExecutor._exec_timeline,risk_scores,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/ai/investigation_tools.py,396,InvestigationToolExecutor._exec_timeline,pim_activations,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/ai/investigation_tools.py,418,InvestigationToolExecutor._exec_timeline,soar_actions,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/ai/investigation_tools.py,440,InvestigationToolExecutor._exec_timeline,remediation_actions,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/ai/investigation_tools.py,485,InvestigationToolExecutor._exec_graph_diff,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/ai/investigation_tools.py,494,InvestigationToolExecutor._exec_graph_diff,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/auth.py,470,<module>,activity_log,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,552,_extract_id,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,564,_extract_id,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,564,_extract_id,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,581,_extract_id,cloud_connections,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,581,_extract_id,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,608,_extract_id,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,618,_extract_id,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,618,_extract_id,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,676,get_stats,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,678,get_stats,discovery_runs,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,686,get_stats,discovery_runs,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,723,get_stats,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,776,get_stats,workload_anomaly_events,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,854,<module>,drift_reports,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,1407,_try_parse_dt,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,1492,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,1519,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,1533,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,1982,get_discovery_runs,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2025,get_snapshots,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2072,verify_snapshot_integrity,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2137,get_snapshot_state,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2149,get_snapshot_state,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2222,get_snapshot_state,azure_storage_accounts,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,2226,get_snapshot_state,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,2289,_find_run,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2297,_find_run,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2434,get_drift_report,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2450,get_drift_report,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2533,get_drift_history,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2594,generate_drift_reports,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2626,get_trends,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2710,get_trends_velocity,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2816,get_identity_risk_history,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2816,get_identity_risk_history,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2872,get_batch_risk_history,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2872,get_batch_risk_history,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2887,get_batch_risk_history,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,2887,get_batch_risk_history,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,3246,get_identity_remediations,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,3246,get_identity_remediations,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,4531,preview_risk_rule,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,4531,preview_risk_rule,graph_api_permissions,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,4531,preview_risk_rule,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,4886,get_overview_insights,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,4886,get_overview_insights,graph_api_permissions,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,4886,get_overview_insights,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5125,get_attack_surface_score,entra_role_assignments,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,5125,get_attack_surface_score,role_assignments,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,5395,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5421,<module>,pim_eligible_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,5422,<module>,pim_eligible_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,5447,<module>,remediation_actions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,5448,<module>,remediation_actions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,5581,<module>,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,5664,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5664,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5807,get_exposure_summary,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5821,get_exposure_summary,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5821,get_exposure_summary,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5914,get_attack_path_count,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,5948,_compute_compliance_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5948,_compute_compliance_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5970,_compute_compliance_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,5970,_compute_compliance_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6011,_compute_compliance_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6011,_compute_compliance_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6040,_compute_compliance_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6040,_compute_compliance_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6059,_compute_compliance_metrics,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6079,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6079,<module>,pim_eligible_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6079,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6126,<module>,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6171,_rows,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6171,_rows,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6191,_rows,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6191,_rows,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6230,_rows,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6230,_rows,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6259,_rows,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6259,_rows,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6278,_rows,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,6470,get_compliance_trends_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,6587,get_compliance_gap_analysis,remediation_playbooks,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,6853,<module>,compliance_snapshots,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,6853,<module>,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,6947,get_dashboard_posture,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,6963,get_dashboard_posture,discovery_runs,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,7063,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,7148,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7244,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7414,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7499,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7686,<module>,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,7852,get_trust_dashboard,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7852,get_trust_dashboard,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7941,get_credential_intelligence,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7968,get_credential_intelligence,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,7984,get_credential_intelligence,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,8043,get_identity_summary,discovery_runs,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,8085,get_identity_summary,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,8100,get_identity_summary,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,8116,get_identity_summary,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8125,get_identity_summary,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8135,get_identity_summary,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8145,<module>,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8167,<module>,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8182,<module>,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8225,<module>,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,8377,get_identity_graph_data,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,9509,execute_remediation,remediation_playbooks,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,9813,get_generated_remediations_handler,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,9898,get_generated_remediations_handler,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,9938,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,10024,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,10081,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,10644,get_remediation_script_handler,role_assignments,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,11960,_export_drift,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,12250,_export_sensitive_data,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,12338,_export_evidence_json,discovery_runs,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,12397,_export_evidence_json,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,12418,_export_evidence_json,remediation_actions,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,12553,export_evidence_zip,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,12608,_make_csv,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,12628,_make_csv,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,12713,<module>,drift_reports,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,12743,<module>,activity_log,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,13115,get_identity_lifecycle,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,15127,get_cross_org_analytics,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,15328,get_login_sessions,activity_log,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,15427,get_onboarding_status,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,15513,get_onboarding_status,activity_log,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,15601,test_azure_connection,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,15611,test_azure_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,15618,test_azure_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,15641,test_azure_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,15647,test_azure_connection,settings,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,16660,simulate_risk,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,16750,get_sensitive_access_for_identity,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,16904,get_blast_radius_summary,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,17714,get_sa_governance_stats,sa_attestations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,17831,get_sa_governance_list,sa_attestations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18094,get_governance_identities,sa_attestations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18110,get_governance_identities,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18121,get_governance_identities,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18132,<module>,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18268,get_governance_identity_detail,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18275,get_governance_identity_detail,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18282,get_governance_identity_detail,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18289,get_governance_identity_detail,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18303,get_governance_identity_detail,sa_attestations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18443,post_governance_decision,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18446,post_governance_decision,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18449,post_governance_decision,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18452,post_governance_decision,sa_attestations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18545,get_governance_stats,sa_attestations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18558,get_governance_stats,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18568,get_governance_stats,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18578,get_governance_stats,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18837,get_system_health,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,18899,get_sla_metrics,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,19335,get_spn_stats,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,19556,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,19568,<module>,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,19625,get_spn_detail,role_assignments,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,19629,get_spn_detail,entra_role_assignments,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,19633,get_spn_detail,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,19637,get_spn_detail,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20025,get_identity_lineage,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20026,get_identity_lineage,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20060,get_identity_lineage,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20061,get_identity_lineage,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20145,<module>,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20146,<module>,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20418,_parse_jsonb,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20419,_parse_jsonb,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20754,get_app_reg_list,app_registrations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20757,get_app_reg_list,app_registrations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,20804,get_app_reg_detail,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,21071,_check_tier_limits,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,21300,get_exposure_graph,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21340,get_exposure_graph,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21416,get_identity_usage,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21416,get_identity_usage,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21432,get_identity_usage,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21537,get_identity_signin_events,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21583,get_identity_signin_events,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21587,get_identity_signin_events,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21665,get_identity_timeline,anomalies,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21684,get_identity_timeline,risk_scores,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21703,get_identity_timeline,pim_activations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21722,get_identity_timeline,soar_actions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21741,get_identity_timeline,remediation_actions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21817,get_identity_attack_paths,graph_api_permissions,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,21840,get_identity_attack_paths,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21873,get_identity_attack_paths,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21896,get_identity_attack_paths,pim_eligible_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,21918,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,22164,get_identity_effective_access,role_assignments,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,22174,get_identity_effective_access,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,22653,get_subscriptions_distinct,discovery_runs,SAFE,org_id variable passed as parameter
+backend/app/api/handlers.py,22836,get_discovery_status,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,22845,get_discovery_status,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,23378,get_group_waste_stats,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,24272,get_workload_stats,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,24303,get_workload_stats,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,24347,<module>,workload_activity_stats,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,24370,<module>,workload_anomaly_events,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,24609,<module>,app_registrations,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24653,<module>,workload_activity_stats,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24666,<module>,workload_anomaly_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24675,<module>,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24740,get_workload_detail,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,24866,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24873,<module>,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24880,<module>,credentials,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24897,<module>,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24898,<module>,graph_api_permissions,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,24986,<module>,workload_activity_stats,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,24987,<module>,workload_activity_stats,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,24999,<module>,workload_anomaly_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,25012,<module>,workload_signin_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,25095,get_workload_findings,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,25165,get_workload_anomalies,workload_anomaly_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,25168,get_workload_anomalies,workload_anomaly_events,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,25209,get_workload_anomaly_stats,workload_anomaly_events,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,25218,get_workload_anomaly_stats,workload_anomaly_events,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,25226,get_workload_anomaly_stats,workload_anomaly_events,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,25440,get_correlation_config,settings,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,25461,save_correlation_config,settings,SAFE,_org_id() passed as parameter
+backend/app/api/handlers.py,25893,governance_reconciliation_handler,sa_attestations,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,26562,create_pilot_organization,settings,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,27279,get_graph_debug_handler,cloud_connections,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27283,get_graph_debug_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27293,get_graph_debug_handler,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27295,get_graph_debug_handler,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27299,get_graph_debug_handler,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27303,get_graph_debug_handler,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27311,get_graph_debug_handler,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27325,get_graph_debug_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27335,get_graph_debug_handler,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,27353,get_graph_debug_handler,role_assignments,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,27439,get_graph_visualization_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,27448,get_graph_visualization_handler,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,27458,get_graph_visualization_handler,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,28447,get_cloud_risk_summary_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,28455,get_cloud_risk_summary_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,28495,get_cloud_risk_summary_handler,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,28509,get_cloud_risk_summary_handler,cloud_connections,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,28585,get_security_dashboard_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,28658,get_security_dashboard_handler,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,28677,get_security_dashboard_handler,drift_reports,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,28808,get_security_overview_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,28818,get_security_overview_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,28862,get_security_overview_handler,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,28884,get_security_overview_handler,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,28895,get_security_overview_handler,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,28936,<module>,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,28996,_get_provider,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,29010,_get_provider,cloud_connections,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,30684,get_graph_attack_finding_detail_handler,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,30738,run_graph_attack_analysis_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,30744,run_graph_attack_analysis_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,31008,create_jira_ticket_handler,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,31611,get_privilege_drift_handler,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,31629,get_privilege_drift_handler,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,31642,get_privilege_drift_handler,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,31656,get_privilege_drift_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,31658,get_privilege_drift_handler,discovery_runs,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,33427,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,33440,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,33440,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/handlers.py,33467,<module>,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,33645,_pillar,risk_summary,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,33715,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,33729,<module>,entra_role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,33729,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,33745,<module>,role_assignments,SAFE,Handler uses _db() in broader scope — RLS enforced
+backend/app/api/handlers.py,34077,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,34078,<module>,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,34313,get_agent_risk_summary,security_findings,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,34612,scan_orphan_agents,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,34747,get_agent_evidence,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,34748,get_agent_evidence,role_assignments,SAFE,Handler uses _db() — RLS enforced at connection level
+backend/app/api/handlers.py,35694,_collect_ciso_sources_from_db,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35694,_collect_ciso_sources_from_db,risk_summary,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35717,_collect_ciso_sources_from_db,anomalies,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35719,_collect_ciso_sources_from_db,anomalies,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35724,_collect_ciso_sources_from_db,anomalies,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35740,_collect_ciso_sources_from_db,remediation_actions,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35759,_collect_ciso_sources_from_db,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35904,get_ciso_summary,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,35910,get_ciso_summary,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,36051,get_inventory_summary,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,36051,get_inventory_summary,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,36300,get_p2_status,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,36358,get_drift_baseline,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,36366,get_drift_baseline,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/handlers.py,36383,get_drift_baseline,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/api/handlers.py,36403,get_drift_baseline,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,147,_check_risk_consistency,risk_summary,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,148,_check_risk_consistency,risk_summary,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,478,metric_integrity_debug,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/integrity.py,486,metric_integrity_debug,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/api/integrity.py,548,_compute_live_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,548,_compute_live_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,616,_compute_live_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/api/integrity.py,617,_compute_live_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/api/integrity.py,652,_compute_live_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,653,_compute_live_metrics,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,670,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,671,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/api/integrity.py,692,_read_persisted_summary,risk_summary,SAFE,Explicit organization_id filter in SQL
+backend/app/api/integrity.py,693,_read_persisted_summary,risk_summary,SAFE,Explicit organization_id filter in SQL
+backend/app/api/routes/approvals.py,997,execute_approval_request,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/routes/approvals.py,1175,rollback_execution,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/api/routes/resources.py,520,ResourceDetailResponse.<module>,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/api/routes/resources.py,623,ResourceDetailResponse.<module>,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/api/scim.py,28,_log_scim,activity_log,SAFE,organization_id variable passed as parameter
+backend/app/connectors.py,16,get_connector,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/connectors.py,34,validate_connector_unique,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/database.py,1621,create_discovery_run,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,1653,complete_discovery_run,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,1665,complete_discovery_run,discovery_runs,SAFE,self._organization_id passed as parameter
+backend/app/database.py,1684,complete_discovery_run,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,3104,save_role_assignment,role_assignments,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3153,save_entra_role_assignment,entra_role_assignments,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3188,get_latest_discovery_run,discovery_runs,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3214,get_identity_roles_enriched,role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3253,get_identity_roles_enriched,entra_role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3390,store_graph_permissions,graph_api_permissions,SAFE,organization_id variable passed as parameter
+backend/app/database.py,3423,store_app_roles,sp_app_roles,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3462,get_app_roles,sp_app_roles,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3520,get_graph_permissions,graph_api_permissions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3660,save_pim_eligible,pim_eligible_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3694,save_pim_activation,pim_activations,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3726,update_identity_pim_summary,pim_activations,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3726,update_identity_pim_summary,pim_eligible_assignments,SAFE,self._organization_id passed as parameter
+backend/app/database.py,3757,get_pim_data,pim_eligible_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3770,get_pim_data,pim_activations,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,3785,get_pim_data,pim_activations,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4149,get_identity_remediations,remediation_playbooks,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4281,get_report_data,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4291,get_report_data,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4305,get_report_data,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4333,get_report_data,entra_role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4333,get_report_data,role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4412,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,4412,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,4516,save_drift_report,drift_reports,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4552,update_drift_report_intelligence,drift_reports,SAFE,self._organization_id passed as parameter
+backend/app/database.py,4574,get_drift_report,drift_reports,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4603,get_latest_drift_report,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,4617,get_latest_drift_report,drift_reports,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4644,get_drift_history,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,4644,get_drift_history,drift_reports,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,4660,get_drift_history,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,4660,get_drift_history,drift_reports,SAFE,organization_id variable passed as parameter
+backend/app/database.py,4690,get_settings,settings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,4704,get_setting,settings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,4719,save_settings,settings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,4760,get_system_setting,settings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,4769,get_system_settings,settings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4863,log_activity,activity_log,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,4878,log_activity,activity_log,SAFE,organization_id variable passed as parameter
+backend/app/database.py,4957,save_credential,credentials,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5046,update_identity_credential_summary,credentials,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5079,get_identity_credentials,credentials,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5151,upsert_remediation_action,remediation_actions,SAFE,organization_id variable passed as parameter
+backend/app/database.py,5199,bulk_upsert_remediation_actions,entra_role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5199,bulk_upsert_remediation_actions,role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5238,bulk_upsert_remediation_actions,remediation_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5264,get_remediation_actions,remediation_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5290,get_remediation_summary,remediation_actions,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5303,get_remediation_summary,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5303,get_remediation_summary,remediation_actions,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5340,execute_remediation_action,remediation_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5413,get_role_usage_stats,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5421,get_role_usage_stats,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5421,get_role_usage_stats,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5441,get_role_usage_stats,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5441,get_role_usage_stats,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5484,get_role_mining_data,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,5495,get_role_mining_data,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5495,get_role_mining_data,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5579,get_role_mining_data,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5579,get_role_mining_data,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5593,get_role_mining_data,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5593,get_role_mining_data,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5603,<module>,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5603,<module>,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,5684,get_webhooks,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5705,get_webhook,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5719,create_webhook,webhooks,SAFE,self._organization_id passed as parameter
+backend/app/database.py,5753,update_webhook,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5771,delete_webhook,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5781,get_webhooks_for_event,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,5821,get_webhook_deliveries,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6021,get_notifications,notifications,SAFE,organization_id variable passed as parameter
+backend/app/database.py,6038,get_notification,notifications,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6058,get_notification_stats,notifications,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,6060,get_notification_stats,notifications,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,6062,get_notification_stats,notifications,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,6064,get_notification_stats,notifications,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,6075,create_notification,notifications,SAFE,organization_id variable passed as parameter
+backend/app/database.py,6096,mark_notification_read,notifications,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6117,mark_all_notifications_read,notifications,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6119,mark_all_notifications_read,notifications,SAFE,self._organization_id passed as parameter
+backend/app/database.py,6129,action_notification,notifications,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6149,delete_notification,notifications,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6159,cleanup_old_notifications,notifications,SAFE,self._organization_id passed as parameter
+backend/app/database.py,6900,seed_dev_tenant,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,6916,seed_dev_tenant,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/database.py,6924,seed_dev_tenant,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/database.py,7064,seed_demo_tenant,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,7070,<module>,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,7389,save_compliance_snapshot,compliance_snapshots,SAFE,organization_id variable passed as parameter
+backend/app/database.py,7407,get_compliance_trends,compliance_snapshots,SAFE,self._organization_id passed as parameter
+backend/app/database.py,7407,get_compliance_trends,discovery_runs,SAFE,self._organization_id passed as parameter
+backend/app/database.py,7442,get_compliance_snapshot_count,compliance_snapshots,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,7491,save_agirs_scores,agirs_scores,SAFE,organization_id variable passed as parameter
+backend/app/database.py,7521,get_latest_agirs_scores,agirs_scores,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,7634,save_risk_summary,risk_summary,SAFE,organization_id variable passed as parameter
+backend/app/database.py,7732,get_latest_risk_summary,risk_summary,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,7779,get_latest_risk_summaries,risk_summary,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,7865,log_discovery_stage,discovery_stage_log,SAFE,organization_id variable passed as parameter
+backend/app/database.py,7873,log_discovery_stage,discovery_stage_log,SAFE,organization_id variable passed as parameter
+backend/app/database.py,7892,get_discovery_stages,discovery_stage_log,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,7968,save_app_registration,app_registrations,SAFE,organization_id variable passed as parameter
+backend/app/database.py,8610,get_saved_views,saved_views,SAFE,organization_id variable passed as parameter
+backend/app/database.py,8628,get_saved_view,saved_views,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8644,create_saved_view,saved_views,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8677,update_saved_view,saved_views,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8695,delete_saved_view,saved_views,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8705,set_default_view,saved_views,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8706,set_default_view,saved_views,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8938,populate_campaign_reviews,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,8992,populate_campaign_reviews,role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9004,populate_campaign_reviews,entra_role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9015,populate_campaign_reviews,credentials,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9026,populate_campaign_reviews,graph_api_permissions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9037,populate_campaign_reviews,pim_eligible_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9378,_get_group_risk_stats,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9399,_get_group_risk_stats,identity_group_members,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,9422,get_groups,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9426,get_groups,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9457,get_group,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9473,get_group,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9492,get_group,identity_group_members,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,9523,create_group,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9556,update_group,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9574,delete_group,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9579,delete_group,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9590,add_group_members,identity_group_members,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9604,remove_group_members,identity_group_members,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9617,get_group_comparison,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9623,get_group_comparison,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9650,get_group_comparison,identity_group_members,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,9676,get_identity_groups,identity_group_members,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9676,get_identity_groups,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9686,get_identity_groups,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9695,get_identity_groups,identity_groups,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,9699,get_identity_groups,identity_groups,SAFE,self._organization_id passed as parameter
+backend/app/database.py,9733,deduplicate_auto_groups,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9735,deduplicate_auto_groups,identity_groups,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9782,seed_auto_groups_for_organization,identity_groups,SAFE,organization_id variable passed as parameter
+backend/app/database.py,9831,save_anomalies,anomalies,SAFE,organization_id variable passed as parameter
+backend/app/database.py,9874,get_anomalies,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9891,get_anomaly,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9925,get_anomaly_stats,anomalies,SAFE,self._organization_id passed as parameter
+backend/app/database.py,9927,get_anomaly_stats,anomalies,SAFE,self._organization_id passed as parameter
+backend/app/database.py,9929,get_anomaly_stats,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9931,get_anomaly_stats,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,9963,get_identity_anomalies_multi,anomalies,SAFE,self._organization_id passed as parameter
+backend/app/database.py,9981,resolve_anomaly,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10009,get_anomalies_for_dashboard,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10035,cleanup_old_anomalies,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10077,create_api_key,api_keys,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10096,get_api_keys,api_keys,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10106,get_api_keys,api_keys,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10127,get_api_key_by_id,api_keys,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10133,get_api_key_by_id,api_keys,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10152,get_api_key_by_hash,api_keys,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10183,update_api_key,api_keys,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10205,delete_api_key,api_keys,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10207,delete_api_key,api_keys,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10217,increment_api_key_usage,api_keys,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10279,get_soar_playbooks,soar_playbooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10292,get_soar_playbook,soar_playbooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10308,create_soar_playbook,soar_playbooks,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10343,update_soar_playbook,soar_playbooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10362,delete_soar_playbook,soar_playbooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10372,get_enabled_playbooks_by_trigger,soar_playbooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10384,update_soar_playbook_triggered,soar_playbooks,SAFE,self._organization_id passed as parameter
+backend/app/database.py,10396,create_soar_action,soar_actions,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10423,update_soar_action,soar_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10447,get_soar_actions,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,10447,get_soar_actions,soar_actions,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,10447,get_soar_actions,soar_playbooks,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,10470,get_soar_action_stats,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10470,get_soar_action_stats,soar_actions,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10485,get_soar_action_stats,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10485,get_soar_action_stats,soar_actions,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10534,get_dashboard_preferences,dashboard_preferences,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10552,save_dashboard_preferences,dashboard_preferences,SAFE,organization_id variable passed as parameter
+backend/app/database.py,10572,delete_dashboard_preferences,dashboard_preferences,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,10766,<module>,settings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,10941,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,11907,create_snapshot_job,snapshot_jobs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,11918,start_snapshot_job,snapshot_jobs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,11933,update_snapshot_job_progress,snapshot_jobs,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,11940,update_snapshot_job_progress,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,11951,complete_snapshot_job,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,11968,get_active_snapshot_job,snapshot_jobs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,11995,get_snapshot_jobs_for_org,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,11995,get_snapshot_jobs_for_org,snapshot_jobs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,14031,update_snapshot_job_heartbeat,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14042,get_zombie_snapshot_jobs,snapshot_jobs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,14066,get_runtime_exceeded_jobs,snapshot_jobs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,14088,retry_snapshot_job,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14111,get_retryable_failed_jobs,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14132,update_snapshot_job_metrics,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14147,get_snapshot_history,cloud_connections,SAFE,org_id variable passed as parameter
+backend/app/database.py,14147,get_snapshot_history,snapshot_jobs,SAFE,org_id variable passed as parameter
+backend/app/database.py,14161,get_snapshot_history,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,14161,get_snapshot_history,snapshot_jobs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,14202,get_connections_due_for_discovery,cloud_connections,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14202,get_connections_due_for_discovery,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14246,update_discovery_settings,cloud_connections,SAFE,self._organization_id passed as parameter
+backend/app/database.py,14276,update_snapshot_timestamps,cloud_connections,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14295,reconcile_subscriptions,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,14365,get_risk_rules,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14367,get_risk_rules,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14418,get_risk_findings,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14452,get_risk_finding_by_id,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14519,get_risk_findings_stats,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14563,create_graph_edge,graph_edges,SAFE,organization_id variable passed as parameter
+backend/app/database.py,14596,persist_graph_snapshot,graph_edges,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14598,persist_graph_snapshot,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14601,persist_graph_snapshot,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14633,persist_graph_snapshot,graph_edges,SAFE,organization_id variable passed as parameter
+backend/app/database.py,14670,get_graph_snapshot,graph_edges,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14730,get_graph_diff,graph_edges,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14749,get_graph_diff,graph_edges,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14799,get_identity_blast_radius_from_graph,graph_edges,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14825,cleanup_old_graph_snapshots,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14836,cleanup_old_graph_snapshots,graph_edges,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,14857,get_identity_access_graph,graph_edges,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14876,get_escalation_findings,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14890,get_escalation_findings,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14919,get_nhi_findings,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,14964,get_dashboard_summary,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,14974,get_dashboard_summary,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,15018,get_dashboard_summary,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,15036,get_dashboard_summary,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,15052,get_dashboard_summary,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,15100,<module>,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,17577,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,17577,<module>,risk_scores,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,17578,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,17578,<module>,risk_scores,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,17871,find_org_by_scim_token,settings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18037,create_sa_attestation,sa_attestations,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18188,prune_old_identity_runs,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18209,prune_old_identity_runs,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18223,prune_old_identity_runs,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,18251,prune_old_identity_runs,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18272,cleanup_old_discovery_runs,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18284,cleanup_old_discovery_runs,risk_scores,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,18288,cleanup_old_discovery_runs,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18288,cleanup_old_discovery_runs,risk_scores,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18292,cleanup_old_discovery_runs,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18302,cleanup_old_drift_reports,drift_reports,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18324,cleanup_old_activity_log,activity_log,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18342,cleanup_old_soar_actions,soar_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18554,create_copilot_conversation,copilot_conversations,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18566,get_copilot_conversation,copilot_conversations,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18578,update_copilot_conversation,copilot_conversations,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18583,update_copilot_conversation,copilot_conversations,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18593,list_copilot_conversations,copilot_conversations,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18681,create_cloud_connection,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18691,create_cloud_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18725,check_connector_credential_expiry,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18751,find_or_create_cloud_connection,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18825,get_cloud_connection_by_id,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18827,get_cloud_connection_by_id,cloud_connections,SAFE,self._organization_id passed as parameter
+backend/app/database.py,18875,update_cloud_connection,cloud_connections,SAFE,self._organization_id passed as parameter
+backend/app/database.py,18897,delete_cloud_connection,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18899,delete_cloud_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/app/database.py,18975,sync_cloud_subscriptions,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18975,sync_cloud_subscriptions,identity_subscription_access,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,18983,sync_cloud_subscriptions,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18983,sync_cloud_subscriptions,identity_subscription_access,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,18998,sync_cloud_subscriptions,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19023,sync_cloud_subscriptions,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19029,sync_cloud_subscriptions,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,19041,sync_cloud_subscriptions,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19200,activate_cloud_subscription,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19233,activate_all_cloud_subscriptions,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19263,deactivate_cloud_subscription,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19387,get_scan_schedules,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19387,get_scan_schedules,scan_schedules,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19403,create_scan_schedule,scan_schedules,SAFE,organization_id variable passed as parameter
+backend/app/database.py,19426,update_scan_schedule,scan_schedules,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19440,delete_scan_schedule,scan_schedules,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19452,get_due_scan_schedules,scan_schedules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,19467,mark_scan_schedule_run,scan_schedules,SAFE,organization_id variable passed as parameter
+backend/app/database.py,19898,update_role_last_used_from_arm,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,19929,save_identity_subscription_access,identity_subscription_access,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,19957,update_identity_subscription_summary,identity_subscription_access,SAFE,self._organization_id passed as parameter
+backend/app/database.py,19988,get_identity_subscription_access,identity_subscription_access,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,20007,get_identities_by_subscription,identity_subscription_access,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,20257,save_app_reg_exposure,app_registrations,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,20469,cleanup_signin_events,workload_signin_events,SAFE,self._organization_id passed as parameter
+backend/app/database.py,20488,cleanup_workload_anomalies,workload_anomaly_events,SAFE,self._organization_id passed as parameter
+backend/app/database.py,21362,save_security_findings,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,21404,save_security_findings,security_findings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,21486,get_security_findings,security_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21530,get_security_finding,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,21533,get_security_finding,security_findings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,21555,update_security_finding_status,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,21562,update_security_finding_status,security_findings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,21605,get_security_findings_stats,security_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21608,get_security_findings_stats,security_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21610,get_security_findings_stats,security_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21616,get_security_findings_stats,security_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21622,get_security_findings_stats,security_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21727,save_identity_exposures,identity_exposures,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,21763,save_identity_exposures,identity_exposures,SAFE,self._organization_id passed as parameter
+backend/app/database.py,21819,get_identity_exposures_persisted,identity_exposures,SAFE,self._organization_id passed as parameter
+backend/app/database.py,21869,get_identity_exposures_stats,identity_exposures,SAFE,self._organization_id passed as parameter
+backend/app/database.py,21872,get_identity_exposures_stats,identity_exposures,SAFE,self._organization_id passed as parameter
+backend/app/database.py,21875,get_identity_exposures_stats,identity_exposures,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21882,get_identity_exposures_stats,identity_exposures,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21902,update_identity_exposure_status,identity_exposures,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,21953,normalize_findings_to_security_findings,risk_rules,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,22056,<module>,graph_attack_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,22760,get_identities_for_path_building,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,22770,get_identities_for_path_building,risk_summary,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,22806,get_role_assignments_for_identity,role_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,24328,create_job_run,job_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,24351,complete_job_run,job_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,24387,get_job_runs,job_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,24401,get_job_run,job_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,24519,create_snapshot_run,snapshot_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,24546,complete_snapshot_run,snapshot_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,24588,get_snapshot_runs,snapshot_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,24606,get_snapshot_run_stats,snapshot_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,24774,retry_snapshot_job_with_backoff,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,24788,retry_snapshot_job_with_backoff,snapshot_jobs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,24828,compute_tenant_health_status,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,24844,compute_tenant_health_status,snapshot_jobs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,24852,compute_tenant_health_status,snapshot_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,24952,save_graph_attack_findings,graph_attack_findings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,25016,get_graph_attack_findings,graph_attack_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,25045,get_graph_attack_finding_stats,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25086,compute_posture_score,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25109,compute_posture_score,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25117,compute_posture_score,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25125,compute_posture_score,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25147,compute_posture_score,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/database.py,25301,get_risky_identities,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25301,get_risky_identities,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25339,get_privileged_identities,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25339,get_privileged_identities,entra_role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25339,get_privileged_identities,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25380,get_remediation_priority,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25469,assign_finding,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25502,update_finding_workflow_status,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25532,update_finding_workflow_status,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25563,add_finding_comment,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25608,get_remediation_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25622,get_remediation_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25631,get_remediation_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25639,get_remediation_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25673,auto_resolve_findings,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25684,auto_resolve_findings,graph_attack_findings,SAFE,organization_id variable passed as parameter
+backend/app/database.py,25713,set_finding_sla,graph_attack_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,25730,check_sla_breaches,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25777,get_findings_export,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25838,dispatch_security_webhooks,webhooks,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25946,create_jira_ticket,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,25986,get_finding_context,graph_attack_findings,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26021,get_security_summary_context,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26058,get_security_summary_context,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26071,get_security_summary_context,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26078,get_security_summary_context,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26147,get_identity_investigation_context,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26155,get_identity_investigation_context,pim_eligible_assignments,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26160,get_identity_investigation_context,pim_activations,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26202,get_posture_analysis_context,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26249,get_posture_analysis_context,anomalies,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26459,check_plan_limits,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26473,check_plan_limits,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26520,compute_tenant_risk_score,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26575,get_snapshot_stats,job_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,26596,get_discovery_stats,discovery_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,26624,get_recent_failures,job_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,26641,get_recent_failures,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/database.py,26675,clear_tenant_discovery_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26687,clear_tenant_discovery_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26691,clear_tenant_discovery_data,job_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26694,clear_tenant_discovery_data,job_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/database.py,26782,get_job_failure_rate,job_runs,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,27447,cleanup_microsoft_remediations,remediation_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,27449,cleanup_microsoft_remediations,remediation_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,27449,cleanup_microsoft_remediations,soar_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/database.py,27451,cleanup_microsoft_remediations,soar_actions,SAFE,database.py helper — called through RLS-scoped Database instance
+backend/app/engines/access_review_engine.py,164,AccessReviewEngine._load_rbac_roles,role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/access_review_engine.py,202,AccessReviewEngine._load_entra_roles,entra_role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/access_review_engine.py,269,AccessReviewEngine._load_finding_counts,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/access_review_engine.py,336,AccessReviewEngine.auto_generate_evidence,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/activity_ingestor.py,117,ActivityIngestor._get_latest_run_id,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/activity_ingestor.py,174,ActivityIngestor._ingest_role_events,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/activity_ingestor.py,257,ActivityIngestor._build_role_history,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/activity_ingestor.py,290,ActivityIngestor._build_access_history,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/agent_orphan_detector.py,99,AgentOrphanDetector.auto_resolve,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/agent_orphan_detector.py,153,AgentOrphanDetector.auto_resolve,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/agent_orphan_detector.py,191,AgentOrphanDetector._detect_orphaned_agents,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/anomaly_detector.py,121,AnomalyDetector._get_run_roles,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/anomaly_detector.py,137,AnomalyDetector._get_run_entra_roles,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/anomaly_detector.py,334,AnomalyDetector._detect_off_hours_pim,pim_activations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/anomaly_detector.py,390,AnomalyDetector._detect_excessive_pim_usage,pim_activations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/anomaly_detector.py,483,AnomalyDetector._detect_excessive_api_permissions,graph_api_permissions,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,288,AttackPathEngine._detect_direct_escalation,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,330,AttackPathEngine._detect_direct_escalation,graph_api_permissions,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,382,AttackPathEngine._detect_ownership_chain,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,447,AttackPathEngine._detect_pim_escalation,pim_eligible_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,499,AttackPathEngine._detect_lateral_movement,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,577,AttackPathEngine._detect_sensitive_data_exposure,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_path_engine.py,658,_detect_external_identity_risk,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_predictor.py,121,AttackPredictor._load_identities,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/attack_predictor.py,211,AttackPredictor._check_privileged_roles,role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/attack_predictor.py,244,AttackPredictor._check_anomaly_frequency,anomalies,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/attack_replay_engine.py,183,AttackReplayEngine._get_anomaly_events,anomalies,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/attack_simulator.py,133,AttackSimulator._load_graph,graph_edges,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/attack_simulator.py,341,AttackSimulator._create_blast_radius_finding,risk_rules,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/blast_radius_engine.py,241,BlastRadiusEngine._load_rbac_assignments,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/blast_radius_engine.py,296,BlastRadiusEngine._load_entra_assignments,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/correlation/identity_correlator.py,77,IdentityCorrelator._load_config,settings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/correlation/identity_correlator.py,98,IdentityCorrelator._fetch_users,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/correlation/orphaned_detector.py,161,OrphanedAccountDetector._get_privileged_roles,role_assignments,SAFE,org_id variable passed as parameter
+backend/app/engines/correlation/orphaned_detector.py,168,OrphanedAccountDetector._get_privileged_roles,entra_role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/discovery/aws_discovery.py,187,AWSDiscoveryEngine.run_discovery,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,398,AzureDiscoveryEngine._update_job_progress,snapshot_jobs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/azure_discovery.py,409,AzureDiscoveryEngine._update_job_progress,snapshot_jobs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,442,AzureDiscoveryEngine._update_job_metrics,snapshot_jobs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,1501,<module>,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/discovery/azure_discovery.py,1568,<module>,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,1585,<module>,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,1611,<module>,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,1729,<module>,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/engines/discovery/azure_discovery.py,1981,<module>,cloud_connections,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,2599,_expand_group_roles_to_members,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/azure_discovery.py,2670,_expand_group_roles_to_members,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,5960,<module>,cloud_connections,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,8933,<module>,identity_subscription_access,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/azure_discovery.py,9330,<module>,settings,SAFE,organization_id variable passed as parameter
+backend/app/engines/discovery/azure_discovery.py,9413,_save_identities,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9706,_compute_workload_exposure,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/azure_discovery.py,9732,_compute_workload_exposure,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9737,_compute_workload_exposure,entra_role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9742,_compute_workload_exposure,credentials,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9747,_compute_workload_exposure,graph_api_permissions,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9758,_compute_workload_exposure,pim_eligible_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9759,_compute_workload_exposure,pim_eligible_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9763,_compute_workload_exposure,pim_activations,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9774,_compute_workload_exposure,workload_activity_stats,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9775,_compute_workload_exposure,workload_activity_stats,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9818,<module>,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/azure_discovery.py,9819,<module>,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/azure_discovery.py,9848,<module>,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/azure_discovery.py,9851,<module>,entra_role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/discovery/gcp_discovery.py,163,GCPDiscoveryEngine.run_discovery,discovery_runs,SAFE,Engine creates Database(organization_id=...) — RLS enforced
+backend/app/engines/discovery/pipeline_validator.py,95,validate_resource_counts,azure_storage_accounts,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/pipeline_validator.py,96,validate_resource_counts,azure_storage_accounts,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/pipeline_validator.py,105,validate_resource_counts,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/pipeline_validator.py,106,validate_resource_counts,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/discovery/pipeline_validator.py,132,validate_role_assignments,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/drift_detector.py,126,DriftDetector._get_run_timestamp,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/drift_detector.py,134,DriftDetector._get_first_run_timestamp,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/drift_detector.py,148,DriftDetector._get_run_identities,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/drift_detector.py,276,DriftDetector._detect_removed_identities,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/escalation_detector.py,55,EscalationDetector._get_latest_run_id,discovery_runs,SAFE,org_id variable passed as parameter
+backend/app/engines/escalation_detector.py,92,EscalationDetector.get_identity_escalation_paths,graph_edges,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/escalation_detector.py,157,EscalationDetector._detect_can_assign_owner,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/escalation_detector.py,199,EscalationDetector._detect_spn_owner,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/escalation_detector.py,237,EscalationDetector._detect_mi_contributor,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/fix_recommendation_engine.py,737,FixRecommendationEngine._load_findings,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/ghost_detector.py,31,GhostIdentityDetector.detect,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/ghost_detector.py,31,GhostIdentityDetector.detect,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/governance_analytics.py,71,GovernanceAnalyticsEngine._get_latest_run_id,discovery_runs,SAFE,org_id variable passed as parameter
+backend/app/engines/governance_analytics.py,93,GovernanceAnalyticsEngine._compute_privilege_drift_rate,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/governance_analytics.py,102,GovernanceAnalyticsEngine._compute_privilege_drift_rate,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/governance_analytics.py,112,GovernanceAnalyticsEngine._compute_privilege_drift_rate,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/governance_analytics.py,184,GovernanceAnalyticsEngine._compute_guest_privilege_ratio,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/governance_analytics.py,214,GovernanceAnalyticsEngine._compute_inactive_identity_ratio,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_attack_engine.py,345,GraphAttackEngine._build_graph,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_attack_engine.py,385,GraphAttackEngine._build_graph,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_attack_engine.py,410,GraphAttackEngine._build_graph,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_attack_engine.py,437,GraphAttackEngine.<module>,app_registrations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_builder.py,189,GraphBuilder._get_latest_run_id,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/graph_builder.py,216,GraphBuilder._get_role_assignments,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_builder.py,237,GraphBuilder._add_graph_api_permission_nodes,graph_api_permissions,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_intelligence.py,203,GraphIntelligenceEngine._get_latest_run_id,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/graph_intelligence.py,226,GraphIntelligenceEngine._load_role_assignments,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/graph_visualizer.py,247,GraphVisualizer._load_graph_edges,graph_edges,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/graph_visualizer.py,294,GraphVisualizer._load_neighbor_edges,graph_edges,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/identity_exposure_engine.py,123,IdentityExposureEngine._detect_dormant_privileged,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_exposure_engine.py,171,IdentityExposureEngine._detect_long_lived_credential,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_exposure_engine.py,217,IdentityExposureEngine._detect_spn_secret_exposure,credentials,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_exposure_engine.py,263,IdentityExposureEngine._detect_external_privileged,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_governance_engine.py,170,IdentityGovernanceEngine._get_latest_run_id,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/identity_governance_engine.py,194,IdentityGovernanceEngine._load_role_assignments,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_graph_builder.py,44,build_identity_graph,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/identity_graph_builder.py,54,build_identity_graph,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_graph_builder.py,69,build_identity_graph,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/identity_risk_simulator.py,201,IdentityRiskSimulator._count_resources_at_scope,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_risk_simulator.py,249,IdentityRiskSimulator._find_identity,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/identity_risk_simulator.py,260,IdentityRiskSimulator._find_identity,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/identity_risk_simulator.py,277,IdentityRiskSimulator._load_roles_for_identity,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_threat_detector.py,82,IdentityThreatDetector._get_latest_run_id,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/identity_threat_detector.py,103,IdentityThreatDetector._detect_privilege_escalation,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/identity_threat_detector.py,242,IdentityThreatDetector._detect_policy_change,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/nhi_analyzer.py,54,NHIAnalyzer._get_latest_run_id,discovery_runs,SAFE,org_id variable passed as parameter
+backend/app/engines/nhi_analyzer.py,84,NHIAnalyzer.get_nhi_findings,risk_rules,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/nhi_analyzer.py,217,NHIAnalyzer._analyze_spn_owner,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/nhi_analyzer.py,251,NHIAnalyzer._analyze_mi_high_priv,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/platform_health.py,50,PlatformHealthEngine.evaluate_tenant_health,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/platform_health.py,65,PlatformHealthEngine.evaluate_tenant_health,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/platform_health.py,72,PlatformHealthEngine.evaluate_tenant_health,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/platform_health.py,90,PlatformHealthEngine.evaluate_tenant_health,snapshot_jobs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/platform_health.py,134,PlatformHealthEngine.check_discovery_integrity,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/platform_health.py,134,PlatformHealthEngine.check_discovery_integrity,azure_storage_accounts,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/platform_health.py,147,PlatformHealthEngine.check_discovery_integrity,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/platform_health.py,147,PlatformHealthEngine.check_discovery_integrity,azure_storage_accounts,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/platform_health.py,154,PlatformHealthEngine.check_discovery_integrity,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/policy_generator.py,146,PolicyGenerator._get_current_roles,role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/policy_generator.py,182,PolicyGenerator._analyze_activity,risk_rules,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/policy_generator.py,238,PolicyGenerator._get_over_privileged_identities,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/policy_generator.py,238,PolicyGenerator._get_over_privileged_identities,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/policy_recommender.py,47,PolicyRecommender._get_latest_run_id,discovery_runs,SAFE,org_id variable passed as parameter
+backend/app/engines/policy_recommender.py,62,PolicyRecommender._eval_excess_privilege_identity,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/policy_recommender.py,139,PolicyRecommender._eval_guest_user_privilege_review,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/policy_recommender.py,208,PolicyRecommender._eval_service_principal_excess_privilege,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/rbac_hygiene.py,552,RbacHygieneEngine._load_pim_eligible,pim_eligible_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/rbac_hygiene.py,559,RbacHygieneEngine._load_pim_eligible,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/rbac_hygiene.py,559,RbacHygieneEngine._load_pim_eligible,pim_eligible_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/remediation/fix_prioritizer.py,366,FixPrioritizer.get_org_top_3,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/remediation/fix_prioritizer.py,496,FixPrioritizer._load_full_identity,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/remediation/fix_prioritizer.py,514,FixPrioritizer._load_full_identity,entra_role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/remediation_engine.py,153,RemediationEngine._get_remediation_mode,settings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/remediation_engine.py,191,RemediationEngine._count_owners_for_connection,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/remediation_engine.py,191,RemediationEngine._count_owners_for_connection,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/reporting_engine.py,144,ReportingEngine._identity_risk,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/reporting_engine.py,384,ReportingEngine._compliance_evidence,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/reporting_engine.py,414,ReportingEngine._compliance_evidence,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/reporting_engine.py,422,ReportingEngine._compliance_evidence,security_findings,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,211,AGIRSEngine._get_run_ids,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk/agirs_engine.py,211,AGIRSEngine._get_run_ids,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk/agirs_engine.py,224,AGIRSEngine._get_run_ids,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk/agirs_engine.py,260,AGIRSEngine._compute_hiri,entra_role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,260,AGIRSEngine._compute_hiri,role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,369,AGIRSEngine.<module>,entra_role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,369,AGIRSEngine.<module>,role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,491,AGIRSEngine._compute_nhiri,entra_role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,491,AGIRSEngine._compute_nhiri,role_assignments,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,528,AGIRSEngine._compute_nhiri,app_registrations,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/agirs_engine.py,621,_compute_gei,pim_eligible_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/agirs_engine.py,644,_compute_gei,sa_attestations,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/agirs_engine.py,662,_compute_gei,workload_activity_stats,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/agirs_engine.py,711,_update_blast_radius_scores,entra_role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/agirs_engine.py,711,_update_blast_radius_scores,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/agirs_engine.py,799,_get_top_dangerous,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/agirs_engine.py,857,_compute_confidence,workload_activity_stats,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/risk/risk_summary_engine.py,98,RiskSummaryEngine._compute_identity_counts,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk/risk_summary_engine.py,98,RiskSummaryEngine._compute_identity_counts,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk/risk_summary_engine.py,157,RiskSummaryEngine._compute_identity_counts,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk/risk_summary_engine.py,157,RiskSummaryEngine._compute_identity_counts,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk/risk_summary_engine.py,255,RiskSummaryEngine._compute_remaining_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk/risk_summary_engine.py,256,RiskSummaryEngine._compute_remaining_metrics,graph_attack_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk/risk_summary_engine.py,294,RiskSummaryEngine._compute_remaining_metrics,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/risk_summary_engine.py,296,RiskSummaryEngine._compute_remaining_metrics,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/risk_summary_engine.py,323,RiskSummaryEngine._compute_remaining_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk/risk_summary_engine.py,324,RiskSummaryEngine._compute_remaining_metrics,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk/risk_summary_engine.py,334,RiskSummaryEngine._compute_remaining_metrics,posture_scores,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk/risk_summary_engine.py,341,RiskSummaryEngine.<module>,posture_scores,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk/risk_summary_engine.py,342,RiskSummaryEngine.<module>,posture_scores,SAFE,Explicit organization_id filter in SQL
+backend/app/engines/risk_evaluator.py,66,RiskEvaluator._get_latest_run_id,discovery_runs,SAFE,org_id variable passed as parameter
+backend/app/engines/risk_evaluator.py,94,RiskEvaluator._eval_disabled_user_with_role,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk_evaluator.py,121,RiskEvaluator._eval_guest_high_privilege,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk_evaluator.py,149,RiskEvaluator._eval_spn_owner,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk_evaluator.py,227,RiskEvaluator._eval_inactive_privileged,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk_evaluator.py,287,RiskEvaluator._eval_aws_user_admin_policy,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk_evaluator.py,349,RiskEvaluator._eval_gcp_owner_on_project,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/risk_forecaster.py,210,RiskForecaster._check_credential_aging,risk_rules,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk_forecaster.py,229,RiskForecaster._check_privileged_growth,risk_rules,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/risk_forecaster.py,264,RiskForecaster._check_nhi_exposure,risk_rules,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/role_mining.py,900,RoleMiningEngine._load_all_roles,discovery_runs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/role_mining.py,913,RoleMiningEngine._load_all_roles,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/role_mining.py,959,RoleMiningEngine._load_all_roles,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/role_mining.py,1004,RoleMiningEngine._load_all_roles,pim_eligible_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/role_mining.py,1018,RoleMiningEngine.<module>,pim_activations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/role_mining.py,1051,RoleMiningEngine._load_evidence_data,pim_activations,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_command_center.py,162,SecurityCommandCenter._count_active_identities,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_copilot.py,147,SecurityCopilot._get_risk_ranking_data,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_copilot.py,178,SecurityCopilot._get_anomaly_data,anomalies,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/engines/security_findings.py,189,SecurityFindingsEngine._detect_dormant_privileged,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,189,SecurityFindingsEngine._detect_dormant_privileged,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,251,SecurityFindingsEngine._detect_disabled_active_role,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,251,SecurityFindingsEngine._detect_disabled_active_role,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,291,SecurityFindingsEngine._detect_guest_admin,entra_role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,479,SecurityFindingsEngine._detect_mi_sub_scope,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,519,SecurityFindingsEngine._detect_sub_owner,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,583,_detect_sensitive_data_access,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,646,_detect_broad_rbac,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,688,_detect_storage_public,azure_storage_accounts,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,725,_detect_kv_no_purge,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings.py,762,_detect_kv_no_private,azure_key_vaults,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings_engine.py,40,generate_security_findings,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/security_findings_engine.py,50,generate_security_findings,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings_engine.py,64,generate_security_findings,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/security_findings_engine.py,80,generate_security_findings,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/security_findings_engine.py,90,generate_security_findings,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/engines/security_findings_engine.py,170,<module>,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/security_findings_engine.py,180,<module>,security_findings,SAFE,organization_id variable passed as parameter
+backend/app/engines/security_posture_engine.py,31,compute_security_posture,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/engines/security_posture_engine.py,45,compute_security_posture,security_findings,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,41,BehavioralAnomalyEngine._insert_anomaly,workload_anomaly_events,SAFE,organization_id variable passed as parameter
+backend/app/engines/telemetry/behavioral_engine.py,66,BehavioralAnomalyEngine._detect_impossible_travel,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,103,BehavioralAnomalyEngine._detect_dormant_reactivation,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,133,BehavioralAnomalyEngine._detect_off_hours_spike,workload_activity_stats,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,161,BehavioralAnomalyEngine._detect_new_resource_access,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,198,BehavioralAnomalyEngine._detect_auth_failure_burst,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,235,BehavioralAnomalyEngine._detect_risky_sign_in,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,264,BehavioralAnomalyEngine._detect_ca_bypass_attempt,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/behavioral_engine.py,292,BehavioralAnomalyEngine._detect_volume_anomaly,workload_activity_stats,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/p2_ingestion.py,288,P2TelemetryService.compute_activity_stats,workload_activity_stats,SAFE,Scoped via discovery_run_id filter
+backend/app/engines/telemetry/p2_ingestion.py,288,P2TelemetryService.compute_activity_stats,workload_signin_events,SAFE,Scoped via discovery_run_id filter
+backend/app/entitlements/decorator.py,46,wrapper,activity_log,SAFE,organization_id variable passed as parameter
+backend/app/scheduler.py,227,_run_org_discovery,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,237,_run_org_discovery,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,872,_send_change_notification_if_needed,discovery_runs,SAFE,Scheduler uses Database(organization_id=...) — RLS enforced
+backend/app/scheduler.py,904,_send_change_notification_if_needed,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,1214,_run,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,1287,_run,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,1381,_run,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,1463,_compute_risk_summary,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,1551,_fire_webhook_events,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/scheduler.py,1647,_generate_notifications,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/scheduler.py,1654,_generate_notifications,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/app/scheduler.py,3976,_run_nhi_signin_enrichment,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,4187,_run_agent_orphan_detection,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/scheduler.py,4218,_run_agent_orphan_detection,security_findings,SAFE,Explicit organization_id filter in SQL
+backend/app/services/agent_classifier.py,208,classify_tenant,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/agent_classifier.py,355,_get_identity_roles,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/services/agent_classifier.py,356,_get_identity_roles,role_assignments,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/services/connection_lifecycle.py,77,ConnectionLifecycleService.remove_connection_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,116,ConnectionLifecycleService.remove_connection_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,143,ConnectionLifecycleService.remove_connection_data,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,202,ConnectionLifecycleService.purge_connection_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,226,ConnectionLifecycleService.purge_connection_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,232,ConnectionLifecycleService.purge_connection_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,300,ConnectionLifecycleService._cancel_inflight_jobs,snapshot_jobs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/services/connection_lifecycle.py,301,ConnectionLifecycleService._cancel_inflight_jobs,snapshot_jobs,SAFE,Engine/service receives db param — RLS enforced by caller
+backend/app/services/connection_lifecycle.py,367,ConnectionLifecycleService.cleanup_orphaned_data,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/app/services/connection_lifecycle.py,367,ConnectionLifecycleService.cleanup_orphaned_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/app/services/copilot_service.py,190,CopilotService.gather_context,discovery_runs,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/services/copilot_service.py,209,CopilotService.gather_context,anomalies,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/services/copilot_service.py,251,CopilotService.gather_context,drift_reports,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/services/copilot_service.py,286,CopilotService.get_suggestions,anomalies,SAFE,Engine/service receives db param — RLS typically enforced by caller
+backend/app/services/copilot_service.py,292,CopilotService.get_suggestions,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/services/copilot_service.py,303,CopilotService.get_suggestions,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/app/services/phase3_graph_writer.py,292,Phase3GraphWriter._upsert_edge,graph_edges,SAFE,Explicit organization_id filter in SQL
+backend/app/services/phase3_graph_writer.py,308,Phase3GraphWriter._upsert_edge,graph_edges,SAFE,organization_id variable passed as parameter
+backend/app/services/phase3_graph_writer.py,330,Phase3GraphWriter._upsert_edge,graph_edges,SAFE,organization_id variable passed as parameter
+backend/app/services/phase3_graph_writer.py,832,_invalidate_stale_edges,graph_edges,SAFE,Explicit organization_id filter in SQL
+backend/app/services/phase3_graph_writer.py,856,_invalidate_stale_edges,graph_edges,SAFE,Explicit organization_id filter in SQL
+backend/app/services/posture_score_engine.py,123,PostureScoreEngine.__init__,posture_scores,SAFE,Explicit organization_id filter in SQL
+backend/app/services/posture_score_engine.py,153,PostureScoreEngine.__init__,posture_scores,SAFE,Explicit organization_id filter in SQL
+backend/app/services/posture_score_engine.py,277,PostureScoreEngine._pct_good,posture_scores,SAFE,organization_id variable passed as parameter
+backend/app/services/script_generator.py,290,ScriptGenerator._get_role_assignments,role_assignments,SAFE,Explicit organization_id filter in SQL
+backend/scripts/backfill_all_orgs.py,357,main,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/backfill_first_scan_orgs.py,215,main,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/benchmark_agent_blast_radius.py,92,_seed_benchmark_tenant,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/scripts/benchmark_agent_blast_radius.py,103,_seed_benchmark_tenant,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/scripts/benchmark_agent_blast_radius.py,250,<module>,azure_key_vaults,SAFE,organization_id variable passed as parameter
+backend/scripts/benchmark_agent_blast_radius.py,375,_cleanup_benchmark_tenant,discovery_runs,SAFE,Scoped via discovery_run_id filter
+backend/scripts/benchmark_agent_blast_radius.py,376,_cleanup_benchmark_tenant,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/scripts/benchmark_agent_blast_radius.py,376,_cleanup_benchmark_tenant,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/benchmark_agent_blast_radius.py,377,_cleanup_benchmark_tenant,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_ai_agent_test_tenant.py,195,_create_discovery_run,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_ai_agent_test_tenant.py,286,_cleanup_previous,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,333,setup_cloud_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_org.py,374,clean_all,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,393,clean_all,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,413,clean_all,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,425,clean_all,settings,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,439,create_discovery_run,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_org.py,791,_rbac,role_assignments,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_org.py,805,_entra,entra_role_assignments,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_org.py,967,_finding,security_findings,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_org.py,1130,seed_drift_reports,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,1130,seed_drift_reports,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,1203,seed_drift_reports,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,1203,seed_drift_reports,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_org.py,1273,seed_generated_remediations,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/scripts/seed_demo_org.py,1299,seed_generated_remediations,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/scripts/seed_demo_org.py,1325,seed_generated_remediations,role_assignments,SAFE,Scoped via discovery_run_id filter
+backend/scripts/seed_demo_tenant.py,282,clean_demo_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_tenant.py,293,clean_demo_data,discovery_runs,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_tenant.py,297,clean_demo_data,cloud_connections,SAFE,Explicit organization_id filter in SQL
+backend/scripts/seed_demo_tenant.py,309,seed_cloud_connection,cloud_connections,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_tenant.py,327,seed_discovery_run,discovery_runs,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_tenant.py,511,seed_role_assignments,role_assignments,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_tenant.py,542,seed_role_assignments,role_assignments,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_tenant.py,568,seed_role_assignments,entra_role_assignments,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_tenant.py,579,seed_role_assignments,entra_role_assignments,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_demo_tenant.py,808,seed_security_findings,security_findings,SAFE,organization_id variable passed as parameter
+backend/scripts/seed_phase3_graph.py,535,seed,graph_edges,SAFE,Explicit organization_id filter in SQL

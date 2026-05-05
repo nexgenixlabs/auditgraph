@@ -1,0 +1,5 @@
+[
+  "/Users/sangabattula/projects/auditgraph/backend/scripts/../app/database.py:17969:SSO005:INSERT into sso_auth_codes without hash_code \u2014 codes must be HMAC-hashed",
+  "/Users/sangabattula/projects/auditgraph/backend/scripts/../app/database.py:17975:SSO005:INSERT into sso_auth_codes without hash_code \u2014 codes must be HMAC-hashed",
+  "/Users/sangabattula/projects/auditgraph/backend/scripts/../app/engines/discovery/aws_discovery.py:1096:SSO004:Plaintext == on code variable \u2014 use hmac.compare_digest()"
+]

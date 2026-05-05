@@ -15,6 +15,7 @@ Architecture:
 """
 
 import logging
+from psycopg2 import sql as psycopg2_sql
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,9 @@ class ConnectionLifecycleService:
                 try:
                     cursor.execute("SAVEPOINT cc_cleanup")
                     cursor.execute(
-                        f"DELETE FROM {table} WHERE cloud_connection_id = %s",
-                        (connection_id,)
+                        psycopg2_sql.SQL("DELETE FROM {tbl} WHERE cloud_connection_id = %s")
+                        .format(tbl=psycopg2_sql.Identifier(table)),
+                        (connection_id,),
                     )
                     deleted = cursor.rowcount
                     cursor.execute("RELEASE SAVEPOINT cc_cleanup")
@@ -209,8 +211,9 @@ class ConnectionLifecycleService:
                 try:
                     cursor.execute("SAVEPOINT purge_cc")
                     cursor.execute(
-                        f"DELETE FROM {table} WHERE cloud_connection_id = %s",
-                        (connection_id,)
+                        psycopg2_sql.SQL("DELETE FROM {tbl} WHERE cloud_connection_id = %s")
+                        .format(tbl=psycopg2_sql.Identifier(table)),
+                        (connection_id,),
                     )
                     deleted = cursor.rowcount
                     cursor.execute("RELEASE SAVEPOINT purge_cc")
@@ -333,9 +336,9 @@ class ConnectionLifecycleService:
             try:
                 cursor.execute("SAVEPOINT assert_check")
                 cursor.execute(
-                    f"SELECT COUNT(*) FROM {table} "
-                    f"WHERE cloud_connection_id = %s",
-                    (connection_id,)
+                    psycopg2_sql.SQL("SELECT COUNT(*) FROM {tbl} WHERE cloud_connection_id = %s")
+                    .format(tbl=psycopg2_sql.Identifier(table)),
+                    (connection_id,),
                 )
                 count = cursor.fetchone()[0]
                 cursor.execute("RELEASE SAVEPOINT assert_check")

@@ -1,0 +1,65 @@
+# AuditGraph — Tenant-Scoped Tables Registry
+#
+# Every table listed here MUST have:
+#   - organization_id INTEGER NOT NULL (or tenant_id NOT NULL)
+#   - FK to organizations(id) or tenants(id)
+#   - RLS policies (org_strict_sel/ins/upd/del)
+#   - Entry in TENANT_TABLES (scripts/lint_tenant_scope.py)
+#   - Entry in _BASELINE_TENANT_TABLES (app/security/tenant_scope.py)
+#
+# CI enforcement: schema-drift test fails if a table appears here
+# but is missing organization_id, or vice versa.
+#
+# Last updated: 2026-04-28 (AG-129)
+# Count: 45 tables
+
+activity_log
+agirs_scores
+anomalies
+api_keys
+app_registrations
+azure_key_vaults
+azure_storage_accounts
+cloud_connections
+compliance_framework_config
+compliance_snapshots
+copilot_conversations
+credentials
+dashboard_preferences
+discovery_runs
+discovery_stage_log
+drift_reports
+entra_role_assignments
+graph_api_permissions
+graph_attack_findings
+graph_edges
+identities
+identity_exposures
+identity_group_members
+identity_groups
+identity_subscription_access
+job_runs
+notifications
+pim_activations
+pim_eligible_assignments
+posture_scores
+remediation_actions
+remediation_playbooks
+risk_rules
+risk_scores
+risk_summary
+role_assignments
+sa_attestations
+saved_views
+scan_schedules
+security_findings
+settings
+snapshot_jobs
+snapshot_runs
+soar_actions
+soar_playbooks
+sp_app_roles
+webhooks
+workload_activity_stats
+workload_anomaly_events
+workload_signin_events

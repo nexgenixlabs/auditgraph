@@ -111,6 +111,7 @@ export interface IdentityDetailsResponse {
     deleted_at?: string | null;
     ca_coverage_status?: string | null;
     ca_mfa_enforced?: boolean;
+    has_federated_credentials?: boolean;
     removable_role_count?: number;
     group_count?: number;
     privileged_groups?: { group_name: string; group_type: string; inherited_role_count: number; highest_scope: string }[];

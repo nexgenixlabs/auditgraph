@@ -630,7 +630,12 @@ class EmailService:
         from app.database import Database
         db = Database(organization_id=organization_id) if organization_id else Database()
         try:
-            report_data = db.get_report_data()
+            # AG-94: Pass org_id to scope report data to the correct tenant
+            effective_org_id = organization_id or db._organization_id
+            if not effective_org_id:
+                logger.warning("send_scheduled_report called without organization_id — skipping")
+                return False
+            report_data = db.get_report_data(org_id=effective_org_id)
             if report_data is None:
                 logger.info("No completed discovery runs - skipping scheduled report")
                 return False

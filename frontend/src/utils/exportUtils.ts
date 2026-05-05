@@ -5,6 +5,10 @@
  * All exports include standardized metadata: Snapshot ID, Timestamp, Tenant ID, Schema version.
  */
 
+// Re-export canonical identity CSV columns from single source of truth
+export { IDENTITY_CSV_COLUMNS } from '../constants/exportConstants';
+export type { CsvColumnDef } from '../constants/exportConstants';
+
 export const EXPORT_SCHEMA_VERSION = '1.0';
 
 export interface ExportMetadata {
@@ -82,32 +86,6 @@ export function exportFilename(type: string, format: 'csv' | 'json'): string {
   const date = new Date().toISOString().split('T')[0];
   return `auditgraph-${type}-${date}.${format}`;
 }
-
-export const IDENTITY_CSV_COLUMNS: CsvColumn[] = [
-  { key: 'display_name', header: 'Display Name' },
-  { key: 'identity_id', header: 'Identity ID' },
-  { key: 'identity_type', header: 'Type' },
-  { key: 'identity_category', header: 'Category' },
-  { key: 'subscription_name', header: 'Subscription Name' },
-  { key: 'subscription_id', header: 'Subscription ID' },
-  { key: 'cloud', header: 'Cloud' },
-  { key: 'permission_plane', header: 'Permission Plane' },
-  { key: 'risk_level', header: 'Risk Level' },
-  { key: 'risk_score', header: 'Risk Score' },
-  { key: 'privilege_tier', header: 'Privilege Tier' },
-  { key: 'entra_role_count', header: 'Entra Roles' },
-  { key: 'rbac_role_count', header: 'RBAC Roles' },
-  { key: 'api_permission_count', header: 'Graph API Perms' },
-  { key: 'credential_count', header: 'Credentials' },
-  { key: 'credential_status', header: 'Credential Status' },
-  { key: 'credential_expiration', header: 'Credential Expiry' },
-  { key: 'created_datetime', header: 'Created' },
-  { key: 'last_seen_auth', header: 'Last Active' },
-  { key: 'activity_status', header: 'Activity Status' },
-  { key: 'owner_display_name', header: 'Owner' },
-  { key: 'ca_coverage_status', header: 'CA Coverage' },
-  { key: 'enabled', header: 'Enabled' },
-];
 
 export const COMPLIANCE_CSV_COLUMNS: CsvColumn[] = [
   { key: 'framework', header: 'Framework' },

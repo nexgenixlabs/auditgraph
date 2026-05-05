@@ -160,6 +160,8 @@ interface StatusData {
   scheduler_running: boolean;
   next_run: string | null;
   next_report: string | null;
+  last_report: string | null;
+  report_schedule_allowed: boolean;
 }
 
 // ─── Ticketing Integration Component ───────────────────────────
@@ -221,7 +223,7 @@ function TicketingSection({ ticketingRef }: { ticketingRef: React.RefObject<HTML
         <span className="text-xl">🎫</span>
         <div>
           <div className="text-lg font-semibold text-gray-900">Ticketing</div>
-          <p className="text-xs text-gray-500">Connect your ITSM platform to create remediation tickets directly from the dashboard. <span className="text-amber-600 font-medium">(Preview — integration coming soon)</span></p>
+          <p className="text-xs text-gray-500">Connect your ITSM platform to create remediation tickets directly from the dashboard.</p>
         </div>
       </div>
 

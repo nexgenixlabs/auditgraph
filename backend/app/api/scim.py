@@ -9,6 +9,7 @@ import json
 from datetime import datetime, timezone
 from functools import wraps
 from flask import request, jsonify, g
+from psycopg2 import sql as psycopg2_sql
 
 logger = logging.getLogger(__name__)
 
@@ -347,11 +348,20 @@ def scim_patch_user(user_id):
                 updates['username'] = value
 
     if updates:
-        set_parts = [f"{k} = %s" for k in updates]
-        set_parts.append("updated_at = NOW()")
+        _scim_cols = {'enabled', 'display_name', 'username', 'email', 'phone',
+                      'role', 'auth_provider', 'external_id'}
+        for k in updates:
+            if k not in _scim_cols:
+                return jsonify({'schemas': ['urn:ietf:params:scim:api:messages:2.0:Error'],
+                                'detail': 'Unsupported attribute', 'status': 400}), 400
+        set_clause = psycopg2_sql.SQL(", ").join(
+            [psycopg2_sql.SQL("{col} = %s").format(col=psycopg2_sql.Identifier(k)) for k in updates]
+            + [psycopg2_sql.SQL("updated_at = NOW()")]
+        )
         params = list(updates.values()) + [user_id, org_id]
         cursor.execute(
-            f"UPDATE users SET {', '.join(set_parts)} WHERE id = %s AND organization_id = %s RETURNING *",
+            psycopg2_sql.SQL("UPDATE {tbl} SET {sets} WHERE id = %s AND organization_id = %s RETURNING *")
+            .format(tbl=psycopg2_sql.Identifier("users"), sets=set_clause),
             params,
         )
         row = dict(cursor.fetchone())

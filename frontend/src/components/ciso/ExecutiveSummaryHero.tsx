@@ -47,7 +47,7 @@ function buildInsightLines(vm: CISOViewModel): {
   riskFocus: string | null;
   actionHint: string | null;
 } {
-  const verdict = VERDICT_LINE[vm.status] || 'Identity posture data unavailable';
+  const verdict = VERDICT_LINE[vm.status] || 'Posture assessment pending — run a discovery scan to generate results.';
   const topDriver = vm.top_risk_drivers[0];
   const riskFocus = topDriver ? driverToRiskFocus(topDriver.title, topDriver.count) : null;
   const actionHint = topDriver ? driverToActionHint(topDriver.title) : null;

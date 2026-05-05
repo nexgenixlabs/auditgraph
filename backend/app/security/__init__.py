@@ -1,10 +1,14 @@
 """
+AuditGraph security primitives.
+
 Phase 5: Security Hardening — Rate Limiting & Security Headers
+Phase AG-93: SQL Identifier Safety (sql_identifiers submodule)
 
 In-memory rate limiter for auth endpoints.
 Thread-safe, no external dependency (no Redis required).
 Auto-evicts stale entries every 60 seconds.
 """
+import os
 import time
 import threading
 import logging
@@ -135,10 +139,13 @@ def add_security_headers(response):
         'geolocation=(), camera=(), microphone=()'
 
     # Content Security Policy (Phase 1 Security Hardening)
+    # AG-114: unsafe-inline only in development (2,787 inline style= in frontend)
+    _is_dev = os.environ.get('APP_ENV', 'production') == 'local'
+    _style_src = "'self' 'unsafe-inline'" if _is_dev else "'self'"
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
         "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
+        f"style-src {_style_src}; "
         "img-src 'self' data: https:; "
         "font-src 'self'; "
         "connect-src 'self'; "

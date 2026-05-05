@@ -69,6 +69,7 @@ import time
 import threading
 import psycopg2
 import psycopg2.pool
+from psycopg2 import sql as psycopg2_sql
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -79,6 +80,7 @@ from app.config import (
 )
 
 _db_logger = logging.getLogger(__name__)
+_BCRYPT_ROUNDS = int(os.environ.get('BCRYPT_ROUNDS', '12'))  # AG-112
 
 # ---------------------------------------------------------------------------
 # SQL Safety Guard — detect f-string / string-concat SQL at runtime
@@ -616,8 +618,21 @@ class Database:
         psycopg2 runs with autocommit=False, so set_config() is always
         inside an implicit transaction.  ROLLBACK reverts the setting,
         so we must re-apply it immediately.
+
+        AG-109: If the RLS context cannot be re-established after rollback,
+        the connection is closed and set to None to prevent cross-tenant
+        data leakage.  Any subsequent query on this Database instance will
+        fail-closed with an AttributeError rather than executing without
+        tenant isolation.
         """
-        self.conn.rollback()
+        try:
+            self.conn.rollback()
+        except Exception:
+            # Rollback itself failed — connection is dead.
+            # Close it and bail; no RLS re-set is possible or needed.
+            self._poison_connection("rollback failed")
+            return
+
         if getattr(self, '_organization_id', None):
             try:
                 cur = self.conn.cursor()
@@ -626,8 +641,34 @@ class Database:
                     (str(self._organization_id),),
                 )
                 cur.close()
-            except Exception:
-                pass  # connection may be broken
+            except Exception as rls_err:
+                # CRITICAL: RLS context could not be re-established.
+                # This connection is unsafe — close it to prevent
+                # cross-tenant data leakage.
+                _db_logger.error(
+                    "AG-109 RLS CONTEXT LOST after rollback for org_id=%s: %s "
+                    "— connection closed to prevent cross-tenant leak",
+                    self._organization_id, rls_err,
+                )
+                self._poison_connection(
+                    f"RLS re-set failed for org_id={self._organization_id}: {rls_err}"
+                )
+
+    def _poison_connection(self, reason: str):
+        """Close the underlying connection and set self.conn to None.
+
+        Called when the connection enters an unrecoverable state where
+        continued use would risk violating tenant isolation.  After this
+        call, any attempt to use self.conn will raise AttributeError,
+        which is the correct fail-closed behavior.
+        """
+        _db_logger.warning("Connection poisoned: %s", reason)
+        try:
+            if self.conn and not self.conn.closed:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = None
 
     def safe_commit(self):
         """Alias for _commit(). Kept for backward compatibility."""
@@ -980,25 +1021,24 @@ class Database:
                     )
                     policy_count = cursor.fetchone()[0]
                     if policy_count == 0:
-                        setting = "current_setting('app.current_organization_id', true)::integer"
+                        _tbl_ident = psycopg2_sql.Identifier(table_name)
+                        _rls_using = psycopg2_sql.SQL("organization_id = current_setting('app.current_organization_id', true)::integer")
                         for suffix in ('sel', 'ins', 'upd', 'del'):
-                            cursor.execute(f'DROP POLICY IF EXISTS org_strict_{suffix} ON "{table_name}"')
-                        cursor.execute(f"""
-                            CREATE POLICY org_strict_sel ON "{table_name}" FOR SELECT
-                                USING (organization_id = {setting})
-                        """)
-                        cursor.execute(f"""
-                            CREATE POLICY org_strict_ins ON "{table_name}" FOR INSERT
-                                WITH CHECK (organization_id = {setting})
-                        """)
-                        cursor.execute(f"""
-                            CREATE POLICY org_strict_upd ON "{table_name}" FOR UPDATE
-                                USING (organization_id = {setting})
-                        """)
-                        cursor.execute(f"""
-                            CREATE POLICY org_strict_del ON "{table_name}" FOR DELETE
-                                USING (organization_id = {setting})
-                        """)
+                            cursor.execute(
+                                psycopg2_sql.SQL("DROP POLICY IF EXISTS {pol} ON {tbl}").format(
+                                    pol=psycopg2_sql.Identifier(f"org_strict_{suffix}"), tbl=_tbl_ident))
+                        cursor.execute(psycopg2_sql.SQL(
+                            "CREATE POLICY {pol} ON {tbl} FOR SELECT USING ({cond})"
+                        ).format(pol=psycopg2_sql.Identifier("org_strict_sel"), tbl=_tbl_ident, cond=_rls_using))
+                        cursor.execute(psycopg2_sql.SQL(
+                            "CREATE POLICY {pol} ON {tbl} FOR INSERT WITH CHECK ({cond})"
+                        ).format(pol=psycopg2_sql.Identifier("org_strict_ins"), tbl=_tbl_ident, cond=_rls_using))
+                        cursor.execute(psycopg2_sql.SQL(
+                            "CREATE POLICY {pol} ON {tbl} FOR UPDATE USING ({cond})"
+                        ).format(pol=psycopg2_sql.Identifier("org_strict_upd"), tbl=_tbl_ident, cond=_rls_using))
+                        cursor.execute(psycopg2_sql.SQL(
+                            "CREATE POLICY {pol} ON {tbl} FOR DELETE USING ({cond})"
+                        ).format(pol=psycopg2_sql.Identifier("org_strict_del"), tbl=_tbl_ident, cond=_rls_using))
                         policies_created += 1
                         logger.info("Created RLS policies for table: %s", table_name)
                     cursor.execute(f'RELEASE SAVEPOINT {sp}')
@@ -1795,6 +1835,7 @@ class Database:
     _last_activity_cols_ensured = False
     _signin_datetime_cols_ensured = False
     _access_paths_col_ensured = False
+    _telemetry_coverage_col_ensured = False
     _lineage_verdicts_ensured = False
 
     def backfill_microsoft_flag(self):
@@ -2438,6 +2479,20 @@ class Database:
                     self._rollback()
             Database._access_paths_col_ensured = True
 
+        # Ensure telemetry_coverage column exists (Phase 2 Telemetry Transparency)
+        if not Database._telemetry_coverage_col_ensured:
+            try:
+                cursor.execute("SAVEPOINT telemetry_cov_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS telemetry_coverage VARCHAR(10)")
+                cursor.execute("RELEASE SAVEPOINT telemetry_cov_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT telemetry_cov_ddl")
+                except Exception:
+                    self._rollback()
+            Database._telemetry_coverage_col_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -2608,7 +2663,10 @@ class Database:
                 access_paths,
 
                 -- Privilege tier (AG-78)
-                privilege_tier
+                privilege_tier,
+
+                -- Telemetry coverage (Phase 2 Transparency)
+                telemetry_coverage
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -2643,6 +2701,7 @@ class Database:
                 %s, %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s, %s, %s,
+                %s,
                 %s,
                 %s
             )
@@ -2794,6 +2853,8 @@ class Database:
                 access_paths = EXCLUDED.access_paths,
 
                 privilege_tier = EXCLUDED.privilege_tier,
+
+                telemetry_coverage = EXCLUDED.telemetry_coverage,
 
                 created_at = NOW()
             RETURNING id
@@ -2958,6 +3019,9 @@ class Database:
 
                 # Privilege tier (AG-78)
                 identity_data.get("privilege_tier"),
+
+                # Telemetry coverage (Phase 2 Transparency)
+                identity_data.get("telemetry_coverage"),
             ),
         )
 
@@ -3148,7 +3212,12 @@ class Database:
         cursor.close()
 
     def save_entra_role_assignment(self, identity_db_id: int, entra_role_data: Dict):
-        """Save an Entra ID directory role assignment to the database with usage intelligence"""
+        """Save an Entra ID directory role assignment with upsert semantics.
+
+        Uses ON CONFLICT (identity_db_id, role_definition_id, directory_scope)
+        to prevent duplicate rows from accumulating across discovery runs.
+        If a matching row already exists, usage intelligence fields are updated.
+        """
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -3160,6 +3229,16 @@ class Database:
                 last_used_at, last_used_operation,
                 organization_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (identity_db_id, role_definition_id, COALESCE(directory_scope, '/'))
+            DO UPDATE SET
+                role_name = EXCLUDED.role_name,
+                usage_status = EXCLUDED.usage_status,
+                days_since_assigned = EXCLUDED.days_since_assigned,
+                redundant_with = EXCLUDED.redundant_with,
+                risk_level = EXCLUDED.risk_level,
+                why_critical = EXCLUDED.why_critical,
+                last_used_at = EXCLUDED.last_used_at,
+                last_used_operation = EXCLUDED.last_used_operation
         """,
             (
                 identity_db_id,
@@ -3182,16 +3261,22 @@ class Database:
         self._commit()
         cursor.close()
 
-    def get_latest_discovery_run(self) -> Optional[Dict]:
-        """Get the most recent completed discovery run"""
+    def get_latest_discovery_run(self, *, org_id: int) -> Optional[Dict]:
+        """Get the most recent completed discovery run for a specific org.
+
+        AG-94: Requires explicit org_id to prevent cross-tenant data leak.
+        """
+        from app.security.tenant_scope import _validate_org_id
+        _validate_org_id(org_id, 'get_latest_discovery_run')
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
             SELECT * FROM discovery_runs
-            WHERE status = 'completed'
+            WHERE status = 'completed' AND organization_id = %s
             ORDER BY completed_at DESC
             LIMIT 1
-        """
+        """,
+            (org_id,),
         )
         result = cursor.fetchone()
         cursor.close()
@@ -3203,7 +3288,13 @@ class Database:
 
     def get_identity_roles_enriched(self, identity_db_id: int) -> List[Dict]:
         """
-        Get all role assignments for an identity with intelligence data
+        Get all role assignments for an identity with intelligence data.
+
+        Includes last_used waterfall:
+          P1: ra.last_used_at (role-level activity record)
+          P1b: ral.last_activity_date (role_activity_log)
+          P3: i.last_activity_date (identity-level fallback)
+          P4: NULL → "Never used"
 
         Returns:
             List of roles with intelligence (risk level, descriptions, usage status, etc.)
@@ -3211,6 +3302,7 @@ class Database:
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
         # Get Azure RBAC roles with intelligence and usage status
+        # P3 fallback: JOIN identities for identity-level last_activity_date
         cursor.execute(
             """
             SELECT
@@ -3235,13 +3327,17 @@ class Database:
                 ra.last_used_at,
                 ra.last_used_operation,
                 ra.group_display_name,
-                ra.group_principal_azure_object_id
+                ra.group_principal_azure_object_id,
+                -- P3 fallback: identity-level activity date
+                i.last_activity_date as identity_last_activity_date
             FROM role_assignments ra
             LEFT JOIN role_permissions rp
                 ON rp.role_name = ra.role_name AND rp.role_type = 'azure'
             LEFT JOIN role_activity_log ral
                 ON ral.identity_db_id = ra.identity_db_id
                 AND ral.role_name = ra.role_name
+            JOIN identities i
+                ON i.id = ra.identity_db_id
             WHERE ra.identity_db_id = %s
         """,
             (identity_db_id,),
@@ -3272,13 +3368,17 @@ class Database:
                 NULL as resource_type,
                 NULL as resource_name,
                 era.last_used_at,
-                era.last_used_operation
+                era.last_used_operation,
+                -- P3 fallback: identity-level activity date
+                i.last_activity_date as identity_last_activity_date
             FROM entra_role_assignments era
             LEFT JOIN role_permissions rp
                 ON rp.role_name = era.role_name AND rp.role_type = 'entra'
             LEFT JOIN role_activity_log ral
                 ON ral.identity_db_id = era.identity_db_id
                 AND ral.role_name = era.role_name
+            JOIN identities i
+                ON i.id = era.identity_db_id
             WHERE era.identity_db_id = %s
         """,
             (identity_db_id,),
@@ -4268,16 +4368,20 @@ class Database:
             }
         }
 
-    def get_report_data(self, run_ids=None) -> Dict:
+    def get_report_data(self, run_ids=None, *, org_id: int) -> Dict:
         """
         Get comprehensive data for PDF report generation.
         Returns stats, posture, compliance, top risks, and remediation summary.
         If run_ids provided, scope report to those runs (multi-connection support).
+
+        AG-94: Requires explicit org_id to prevent cross-tenant data leak.
         """
+        from app.security.tenant_scope import _validate_org_id
+        _validate_org_id(org_id, 'get_report_data')
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
         if run_ids:
-            # Multi-connection: aggregate stats across provided run IDs
+            # Multi-connection: aggregate stats across provided run IDs (scoped to org)
             cursor.execute("""
                 SELECT MAX(id) AS id, MAX(completed_at) AS completed_at,
                        SUM(total_identities) AS total_identities,
@@ -4285,14 +4389,14 @@ class Database:
                        SUM(high_count) AS high_count,
                        SUM(medium_count) AS medium_count,
                        SUM(low_count) AS low_count
-                FROM discovery_runs WHERE id = ANY(%s)
-            """, (run_ids,))
+                FROM discovery_runs WHERE id = ANY(%s) AND organization_id = %s
+            """, (run_ids, org_id))
         else:
             cursor.execute("""
                 SELECT id, completed_at, total_identities, critical_count, high_count, medium_count, low_count
-                FROM discovery_runs WHERE status = 'completed'
+                FROM discovery_runs WHERE status = 'completed' AND organization_id = %s
                 ORDER BY id DESC LIMIT 1
-            """)
+            """, (org_id,))
         run = cursor.fetchone()
         if not run or not run.get('id'):
             cursor.close()
@@ -4300,13 +4404,13 @@ class Database:
 
         use_run_ids = run_ids if run_ids else [run["id"]]
 
-        # Previous run for trend (use oldest run's predecessor)
+        # Previous run for trend (use oldest run's predecessor, scoped to org)
         oldest_run_id = min(use_run_ids) if use_run_ids else run["id"]
         cursor.execute("""
             SELECT id, total_identities, critical_count, high_count, medium_count
-            FROM discovery_runs WHERE status = 'completed' AND id < %s
+            FROM discovery_runs WHERE status = 'completed' AND organization_id = %s AND id < %s
             ORDER BY id DESC LIMIT 1
-        """, (oldest_run_id,))
+        """, (org_id, oldest_run_id))
         prev_run = cursor.fetchone()
 
         # Top 20 critical/high identities
@@ -5407,10 +5511,15 @@ class Database:
                     r[ts] = r[ts].isoformat()
         return rows
 
-    def get_role_usage_stats(self):
-        """Aggregate usage_status and risk_level counts across all role assignments from latest run."""
+    def get_role_usage_stats(self, *, org_id: int):
+        """Aggregate usage_status and risk_level counts across all role assignments from latest run.
+
+        AG-94: Requires explicit org_id to scope discovery run lookup.
+        """
+        from app.security.tenant_scope import _validate_org_id
+        _validate_org_id(org_id, 'get_role_usage_stats')
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (org_id,))
         row = cursor.fetchone()
         latest_run = row['max'] if row else None
         if not latest_run:
@@ -6231,18 +6340,27 @@ class Database:
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS external_id VARCHAR(500)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_external_id ON users(external_id)")
         # Phase 54: SSO one-time auth codes
+        # AG-95: code column now stores HMAC-SHA256 hash (not plaintext).
+        # attempt_count tracks brute-force attempts per code.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sso_auth_codes (
                 id SERIAL PRIMARY KEY,
-                code VARCHAR(128) UNIQUE NOT NULL,
+                code VARCHAR(256) NOT NULL,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 organization_id INTEGER,
                 used BOOLEAN DEFAULT false,
+                attempt_count INTEGER DEFAULT 0,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sso_codes_code ON sso_auth_codes(code)")
+        # AG-95: Add attempt_count column if missing (migration from old schema)
+        try:
+            cursor.execute("ALTER TABLE sso_auth_codes ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0")
+        except Exception:
+            try: self.conn.rollback()
+            except Exception: pass
         # Phase 78: force_password_change column
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS force_password_change BOOLEAN DEFAULT false")
         # Phase 78: Role migration — auditor→reader, viewer→compliance
@@ -6645,7 +6763,7 @@ class Database:
                 import secrets as _secrets
                 password = _secrets.token_urlsafe(16)
                 logger.warning("[FIRST RUN] Generated admin password for '%s' — set ADMIN_PASSWORD env var to persist", username)
-            hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
+            hashed = bcrypt_lib.hashpw(password.encode('utf-8'), bcrypt_lib.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
             self.create_user(username, hashed, 'Administrator', 'admin', organization_id=default_org_id)
             # Promote to superadmin with portal access
             try:
@@ -6669,7 +6787,7 @@ class Database:
                 cursor2 = self.conn.cursor()
                 cursor2.execute("SELECT id FROM users WHERE username = %s", (username,))
                 row = cursor2.fetchone()
-                hashed = bcrypt_lib.hashpw(configured_password.encode('utf-8'), bcrypt_lib.gensalt()).decode('utf-8')
+                hashed = bcrypt_lib.hashpw(configured_password.encode('utf-8'), bcrypt_lib.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
                 if row:
                     cursor2.execute(
                         "UPDATE users SET password_hash = %s WHERE username = %s",
@@ -6763,7 +6881,7 @@ class Database:
                 # Sync password + org on every startup for consistency
                 password_hash = bcrypt_lib.hashpw(
                     'Admin@123'.encode('utf-8'),
-                    bcrypt_lib.gensalt()
+                    bcrypt_lib.gensalt(rounds=_BCRYPT_ROUNDS)
                 ).decode('utf-8')
                 cursor.execute(
                     "UPDATE users SET password_hash = %s, organization_id = %s, "
@@ -6776,7 +6894,7 @@ class Database:
                 # Hash password using same bcrypt method as production login
                 password_hash = bcrypt_lib.hashpw(
                     'Admin@123'.encode('utf-8'),
-                    bcrypt_lib.gensalt()
+                    bcrypt_lib.gensalt(rounds=_BCRYPT_ROUNDS)
                 ).decode('utf-8')
 
                 cursor.execute("""
@@ -6862,7 +6980,7 @@ class Database:
                     "No fallback password is allowed. Add it to backend/.env.dev."
                 )
             password_hash = bcrypt_lib.hashpw(
-                password.encode('utf-8'), bcrypt_lib.gensalt()
+                password.encode('utf-8'), bcrypt_lib.gensalt(rounds=_BCRYPT_ROUNDS)
             ).decode('utf-8')
 
             if existing:
@@ -7039,7 +7157,7 @@ class Database:
 
                 password_hash = bcrypt_lib.hashpw(
                     u['password'].encode('utf-8'),
-                    bcrypt_lib.gensalt()
+                    bcrypt_lib.gensalt(rounds=_BCRYPT_ROUNDS)
                 ).decode('utf-8')
 
                 cursor.execute("""
@@ -8929,13 +9047,18 @@ class Database:
         cursor.close()
         return deleted
 
-    def populate_campaign_reviews(self, campaign_id: int, scope_filters: dict, reviewer_id: int, deadline=None) -> int:
-        """Populate campaign_reviews from identities with V2 risk scoring and AI recommendations."""
+    def populate_campaign_reviews(self, campaign_id: int, scope_filters: dict, reviewer_id: int, deadline=None, *, org_id: int) -> int:
+        """Populate campaign_reviews from identities with V2 risk scoring and AI recommendations.
+
+        AG-94: Requires explicit org_id to scope discovery run lookup.
+        """
+        from app.security.tenant_scope import _validate_org_id
+        _validate_org_id(org_id, 'populate_campaign_reviews')
         self._ensure_access_review_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Find latest completed discovery run
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        # Find latest completed discovery run (scoped to org)
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (org_id,))
         row = cursor.fetchone()
         latest_run = row['max'] if row else None
         if not latest_run:
@@ -9372,10 +9495,17 @@ class Database:
                 params.append(val)
         return parts, params
 
-    def _get_group_risk_stats(self, cursor, group_id: int = None, auto_criteria: dict = None, latest_run: int = None) -> dict:
-        """Compute risk breakdown for a group's members."""
+    def _get_group_risk_stats(self, cursor, group_id: int = None, auto_criteria: dict = None, latest_run: int = None, *, org_id: int = None) -> dict:
+        """Compute risk breakdown for a group's members.
+
+        AG-94: When latest_run is None, scopes discovery_runs lookup by org_id.
+        """
         if latest_run is None:
-            cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+            if org_id is not None:
+                cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (org_id,))
+            else:
+                # Fallback: use self._organization_id (RLS connection context)
+                cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (self._organization_id,))
             row = cursor.fetchone()
             latest_run = row[0] if row else None
         if not latest_run:
@@ -9415,11 +9545,15 @@ class Database:
             'avg_risk_score': round(float(row[6]), 1)
         }
 
-    def get_groups(self) -> list:
-        """Get all identity groups with summary stats."""
+    def get_groups(self, *, org_id: int = None) -> list:
+        """Get all identity groups with summary stats.
+
+        AG-94: Scopes discovery_runs lookup by org_id. Falls back to self._organization_id.
+        """
+        effective_org_id = org_id or self._organization_id
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (effective_org_id,))
         row = cursor.fetchone()
         latest_run = row['max'] if row else None
 
@@ -9449,8 +9583,12 @@ class Database:
         cursor2.close()
         return groups
 
-    def get_group(self, group_id: int) -> Optional[dict]:
-        """Get a single group with its member identities."""
+    def get_group(self, group_id: int, *, org_id: int = None) -> Optional[dict]:
+        """Get a single group with its member identities.
+
+        AG-94: Scopes discovery_runs lookup by org_id. Falls back to self._organization_id.
+        """
+        effective_org_id = org_id or self._organization_id
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -9469,8 +9607,8 @@ class Database:
             if group.get(ts) and hasattr(group[ts], 'isoformat'):
                 group[ts] = group[ts].isoformat()
 
-        # Get latest run
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        # Get latest run (scoped to org)
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (effective_org_id,))
         lr = cursor.fetchone()
         latest_run = lr['max'] if lr else None
 
@@ -9610,11 +9748,15 @@ class Database:
         cursor.close()
         return count
 
-    def get_group_comparison(self, group_ids: list) -> list:
-        """Get comparison data for 2-3 groups."""
+    def get_group_comparison(self, group_ids: list, *, org_id: int = None) -> list:
+        """Get comparison data for 2-3 groups.
+
+        AG-94: Scopes discovery_runs lookup by org_id. Falls back to self._organization_id.
+        """
+        effective_org_id = org_id or self._organization_id
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (effective_org_id,))
         lr = cursor.fetchone()
         latest_run = lr['max'] if lr else None
 
@@ -9667,8 +9809,12 @@ class Database:
         cursor.close()
         return results
 
-    def get_identity_groups(self, identity_id: str) -> list:
-        """Get all groups an identity belongs to (custom memberships + matching auto groups)."""
+    def get_identity_groups(self, identity_id: str, *, org_id: int = None) -> list:
+        """Get all groups an identity belongs to (custom memberships + matching auto groups).
+
+        AG-94: Scopes discovery_runs lookup by org_id. Falls back to self._organization_id.
+        """
+        effective_org_id = org_id or self._organization_id
         self._ensure_identity_group_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -9682,8 +9828,8 @@ class Database:
         """, (identity_id,))
         custom = [dict(r) for r in cursor.fetchall()]
 
-        # Auto groups: check if identity matches criteria
-        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed'")
+        # Auto groups: check if identity matches criteria (scoped to org)
+        cursor.execute("SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s", (effective_org_id,))
         lr = cursor.fetchone()
         latest_run = lr['max'] if lr else None
 
@@ -9791,35 +9937,49 @@ class Database:
     # Phase 40: Anomaly Detection
     # ================================================================
 
+    _anomalies_ensured = False
+
     def _ensure_anomalies_table(self):
         """Create anomalies table if it doesn't exist."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS anomalies (
-                id SERIAL PRIMARY KEY,
-                discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                anomaly_type VARCHAR(50) NOT NULL,
-                severity VARCHAR(20) NOT NULL DEFAULT 'medium',
-                identity_id TEXT,
-                identity_name VARCHAR(255),
-                title VARCHAR(255) NOT NULL,
-                description TEXT NOT NULL,
-                details JSONB,
-                resolved BOOLEAN DEFAULT false,
-                resolved_at TIMESTAMPTZ,
-                resolved_by VARCHAR(100),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_run_id ON anomalies(discovery_run_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_type ON anomalies(anomaly_type)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_severity ON anomalies(severity)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_identity ON anomalies(identity_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_created ON anomalies(created_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_resolved ON anomalies(resolved)")
-        cursor.execute("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        self._commit()
-        cursor.close()
+        if Database._anomalies_ensured:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SAVEPOINT _ensure_anomalies")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS anomalies (
+                    id SERIAL PRIMARY KEY,
+                    discovery_run_id INTEGER REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    anomaly_type VARCHAR(50) NOT NULL,
+                    severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+                    identity_id TEXT,
+                    identity_name VARCHAR(255),
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT NOT NULL,
+                    details JSONB,
+                    resolved BOOLEAN DEFAULT false,
+                    resolved_at TIMESTAMPTZ,
+                    resolved_by VARCHAR(100),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_run_id ON anomalies(discovery_run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_type ON anomalies(anomaly_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_severity ON anomalies(severity)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_identity ON anomalies(identity_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_created ON anomalies(created_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_resolved ON anomalies(resolved)")
+            cursor.execute("ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+            cursor.execute("RELEASE SAVEPOINT _ensure_anomalies")
+            self._commit()
+            cursor.close()
+            Database._anomalies_ensured = True
+        except Exception:
+            try:
+                self.conn.cursor().execute("ROLLBACK TO SAVEPOINT _ensure_anomalies")
+            except Exception:
+                pass
+            Database._anomalies_ensured = True
 
     def save_anomalies(self, run_id: int, anomalies: list) -> int:
         """Batch insert anomaly dicts. Returns count inserted."""
@@ -10426,7 +10586,10 @@ class Database:
 
     def get_soar_actions(self, limit=50, offset=0, playbook_id=None, status=None, identity_id=None):
         """Get SOAR action history with optional filters.
-        Excludes actions linked to Microsoft/system-managed identities."""
+        Excludes actions linked to Microsoft/system-managed identities.
+
+        AG-94: Scoped discovery_runs subquery by self._organization_id.
+        """
         self._ensure_soar_tables()
         where_parts = ["sa.organization_id = %s"]
         params = [self._organization_id]
@@ -10442,18 +10605,19 @@ class Database:
         # Exclude Microsoft/system identities from action history
         where_parts.append("NOT COALESCE(i.is_microsoft_system, FALSE)")
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-        params.extend([limit, offset])
+        # Build final params: [org_id for subquery] + [where params] + [limit, offset]
+        final_params = [self._organization_id] + params + [limit, offset]
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(f"""
             SELECT sa.*, sp.name as playbook_name
             FROM soar_actions sa
             LEFT JOIN soar_playbooks sp ON sp.id = sa.playbook_id
             LEFT JOIN identities i ON i.identity_id = sa.identity_id
-                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
+                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s)
             {where_clause}
             ORDER BY sa.created_at DESC
             LIMIT %s OFFSET %s
-        """, params)
+        """, final_params)
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.close()
         for r in rows:
@@ -10464,7 +10628,10 @@ class Database:
 
     def get_soar_action_stats(self):
         """Get SOAR action summary stats.
-        Excludes actions linked to Microsoft/system-managed identities."""
+        Excludes actions linked to Microsoft/system-managed identities.
+
+        AG-94: Scoped discovery_runs subquery by self._organization_id.
+        """
         self._ensure_soar_tables()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
@@ -10476,21 +10643,21 @@ class Database:
                 COUNT(*) FILTER (WHERE sa.created_at > NOW() - INTERVAL '24 hours') as recent_24h
             FROM soar_actions sa
             LEFT JOIN identities i ON i.identity_id = sa.identity_id
-                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
+                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s)
             WHERE sa.organization_id = %s
               AND NOT COALESCE(i.is_microsoft_system, FALSE)
-        """, (self._organization_id,))
+        """, (self._organization_id, self._organization_id))
         stats = dict(cursor.fetchone())
         stats['success_rate'] = round(stats['success_count'] / stats['total'] * 100, 1) if stats['total'] > 0 else 0
         cursor.execute("""
             SELECT sa.integration, COUNT(*) as count
             FROM soar_actions sa
             LEFT JOIN identities i ON i.identity_id = sa.identity_id
-                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed')
+                AND i.discovery_run_id = (SELECT MAX(id) FROM discovery_runs WHERE status = 'completed' AND organization_id = %s)
             WHERE sa.organization_id = %s
               AND NOT COALESCE(i.is_microsoft_system, FALSE)
             GROUP BY sa.integration ORDER BY count DESC
-        """, (self._organization_id,))
+        """, (self._organization_id, self._organization_id))
         stats['by_integration'] = {r['integration']: r['count'] for r in cursor.fetchall()}
         cursor.close()
         return stats
@@ -11960,23 +12127,42 @@ class Database:
         self._commit()
         cursor.close()
 
-    def get_active_snapshot_job(self, cloud_connection_id):
+    def get_active_snapshot_job(self, cloud_connection_id, *, org_id: int = None):
         """Get the active (queued/running) job for a connection, if any.
         Jobs older than 90 minutes are considered stale and ignored.
+
+        AG-94/AG-106: Scopes by org_id when provided. Falls back to self._organization_id.
         """
+        effective_org_id = org_id or self._organization_id
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT id, organization_id, cloud_connection_id, discovery_run_id,
-                   scan_mode, status, stage, progress, error_message,
-                   retry_count, duration_seconds,
-                   identities_discovered, resources_discovered, subscriptions_discovered,
-                   created_at, started_at, completed_at, last_heartbeat_at,
-                   stage_timings, estimated_remaining_seconds
-            FROM snapshot_jobs
-            WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
-              AND created_at > NOW() - INTERVAL '90 minutes'
-            ORDER BY created_at DESC LIMIT 1
-        """, (cloud_connection_id,))
+        if effective_org_id:
+            cursor.execute("""
+                SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                       scan_mode, status, stage, progress, error_message,
+                       retry_count, duration_seconds,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       created_at, started_at, completed_at, last_heartbeat_at,
+                       stage_timings, estimated_remaining_seconds
+                FROM snapshot_jobs
+                WHERE cloud_connection_id = %s AND organization_id = %s
+                  AND status IN ('queued', 'running')
+                  AND created_at > NOW() - INTERVAL '90 minutes'
+                ORDER BY created_at DESC LIMIT 1
+            """, (cloud_connection_id, effective_org_id))
+        else:
+            # Admin fallback (no org context) — still filter by connection
+            cursor.execute("""
+                SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                       scan_mode, status, stage, progress, error_message,
+                       retry_count, duration_seconds,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       created_at, started_at, completed_at, last_heartbeat_at,
+                       stage_timings, estimated_remaining_seconds
+                FROM snapshot_jobs
+                WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
+                  AND created_at > NOW() - INTERVAL '90 minutes'
+                ORDER BY created_at DESC LIMIT 1
+            """, (cloud_connection_id,))
         row = cursor.fetchone()
         cursor.close()
         if row:
@@ -17414,11 +17600,15 @@ class Database:
             if params is None:
                 params = (organization_id,)
             try:
-                cursor.execute(f"SAVEPOINT sp_{table}")
-                cursor.execute(f"DELETE FROM {table} WHERE {where}", params)
-                cursor.execute(f"RELEASE SAVEPOINT sp_{table}")
+                cursor.execute("SAVEPOINT sp_del")
+                cursor.execute(
+                    psycopg2_sql.SQL("DELETE FROM {tbl} WHERE ").format(tbl=psycopg2_sql.Identifier(table))
+                    + psycopg2_sql.SQL(where),
+                    params,
+                )
+                cursor.execute("RELEASE SAVEPOINT sp_del")
             except Exception as e:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{table}")
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_del")
                 warnings.append(f"{table}: {e}")
 
         def _critical_del(table, where='organization_id = %s', params=None):
@@ -17428,11 +17618,15 @@ class Database:
             if params is None:
                 params = (organization_id,)
             try:
-                cursor.execute(f"SAVEPOINT sp_{table}")
-                cursor.execute(f"DELETE FROM {table} WHERE {where}", params)
-                cursor.execute(f"RELEASE SAVEPOINT sp_{table}")
+                cursor.execute("SAVEPOINT sp_del")
+                cursor.execute(
+                    psycopg2_sql.SQL("DELETE FROM {tbl} WHERE ").format(tbl=psycopg2_sql.Identifier(table))
+                    + psycopg2_sql.SQL(where),
+                    params,
+                )
+                cursor.execute("RELEASE SAVEPOINT sp_del")
             except Exception as e:
-                cursor.execute(f"ROLLBACK TO SAVEPOINT sp_{table}")
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_del")
                 err_msg = str(e).lower()
                 # Table might not exist yet (future migration) — that's OK
                 if 'does not exist' in err_msg or 'undefined_table' in err_msg:
@@ -17748,48 +17942,128 @@ class Database:
             updates['external_id'] = external_id
         if not updates:
             return
-        set_parts = [f"{k} = %s" for k in updates]
-        set_parts.append("updated_at = NOW()")
-        set_parts.append("last_login_at = NOW()")
+        _user_cols = {'display_name', 'username', 'role', 'external_id', 'enabled',
+                      'email', 'phone', 'auth_provider', 'password_hash'}
+        for k in updates:
+            if k not in _user_cols:
+                raise ValueError(f"disallowed column in user update: {k!r}")
+        set_clause = psycopg2_sql.SQL(", ").join(
+            [psycopg2_sql.SQL("{col} = %s").format(col=psycopg2_sql.Identifier(k)) for k in updates]
+            + [psycopg2_sql.SQL("updated_at = NOW()"), psycopg2_sql.SQL("last_login_at = NOW()")]
+        )
         params = list(updates.values()) + [user_id]
         cursor = self.conn.cursor()
         cursor.execute(
-            f"UPDATE users SET {', '.join(set_parts)} WHERE id = %s",
+            psycopg2_sql.SQL("UPDATE {tbl} SET {sets} WHERE id = %s")
+            .format(tbl=psycopg2_sql.Identifier("users"), sets=set_clause),
             params,
         )
         self._commit()
         cursor.close()
 
     def create_sso_auth_code(self, user_id, organization_id):
-        """Generate and store a one-time SSO auth code. Returns the raw code."""
-        import secrets
+        """Generate and store a one-time SSO auth code. Returns the raw code.
+
+        AG-95: Code is HMAC-SHA256 hashed before storage. TTL extended to 300s
+        per NIST SP 800-63B. Code entropy: 288 bits (secrets.token_urlsafe(36)).
+        """
+        from app.security.sso_security import generate_code, hash_code, CODE_TTL_SEC
         self._ensure_users_table()
-        code = secrets.token_urlsafe(64)
+        code = generate_code()
+        code_hash = hash_code(code, str(user_id), "sso")
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO sso_auth_codes (code, user_id, organization_id, expires_at)
-            VALUES (%s, %s, %s, NOW() + INTERVAL '60 seconds')
-        """, (code, user_id, organization_id))
+            INSERT INTO sso_auth_codes (code, user_id, organization_id, expires_at, attempt_count)
+            VALUES (%s, %s, %s, NOW() + INTERVAL '%s seconds', 0)
+        """, (code_hash, user_id, organization_id, CODE_TTL_SEC))
         self._commit()
         cursor.close()
         return code
 
-    def consume_sso_auth_code(self, code):
-        """Look up code, verify not expired/used, mark used. Returns {user_id, organization_id} or None."""
+    def consume_sso_auth_code(self, code, user_id_hint=None):
+        """Verify and consume a one-time SSO auth code. Returns {user_id, organization_id} or None.
+
+        AG-95: Uses HMAC-SHA256 constant-time comparison. Rate-limited per code
+        (max 5 attempts). Code burned after max attempts even if correct.
+        """
+        from app.security.sso_security import (
+            hash_code, verify_code_constant_time, MAX_ATTEMPTS_PER_CODE,
+            _log_sso_code_event,
+        )
+        import hmac as _hmac
         self._ensure_users_table()
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Fetch all active (non-used, non-expired) codes.
+        # We must iterate and do constant-time comparison to avoid timing leaks.
         cursor.execute("""
-            UPDATE sso_auth_codes
-            SET used = true
-            WHERE code = %s AND used = false AND expires_at > NOW()
+            SELECT id, code AS code_hash, user_id, organization_id, attempt_count
+            FROM sso_auth_codes
+            WHERE used = false AND expires_at > NOW()
+            ORDER BY created_at DESC
+            LIMIT 100
+        """)
+        rows = cursor.fetchall()
+
+        matched_row = None
+        for row in rows:
+            uid = str(row['user_id'])
+            computed_hash = hash_code(code, uid, "sso")
+            if _hmac.compare_digest(computed_hash, row['code_hash']):
+                matched_row = row
+                break
+
+        if matched_row is None:
+            # No match — do a dummy hash computation for constant-time
+            hash_code(code, "0", "sso")
+            _log_sso_code_event("sso_code_invalid", reason="no_match")
+            cursor.close()
+            return None
+
+        # Check attempt count
+        if matched_row['attempt_count'] >= MAX_ATTEMPTS_PER_CODE:
+            # Burn the code
+            cursor.execute(
+                "UPDATE sso_auth_codes SET used = true WHERE id = %s",
+                (matched_row['id'],)
+            )
+            self._commit()
+            _log_sso_code_event("sso_code_burned", reason="max_attempts",
+                                code_id=matched_row['id'])
+            cursor.close()
+            return None
+
+        # Mark consumed
+        cursor.execute("""
+            UPDATE sso_auth_codes SET used = true
+            WHERE id = %s AND used = false
             RETURNING user_id, organization_id
-        """, (code,))
-        row = cursor.fetchone()
+        """, (matched_row['id'],))
+        result = cursor.fetchone()
         self._commit()
         cursor.close()
-        if not row:
+
+        if not result:
             return None
-        return dict(row)
+        return dict(result)
+
+    def increment_sso_code_attempts(self, code):
+        """Increment attempt count on failed code exchange. Burns code at threshold.
+
+        AG-95: Called on failed attempts to track brute-force attempts.
+        """
+        from app.security.sso_security import MAX_ATTEMPTS_PER_CODE, _log_sso_code_event
+        self._ensure_users_table()
+        cursor = self.conn.cursor()
+        # Increment attempt count on all active codes (we don't know which one was targeted)
+        cursor.execute("""
+            UPDATE sso_auth_codes
+            SET attempt_count = attempt_count + 1
+            WHERE used = false AND expires_at > NOW()
+              AND attempt_count < %s
+        """, (MAX_ATTEMPTS_PER_CODE + 1,))
+        self._commit()
+        cursor.close()
 
     # ------------------------------------------------------------------
     # Phase 17: OIDC state management
@@ -18435,7 +18709,10 @@ class Database:
         row_counts = {}
         for table in ['discovery_runs', 'drift_reports', 'activity_log', 'anomalies', 'soar_actions', 'notifications']:
             try:
-                cursor.execute(f"SELECT COUNT(*) as cnt FROM {table}")
+                cursor.execute(
+                    psycopg2_sql.SQL("SELECT COUNT(*) as cnt FROM {tbl}")
+                    .format(tbl=psycopg2_sql.Identifier(table))
+                )
                 row_counts[table] = cursor.fetchone()['cnt']
             except Exception:
                 self._rollback()
@@ -18446,7 +18723,10 @@ class Database:
         for table, col in [('discovery_runs', 'started_at'), ('drift_reports', 'created_at'),
                            ('activity_log', 'created_at'), ('anomalies', 'created_at')]:
             try:
-                cursor.execute(f"SELECT MIN({col}) as oldest FROM {table}")
+                cursor.execute(
+                    psycopg2_sql.SQL("SELECT MIN({c}) as oldest FROM {tbl}")
+                    .format(c=psycopg2_sql.Identifier(col), tbl=psycopg2_sql.Identifier(table))
+                )
                 val = cursor.fetchone()['oldest']
                 oldest[table] = val.isoformat() if val else None
             except Exception:
@@ -19742,6 +20022,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_sub ON identity_subscription_access(subscription_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_identity_id ON identity_subscription_access(identity_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_isa_run ON identity_subscription_access(discovery_run_id)")
+        # AG-151: ensure unique index exists for ON CONFLICT upsert (may be missing if table pre-dates DDL)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_isa_upsert ON identity_subscription_access(identity_db_id, subscription_id, rbac_role, scope)")
         # Add primary_subscription_id and additional_subscription_count to identities if missing
         for col, coltype in [
             ('primary_subscription_id', 'TEXT'),
@@ -19761,6 +20043,7 @@ class Database:
     # ================================================================
 
     _arm_connections_ensured = False
+    _connector_permissions_ensured = False
 
     def _ensure_identity_arm_connections_table(self):
         """Create identity_arm_connections table for storing recent ARM activity events."""
@@ -19858,22 +20141,56 @@ class Database:
         return rows
 
     def update_role_last_used_from_arm(self, org_id: int, updates: list):
-        """Batch-update role_assignments.last_used_at from ARM activity events.
+        """Scope-aware batch-update of role_assignments.last_used_at from ARM events.
 
-        Matches on principal_id (ARM caller = Azure object_id for SPNs / UPN for users).
-        If a principal performed ARM operations, all their role assignments are considered
-        recently used (the role enabled the access regardless of scope hierarchy).
+        An ARM event at resource_id proves usage of roles whose scope is an
+        ancestor of that resource_id (exact, parent RG, parent subscription,
+        or tenant/root). Sibling/unrelated scopes are NOT updated.
+
+        Scope hierarchy (child proves parent):
+            /subscriptions/X/resourceGroups/Y/providers/Z  (event)
+            matches:
+                /subscriptions/X/resourceGroups/Y/providers/Z  (exact)
+                /subscriptions/X/resourceGroups/Y              (parent RG)
+                /subscriptions/X                               (parent sub)
+                /                                              (root/tenant)
+            does NOT match:
+                /subscriptions/X/resourceGroups/OTHER
+                /subscriptions/OTHER/...
 
         Args:
             org_id: Organization ID
             updates: List of dicts with keys: principal_id, subscription_id,
-                     last_used_at, last_used_operation
+                     resource_id, last_used_at, last_used_operation
         """
         if not updates:
             return 0
         cursor = self.conn.cursor()
         count = 0
         for u in updates:
+            event_resource = (u.get('resource_id') or '').lower()
+            if not event_resource:
+                continue
+
+            # Build list of ancestor scope prefixes from the event resource_id.
+            # E.g. /subscriptions/X/resourceGroups/Y/providers/Z →
+            #   ['/subscriptions/x/resourcegroups/y/providers/z',
+            #    '/subscriptions/x/resourcegroups/y',
+            #    '/subscriptions/x',
+            #    '/']
+            ancestor_scopes = [event_resource]
+            parts = event_resource.strip('/').split('/')
+            # Walk up: subscriptions/X/resourceGroups/Y/providers/... → sub/X/rg/Y → sub/X → root
+            if len(parts) >= 4 and parts[2].lower() == 'resourcegroups':
+                # Add resource group scope
+                ancestor_scopes.append('/' + '/'.join(parts[:4]))
+            if len(parts) >= 2 and parts[0].lower() == 'subscriptions':
+                # Add subscription scope
+                ancestor_scopes.append('/' + '/'.join(parts[:2]))
+            # Root scope always matches
+            ancestor_scopes.append('/')
+
+            # Update only roles whose scope matches an ancestor of the event
             cursor.execute("""
                 UPDATE role_assignments SET
                     last_used_at = GREATEST(last_used_at, %s),
@@ -19888,6 +20205,7 @@ class Database:
                     END
                 WHERE organization_id = %s
                   AND principal_id = %s
+                  AND LOWER(scope) = ANY(%s)
             """, (
                 u['last_used_at'],
                 u['last_used_at'], u['last_used_operation'],
@@ -19895,11 +20213,86 @@ class Database:
                 u['last_used_at'],
                 org_id,
                 u['principal_id'],
+                ancestor_scopes,
             ))
             count += cursor.rowcount
         self._commit()
         cursor.close()
         return count
+
+    # ── Connector Permission Tracking ─────────────────────────────────────
+
+    def _ensure_connector_permissions_table(self):
+        """Create connector_permissions table for tracking permission check results."""
+        if Database._connector_permissions_ensured:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connector_permissions (
+                id BIGSERIAL PRIMARY KEY,
+                cloud_connection_id INTEGER NOT NULL,
+                organization_id INTEGER NOT NULL,
+                permission_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'unknown',
+                tested_at TIMESTAMPTZ,
+                error_detail TEXT,
+                impact_description TEXT,
+                UNIQUE (cloud_connection_id, permission_name)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conn_perms_org
+            ON connector_permissions(organization_id)
+        """)
+        self._commit()
+        cursor.close()
+        Database._connector_permissions_ensured = True
+
+    def save_connector_permission(self, connection_id: int, org_id: int,
+                                  permission_name: str, status: str,
+                                  error_detail: str = None,
+                                  impact_description: str = None):
+        """Upsert a connector permission check result."""
+        self._ensure_connector_permissions_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO connector_permissions
+                (cloud_connection_id, organization_id, permission_name,
+                 status, tested_at, error_detail, impact_description)
+            VALUES (%s, %s, %s, %s, NOW(), %s, %s)
+            ON CONFLICT (cloud_connection_id, permission_name)
+            DO UPDATE SET
+                status = EXCLUDED.status,
+                tested_at = EXCLUDED.tested_at,
+                error_detail = EXCLUDED.error_detail,
+                impact_description = EXCLUDED.impact_description
+        """, (connection_id, org_id, permission_name, status,
+              error_detail, impact_description))
+        self._commit()
+        cursor.close()
+
+    def get_connector_permissions(self, org_id: int, connection_id: int = None):
+        """Retrieve connector permission statuses for an organization."""
+        self._ensure_connector_permissions_table()
+        cursor = self.conn.cursor()
+        if connection_id:
+            cursor.execute("""
+                SELECT permission_name, status, tested_at, error_detail, impact_description
+                FROM connector_permissions
+                WHERE organization_id = %s AND cloud_connection_id = %s
+                ORDER BY permission_name
+            """, (org_id, connection_id))
+        else:
+            cursor.execute("""
+                SELECT cp.cloud_connection_id, cp.permission_name, cp.status,
+                       cp.tested_at, cp.error_detail, cp.impact_description
+                FROM connector_permissions cp
+                WHERE cp.organization_id = %s
+                ORDER BY cp.cloud_connection_id, cp.permission_name
+            """, (org_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
 
     def save_identity_subscription_access(self, identity_db_id, identity_id, role_assignment, subscription_id, subscription_name, run_id):
         """Insert one identity ↔ subscription RBAC access row (upsert on conflict)."""
@@ -23344,6 +23737,242 @@ class Database:
         }
 
     # ================================================================
+    # Identity Reachability
+    # ================================================================
+
+    def save_identity_reachability(self, run_id, results):
+        """Batch upsert identity reachability results.
+
+        Args:
+            run_id: discovery run ID
+            results: list of dicts with reachability metrics + risk flags
+
+        Returns:
+            int: count of rows saved
+        """
+        if not results:
+            return 0
+
+        cursor = self.conn.cursor()
+        count = 0
+        for r in results:
+            try:
+                cursor.execute("""
+                    INSERT INTO identity_reachability (
+                        organization_id, identity_id, identity_db_id,
+                        display_name, identity_category,
+                        reachable_resource_count, reachable_privileged_resource_count,
+                        subscriptions_reachable, resource_groups_reachable,
+                        high_value_targets_reachable,
+                        has_privileged_roles, privileged_role_names, highest_scope_type,
+                        flag_broad_blast_radius, flag_privileged_wide_reach,
+                        flag_ai_excessive_blast, flag_dormant_high_blast,
+                        risk_flag_count, risk_flag_details,
+                        blast_radius_risk_score, blast_radius_exposure_level,
+                        agent_identity_type, activity_status,
+                        discovery_run_id, computed_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s,
+                        %s, NOW()
+                    )
+                    ON CONFLICT (identity_db_id, discovery_run_id)
+                    DO UPDATE SET
+                        reachable_resource_count = EXCLUDED.reachable_resource_count,
+                        reachable_privileged_resource_count = EXCLUDED.reachable_privileged_resource_count,
+                        subscriptions_reachable = EXCLUDED.subscriptions_reachable,
+                        resource_groups_reachable = EXCLUDED.resource_groups_reachable,
+                        high_value_targets_reachable = EXCLUDED.high_value_targets_reachable,
+                        has_privileged_roles = EXCLUDED.has_privileged_roles,
+                        privileged_role_names = EXCLUDED.privileged_role_names,
+                        highest_scope_type = EXCLUDED.highest_scope_type,
+                        flag_broad_blast_radius = EXCLUDED.flag_broad_blast_radius,
+                        flag_privileged_wide_reach = EXCLUDED.flag_privileged_wide_reach,
+                        flag_ai_excessive_blast = EXCLUDED.flag_ai_excessive_blast,
+                        flag_dormant_high_blast = EXCLUDED.flag_dormant_high_blast,
+                        risk_flag_count = EXCLUDED.risk_flag_count,
+                        risk_flag_details = EXCLUDED.risk_flag_details,
+                        blast_radius_risk_score = EXCLUDED.blast_radius_risk_score,
+                        blast_radius_exposure_level = EXCLUDED.blast_radius_exposure_level,
+                        agent_identity_type = EXCLUDED.agent_identity_type,
+                        activity_status = EXCLUDED.activity_status,
+                        computed_at = NOW()
+                """, (
+                    r['organization_id'], r['identity_id'], r['identity_db_id'],
+                    r.get('display_name'), r.get('identity_category'),
+                    r.get('reachable_resource_count', 0),
+                    r.get('reachable_privileged_resource_count', 0),
+                    r.get('subscriptions_reachable', 0),
+                    r.get('resource_groups_reachable', 0),
+                    r.get('high_value_targets_reachable', 0),
+                    r.get('has_privileged_roles', False),
+                    json.dumps(r.get('privileged_role_names', [])),
+                    r.get('highest_scope_type'),
+                    r.get('flag_broad_blast_radius', False),
+                    r.get('flag_privileged_wide_reach', False),
+                    r.get('flag_ai_excessive_blast', False),
+                    r.get('flag_dormant_high_blast', False),
+                    r.get('risk_flag_count', 0),
+                    json.dumps(r.get('risk_flag_details', [])),
+                    r.get('blast_radius_risk_score', 0),
+                    r.get('blast_radius_exposure_level', 'LOW'),
+                    r.get('agent_identity_type'),
+                    r.get('activity_status'),
+                    run_id,
+                ))
+                count += 1
+            except Exception as e:
+                logger.debug("save_identity_reachability row error: %s", e)
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+        self._commit()
+        cursor.close()
+        return count
+
+    def get_identity_reachability(self, identity_db_id):
+        """Get the latest reachability result for a single identity."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute("""
+                SELECT * FROM identity_reachability
+                WHERE identity_db_id = %s
+                ORDER BY computed_at DESC
+                LIMIT 1
+            """, (identity_db_id,))
+            row = cursor.fetchone()
+            if row:
+                row = dict(row)
+                if row.get('computed_at'):
+                    row['computed_at'] = row['computed_at'].isoformat()
+                if isinstance(row.get('privileged_role_names'), str):
+                    row['privileged_role_names'] = json.loads(row['privileged_role_names'])
+                if isinstance(row.get('risk_flag_details'), str):
+                    row['risk_flag_details'] = json.loads(row['risk_flag_details'])
+            return row
+        except Exception as e:
+            logger.debug("get_identity_reachability error: %s", e)
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            cursor.close()
+
+    def get_reachability_summary(self, org_id, *, run_id=None):
+        """Get org-wide reachability summary with flag counts and distributions.
+
+        Returns:
+            dict with total, flagged_count, by_exposure, by_flag, top_flagged
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        run_filter = ""
+        params = [org_id]
+        if run_id:
+            run_filter = "AND discovery_run_id = %s"
+            params.append(run_id)
+        else:
+            # Latest run
+            run_filter = """AND discovery_run_id = (
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            )"""
+            params.append(org_id)
+
+        try:
+            # Total + flagged counts
+            cursor.execute(f"""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE risk_flag_count > 0) as flagged_count,
+                    AVG(reachable_resource_count) as avg_reachable,
+                    AVG(high_value_targets_reachable) as avg_hvt,
+                    MAX(reachable_resource_count) as max_reachable,
+                    SUM(reachable_privileged_resource_count) as total_privileged_reachable
+                FROM identity_reachability
+                WHERE organization_id = %s {run_filter}
+            """, params)
+            summary_row = cursor.fetchone()
+
+            # By exposure level
+            cursor.execute(f"""
+                SELECT blast_radius_exposure_level, COUNT(*) as count
+                FROM identity_reachability
+                WHERE organization_id = %s {run_filter}
+                GROUP BY blast_radius_exposure_level
+                ORDER BY count DESC
+            """, params)
+            by_exposure = {r['blast_radius_exposure_level']: r['count'] for r in cursor.fetchall()}
+
+            # Flag distribution
+            cursor.execute(f"""
+                SELECT
+                    COUNT(*) FILTER (WHERE flag_broad_blast_radius) as broad_blast_radius,
+                    COUNT(*) FILTER (WHERE flag_privileged_wide_reach) as privileged_wide_reach,
+                    COUNT(*) FILTER (WHERE flag_ai_excessive_blast) as ai_excessive_blast,
+                    COUNT(*) FILTER (WHERE flag_dormant_high_blast) as dormant_high_blast
+                FROM identity_reachability
+                WHERE organization_id = %s {run_filter}
+            """, params)
+            flag_row = cursor.fetchone()
+            by_flag = dict(flag_row) if flag_row else {}
+
+            # Top flagged identities
+            cursor.execute(f"""
+                SELECT identity_db_id, display_name, identity_category,
+                       reachable_resource_count, high_value_targets_reachable,
+                       risk_flag_count, risk_flag_details,
+                       blast_radius_risk_score, blast_radius_exposure_level,
+                       agent_identity_type, activity_status
+                FROM identity_reachability
+                WHERE organization_id = %s {run_filter}
+                  AND risk_flag_count > 0
+                ORDER BY risk_flag_count DESC, blast_radius_risk_score DESC
+                LIMIT 15
+            """, params)
+            top_flagged = []
+            for r in cursor.fetchall():
+                row = dict(r)
+                if isinstance(row.get('risk_flag_details'), str):
+                    row['risk_flag_details'] = json.loads(row['risk_flag_details'])
+                top_flagged.append(row)
+
+            cursor.close()
+
+            return {
+                'total': summary_row['total'] if summary_row else 0,
+                'flagged_count': summary_row['flagged_count'] if summary_row else 0,
+                'avg_reachable_resources': round(float(summary_row['avg_reachable'] or 0), 1) if summary_row else 0,
+                'avg_high_value_targets': round(float(summary_row['avg_hvt'] or 0), 1) if summary_row else 0,
+                'max_reachable_resources': summary_row['max_reachable'] if summary_row else 0,
+                'total_privileged_reachable': summary_row['total_privileged_reachable'] if summary_row else 0,
+                'by_exposure': by_exposure,
+                'by_flag': by_flag,
+                'top_flagged': top_flagged,
+            }
+        except Exception as e:
+            logger.debug("get_reachability_summary error: %s", e)
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            cursor.close()
+            return {
+                'total': 0, 'flagged_count': 0,
+                'avg_reachable_resources': 0, 'avg_high_value_targets': 0,
+                'max_reachable_resources': 0, 'total_privileged_reachable': 0,
+                'by_exposure': {}, 'by_flag': {}, 'top_flagged': [],
+            }
+
+    # ================================================================
     # Phase 6: Access Review Workflow
     # ================================================================
 
@@ -26053,11 +26682,11 @@ class Database:
             """, (org_id,))
             ctx['attack_paths'] = cursor.fetchone()['cnt']
 
-            # Recent anomalies
+            # Recent anomalies (AG-94: scoped to org)
             cursor.execute("""
                 SELECT COUNT(*) AS cnt FROM anomalies
-                WHERE resolved = false
-            """)
+                WHERE resolved = false AND organization_id = %s
+            """, (org_id,))
             ctx['recent_anomalies'] = cursor.fetchone()['cnt']
 
             cursor.close()
@@ -27514,6 +28143,533 @@ class Database:
                 pass
             cursor.close()
             raise e
+
+    # ── Optimization Recommendations ──────────────────────────────────
+
+    def upsert_optimization_recommendation(self, org_id, rec):
+        """Upsert an optimization recommendation.
+
+        Uses ON CONFLICT on (org_id, identity_id, role_name, role_type, scope, classification)
+        to update evidence/reason while preserving review state.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO optimization_recommendations (
+                organization_id, identity_id, identity_db_id, display_name,
+                identity_category, role_name, role_type, scope, scope_type,
+                classification, reason, advisory, evidence_summary,
+                discovery_run_id, observation_window_days, generated_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
+            )
+            ON CONFLICT (organization_id, identity_id, role_name, role_type, scope, classification)
+            DO UPDATE SET
+                identity_db_id = EXCLUDED.identity_db_id,
+                display_name = EXCLUDED.display_name,
+                identity_category = EXCLUDED.identity_category,
+                scope_type = EXCLUDED.scope_type,
+                reason = EXCLUDED.reason,
+                advisory = EXCLUDED.advisory,
+                evidence_summary = EXCLUDED.evidence_summary,
+                discovery_run_id = EXCLUDED.discovery_run_id,
+                observation_window_days = EXCLUDED.observation_window_days,
+                generated_at = NOW(),
+                updated_at = NOW()
+            RETURNING id
+        """, (
+            org_id,
+            rec.get('identity_id'),
+            rec.get('identity_db_id'),
+            rec.get('display_name'),
+            rec.get('identity_category'),
+            rec.get('role_name'),
+            rec.get('role_type', 'azure'),
+            rec.get('scope', '/'),
+            rec.get('scope_type'),
+            rec.get('classification'),
+            rec.get('reason'),
+            rec.get('advisory'),
+            json.dumps(rec.get('evidence_summary', {})),
+            rec.get('discovery_run_id'),
+            rec.get('observation_window_days', 90),
+        ))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return row[0] if row else None
+
+    def get_optimization_recommendations(self, org_id, *, include_dismissed=False,
+                                          identity_id=None, classification=None,
+                                          review_status=None, limit=100, offset=0):
+        """Get optimization recommendations for an org with optional filters."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        conditions = ["organization_id = %s"]
+        params = [org_id]
+
+        if not include_dismissed:
+            conditions.append("review_status NOT IN ('dismissed', 'deferred')")
+
+        if identity_id:
+            conditions.append("identity_id = %s")
+            params.append(identity_id)
+
+        if classification:
+            conditions.append("classification = %s")
+            params.append(classification)
+
+        if review_status:
+            conditions.append("review_status = %s")
+            params.append(review_status)
+
+        where = " AND ".join(conditions)
+        params.extend([limit, offset])
+
+        cursor.execute(f"""
+            SELECT * FROM optimization_recommendations
+            WHERE {where}
+            ORDER BY
+                CASE classification
+                    WHEN 'candidate_remove' THEN 1
+                    WHEN 'candidate_review' THEN 2
+                    WHEN 'potential_scope_narrowing' THEN 3
+                    WHEN 'insufficient_evidence' THEN 4
+                    ELSE 5
+                END,
+                created_at DESC
+            LIMIT %s OFFSET %s
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_optimization_recommendation_by_id(self, org_id, rec_id):
+        """Get a single optimization recommendation by ID, scoped to org."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM optimization_recommendations
+            WHERE id = %s AND organization_id = %s
+        """, (rec_id, org_id))
+        row = cursor.fetchone()
+        cursor.close()
+        return dict(row) if row else None
+
+    def update_optimization_review(self, org_id, rec_id, review_status, reviewer, review_note=None):
+        """Update the review state of an optimization recommendation."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE optimization_recommendations
+            SET review_status = %s,
+                reviewer = %s,
+                reviewed_at = NOW(),
+                review_note = %s,
+                updated_at = NOW()
+            WHERE id = %s AND organization_id = %s
+            RETURNING id
+        """, (review_status, reviewer, review_note, rec_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return row[0] if row else None
+
+    def get_optimization_summary_counts(self, org_id, *, include_dismissed=False):
+        """Get aggregated counts by classification and review_status."""
+        cursor = self.conn.cursor()
+        dismiss_filter = ""
+        if not include_dismissed:
+            dismiss_filter = "AND review_status NOT IN ('dismissed', 'deferred')"
+
+        cursor.execute(f"""
+            SELECT classification, review_status, COUNT(*) AS cnt
+            FROM optimization_recommendations
+            WHERE organization_id = %s {dismiss_filter}
+            GROUP BY classification, review_status
+        """, (org_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+
+        result = {}
+        for cls, status, cnt in rows:
+            if cls not in result:
+                result[cls] = {'total': 0, 'by_status': {}}
+            result[cls]['total'] += cnt
+            result[cls]['by_status'][status] = cnt
+        return result
+
+    def close_stale_recommendations(self, org_id, current_run_id):
+        """Close recommendations that were NOT refreshed by the current run.
+
+        When the materialization job runs, it upserts all current candidates
+        with discovery_run_id = current_run_id.  Any recommendation still
+        pointing at an older run is stale — the role assignment or
+        classification that triggered it no longer applies.
+
+        Only auto-closes 'open' recommendations.  User-reviewed ones
+        (accepted/dismissed/deferred) are preserved as audit history.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE optimization_recommendations
+            SET review_status = 'auto_closed',
+                review_note = 'Auto-closed: recommendation no longer applicable after latest discovery run',
+                updated_at = NOW()
+            WHERE organization_id = %s
+              AND discovery_run_id IS DISTINCT FROM %s
+              AND review_status = 'open'
+            RETURNING id
+        """, (org_id, current_run_id))
+        closed_ids = [r[0] for r in cursor.fetchall()]
+        self._commit()
+        cursor.close()
+        return closed_ids
+
+    # ── Privilege Drift Events ─────────────────────────────────────────
+
+    def save_privilege_drift_events(self, org_id, events):
+        """Bulk-insert privilege drift events for a discovery run pair.
+
+        Args:
+            org_id: organization ID
+            events: list of dicts with drift event data
+        Returns:
+            Number of events inserted
+        """
+        if not events:
+            return 0
+        cursor = self.conn.cursor()
+        count = 0
+        for ev in events:
+            try:
+                cursor.execute("""
+                    INSERT INTO privilege_drift_events (
+                        organization_id, identity_id, identity_db_id,
+                        display_name, identity_category,
+                        drift_type, role_name, role_type, scope, prior_scope,
+                        prior_risk_level, current_risk_level,
+                        prior_risk_score, current_risk_score,
+                        is_privileged, details,
+                        discovery_run_id, previous_run_id
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                """, (
+                    org_id,
+                    ev.get('identity_id'),
+                    ev.get('identity_db_id'),
+                    ev.get('display_name'),
+                    ev.get('identity_category'),
+                    ev['drift_type'],
+                    ev.get('role_name'),
+                    ev.get('role_type', 'azure'),
+                    ev.get('scope'),
+                    ev.get('prior_scope'),
+                    ev.get('prior_risk_level'),
+                    ev.get('current_risk_level'),
+                    ev.get('prior_risk_score'),
+                    ev.get('current_risk_score'),
+                    ev.get('is_privileged', False),
+                    json.dumps(ev.get('details', {})),
+                    ev['discovery_run_id'],
+                    ev['previous_run_id'],
+                ))
+                count += 1
+            except Exception as e:
+                _db_logger.warning("Failed to insert privilege drift event: %s", e)
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+        self._commit()
+        cursor.close()
+        return count
+
+    def get_privilege_drift_summary(self, org_id, *, run_id=None, limit_runs=5):
+        """Get org-wide privilege drift summary.
+
+        If run_id is provided, returns summary for that specific run.
+        Otherwise aggregates across the most recent `limit_runs` runs.
+
+        Returns:
+            dict with counts_by_type, top_expansions, net_privilege_delta
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        run_filter = ""
+        params = [org_id]
+        if run_id:
+            run_filter = "AND discovery_run_id = %s"
+            params.append(run_id)
+        else:
+            # Scope to most recent N runs
+            run_filter = """AND discovery_run_id IN (
+                SELECT DISTINCT discovery_run_id
+                FROM privilege_drift_events
+                WHERE organization_id = %s
+                ORDER BY discovery_run_id DESC
+                LIMIT %s
+            )"""
+            params.extend([org_id, limit_runs])
+
+        # Counts by drift type
+        cursor.execute(f"""
+            SELECT drift_type, COUNT(*) as cnt,
+                   COUNT(*) FILTER (WHERE is_privileged) as privileged_cnt
+            FROM privilege_drift_events
+            WHERE organization_id = %s {run_filter}
+            GROUP BY drift_type
+        """, params)
+        type_rows = cursor.fetchall()
+
+        counts_by_type = {}
+        for r in type_rows:
+            counts_by_type[r['drift_type']] = {
+                'total': r['cnt'],
+                'privileged': r['privileged_cnt'],
+            }
+
+        # Top risky expansions (privilege_added where is_privileged=true)
+        params_top = [org_id]
+        run_filter_top = ""
+        if run_id:
+            run_filter_top = "AND discovery_run_id = %s"
+            params_top.append(run_id)
+        else:
+            run_filter_top = """AND discovery_run_id IN (
+                SELECT DISTINCT discovery_run_id
+                FROM privilege_drift_events
+                WHERE organization_id = %s
+                ORDER BY discovery_run_id DESC
+                LIMIT %s
+            )"""
+            params_top.extend([org_id, limit_runs])
+
+        cursor.execute(f"""
+            SELECT identity_id, display_name, identity_category,
+                   role_name, role_type, scope, drift_type,
+                   discovery_run_id, created_at
+            FROM privilege_drift_events
+            WHERE organization_id = %s
+              AND drift_type IN ('privilege_added', 'scope_expanded')
+              AND is_privileged = true
+              {run_filter_top}
+            ORDER BY created_at DESC
+            LIMIT 10
+        """, params_top)
+        top_expansions = [dict(r) for r in cursor.fetchall()]
+
+        # Net privilege delta
+        added = counts_by_type.get('privilege_added', {}).get('total', 0)
+        removed = counts_by_type.get('privilege_removed', {}).get('total', 0)
+        net_privilege_delta = added - removed
+
+        cursor.close()
+        return {
+            'counts_by_type': counts_by_type,
+            'top_expansions': top_expansions,
+            'net_privilege_delta': net_privilege_delta,
+        }
+
+    def get_identity_drift_events(self, org_id, identity_id, *, limit=20, offset=0):
+        """Get privilege drift events for a specific identity.
+
+        Returns:
+            list of drift event dicts, ordered by most recent first
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, drift_type, role_name, role_type, scope, prior_scope,
+                   prior_risk_level, current_risk_level,
+                   prior_risk_score, current_risk_score,
+                   is_privileged, details,
+                   discovery_run_id, previous_run_id, created_at
+            FROM privilege_drift_events
+            WHERE organization_id = %s AND identity_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, (org_id, identity_id, limit, offset))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_privilege_drift_run_history(self, org_id, *, limit=10):
+        """Get per-run drift summary for trend display.
+
+        Returns a list of per-run aggregates ordered by most recent.
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT discovery_run_id, previous_run_id,
+                   COUNT(*) as total_events,
+                   COUNT(*) FILTER (WHERE drift_type = 'privilege_added') as added,
+                   COUNT(*) FILTER (WHERE drift_type = 'privilege_removed') as removed,
+                   COUNT(*) FILTER (WHERE drift_type = 'scope_expanded') as scope_expanded,
+                   COUNT(*) FILTER (WHERE drift_type = 'scope_reduced') as scope_reduced,
+                   COUNT(*) FILTER (WHERE drift_type = 'risk_increased') as risk_increased,
+                   COUNT(*) FILTER (WHERE drift_type = 'risk_reduced') as risk_reduced,
+                   COUNT(*) FILTER (WHERE is_privileged) as privileged_events,
+                   MIN(created_at) as run_timestamp
+            FROM privilege_drift_events
+            WHERE organization_id = %s
+            GROUP BY discovery_run_id, previous_run_id
+            ORDER BY discovery_run_id DESC
+            LIMIT %s
+        """, (org_id, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    # ── Workload Attributions ──────────────────────────────────────────
+
+    def upsert_workload_attribution(self, org_id, attr):
+        """Upsert a workload attribution for an identity.
+
+        Uses ON CONFLICT on (org_id, identity_db_id, workload_resource_id, attribution_basis).
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO workload_attributions (
+                organization_id, identity_id, identity_db_id,
+                workload_type, workload_name, workload_resource_id,
+                workload_resource_group, workload_subscription_id,
+                attribution_confidence, attribution_basis,
+                attribution_signals, is_ai_workload,
+                discovery_run_id, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+            )
+            ON CONFLICT (organization_id, identity_db_id, workload_resource_id, attribution_basis)
+            DO UPDATE SET
+                workload_type = EXCLUDED.workload_type,
+                workload_name = EXCLUDED.workload_name,
+                workload_resource_group = EXCLUDED.workload_resource_group,
+                workload_subscription_id = EXCLUDED.workload_subscription_id,
+                attribution_confidence = EXCLUDED.attribution_confidence,
+                attribution_signals = EXCLUDED.attribution_signals,
+                is_ai_workload = EXCLUDED.is_ai_workload,
+                discovery_run_id = EXCLUDED.discovery_run_id,
+                updated_at = NOW()
+            RETURNING id
+        """, (
+            org_id,
+            attr.get('identity_id'),
+            attr.get('identity_db_id'),
+            attr['workload_type'],
+            attr.get('workload_name'),
+            attr.get('workload_resource_id', ''),
+            attr.get('workload_resource_group'),
+            attr.get('workload_subscription_id'),
+            attr.get('attribution_confidence', 0),
+            attr['attribution_basis'],
+            json.dumps(attr.get('attribution_signals', [])),
+            attr.get('is_ai_workload', False),
+            attr.get('discovery_run_id'),
+        ))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return row[0] if row else None
+
+    def get_identity_workload_attributions(self, org_id, identity_db_id):
+        """Get all workload attributions for an identity, highest confidence first."""
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, workload_type, workload_name, workload_resource_id,
+                   workload_resource_group, workload_subscription_id,
+                   attribution_confidence, attribution_basis,
+                   attribution_signals, is_ai_workload,
+                   discovery_run_id, created_at, updated_at
+            FROM workload_attributions
+            WHERE organization_id = %s AND identity_db_id = %s
+            ORDER BY attribution_confidence DESC
+        """, (org_id, identity_db_id))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_workload_attribution_summary(self, org_id, *, run_id=None):
+        """Get org-wide workload attribution summary.
+
+        Returns counts by workload_type, AI workload counts, and
+        attribution coverage statistics.
+        """
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+
+        run_filter = ""
+        params = [org_id]
+        if run_id:
+            run_filter = "AND discovery_run_id = %s"
+            params.append(run_id)
+
+        # Counts by workload type
+        cursor.execute(f"""
+            SELECT workload_type,
+                   COUNT(DISTINCT identity_db_id) as identity_count,
+                   COUNT(*) as binding_count,
+                   AVG(attribution_confidence) as avg_confidence,
+                   COUNT(*) FILTER (WHERE is_ai_workload) as ai_count
+            FROM workload_attributions
+            WHERE organization_id = %s {run_filter}
+            GROUP BY workload_type
+            ORDER BY identity_count DESC
+        """, params)
+        type_rows = [dict(r) for r in cursor.fetchall()]
+
+        # Coverage: how many identities have at least one attribution
+        params2 = [org_id]
+        run_filter2 = ""
+        if run_id:
+            run_filter2 = "AND wa.discovery_run_id = %s"
+            params2.append(run_id)
+
+        cursor.execute(f"""
+            SELECT
+                COUNT(DISTINCT i.id) as total_nhi,
+                COUNT(DISTINCT wa.identity_db_id) as attributed
+            FROM identities i
+            LEFT JOIN workload_attributions wa
+                ON wa.identity_db_id = i.id AND wa.organization_id = %s {run_filter2}
+            WHERE i.discovery_run_id = (
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            )
+            AND i.identity_category IN (
+                'service_principal', 'managed_identity_system',
+                'managed_identity_user', 'workload_identity'
+            )
+            AND NOT COALESCE(i.is_microsoft_system, false)
+        """, params2 + [org_id])
+        cov_row = cursor.fetchone()
+
+        # Top workloads by identity count
+        cursor.execute(f"""
+            SELECT workload_name, workload_type, workload_resource_id,
+                   COUNT(DISTINCT identity_db_id) as identity_count,
+                   AVG(attribution_confidence) as avg_confidence
+            FROM workload_attributions
+            WHERE organization_id = %s {run_filter}
+              AND workload_name IS NOT NULL
+            GROUP BY workload_name, workload_type, workload_resource_id
+            ORDER BY identity_count DESC
+            LIMIT 10
+        """, params)
+        top_workloads = [dict(r) for r in cursor.fetchall()]
+
+        cursor.close()
+
+        total_nhi = cov_row['total_nhi'] if cov_row else 0
+        attributed = cov_row['attributed'] if cov_row else 0
+
+        return {
+            'by_workload_type': type_rows,
+            'top_workloads': top_workloads,
+            'coverage': {
+                'total_nhi_identities': total_nhi,
+                'attributed': attributed,
+                'unattributed': total_nhi - attributed,
+                'coverage_pct': round(attributed / total_nhi * 100, 1) if total_nhi > 0 else 0,
+            },
+        }
 
     # ── Key Vault Metadata ─────────────────────────────────────────────
 

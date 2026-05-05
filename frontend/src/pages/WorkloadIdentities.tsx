@@ -378,7 +378,7 @@ const WorkloadIdentities: React.FC = () => {
             className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">
             <p className="text-xs text-gray-500 dark:text-slate-400">Dormant &gt; 30 Days</p>
             <p className="text-2xl font-bold mt-1 text-orange-600 dark:text-orange-400" style={{ width: 'fit-content', borderBottom: '1px dashed currentColor' }}>{stats.zombie_count}</p>
-            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Inactive or never used</p>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Inactive or no activity observed</p>
           </button>
           <button onClick={() => { setCanEscalate(true); updateParams('escalate', 'true'); }}
             className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 p-3 text-left cursor-pointer hover:shadow-sm transition">

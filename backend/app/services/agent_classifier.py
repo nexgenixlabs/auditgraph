@@ -28,7 +28,8 @@ POSSIBLE_THRESHOLD = 0.6        # 0.6–0.79 → possible_ai_agent
 
 def classify_identity(display_name, app_id=None, permissions=None,
                       role_assignments=None, identity_category=None,
-                      workload_type=None, identity_type=None):
+                      workload_type=None, identity_type=None,
+                      workload_attribution=None):
     """Classify a single identity against the AI agent pattern library.
 
     Args:
@@ -39,6 +40,7 @@ def classify_identity(display_name, app_id=None, permissions=None,
         identity_category: identity category string (optional)
         workload_type: workload type string (optional, e.g. 'ai_service', 'ml_workload')
         identity_type: identity type string (optional)
+        workload_attribution: dict with is_ai_workload, workload_type, attribution_confidence (optional)
 
     Returns:
         dict with classification result:
@@ -48,6 +50,30 @@ def classify_identity(display_name, app_id=None, permissions=None,
             detected_platform: platform name or None
     """
     is_human = identity_category == 'human_user'
+
+    # 0. Check workload attribution — AI workload binding (compound signal)
+    # Runs before app_id check since it provides context but doesn't override
+    # definitive app_id matches.
+    if workload_attribution and not is_human:
+        wa_is_ai = workload_attribution.get('is_ai_workload', False)
+        wa_type = (workload_attribution.get('workload_type') or '').lower()
+        wa_conf = workload_attribution.get('attribution_confidence', 0)
+        if wa_is_ai and wa_conf >= 75:
+            # High-confidence AI workload binding
+            return {
+                'agent_identity_type': 'ai_agent',
+                'classification_confidence': min(wa_conf / 100.0, 0.95),
+                'classification_reason': f'workload_attribution_ai: {wa_type} (confidence {wa_conf}%)',
+                'detected_platform': 'azure_ai' if 'ml' in wa_type or 'ai' in wa_type else wa_type,
+            }
+        elif wa_is_ai and wa_conf >= 50:
+            # Medium-confidence AI workload → possible
+            return {
+                'agent_identity_type': 'possible_ai_agent',
+                'classification_confidence': wa_conf / 100.0,
+                'classification_reason': f'workload_attribution_ai: {wa_type} (confidence {wa_conf}%)',
+                'detected_platform': 'azure_ai' if 'ml' in wa_type or 'ai' in wa_type else wa_type,
+            }
 
     # 1. Check app_id against known_app_ids (exact match, highest priority)
     # Humans never match app_id (app_ids are for service principals)
@@ -257,6 +283,35 @@ def classify_tenant(db, organization_id, run_id=None):
              'possible_ai_agent': 0, 'ai_privileged_human': 0, 'unknown': 0,
              'run_id': run_id, 'pattern_version': pattern_version}
 
+    # Pre-fetch workload attributions for AI compound signal
+    _wa_map = {}  # identity_db_id → best attribution dict
+    try:
+        cursor.execute("SAVEPOINT _wa_check")
+        _all_db_ids = [r[0] for r in identities]
+        if _all_db_ids:
+            cursor.execute("""
+                SELECT DISTINCT ON (identity_db_id)
+                    identity_db_id, workload_type, is_ai_workload,
+                    attribution_confidence, workload_name
+                FROM workload_attributions
+                WHERE organization_id = %s AND identity_db_id = ANY(%s)
+                ORDER BY identity_db_id, attribution_confidence DESC
+            """, (organization_id, _all_db_ids))
+            for wa_row in cursor.fetchall():
+                _wa_map[wa_row[0]] = {
+                    'workload_type': wa_row[1],
+                    'is_ai_workload': wa_row[2],
+                    'attribution_confidence': wa_row[3],
+                    'workload_name': wa_row[4],
+                }
+        cursor.execute("RELEASE SAVEPOINT _wa_check")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _wa_check")
+        except Exception:
+            pass
+        logger.debug("classify_tenant: workload_attributions not available — skipping compound signal")
+
     for row in identities:
         identity_db_id = row[0]
         identity_id = row[1]
@@ -272,10 +327,12 @@ def classify_tenant(db, organization_id, run_id=None):
         # Fetch role assignments for this identity
         roles = _get_identity_roles(cursor, identity_db_id)
 
-        # Classify
+        # Classify (with workload attribution compound signal)
+        wa_data = _wa_map.get(identity_db_id)
         result = classify_identity(
             display_name, app_id, permissions, roles, identity_category,
             workload_type=workload_type, identity_type=identity_type,
+            workload_attribution=wa_data,
         )
         agent_type = result['agent_identity_type']
         stats[agent_type] = stats.get(agent_type, 0) + 1

@@ -832,7 +832,7 @@ class WorkloadExposureEngine:
                     'finding_type': 'stale_identity',
                     'severity': 'high',
                     'title': f'Activity status: {activity}',
-                    'description': 'Identity is stale or never used — credentials may be abandoned.',
+                    'description': 'Identity is stale or shows no observed activity — credentials may be abandoned.',
                     'evidence': {'activity_status': activity},
                     'remediation': 'Investigate usage. Remove if confirmed unused.',
                     'component': 'lifecycle',
