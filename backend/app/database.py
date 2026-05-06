@@ -10429,6 +10429,7 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_identity ON soar_actions(identity_id)")
         cursor.execute("ALTER TABLE soar_playbooks ADD COLUMN IF NOT EXISTS organization_id INTEGER")
         cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+        cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS execution_mode VARCHAR(20) NOT NULL DEFAULT 'simulated'")
         self._commit()
         cursor.close()
 

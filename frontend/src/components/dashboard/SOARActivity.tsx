@@ -8,6 +8,7 @@ interface SoarAction {
   action_type: string;
   integration: string;
   status: string;
+  execution_mode?: string;
   identity_id: string | null;
   created_at: string | null;
 }
@@ -35,6 +36,12 @@ const STATUS_DOT: Record<string, string> = {
   failed: 'bg-red-500',
   executing: 'bg-yellow-500 animate-pulse',
   pending: 'bg-gray-400',
+};
+
+const EXEC_MODE_BADGE: Record<string, { label: string; cls: string }> = {
+  simulated: { label: 'Sim', cls: 'text-amber-700 bg-amber-50' },
+  executed: { label: 'Live', cls: 'text-green-700 bg-green-50' },
+  queued: { label: 'Queue', cls: 'text-blue-700 bg-blue-50' },
 };
 
 function timeAgo(dateStr: string): string {
@@ -118,6 +125,11 @@ export default function SOARActivity() {
                   {badge.label}
                 </span>
                 <span className="text-gray-700 truncate flex-1">{a.playbook_name || 'Unknown'}</span>
+                {a.execution_mode && EXEC_MODE_BADGE[a.execution_mode] && (
+                  <span className={`px-1 py-0.5 rounded text-[9px] font-medium flex-shrink-0 ${EXEC_MODE_BADGE[a.execution_mode].cls}`}>
+                    {EXEC_MODE_BADGE[a.execution_mode].label}
+                  </span>
+                )}
                 <span className="text-gray-400 flex-shrink-0">
                   {a.created_at ? timeAgo(a.created_at) : '-'}
                 </span>

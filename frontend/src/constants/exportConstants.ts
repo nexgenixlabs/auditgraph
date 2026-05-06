@@ -22,7 +22,7 @@ export const IDENTITY_CSV_COLUMNS: CsvColumnDef[] = [
   { key: 'cloud', header: 'Cloud' },
   { key: 'permission_plane', header: 'Permission Plane' },
   { key: 'risk_level', header: 'Risk Level' },
-  { key: 'risk_score', header: 'Risk Score' },
+  { key: 'risk_score', header: 'Risk Score (0-10)' },
   { key: 'privilege_tier', header: 'Privilege Tier' },
   { key: 'entra_role_count', header: 'Entra Roles' },
   { key: 'rbac_role_count', header: 'RBAC Roles' },

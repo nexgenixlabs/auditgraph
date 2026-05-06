@@ -11,6 +11,7 @@ import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { deriveIdentityState } from '../constants/identityState';
+import { normalizeScore } from '../utils/identityRiskScore';
 import { formatRelativeDate, lastSeenColor, SOURCE_LABELS, enrichIpLabel } from '../constants/activitySignals';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSelectFilter';
@@ -1741,11 +1742,11 @@ export default function IdentitiesPage() {
   // Export CSV
   function exportToCSV() {
     if (selectedIds.size === 0) { alert('Select identities first.'); return; }
-    const headers = ['Display Name','Identity ID','Type','Category','Subscription Name','Subscription ID','Cloud','Risk','Score','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
+    const headers = ['Display Name','Identity ID','Type','Category','Subscription Name','Subscription ID','Cloud','Risk','Score (0-10)','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
     const rows = selectedIdentities.map(i => [
       i.display_name, i.identity_id, i.identity_type || '', getCategoryLabel(i.identity_category),
       i.subscription_name || '', i.subscription_id || '',
-      i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), i.risk_score ?? 0,
+      i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), normalizeScore(i.risk_score, 10).toFixed(1),
       `T${getPrivilegeTier(i)}`, i.entra_role_count ?? 0, i.rbac_role_count ?? 0,
       i.api_permission_count ?? 0, i.credential_expiration || '', i.created_datetime || '',
       i.last_seen_auth || 'N/A', getDormantStatus(i), getComplianceRelevance(i), i.owner_display_name || '',
@@ -1774,7 +1775,7 @@ export default function IdentitiesPage() {
       body: selectedIdentities.map(i => [
         i.display_name.substring(0, 28) + (i.display_name.length > 28 ? '..' : ''),
         getCategoryLabel(i.identity_category), (i.risk_level || '?').toUpperCase(),
-        String(i.risk_score ?? 0), `T${getPrivilegeTier(i)}`,
+        normalizeScore(i.risk_score, 10).toFixed(1), `T${getPrivilegeTier(i)}`,
         String((i.entra_role_count ?? 0) + (i.rbac_role_count ?? 0)),
         String(i.api_permission_count ?? 0), getDormantStatus(i).toUpperCase(),
         getComplianceRelevance(i),

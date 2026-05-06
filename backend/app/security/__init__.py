@@ -170,13 +170,63 @@ def add_security_headers(response):
 MIN_PASSWORD_LENGTH = 12   # HIPAA-compliant minimum (Phase 6 upgrade)
 MAX_PASSWORD_LENGTH = 128
 
-# Top common passwords blocklist (abbreviated — expand in production)
+# Common passwords blocklist — all lowercase, >= 12 chars to match MIN_PASSWORD_LENGTH.
+# validate_password() calls password.lower() before checking membership.
 BLOCKED_PASSWORDS = {
-    'password1234', 'password123!', 'changeme1234', 'welcome12345',
-    'qwerty123456', 'admin1234567', 'letmein12345', 'monkey123456',
-    'dragon123456', 'master123456', '123456789abc', 'abc123456789',
-    'iloveyou1234', 'trustno1pass', 'sunshine1234', 'princess1234',
-    'football1234', 'charlie12345', 'shadow123456', 'michael12345',
+    # Common password + number/symbol patterns
+    'password1234', 'password123!', 'password12345', 'password1234!',
+    'password!234', 'passwordpass', 'password1111', 'password2024',
+    'password2025', 'password2026', 'passw0rd1234', 'p@ssword1234',
+    'p@ssw0rd1234',
+    # Admin / system patterns
+    'admin1234567', 'admin12345!!', 'admin2024!!!', 'admin2025!!!',
+    'administrator', 'rootpassword', 'root12345678', 'sysadmin1234',
+    'superadmin12', 'testpassword', 'test12345678', 'guest1234567',
+    'guestguest12',
+    # Welcome / generic
+    'welcome12345', 'welcome2024!', 'welcome2025!', 'welcome1234!',
+    'changeme1234', 'changeme123!', 'letmein12345', 'letmein1234!',
+    'pleaseletme1', 'openthegate1',
+    # Simple word + padding
+    'qwerty123456', 'qwertyuiop12', 'qwerty12345!', 'asdfghjkl123',
+    'zxcvbnm12345', '1qaz2wsx3edc', 'qazwsx123456', '123qwe456rty',
+    # Sequential / repeating
+    '123456789abc', 'abc123456789', '1234567890ab', 'abcdefgh1234',
+    'aaaaaaaaaaaa', '111111111111', '000000000000', '123456789012',
+    '987654321012', 'abcdefghijkl', 'zzzzzzzzzzzz', 'qqqqqqqqqqqq',
+    # Names + numbers
+    'michael12345', 'charlie12345', 'jessica12345', 'jennifer1234',
+    'andrew123456', 'daniel123456', 'jordan123456', 'thomas123456',
+    'robert123456', 'joseph123456', 'ashley123456', 'joshua123456',
+    # Pop culture / animals
+    'monkey123456', 'dragon123456', 'shadow123456', 'master123456',
+    'superman1234', 'batman123456', 'starwars1234', 'pokemon12345',
+    'princess1234', 'sunshine1234', 'football1234', 'baseball1234',
+    'soccer123456', 'hockey123456', 'harley123456', 'hunter123456',
+    'ranger123456', 'mustang12345', 'cookie123456', 'chocolate123',
+    # Affection / sentiment
+    'iloveyou1234', 'iloveyou123!', 'trustno1pass', 'trustno11234',
+    'letmein!!!!!', 'loveyou12345',
+    # Security / infosec terms (ironic weak passwords)
+    'security1234', 'secure123456', 'firewall1234', 'network12345',
+    'cybersecure1', 'infosec12345', 'hacker123456', 'exploit12345',
+    'pentest12345', 'defender1234', 'antivirus123', 'encrypted123',
+    'vulnerability', 'scanner12345',
+    # Year patterns
+    'summer202400', 'summer202500', 'winter202400', 'winter202500',
+    'spring202400', 'spring202500', 'autumn202400',
+    # Company / product specific
+    'auditgraph12', 'auditgraph!!', 'nexgenix1234', 'nexgenix123!',
+    'auditgraph23', 'microsoft123', 'azure1234567', 'google123456',
+    # Keyboard walks
+    '1qazxsw23edc', 'zaq12wsx3edc', '!qaz2wsx#edc', 'qweasdzxc123',
+    # Common IT / default patterns
+    'default12345', 'temp12345678', 'temporary123', 'initial12345',
+    'firstlogin12', 'resetme12345', 'newpassword1', 'newuser12345',
+    'setup1234567', 'install12345', 'configconfig',
+    # Misc common >= 12 chars
+    'trustno1!!!!', 'letmeinletme', 'opensesame12', 'abracadabra1',
+    'supermansuper', 'dragondragon', 'mastermaster', 'shadowshadow',
 }
 
 

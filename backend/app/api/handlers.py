@@ -12805,6 +12805,17 @@ def export_data(export_type):
         return _export_evidence_json()
 
 
+def _normalize_risk_score(raw_score):
+    """Normalize additive risk score to 0-10 scale.
+
+    Matches frontend normalizeScore(raw, 10) in identityRiskScore.ts:
+        clamp(raw / 10)  →  min(10, max(0, raw / 10))
+    """
+    if not raw_score:
+        return 0.0
+    return round(min(max(float(raw_score) / 10.0, 0.0), 10.0), 1)
+
+
 def _export_identities():
     """Stream identities as CSV with chunked pagination.
 
@@ -12994,7 +13005,7 @@ def _export_identities():
         csv_headers = [
             'Display Name', 'Identity ID', 'Type', 'Category',
             'Subscription Name', 'Subscription ID', 'Cloud', 'Permission Plane',
-            'Risk Level', 'Risk Score', 'Privilege Tier', 'Entra Roles',
+            'Risk Level', 'Risk Score (0-10)', 'Privilege Tier', 'Entra Roles',
             'RBAC Roles', 'Graph API Perms', 'Credentials',
             'Credential Status', 'Credential Expiry', 'Created',
             'Last Active', 'Activity Status', 'Owner',
@@ -13047,7 +13058,7 @@ def _export_identities():
                             row[6] or 'azure',      # cloud
                             row[7] or 'entra_id',   # permission_plane
                             row[8] or 'info',       # risk_level
-                            int(row[9] or 0),       # risk_score
+                            _normalize_risk_score(row[9]),  # risk_score (0-10)
                             privilege_tier,          # privilege_tier
                             int(row[11] or 0),      # entra_role_count
                             int(row[12] or 0),      # rbac_role_count
@@ -37185,6 +37196,13 @@ def get_risk_summary_full():
                 "ghost_accounts": ghost, "orphaned_spns": orphaned,
                 "over_privileged": over_priv, "dormant_privileged": dormant,
                 "high_blast_radius": high_blast, "external_exposure": ext_exposure,
+                # AG-79: deltas vs prior scan (positive = worse)
+                "ghost_accounts_delta": ghost - (previous.get('ghost_accounts') or 0) if previous else None,
+                "orphaned_spns_delta": orphaned - (previous.get('orphaned_spns') or 0) if previous else None,
+                "over_privileged_delta": over_priv - (previous.get('over_privileged') or 0) if previous else None,
+                "dormant_privileged_delta": dormant - (previous.get('dormant_privileged') or 0) if previous else None,
+                "high_blast_radius_delta": high_blast - (previous.get('high_blast_radius') or 0) if previous else None,
+                "external_exposure_delta": ext_exposure - (previous.get('external_exposure') or 0) if previous else None,
             },
             "risk_level_distribution": risk_level_dist,
             "identity_counts": {
