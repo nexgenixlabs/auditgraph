@@ -1113,7 +1113,7 @@ class AzureDiscoveryEngine:
         # Step 7: Check credentials
         logger.info("Checking Credential Expiration...")
         self._update_job_progress('analyzing_risk', 52)
-        identities_with_creds = self._check_credentials(identities_with_risks)
+        identities_with_creds = self._check_credentials(identities_with_risks, credentials_map)
 
         # Attach role_assignments to each identity dict for the activity waterfall
         _ra_by_pid = {}
@@ -8113,12 +8113,51 @@ class AzureDiscoveryEngine:
                 self._cached_custom_rules = []
         return self._cached_custom_rules
 
-    def _check_credentials(self, identities: List[Dict]) -> List[Dict]:
-        logger.info("Checking %s identities...", len(identities))
+    def _check_credentials(self, identities: List[Dict], credentials_map: Dict[str, List[Dict]] = None) -> List[Dict]:
+        from datetime import datetime, timezone
+        credentials_map = credentials_map or {}
+        now = datetime.now(timezone.utc)
+        expired_count = 0
+        expiring_count = 0
+
+        logger.info("Checking %s identities for credential expiration...", len(identities))
         for identity in identities:
-            identity['credential_status'] = 'Valid'
-            identity['credential_expiration'] = None
-        logger.info("All credentials are valid for 30+ days")
+            creds = credentials_map.get(identity.get('identity_id'), [])
+            # Find earliest non-federated expiry
+            expiries = []
+            for c in creds:
+                if c.get('credential_type') == 'federated':
+                    continue
+                end = c.get('end_datetime')
+                if end:
+                    if isinstance(end, str):
+                        try:
+                            end = datetime.fromisoformat(end.replace('Z', '+00:00'))
+                        except (ValueError, TypeError):
+                            continue
+                    expiries.append(end)
+
+            if expiries:
+                earliest = min(expiries)
+                identity['credential_expiration'] = earliest.isoformat()
+                if earliest < now:
+                    identity['credential_status'] = 'Expired'
+                    expired_count += 1
+                elif earliest < now + __import__('datetime').timedelta(days=30):
+                    identity['credential_status'] = 'Expiring Soon'
+                    expiring_count += 1
+                else:
+                    identity['credential_status'] = 'Valid'
+            elif creds:
+                # Has credentials but none with expiry (federated-only or no-expiry)
+                identity['credential_status'] = 'Valid'
+                identity['credential_expiration'] = None
+            else:
+                identity['credential_status'] = None
+                identity['credential_expiration'] = None
+
+        logger.info("Credential check: %s expired, %s expiring soon, %s total with creds",
+                     expired_count, expiring_count, len(credentials_map))
         return identities
     
     def _check_activity(self, identities: List[Dict]) -> List[Dict]:
@@ -9987,6 +10026,29 @@ class AzureDiscoveryEngine:
                     for credential in credentials:
                         self.db.save_credential(identity_db_id, credential)
                         self._credentials_saved += 1
+                        # Also populate identity_credentials inventory
+                        # (skip 'federated' — tracked in federated_credentials table)
+                        _ic_type = credential.get('credential_type', '')
+                        if _ic_type in ('secret', 'certificate', 'key', 'password', 'token'):
+                            try:
+                                self.db.save_identity_credential(
+                                    org_id=self.db_org_id,
+                                    connection_id=self.cloud_connection_id,
+                                    identity_id=identity.get('identity_id', ''),
+                                    credential_type=_ic_type,
+                                    created_at=credential.get('start_datetime'),
+                                    expires_at=credential.get('end_datetime'),
+                                    metadata={
+                                        'key_id': credential.get('key_id'),
+                                        'display_name': credential.get('display_name'),
+                                    },
+                                )
+                            except Exception as _ic_err:
+                                logger.debug("save_identity_credential skipped: %s", _ic_err)
+                                try:
+                                    self.db._rollback()
+                                except Exception:
+                                    pass
                     self.db.update_identity_credential_summary(identity_db_id)
             except Exception as e:
                 logger.error("save_credentials FAILED for %s: %s", identity.get('display_name'), e)

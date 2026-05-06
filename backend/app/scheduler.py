@@ -2838,8 +2838,7 @@ def _launch_owned_objects_background(db_org_id: int, conn: dict):
         except Exception as e:
             logger.error("[owned_objects_bg] Background enrichment failed: %s", e)
         finally:
-            nonlocal client_secret
-            client_secret = None  # AG-116: zero after use — prevent memory retention
+            pass  # AG-116: secret zeroed by caller scope after thread launch
 
     t = threading.Thread(target=_run, name=f"owned_objects_bg_org{db_org_id}", daemon=True)
     t.start()
@@ -2933,8 +2932,7 @@ def _launch_ip_enrichment_background(db_org_id: int, conn: dict):
         except Exception as e:
             logger.error("[ip_enrichment_bg] Background enrichment failed: %s", e)
         finally:
-            nonlocal client_secret
-            client_secret = None  # AG-116: zero after use — prevent memory retention
+            pass  # AG-116: secret zeroed by caller scope after thread launch
 
     t = threading.Thread(target=_run, name=f"ip_enrichment_bg_org{db_org_id}", daemon=True)
     t.start()
@@ -3012,8 +3010,7 @@ def _launch_signin_intelligence_background(db_org_id: int, conn: dict):
         except Exception as e:
             logger.error("[signin_intel_bg] Background enrichment failed: %s", e)
         finally:
-            nonlocal client_secret
-            client_secret = None  # AG-116: zero after use — prevent memory retention
+            pass  # AG-116: secret zeroed by caller scope after thread launch
 
     t = threading.Thread(target=_run, name=f"signin_intel_bg_org{db_org_id}", daemon=True)
     t.start()

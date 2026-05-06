@@ -5138,12 +5138,9 @@ class Database:
 
     def update_identity_credential_summary(self, identity_db_id: int):
         """
-        Update credential_count, next_expiry, and credential_risk on identity
-
-        NOTE: Requires identities table to include:
-          - credential_count
-          - next_expiry
-          - credential_risk
+        Update credential_count, next_expiry, credential_risk,
+        credential_expiration, and credential_status on identity
+        from the live credentials table.
         """
         cursor = self.conn.cursor()
 
@@ -5158,7 +5155,13 @@ class Database:
                         WHEN MIN(end_datetime) < NOW() + INTERVAL '30 days' THEN 'expiring_soon'
                         WHEN MIN(end_datetime) IS NULL THEN 'unknown'
                         ELSE 'healthy'
-                    END as risk
+                    END as risk,
+                    CASE
+                        WHEN MIN(end_datetime) < NOW() THEN 'Expired'
+                        WHEN MIN(end_datetime) < NOW() + INTERVAL '30 days' THEN 'Expiring Soon'
+                        WHEN MIN(end_datetime) IS NULL THEN 'Valid'
+                        ELSE 'Valid'
+                    END as status
                 FROM credentials
                 WHERE identity_db_id = %s
             )
@@ -5166,7 +5169,9 @@ class Database:
             SET
                 credential_count = credential_summary.count,
                 next_expiry = credential_summary.earliest_expiry,
-                credential_risk = credential_summary.risk
+                credential_risk = credential_summary.risk,
+                credential_expiration = credential_summary.earliest_expiry,
+                credential_status = credential_summary.status
             FROM credential_summary
             WHERE identities.id = %s
         """,
@@ -10384,54 +10389,9 @@ class Database:
     # ── Phase 43: SOAR Integration ─────────────────────────────────
 
     def _ensure_soar_tables(self):
-        """Create soar_playbooks and soar_actions tables if they don't exist."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS soar_playbooks (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                description TEXT,
-                enabled BOOLEAN DEFAULT true,
-                trigger_type VARCHAR(30) NOT NULL,
-                trigger_conditions JSONB NOT NULL DEFAULT '{}',
-                action_type VARCHAR(30) NOT NULL,
-                action_config JSONB NOT NULL DEFAULT '{}',
-                integration VARCHAR(30) NOT NULL DEFAULT 'internal',
-                cooldown_minutes INTEGER DEFAULT 60,
-                created_by VARCHAR(100),
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
-                last_triggered_at TIMESTAMPTZ,
-                trigger_count INTEGER DEFAULT 0
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS soar_actions (
-                id SERIAL PRIMARY KEY,
-                playbook_id INTEGER REFERENCES soar_playbooks(id) ON DELETE SET NULL,
-                identity_id TEXT,
-                anomaly_id INTEGER,
-                trigger_event JSONB,
-                action_type VARCHAR(30) NOT NULL,
-                integration VARCHAR(30) NOT NULL,
-                status VARCHAR(20) DEFAULT 'pending',
-                result JSONB,
-                executed_at TIMESTAMPTZ,
-                completed_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_playbooks_trigger ON soar_playbooks(trigger_type)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_playbooks_enabled ON soar_playbooks(enabled)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_playbook ON soar_actions(playbook_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_status ON soar_actions(status)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_created ON soar_actions(created_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_actions_identity ON soar_actions(identity_id)")
-        cursor.execute("ALTER TABLE soar_playbooks ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        cursor.execute("ALTER TABLE soar_actions ADD COLUMN IF NOT EXISTS execution_mode VARCHAR(20) NOT NULL DEFAULT 'simulated'")
-        self._commit()
-        cursor.close()
+        """No-op — SOAR schema managed by migration 112_fix_soar_tables.sql.
+        Kept as stub so existing callers don't break."""
+        pass
 
     def get_soar_playbooks(self):
         """List all SOAR playbooks."""

@@ -9381,6 +9381,8 @@ def get_identity_graph_data(identity_id):
 
         roles = db.get_identity_roles_enriched(db_id)
         credentials = db.get_identity_credentials(db_id)
+        # Live aggregate: credential_count from actual credential rows
+        ident["credential_count"] = len(credentials)
         owners = db.get_ownership(db_id)
         graph_perms = db.get_graph_permissions(db_id)
         app_roles = db.get_app_roles(db_id)
