@@ -136,7 +136,7 @@ function SkeletonBlock() {
 function UnavailableBlock() {
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col items-center justify-center gap-1">
-      <span className="text-xs text-gray-400">Additional insights temporarily unavailable</span>
+      <span className="text-xs text-gray-400">No additional insights for this period</span>
       <span className="text-[10px] text-gray-500">Core posture data is up to date</span>
     </div>
   );
@@ -150,7 +150,7 @@ const GAP_ACTIONS: Record<string, string> = {
   DRIFT_NOT_ENABLED: 'Run a second scan to track configuration changes over time',
   DRIFT_NEEDS_SECOND_SCAN: 'Run a second scan to track configuration changes over time',
   REMEDIATION_UNAVAILABLE: 'Configure remediation playbooks to enable automated fixes',
-  SPN_UNAVAILABLE: 'Service principal data is not yet available',
+  SPN_UNAVAILABLE: 'Service principal data pending next discovery scan',
 };
 
 function PartialVisibilityBanner({ primaryGap, usableSources, totalSources }: {

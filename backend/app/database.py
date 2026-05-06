@@ -21065,58 +21065,8 @@ class Database:
             cursor.close()
 
     def _ensure_lineage_verdicts_table(self):
-        """Create lineage_verdicts table for historical verdict tracking."""
-        if Database._lineage_verdicts_ensured:
-            return
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS lineage_verdicts (
-                    id BIGSERIAL PRIMARY KEY,
-                    discovery_run_id BIGINT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
-                    organization_id INTEGER NOT NULL,
-                    identity_id BIGINT NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
-                    verdict VARCHAR(50) NOT NULL,
-                    confidence_score FLOAT DEFAULT 1.0,
-                    contributing_factors JSONB,
-                    previous_verdict VARCHAR(50),
-                    verdict_changed BOOLEAN DEFAULT FALSE,
-                    scored_at TIMESTAMPTZ DEFAULT NOW(),
-                    verdict_source VARCHAR(50) DEFAULT 'lineage_engine'
-                )
-            """)
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_lv_identity_run ON lineage_verdicts(identity_id, discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lv_run_id ON lineage_verdicts(discovery_run_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lv_identity_id ON lineage_verdicts(identity_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lv_verdict ON lineage_verdicts(verdict)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lv_org_id ON lineage_verdicts(organization_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_lv_changed ON lineage_verdicts(verdict_changed) WHERE verdict_changed = TRUE")
-
-            # RLS policies (same pattern as entra_groups)
-            cursor.execute("ALTER TABLE lineage_verdicts ENABLE ROW LEVEL SECURITY")
-            cursor.execute("ALTER TABLE lineage_verdicts FORCE ROW LEVEL SECURITY")
-            for policy_stmt in [
-                "CREATE POLICY org_strict_sel ON lineage_verdicts FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                "CREATE POLICY org_strict_ins ON lineage_verdicts FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                "CREATE POLICY org_strict_upd ON lineage_verdicts FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-                "CREATE POLICY org_strict_del ON lineage_verdicts FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
-            ]:
-                cursor.execute("SAVEPOINT lv_rls")
-                try:
-                    cursor.execute(policy_stmt)
-                    cursor.execute("RELEASE SAVEPOINT lv_rls")
-                except Exception:
-                    cursor.execute("ROLLBACK TO SAVEPOINT lv_rls")
-
-            self._commit()
-            Database._lineage_verdicts_ensured = True
-        except Exception as e:
-            self._rollback()
-            if self._organization_id:
-                self.set_organization_context(self._organization_id)
-            logger.warning("lineage_verdicts table error: %s", e)
-        finally:
-            cursor.close()
+        """No-op — lineage_verdicts schema managed by migration 114_fix_lineage_verdicts_table.sql."""
+        pass
 
     def save_lineage_verdict(self, run_id: int, identity_db_id: int, verdict_data: dict):
         """Upsert a lineage verdict for historical tracking."""
