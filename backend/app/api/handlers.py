@@ -15338,7 +15338,12 @@ def get_query_fields():
 # ================================================================
 
 def get_anomalies_list():
-    """GET /api/anomalies — list anomalies with optional filters."""
+    """GET /api/anomalies — list anomalies with optional filters.
+
+    Anomalies persist until resolved, so the default view shows all
+    unresolved anomalies for the org (not scoped to latest run).
+    Callers can still filter by run_id explicitly.
+    """
     db = _db()
     try:
         limit = _safe_query_int('limit', 50, 200)
@@ -15352,17 +15357,10 @@ def get_anomalies_list():
         if resolved_param is not None:
             resolved = resolved_param.lower() == 'true'
 
-        # Connection-scoped: filter anomalies to runs belonging to the selected connection
-        run_ids = None
-        if not run_id:
-            cursor = db.conn.cursor()
-            run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
-            cursor.close()
-
         anomalies = db.get_anomalies(
             limit=limit, offset=offset, anomaly_type=anomaly_type,
             severity=severity, identity_id=identity_id, resolved=resolved,
-            run_id=run_id, run_ids=run_ids,
+            run_id=run_id, run_ids=None,
         )
         return jsonify({'anomalies': anomalies, 'count': len(anomalies)})
     finally:
@@ -15370,13 +15368,15 @@ def get_anomalies_list():
 
 
 def get_anomaly_stats_handler():
-    """GET /api/anomalies/stats — anomaly summary stats."""
+    """GET /api/anomalies/stats — anomaly summary stats.
+
+    Returns all unresolved anomalies for the organization, not scoped to
+    the latest discovery run.  Anomalies persist until explicitly resolved
+    regardless of which run detected them.
+    """
     db = _db()
     try:
-        cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
-        cursor.close()
-        stats = db.get_anomaly_stats(run_ids=run_ids)
+        stats = db.get_anomaly_stats(run_ids=None)
         return jsonify(stats)
     finally:
         db.close()

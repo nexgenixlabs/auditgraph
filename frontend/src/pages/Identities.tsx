@@ -1681,7 +1681,6 @@ export default function IdentitiesPage() {
       return 0;
     });
     if (result.length === 0 && identities.length > 0) {
-      console.warn('[IdentityInventory] 0 filtered from', identities.length, 'total. allSubscriptions:', allSubscriptions, 'sample identity sub:', identities[0]?.primary_subscription_id, identities[0]?.subscription_id);
     }
     return result;
   }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir]);

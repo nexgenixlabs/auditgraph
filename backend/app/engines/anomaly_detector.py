@@ -78,6 +78,12 @@ class AnomalyDetector:
 
         for name, detector in detectors:
             try:
+                # Ensure clean transaction state before each detector so a
+                # failure in one detector doesn't poison all subsequent ones.
+                try:
+                    self.db.conn.rollback()
+                except Exception:
+                    pass
                 if name in ('off_hours_pim', 'excessive_pim_usage',
                             'excessive_api_permission'):
                     results = detector(current_run_id, settings)
@@ -88,6 +94,10 @@ class AnomalyDetector:
                     logger.info(f"  Anomaly detector '{name}': {len(results)} findings")
             except Exception as e:
                 logger.error(f"  Anomaly detector '{name}' failed: {e}")
+                try:
+                    self.db.conn.rollback()
+                except Exception:
+                    pass
 
         return anomalies
 

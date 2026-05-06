@@ -1689,16 +1689,6 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
       .finally(() => setLoading(false));
   }, [identityId, withConnection]);
 
-  // TEMP diagnostic — remove after field rendering is verified in the browser.
-  useEffect(() => {
-    if (paths.length > 0) {
-      // eslint-disable-next-line no-console
-      console.log('ATTACK_PATH_KEYS:', Object.keys(paths[0]));
-      // eslint-disable-next-line no-console
-      console.log('ATTACK_PATH_SAMPLE:', JSON.stringify(paths[0], null, 2));
-    }
-  }, [paths]);
-
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
