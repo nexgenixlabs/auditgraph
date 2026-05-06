@@ -10741,7 +10741,8 @@ class AzureDiscoveryEngine:
                         cursor.execute("""
                             UPDATE identities SET
                                 has_federated_credentials = TRUE,
-                                federated_issuer_types = %s
+                                federated_issuer_types = %s,
+                                recommended_action = 'review_federated_dependencies'
                             WHERE id = %s
                         """, (
                             json.dumps(sorted(issuer_types_for_identity)),
@@ -10789,14 +10790,13 @@ class AzureDiscoveryEngine:
                     if not row:
                         continue
                     current_action, activity_src = row
-                    if current_action in ('UNUSED', 'ORPHANED', 'NEEDS_REVIEW', 'STALE', 'AT_RISK'):
-                        # Determine new verdict based on activity
+                    if current_action in ('UNUSED', 'ORPHANED', 'NEEDS_REVIEW', 'STALE', 'AT_RISK',
+                                          'FEDERATED_UNVERIFIED', 'ACTIVE_FEDERATED'):
+                        new_action = 'review_federated_dependencies'
                         if activity_src and activity_src not in ('created_date', 'none', None):
-                            new_action = 'ACTIVE_FEDERATED'
                             new_text = ('Active federated identity. External pipeline dependency — '
                                         'review federated credentials before any action.')
                         else:
-                            new_action = 'FEDERATED_UNVERIFIED'
                             new_text = ('External pipeline dependency detected via federated credentials. '
                                         'Review federated credentials before any action.')
                         cursor.execute("""

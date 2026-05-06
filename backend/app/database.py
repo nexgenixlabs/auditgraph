@@ -8704,27 +8704,8 @@ class Database:
     # ─── Saved Views (Phase 34) ──────────────────────────────────────
 
     def _ensure_saved_views_table(self):
-        """Create saved_views table if it doesn't exist."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS saved_views (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                description TEXT,
-                filters JSONB NOT NULL DEFAULT '{}',
-                sort_field VARCHAR(50),
-                sort_direction VARCHAR(10) DEFAULT 'desc',
-                is_default BOOLEAN DEFAULT false,
-                is_shared BOOLEAN DEFAULT false,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_views_user ON saved_views(user_id)")
-        cursor.execute("ALTER TABLE saved_views ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        self._commit()
-        cursor.close()
+        """No-op — saved_views schema managed by migration 113_fix_saved_views_table.sql."""
+        pass
 
     def get_saved_views(self, user_id: int) -> list:
         """Get user's views + shared views, ordered by default first then name."""
