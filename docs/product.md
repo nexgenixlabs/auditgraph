@@ -12,7 +12,7 @@ NexGenix Labs builds next-generation cybersecurity products that solve real ente
 
 **Our Mission:** Eliminate identity blind spots across every cloud, every identity type, every permission — before attackers exploit them.
 
-**Our Approach:** We don't just scan — we understand. AuditGraph maps the full identity universe (human, machine, guest, federated) across Azure, AWS, and GCP, scores risk with context, and tells you exactly what to fix and why.
+**Our Approach:** We don't just scan — we understand. AuditGraph maps the full identity universe (human, machine, guest, federated) across Azure, AWS, and GCP, scores risk using industry-standard frameworks (CVSS v3.1, NIST SP 800-53, MITRE ATT&CK v14, CIS Controls v8), and tells you exactly what to fix and why.
 
 ---
 
@@ -41,9 +41,10 @@ Every major breach in the last 5 years started with one thing: **a compromised i
 
 - **SolarWinds** — compromised service account with over-privileged access
 - **Colonial Pipeline** — stolen VPN credentials (no MFA)
-- **Uber (2022)** — social engineering → MFA fatigue → admin access
+- **Uber (2022)** — social engineering then MFA fatigue then admin access
 - **Okta (2023)** — service account token stolen from support case
-- **Microsoft (2024)** — legacy test OAuth app with no MFA → email compromise
+- **Microsoft (2024)** — legacy test OAuth app with no MFA then email compromise
+- **Snowflake (2024)** — stolen credentials, no MFA, 165+ customer environments breached
 
 The pattern is clear: **identities are the #1 attack vector**, and most organizations can't answer basic questions:
 
@@ -96,11 +97,11 @@ AuditGraph does.
 ║   │          │    │          │    │          │    │          │         ║
 ║   └──────────┘    └──────────┘    └──────────┘    └──────────┘         ║
 ║        │               │               │               │                ║
-║   Every identity  Attack paths    AGIRS risk      Automated             ║
-║   across every    Blast radius    scoring         fix actions           ║
-║   cloud           Drift           (0-100)         SOAR routing          ║
-║   provider        Anomalies       Lineage         Approval              ║
-║                   Correlations    verdicts         workflows             ║
+║   Every identity  Attack paths    CVSS v3.1       Automated             ║
+║   across every    Blast radius    severity        fix actions           ║
+║   cloud           Drift           NIST/MITRE      SOAR routing          ║
+║   provider        Anomalies       aligned         Approval              ║
+║                   Correlations    scoring          workflows             ║
 ║                                                                          ║
 ║   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         ║
 ║   │          │    │          │    │          │    │          │         ║
@@ -160,7 +161,7 @@ AuditGraph does.
 ║  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐            │      ║
 ║  │  │  Risk    │ │  Attack  │ │  Blast   │ │  Anomaly │            │      ║
 ║  │  │ Scoring  │ │  Path    │ │  Radius  │ │Detection │            │      ║
-║  │  │ (AGIRS)  │ │  Engine  │ │  Engine  │ │  Engine  │            │      ║
+║  │  │ (CVSS)   │ │  Engine  │ │  Engine  │ │  Engine  │            │      ║
 ║  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘            │      ║
 ║  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐            │      ║
 ║  │  │  Drift   │ │  Lineage │ │  Role    │ │  SOAR    │            │      ║
@@ -225,54 +226,91 @@ AuditGraph does.
 ║  │ @cross_org audit │              │ (key rotation)    │               ║
 ║  │                   │              │                   │               ║
 ║  │ Sentinel values   │              │ Zero-after-use   │               ║
-║  │ Fail-closed auth  │              │ (AG-116 pattern)  │              ║
+║  │ Fail-closed auth  │              │ (secret lifecycle)│              ║
 ║  └─────────────────┘              └─────────────────┘               ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
-### Risk Scoring Architecture (AGIRS)
+### Risk Scoring Architecture
+
+AuditGraph scores risk using **industry-standard frameworks** — not proprietary black-box algorithms.
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
-║            AGIRS — AuditGraph Identity Risk Score (0-100)             ║
+║          IDENTITY RISK SCORING — Industry Standards Aligned          ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                      ║
-║  ┌───────────────────────────────────────────────┐                  ║
-║  │                                               │                  ║
-║  │              AGIRS COMPOSITE                  │                  ║
-║  │          ┌─────────────────────┐              │                  ║
-║  │          │    Final Score      │              │                  ║
-║  │          │    (0 — 100)        │              │                  ║
-║  │          └────────┬────────────┘              │                  ║
-║  │                   │                           │                  ║
-║  │     ┌─────────────┼─────────────┐            │                  ║
-║  │     │             │             │            │                  ║
-║  │  ┌──▼──┐      ┌───▼───┐    ┌───▼───┐       │                  ║
-║  │  │HIRI │      │ NHIRI │    │  GEI  │       │                  ║
-║  │  │ 40% │      │  40%  │    │  20%  │       │                  ║
-║  │  └──┬──┘      └───┬───┘    └───┬───┘       │                  ║
-║  │     │             │            │             │                  ║
-║  │  Human          Non-Human    Governance      │                  ║
-║  │  Identity       Identity     Effectiveness   │                  ║
-║  │  Risk Index     Risk Index   Index            │                  ║
-║  │                                               │                  ║
-║  │  - Ghost users  - Orphaned SPNs  - Control   │                  ║
-║  │  - Dormant      - Expired creds    health     │                  ║
-║  │  - Over-priv    - Ownerless apps - Compliance │                  ║
-║  │  - Guest risk   - Zombie MIs     - Policy     │                  ║
-║  │  - Zombie accts - Fed misconfig    adherence  │                  ║
-║  │                                               │                  ║
-║  └───────────────────────────────────────────────┘                  ║
+║  ┌───────────────────────────────────────────────────┐              ║
+║  │           PER-IDENTITY RISK SCORE                 │              ║
+║  │                                                   │              ║
+║  │   CVSS v3.1 Severity Bands                       │              ║
+║  │   ████████████████████ CRITICAL (9.0-10.0)       │              ║
+║  │   ████████████████     HIGH     (7.0-8.9)        │              ║
+║  │   ████████████         MEDIUM   (4.0-6.9)        │              ║
+║  │   ████████             LOW      (0.1-3.9)        │              ║
+║  │   ████                 INFO     (0.0)            │              ║
+║  │                                                   │              ║
+║  │   Scored across 5 dimensions:                    │              ║
+║  │   1. Attack Surface  — exposure footprint        │              ║
+║  │   2. Privilege Level  — role tier (T0-T3)        │              ║
+║  │   3. Credential Risk  — expiry, rotation, count  │              ║
+║  │   4. Activity Status  — dormancy (NIST 90-day)   │              ║
+║  │   5. Governance       — ownership, reviews, PIM  │              ║
+║  │                                                   │              ║
+║  └───────────────────────────────────────────────────┘              ║
 ║                                                                      ║
-║  RISK LEVELS:                                                        ║
-║  ████████████████████ CRITICAL (80-100)                              ║
-║  ████████████████     HIGH     (60-79)                               ║
-║  ████████████         MEDIUM   (40-59)                               ║
-║  ████████             LOW      (0-39)                                ║
+║  ┌───────────────────────────────────────────────────┐              ║
+║  │        ORGANIZATION POSTURE SCORE (0-100)         │              ║
+║  │                                                   │              ║
+║  │   Three-pillar composite:                        │              ║
+║  │                                                   │              ║
+║  │   ┌─────────┐  ┌──────────┐  ┌──────────┐       │              ║
+║  │   │  Human  │  │Non-Human │  │Governance│       │              ║
+║  │   │Identity │  │ Identity │  │Effective-│       │              ║
+║  │   │  Risk   │  │   Risk   │  │  ness    │       │              ║
+║  │   │  (40%)  │  │  (40%)   │  │  (20%)   │       │              ║
+║  │   └────┬────┘  └────┬─────┘  └────┬─────┘       │              ║
+║  │        │            │             │               │              ║
+║  │   Ghost users   Orphaned SPNs  Ownership         │              ║
+║  │   Dormant accts Expired creds  PIM adoption      │              ║
+║  │   Over-priv     Zombie MIs     Access reviews    │              ║
+║  │   Guest risk    Fed misconfig  Monitoring         │              ║
+║  │                                                   │              ║
+║  └───────────────────────────────────────────────────┘              ║
+║                                                                      ║
+║  STANDARDS ALIGNMENT:                                                ║
+║  ┌────────────────────────────────────────────────────────────┐      ║
+║  │                                                            │      ║
+║  │  CVSS v3.1  — Severity classification & scoring bands     │      ║
+║  │  NIST SP 800-53 — AC-6 Least Privilege, IA-5 AuthN Mgmt  │      ║
+║  │  NIST SP 800-63B — 90-day dormancy thresholds             │      ║
+║  │  NIST SP 800-207 — Zero Trust Architecture principles     │      ║
+║  │  MITRE ATT&CK v14 — T1078 Valid Accounts, T1098 Account  │      ║
+║  │                     Manipulation, T1528 Steal App Token   │      ║
+║  │  CIS Controls v8 — Control 5.3 Dormant, 5.4 Least Priv   │      ║
+║  │                                                            │      ║
+║  └────────────────────────────────────────────────────────────┘      ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
+
+### Risk Factor Catalog (Sample)
+
+Every identity's risk score is computed by evaluating a catalog of risk factors mapped to industry controls:
+
+| Risk Factor | CVSS Score | Framework | Control ID |
+|------------|-----------|-----------|------------|
+| Global Administrator role | 9.8 Critical | MITRE ATT&CK | T1078.004 |
+| Privileged Role Administrator | 9.5 Critical | NIST 800-53 | AC-6(5) |
+| Ghost access (disabled + active roles) | 9.0 Critical | CIS Controls v8 | 5.3 |
+| Subscription Owner | 8.5 High | NIST 800-53 | AC-6(1) |
+| Expired credentials still active | 8.0 High | NIST 800-63B | IA-5(1) |
+| Directory.ReadWrite.All API perm | 8.0 High | MITRE ATT&CK | T1098 |
+| Dormant 90+ days with privileges | 7.5 High | NIST SP 800-63B | Section 5 |
+| Multiple active secrets | 5.0 Medium | CIS Controls v8 | 5.2 |
+| No owner assigned | 4.5 Medium | NIST 800-53 | AC-2(4) |
+| Stale 30-90 days | 3.5 Low | CIS Controls v8 | 5.3 |
 
 ---
 
@@ -305,9 +343,9 @@ Phase 5  ▓▓▓▓▓▓  SPN credentials (secrets, certs, federated)
 Phase 6  ▓▓▓▓▓▓  Microsoft Graph API permissions
 Phase 7  ▓▓▓▓  Custom app role assignments
 Phase 8  ▓▓▓▓▓▓▓▓  Users with RBAC or Entra roles
-Phase 9  ▓▓▓▓▓▓▓▓▓▓  Risk level calculation
+Phase 9  ▓▓▓▓▓▓▓▓▓▓  Risk scoring (CVSS v3.1 aligned)
 Phase 10 ▓▓▓▓  Credential expiration check
-Phase 11 ▓▓▓▓▓▓  Activity / sign-in status
+Phase 11 ▓▓▓▓▓▓  Activity / sign-in status (NIST 90-day)
 Phase 12 ▓▓▓▓  Save to PostgreSQL
 Phase 13 ▓▓  Complete with summary stats
 ```
@@ -325,7 +363,8 @@ Phase 13 ▓▓  Complete with summary stats
 |--------|-----|
 | Neo4j graph database | Native graph traversal — attack paths are graph problems, not table problems |
 | @xyflow/react | Interactive, zoomable attack path visualization for security teams |
-| Custom fingerprinting | SHA-256 deduplication prevents duplicate findings across snapshots |
+| SHA-256 fingerprinting | Deduplication prevents duplicate findings across discovery snapshots |
+| MITRE ATT&CK mapping | Every attack path maps to ATT&CK techniques (T1078, T1098, T1136) |
 
 ```
 ATTACK PATH EXAMPLE
@@ -333,7 +372,7 @@ ATTACK PATH EXAMPLE
 
   Compromised           Privilege              Target
   Identity              Escalation             Resources
-                        Path
+                        Path (T1078)
 
   ┌──────────┐    ┌──────────────┐    ┌──────────────────┐
   │ Guest    │───▶│ User Admin   │───▶│ Global Admin      │
@@ -371,6 +410,7 @@ ATTACK PATH EXAMPLE
 - "Which service principals have credentials expiring this week?"
 - "What's the blast radius if john.doe@company.com is compromised?"
 - "List all privilege escalation paths from guest accounts to Global Admin"
+- "Map these findings to NIST 800-53 controls for our SOC 2 audit"
 
 ---
 
@@ -386,14 +426,14 @@ ATTACK PATH EXAMPLE
 | 586-class fix recommendation engine | Every finding type maps to a specific, actionable remediation |
 | ServiceNow + Jira integration | Meet security teams where they work |
 | Slack + Teams + PagerDuty | Real-time alerting to the right channel |
-| Approval workflows | Humans in the loop for destructive actions (role removal, identity disable) |
+| Approval workflows | Humans in the loop for destructive actions |
 | Direct Azure execution | Remove role assignments, rotate credentials, enable PIM — without leaving AuditGraph |
 
 ---
 
 ### Module 5: Compliance & Governance
 
-**What it does:** Maps your identity posture to regulatory frameworks (SOC 2, NIST, HIPAA, PCI-DSS, CIS, MITRE ATT&CK) and generates audit-ready evidence.
+**What it does:** Maps your identity posture to regulatory frameworks and generates audit-ready evidence — automatically.
 
 **Why we built it:** Every compliance framework has identity requirements. But mapping technical findings to control IDs is painful manual work. AuditGraph automates it.
 
@@ -401,18 +441,26 @@ ATTACK PATH EXAMPLE
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                                                                   │
-│  SOC 2 Type II          NIST 800-53           HIPAA              │
+│  SOC 2 Type II          NIST SP 800-53         HIPAA             │
 │  ┌──────────────┐       ┌──────────────┐      ┌──────────────┐  │
-│  │ CC6.1 Logical│       │ AC-6 Least   │      │ 164.312      │  │
-│  │ CC6.3 RBAC   │       │ IA-5 AuthN   │      │ Access       │  │
-│  │ CC7.2 Monitor│       │ AC-2 Account │      │ Controls     │  │
+│  │ CC6.1 Logical│       │ AC-2 Account │      │ 164.312      │  │
+│  │ CC6.3 RBAC   │       │ AC-6 Least   │      │ Access       │  │
+│  │ CC7.2 Monitor│       │ IA-5 AuthN   │      │ Controls     │  │
 │  └──────────────┘       └──────────────┘      └──────────────┘  │
 │                                                                   │
 │  PCI-DSS v4             CIS Controls v8       MITRE ATT&CK v14  │
 │  ┌──────────────┐       ┌──────────────┐      ┌──────────────┐  │
-│  │ Req 7 Access │       │ CIS 5 Account│      │ T1078 Valid  │  │
-│  │ Req 8 Identify│      │ CIS 6 Access │      │ T1098 Manip  │  │
-│  │ Req 10 Log   │       │ CIS 16 AppSec│      │ T1136 Create │  │
+│  │ Req 7 Access │       │ 5.2 Cred Mgmt│      │ T1078 Valid  │  │
+│  │ Req 8 Identity│      │ 5.3 Dormant  │      │ T1098 Manip  │  │
+│  │ Req 10 Log   │       │ 5.4 Least Priv│     │ T1136 Create │  │
+│  │              │       │ 16 App Sec   │      │ T1528 Token  │  │
+│  └──────────────┘       └──────────────┘      └──────────────┘  │
+│                                                                   │
+│  NIST CSF 2.0           ISO 27001             NIST SP 800-207    │
+│  ┌──────────────┐       ┌──────────────┐      ┌──────────────┐  │
+│  │ Identify     │       │ A.9 Access   │      │ Zero Trust   │  │
+│  │ Protect      │       │ A.12 Ops Sec │      │ Architecture │  │
+│  │ Detect       │       │ A.18 Comply  │      │ Principles   │  │
 │  └──────────────┘       └──────────────┘      └──────────────┘  │
 │                                                                   │
 └─────────────────────────────────────────────────────────────────┘
@@ -425,6 +473,11 @@ ATTACK PATH EXAMPLE
 **What it does:** Continuously monitors identity changes between discovery runs — new privileged access, removed permissions, credential rotations, suspicious activity patterns.
 
 **Why we built it:** Point-in-time scans miss what happens _between_ scans. AuditGraph detects privilege drift (someone gained admin access), ghost identities (disabled but still has roles), and behavioral anomalies (login from unusual location).
+
+**Standards alignment:**
+- NIST SP 800-53 AC-2(4): Automated audit of account management
+- CIS Controls v8 5.3: Disable dormant accounts within 45 days
+- MITRE ATT&CK T1098: Account manipulation detection
 
 ---
 
@@ -490,8 +543,8 @@ ATTACK PATH EXAMPLE
 │  PROBLEM 4: Compliance-to-Code Gap                                │
 │  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄                                │
 │  Auditors ask "show me SOC 2 CC6.1 evidence." Engineers stare.   │
-│  AuditGraph maps every technical finding to control IDs           │
-│  automatically.                                                    │
+│  AuditGraph maps every technical finding to NIST/CIS/MITRE       │
+│  control IDs automatically.                                       │
 │                                                                    │
 │  PROBLEM 5: Tool Sprawl                                           │
 │  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄                                   │
@@ -515,23 +568,32 @@ SPN Deep Analysis   █████  ██░░░  ░░░░░  ██░
 Blast Radius        █████  ░░░░░  ██░░░  █████  ░░░░░  ░░░░░  █████
 Attack Paths        █████  ██░░░  █████  █████  ░░░░░  ░░░░░  █████
 Lineage Engine      █████  ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░
-Risk Forecasting    █████  ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░  ░░░░░
+CVSS/NIST Scoring   █████  ██░░░  ███░░  ███░░  ░░░░░  ███░░  ███░░
 Remediation Exec    █████  ██░░░  ██░░░  █████  █████  █████  ██░░░
 CISO Dashboard      █████  ██░░░  ░░░░░  ██░░░  ░░░░░  ██░░░  ██░░░
 AI Copilot          █████  ██░░░  █████  ██░░░  ░░░░░  ██░░░  █████
 Self-Hosted         █████  ░░░░░  ░░░░░  ░░░░░  █████  █████  ░░░░░
+MITRE ATT&CK Map   █████  ░░░░░  █████  █████  ░░░░░  ░░░░░  █████
 Price/Value         █████  ███░░  ██░░░  ██░░░  ███░░  █░░░░  ██░░░
 
 LEGEND: █████ = Excellent  ███░░ = Good  ██░░░ = Partial  ░░░░░ = Missing
 ```
 
 **AuditGraph's Unfair Advantages:**
-1. **Lineage Engine** — 12-signal verdict assembly. No competitor has this.
-2. **SPN/MI as First-Class Citizens** — Not an afterthought.
-3. **Blast Radius + Attack Path Combined** — "How can it be compromised?" + "What's the damage?"
-4. **Self-Hosted Option** — Critical for regulated industries.
-5. **610 API Endpoints** — Deepest integration surface in the market.
-6. **Price** — 60-80% less than enterprise incumbents.
+
+1. **Industry-Standard Scoring** — CVSS v3.1 severity bands, NIST dormancy thresholds, MITRE ATT&CK technique mapping, CIS Controls alignment. Not a proprietary black box — auditors and CISOs already speak this language.
+
+2. **SPN/MI as First-Class Citizens** — Not an afterthought. Dedicated credential lifecycle, federated credential detection, ownership chain analysis.
+
+3. **Blast Radius + Attack Path Combined** — "How can it be compromised?" + "What's the damage?" Most competitors show one or the other.
+
+4. **12-Signal Lineage Engine** — No competitor has this. Combines activity, permissions, ownership, credentials, drift, and anomalies into a per-identity verdict with confidence scoring.
+
+5. **Self-Hosted Option** — Critical for regulated industries (banking, government, healthcare) that can't send identity data to a third-party SaaS.
+
+6. **610 API Endpoints** — Deepest integration surface in the market. Build custom workflows, embed in existing tools.
+
+7. **Price** — 60-80% less than enterprise incumbents at comparable or deeper identity coverage.
 
 ---
 
@@ -558,7 +620,7 @@ LEGEND: █████ = Excellent  ███░░ = Good  ██░░░ = P
 ║ FEATURES       ║ FEATURES       ║ FEATURES       ║ FEATURES           ║
 ║                ║                ║                ║                    ║
 ║ Discovery      ║ Everything     ║ Everything     ║ Everything         ║
-║ Risk scoring   ║ in Pro         ║ in Free plus:  ║ in Pro plus:       ║
+║ CVSS scoring   ║ in Pro         ║ in Free plus:  ║ in Pro plus:       ║
 ║ Basic dashboard║ for 30 days    ║                ║                    ║
 ║ Anomaly detect ║                ║ SOAR automation║ SCIM provisioning  ║
 ║                ║ AI Copilot:    ║ API keys       ║ Custom integrations║
@@ -569,7 +631,7 @@ LEGEND: █████ = Excellent  ███░░ = Good  ██░░░ = P
 ║                ║                ║ SSO/OIDC       ║ White-label option ║
 ║                ║                ║ Scheduled rpts ║                    ║
 ║                ║                ║ Compliance exp ║ AI Copilot:        ║
-║                ║                ║                ║ Unlimited          ║
+║                ║                ║ MITRE/NIST maps║ Unlimited          ║
 ║                ║                ║                ║                    ║
 ╠════════════════╩════════════════╩════════════════╩═══════════════════╣
 ║                                                                       ║
@@ -692,7 +754,7 @@ LEGEND: █████ = Excellent  ███░░ = Good  ██░░░ = P
 ║  ┌────────────────────────────────────────────────────────────┐      ║
 ║  │  Target: Azure-heavy mid-market (500-5000 identities)     │      ║
 ║  │  Motion: Product-led growth + direct sales                 │      ║
-║  │  Channel: Free tier → Trial → Pro conversion              │      ║
+║  │  Channel: Free tier > Trial > Pro conversion               │      ║
 ║  │  Goal: 10 paying customers, $100K ARR                     │      ║
 ║  └────────────────────────────────────────────────────────────┘      ║
 ║                                                                      ║
@@ -723,7 +785,7 @@ LEGEND: █████ = Excellent  ███░░ = Good  ██░░░ = P
 | **Cloud usage** | Azure-primary, may have AWS/GCP |
 | **Identity count** | 500-10,000 (users + SPNs + MIs) |
 | **Industry** | Finance, healthcare, government, SaaS, technology |
-| **Compliance needs** | SOC 2, HIPAA, PCI-DSS, NIST |
+| **Compliance needs** | SOC 2, HIPAA, PCI-DSS, NIST, ISO 27001 |
 | **Pain point** | Failed audit, breach scare, compliance deadline, tool sprawl |
 | **Decision maker** | CISO, VP Security, Director of Cloud Security |
 | **Budget holder** | CISO or CTO |
@@ -751,12 +813,12 @@ Self-Serve     Activation     Value Demo     Conversion       Commitment
 
 | Module | Pages | Engines | Key Differentiator |
 |--------|-------|---------|-------------------|
-| **CISO Dashboard** | 4 | 3 | Executive-ready posture scoring (AGIRS) |
+| **CISO Dashboard** | 4 | 3 | Executive posture scoring (CVSS/NIST aligned) |
 | **Identity Explorer** | 12 | 8 | SPN/MI deep analysis, credential tracking |
-| **Attack Intelligence** | 5 | 6 | Graph-based attack paths + blast radius |
+| **Attack Intelligence** | 5 | 6 | Graph-based attack paths + blast radius (MITRE mapped) |
 | **Risk & Compliance** | 10 | 7 | Multi-framework compliance automation |
 | **Remediation** | 3 | 4 | Direct execution + SOAR + approval workflows |
-| **Drift & Anomaly** | 3 | 4 | Continuous change detection |
+| **Drift & Anomaly** | 3 | 4 | Continuous change detection (CIS 5.3 aligned) |
 | **Governance** | 5 | 4 | Access reviews, role mining, policy generation |
 | **Reporting** | 3 | 2 | PDF exports, scheduled delivery |
 | **AI Copilot** | 1 | 3 | Natural language security investigation |
@@ -778,6 +840,7 @@ Self-Serve     Activation     Value Demo     Conversion       Commitment
 | **Stage** | Product-ready, pre-revenue |
 | **Stack** | Python + React + PostgreSQL + Neo4j + Azure |
 | **Codebase** | 288K LOC, 675 files, 66 engines, 207 DB tables |
+| **Scoring Standards** | CVSS v3.1, NIST SP 800-53, MITRE ATT&CK v14, CIS Controls v8 |
 | **Differentiation** | Deepest non-human identity analysis, lineage engine, blast radius, self-hosted option |
 | **Target Market** | Azure-heavy mid-market to enterprise, regulated industries |
 | **Business Model** | SaaS (platform fee + per-subscription) with self-hosted option |
