@@ -1647,7 +1647,8 @@ def get_identity_details(identity_id: str):
                    i.last_activity_date,
                    i.last_activity_source,
                    i.telemetry_coverage,
-                   COALESCE(i.has_federated_credentials, FALSE) as has_federated_credentials
+                   COALESCE(i.has_federated_credentials, FALSE) as has_federated_credentials,
+                   i.organization_id
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -1730,6 +1731,7 @@ def get_identity_details(identity_id: str):
             "last_activity_source": row[44] if len(row) > 44 else None,
             "telemetry_coverage": row[45] if len(row) > 45 else None,
             "has_federated_credentials": bool(row[46]) if len(row) > 46 else False,
+            "organization_id": row[47] if len(row) > 47 else None,
         }
 
         # Compute effective_last_used = MAX(observed, Azure sign-in)
@@ -1823,6 +1825,17 @@ def get_identity_details(identity_id: str):
             try: db.conn.rollback()
             except Exception: pass
         identity["arm_connections"] = arm_connections
+
+        # ── ARM scan completed flag (has any ARM data been collected for this org?) ──
+        arm_scan_completed = False
+        try:
+            # Use identity's own organization_id — _org_id() is unreliable in this context
+            _check_org = identity.get('organization_id') or _org_id()
+            arm_scan_completed = db.check_arm_scan_completed(_check_org)
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+        identity["arm_scan_completed"] = arm_scan_completed
 
         # ── Rule 2: override misleading activity_status for federated identities ──
         if fed_wt_raw and identity.get("activity_status") in ('never_used', 'unknown', 'stale', None):

@@ -20082,6 +20082,21 @@ class Database:
         cursor.close()
         return rows
 
+    def check_arm_scan_completed(self, org_id: int) -> bool:
+        """Check whether any ARM scan has been run for this org."""
+        self._ensure_identity_arm_connections_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT EXISTS(
+                SELECT 1 FROM identity_arm_connections ae
+                JOIN identities i ON i.id = ae.identity_db_id
+                WHERE i.organization_id = %s
+            ) AS arm_scan_completed
+        """, (org_id,))
+        result = cursor.fetchone()
+        cursor.close()
+        return bool(result[0]) if result else False
+
     def update_role_last_used_from_arm(self, org_id: int, updates: list):
         """Scope-aware batch-update of role_assignments.last_used_at from ARM events.
 

@@ -941,6 +941,23 @@ export default function OverviewTab({
           resource_name: string | null;
           status: string;
         }> | undefined;
+        const armScanCompleted = (identity as any).arm_scan_completed as boolean | undefined;
+
+        const formatRelativeTime = (iso: string): { relative: string; full: string } => {
+          const d = new Date(iso);
+          const now = new Date();
+          const diffMs = now.getTime() - d.getTime();
+          const diffMins = Math.floor(diffMs / 60000);
+          const diffHours = Math.floor(diffMs / 3600000);
+          const diffDays = Math.floor(diffMs / 86400000);
+          let relative: string;
+          if (diffMins < 1) relative = 'just now';
+          else if (diffMins < 60) relative = `${diffMins} min ago`;
+          else if (diffHours < 24) relative = `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+          else if (diffDays < 30) relative = `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+          else relative = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          return { relative, full: d.toISOString() };
+        };
 
         return (
           <div className="border border-gray-200 rounded-xl p-4">
@@ -950,44 +967,41 @@ export default function OverviewTab({
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-left text-gray-400 text-[10px] uppercase tracking-wider">
-                      <th className="pb-1.5 pr-3">Date/Time</th>
                       <th className="pb-1.5 pr-3">Source IP</th>
-                      <th className="pb-1.5 pr-3">Operation</th>
-                      <th className="pb-1.5">Status</th>
+                      <th className="pb-1.5 pr-3">Target Service</th>
+                      <th className="pb-1.5">Timestamp</th>
                     </tr>
                   </thead>
                   <tbody>
                     {connections.map((c, i) => {
-                      const d = c.event_timestamp ? new Date(c.event_timestamp) : null;
-                      const dateStr = d
-                        ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                          + ' ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-                        : '\u2014';
-                      const isSuccess = (c.status || '').toLowerCase().includes('succeed')
-                        || (c.status || '').toLowerCase().includes('success');
+                      const ts = c.event_timestamp ? formatRelativeTime(c.event_timestamp) : null;
                       return (
                         <tr key={i} className="border-t border-gray-100">
-                          <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">{dateStr}</td>
                           <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]">{c.caller_ip_address || '\u2014'}</td>
-                          <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.operation_short}</td>
-                          <td className="py-1.5">
-                            {isSuccess
-                              ? <span className="text-green-600">{'\u2713'}</span>
-                              : <span className="text-red-500">{'\u2717'}</span>
-                            }
-                          </td>
+                          <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.resource_name || c.operation_short}</td>
+                          <td className="py-1.5 text-gray-600 whitespace-nowrap" title={ts?.full}>{ts?.relative || '\u2014'}</td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
               </div>
+            ) : !armScanCompleted ? (
+              <>
+                <div className="text-xs text-gray-400">Discovery pending {'\u2014'} run a scan to collect ARM activity</div>
+                <div className="mt-1 text-[10px] text-gray-400">Source: Azure ARM activity logs {'\u2014'} available without sign-in logs</div>
+              </>
             ) : (
-              <div className="text-xs text-gray-400">No ARM activity recorded in last 90 days</div>
+              <>
+                <div className="text-xs text-gray-400">No ARM operations in last 90 days</div>
+                <div className="mt-1 text-[10px] text-gray-400">This identity has not performed any Azure resource operations. This may indicate a login-only or inactive identity.</div>
+              </>
             )}
-            <div className="mt-2 text-[10px] text-gray-400">
-              Source: Azure ARM activity logs {'\u2014'} available without sign-in logs
-            </div>
+            {connections && connections.length > 0 && (
+              <div className="mt-2 text-[10px] text-gray-400">
+                Source: Azure ARM activity logs {'\u2014'} available without sign-in logs
+              </div>
+            )}
           </div>
         );
       })()}
