@@ -4715,6 +4715,10 @@ def create_app():
     # RuntimeError (ENFORCE_ADMIN_GUARD=True) or log a warning (False).
     Database._startup_complete = True
 
+    # ── Diagnostic routes (admin-only, internal tooling) ──
+    from app.diagnostics.routes import register_diagnostic_routes
+    register_diagnostic_routes(app)
+
     # ── API Versioning: mirror /api/* routes at /api/v1/* ──
     # Existing /api/ routes remain unchanged (backward compatible).
     # New /api/v1/ prefix allows future version evolution.
