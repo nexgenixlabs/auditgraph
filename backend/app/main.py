@@ -1044,7 +1044,12 @@ def create_app():
                 "CREATE INDEX IF NOT EXISTS idx_settings_org ON settings(organization_id)"
             ) or _db_init._commit()),
             ('core schema (migration 001)', lambda: _run_core_schema(_db_init)),
-            ('full schema (migration 100)', lambda: _run_full_schema(_db_init)),
+            # AG_SKIP_FULL_SCHEMA_DUMP=1 bypasses 100_full_schema.sql on fresh installs.
+            # The pg_dump is missing ALTER TABLE ... ADD PRIMARY KEY statements, so tables
+            # land without PKs and downstream FK creation (e.g. keyvault_metadata →
+            # cloud_connections) fails. Python _ensure_*_table() methods cover the same
+            # tables with correct PKs, so it's safe to skip here.
+            ('full schema (migration 100)', lambda: None if os.environ.get('AG_SKIP_FULL_SCHEMA_DUMP') == '1' else _run_full_schema(_db_init)),
             ('derived tables (070-071)', lambda: _run_derived_tables(_db_init)),
             ('cloud_connections table', lambda: _db_init._ensure_cloud_connections_table()),
             ('cloud_subscriptions table', lambda: _db_init._ensure_cloud_subscriptions_table()),

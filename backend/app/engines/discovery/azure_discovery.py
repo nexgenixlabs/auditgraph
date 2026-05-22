@@ -1102,6 +1102,28 @@ class AzureDiscoveryEngine:
             group['nested_group_count'] = len([m for m in members_list if m['member_type'] == 'group' and m['depth'] == 0])
         logger.info("Privileged groups: %s", sum(1 for g in groups if g['is_privileged']))
 
+        # Step 5e: Collect MFA/SSPR registration data (bulk, non-blocking)
+        if not _scan_timed_out:
+            try:
+                mfa_map = await self._collect_mfa_registration()
+                if mfa_map:
+                    mfa_applied = 0
+                    for identity in all_identities:
+                        oid = identity.get('object_id')
+                        if oid and oid in mfa_map:
+                            reg = mfa_map[oid]
+                            # ca_mfa_enforced: True if user has registered MFA
+                            # Only set if we got data — never overwrite with None
+                            if reg.get('mfa_registered') is not None:
+                                identity['ca_mfa_enforced'] = reg['mfa_registered']
+                                mfa_applied += 1
+                    logger.info(
+                        "[MFA] Applied registration data to %s/%s identities. org=%s",
+                        mfa_applied, len(all_identities), self.db_org_id,
+                    )
+            except Exception as e:
+                logger.warning("[MFA] Step 5e failed: %s. org=%s", e, self.db_org_id)
+
         # Step 6: Calculate risks (enhanced points-based scoring)
         logger.info("Calculating Risk Levels...")
         self._update_job_progress('analyzing_risk', 48)
@@ -5552,6 +5574,79 @@ class AzureDiscoveryEngine:
 
         return pim_map
 
+    async def _collect_mfa_registration(self) -> dict:
+        """Collect per-user MFA/SSPR registration status via Graph API.
+
+        Uses the beta credentialUserRegistrationDetails report endpoint
+        (one bulk call for all users in the tenant).
+
+        Requires: Reports.Read.All permission.
+        Returns: dict mapping user object_id -> {mfa_registered, sspr_registered}
+        """
+        logger.info("Collecting MFA/SSPR registration data...")
+        mfa_map: dict[str, dict] = {}
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+
+            url: str | None = (
+                "https://graph.microsoft.com/beta"
+                "/reports/credentialUserRegistrationDetails?$top=999"
+            )
+
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+                page = 0
+                while url:
+                    page += 1
+                    async with self._graph_semaphore:
+                        async with session.get(url, headers=headers) as resp:
+                            if resp.status == 403:
+                                logger.warning(
+                                    "[MFA] 403 Forbidden — Reports.Read.All "
+                                    "permission likely missing. MFA data will "
+                                    "be NULL (unknown). org=%s",
+                                    self.db_org_id,
+                                )
+                                return mfa_map
+                            if resp.status == 404:
+                                logger.warning(
+                                    "[MFA] 404 — credentialUserRegistrationDetails "
+                                    "endpoint not available. org=%s",
+                                    self.db_org_id,
+                                )
+                                return mfa_map
+                            if resp.status != 200:
+                                body = await resp.text()
+                                logger.warning(
+                                    "[MFA] HTTP %s on page %s — %s. org=%s",
+                                    resp.status, page, body[:200], self.db_org_id,
+                                )
+                                return mfa_map
+                            data = await resp.json()
+
+                    for entry in data.get('value', []):
+                        uid = entry.get('id')
+                        if uid:
+                            mfa_map[uid] = {
+                                'mfa_registered': entry.get('isMfaRegistered'),
+                                'sspr_registered': entry.get('isSsprRegistered'),
+                            }
+
+                    url = data.get('@odata.nextLink')
+
+            logger.info(
+                "[MFA] Collected registration data for %s users. org=%s",
+                len(mfa_map), self.db_org_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "[MFA] Collection failed: %s. MFA data will be NULL. org=%s",
+                e, self.db_org_id,
+            )
+
+        return mfa_map
+
     async def _discover_conditional_access(self) -> list:
         """
         Discover Conditional Access policies via Microsoft Graph API.
@@ -9913,6 +10008,19 @@ class AzureDiscoveryEngine:
                             _pt = 2; break
                 identity['privilege_tier'] = f'T{_pt}'
 
+            # ── Signal 11: Flag Microsoft first-party SPNs ──
+            if 'is_microsoft_first_party' not in identity:
+                from app.constants.identity_status import (
+                    MICROSOFT_FIRST_PARTY_OWNER_IDS,
+                    MICROSOFT_FIRST_PARTY_NAME_PREFIXES,
+                )
+                _owner_org = identity.get('app_owner_org_id') or ''
+                _dname = identity.get('display_name') or ''
+                identity['is_microsoft_first_party'] = (
+                    _owner_org in MICROSOFT_FIRST_PARTY_OWNER_IDS
+                    or any(_dname.startswith(p) for p in MICROSOFT_FIRST_PARTY_NAME_PREFIXES)
+                )
+
             try:
                 identity_db_id = self.db.save_identity(run_id, identity)
                 identity['_db_id'] = identity_db_id
@@ -10108,6 +10216,82 @@ class AzureDiscoveryEngine:
             "Identity write complete: org=%s run=%s total=%s elapsed=%.1fs",
             self.db_org_id, run_id, saved_count, _save_elapsed,
         )
+
+        # ── Post-save: recompute activity_status from actual DB values ──
+        # Fixes Signal 10 drift: ensures activity_status matches the
+        # authoritative last_sign_in / enabled columns after upsert.
+        # Preserves multi-signal intelligence (likely_active, recently_created)
+        # for identities that have no sign-in data.
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                UPDATE identities
+                SET activity_status = CASE
+                    WHEN enabled = FALSE THEN 'inactive'
+                    WHEN last_sign_in IS NOT NULL
+                         AND last_sign_in >= NOW() - INTERVAL '30 days'
+                        THEN 'active'
+                    WHEN last_sign_in IS NOT NULL
+                         AND last_sign_in >= NOW() - INTERVAL '90 days'
+                        THEN 'inactive'
+                    WHEN last_sign_in IS NOT NULL
+                        THEN 'stale'
+                    WHEN last_sign_in IS NULL
+                         AND activity_status NOT IN ('likely_active', 'recently_created')
+                        THEN 'never_used'
+                    ELSE activity_status
+                END
+                WHERE discovery_run_id = %s
+            """, (run_id,))
+            recomputed = cursor.rowcount
+            self.db._commit()
+            cursor.close()
+            logger.info(
+                "activity_status recomputed: org=%s run=%s rows=%s",
+                self.db_org_id, run_id, recomputed,
+            )
+        except Exception as e:
+            logger.warning("activity_status recompute failed: org=%s error=%s", self.db_org_id, e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # ── Post-save: backfill is_microsoft_first_party for existing rows ──
+        # Catches rows saved before the flag was added or identities that
+        # didn't pass through the inline check above.
+        try:
+            from app.constants.identity_status import (
+                MICROSOFT_FIRST_PARTY_OWNER_IDS,
+                MICROSOFT_FIRST_PARTY_NAME_PREFIXES,
+            )
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                UPDATE identities
+                SET is_microsoft_first_party = TRUE
+                WHERE discovery_run_id = %s
+                  AND COALESCE(is_microsoft_first_party, FALSE) = FALSE
+                  AND (
+                      app_owner_org_id = ANY(%s)
+                      OR display_name LIKE 'Microsoft %%'
+                      OR display_name LIKE 'Agent (%%'
+                      OR display_name LIKE 'Windows %%'
+                  )
+            """, (run_id, list(MICROSOFT_FIRST_PARTY_OWNER_IDS)))
+            ms_fp_count = cursor.rowcount
+            self.db._commit()
+            cursor.close()
+            if ms_fp_count:
+                logger.info(
+                    "is_microsoft_first_party backfill: org=%s run=%s rows=%s",
+                    self.db_org_id, run_id, ms_fp_count,
+                )
+        except Exception as e:
+            logger.warning("is_microsoft_first_party backfill failed: org=%s error=%s", self.db_org_id, e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
 
         # ── Bulk reconciliation: backfill identity_list for any missed dual-writes ──
         try:

@@ -38,15 +38,22 @@ def get_connection():
 
 
 def ensure_schema_migrations_table(conn):
-    """Create the schema_migrations tracking table if it doesn't exist."""
+    """Create the schema_migrations tracking table if it doesn't exist.
+
+    The backend's _ensure_schema_migrations_table() may have created this table
+    already with a different shape (version, description, applied_at, checksum).
+    We tolerate either by adding our required columns defensively.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
-                filename TEXT NOT NULL,
+                filename TEXT,
                 applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        # Defensive: add filename column if the table was pre-created by app.database
+        cur.execute("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS filename TEXT")
     conn.commit()
 
 
@@ -79,7 +86,12 @@ def get_pending_migrations(applied_versions):
 
 
 def apply_migration(conn, version, filename, filepath):
-    """Apply a single SQL migration file and record it in schema_migrations."""
+    """Apply a single SQL migration file and record it in schema_migrations.
+
+    Runs in AUTOCOMMIT so migration files that contain explicit BEGIN/COMMIT
+    pragmas and `CREATE INDEX CONCURRENTLY` (which forbids a wrapping txn)
+    work as the author intended.
+    """
     with open(filepath, 'r') as f:
         sql = f.read()
 
@@ -87,13 +99,13 @@ def apply_migration(conn, version, filename, filepath):
         print(f"  Skipping empty migration: {filename}")
         return
 
+    # Connection is already in autocommit mode (set in main()).
     with conn.cursor() as cur:
         cur.execute(sql)
         cur.execute(
             "INSERT INTO schema_migrations (version, filename) VALUES (%s, %s)",
             (version, filename)
         )
-    conn.commit()
 
 
 def run_ddl():
@@ -124,6 +136,9 @@ def main():
 
     print(f"Connecting to database...")
     conn = get_connection()
+    # AUTOCOMMIT lets migration files use explicit BEGIN/COMMIT and run
+    # CREATE INDEX CONCURRENTLY (which forbids a wrapping txn).
+    conn.autocommit = True
     print(f"  Host: {os.environ.get('DB_HOST', 'localhost')}")
     print(f"  Database: {os.environ.get('DB_NAME', 'auditgraph')}")
     print(f"  User: {os.environ.get('DB_ADMIN_USER', os.environ.get('DB_USER', 'auditgraph'))}")

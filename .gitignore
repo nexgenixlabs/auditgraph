@@ -77,3 +77,9 @@ backend/test-results/
 *_backup.py
 *_simplified_backup*
 *_Phase*_backup*
+
+# Migration data dumps — regenerated from local sandbox
+deploy/migration/sandbox_dump.json
+deploy/migration/local_cols.json
+deploy/migration/local_schema.json
+deploy/migration/local_schema.sql

@@ -1836,6 +1836,7 @@ class Database:
     _signin_datetime_cols_ensured = False
     _access_paths_col_ensured = False
     _telemetry_coverage_col_ensured = False
+    _ms_first_party_col_ensured = False
     _lineage_verdicts_ensured = False
 
     def backfill_microsoft_flag(self):
@@ -2493,6 +2494,20 @@ class Database:
                     self._rollback()
             Database._telemetry_coverage_col_ensured = True
 
+        # Ensure is_microsoft_first_party column exists (Signal 11 orphan exclusion)
+        if not Database._ms_first_party_col_ensured:
+            try:
+                cursor.execute("SAVEPOINT ms_fp_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_microsoft_first_party BOOLEAN DEFAULT FALSE")
+                cursor.execute("RELEASE SAVEPOINT ms_fp_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT ms_fp_ddl")
+                except Exception:
+                    self._rollback()
+            Database._ms_first_party_col_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -2666,7 +2681,13 @@ class Database:
                 privilege_tier,
 
                 -- Telemetry coverage (Phase 2 Transparency)
-                telemetry_coverage
+                telemetry_coverage,
+
+                -- MFA registration (Signal 5)
+                ca_mfa_enforced,
+
+                -- Microsoft first-party flag (Signal 11 orphan exclusion)
+                is_microsoft_first_party
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -2701,6 +2722,8 @@ class Database:
                 %s, %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s, %s, %s,
+                %s,
+                %s,
                 %s,
                 %s,
                 %s
@@ -2855,6 +2878,10 @@ class Database:
                 privilege_tier = EXCLUDED.privilege_tier,
 
                 telemetry_coverage = EXCLUDED.telemetry_coverage,
+
+                ca_mfa_enforced = COALESCE(EXCLUDED.ca_mfa_enforced, identities.ca_mfa_enforced),
+
+                is_microsoft_first_party = EXCLUDED.is_microsoft_first_party,
 
                 created_at = NOW()
             RETURNING id
@@ -3022,6 +3049,12 @@ class Database:
 
                 # Telemetry coverage (Phase 2 Transparency)
                 identity_data.get("telemetry_coverage"),
+
+                # MFA registration (Signal 5)
+                identity_data.get("ca_mfa_enforced"),
+
+                # Microsoft first-party flag (Signal 11)
+                identity_data.get("is_microsoft_first_party", False),
             ),
         )
 

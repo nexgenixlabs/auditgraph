@@ -280,14 +280,14 @@ class SignalValidator:
         cur.execute("""
             SELECT COUNT(*) FROM identities
             WHERE organization_id = %s
-              AND identity_category IN ('user', 'guest')
+              AND identity_category IN ('user', 'human_user', 'guest', 'member')
         """, (org_id,))
         human_count = cur.fetchone()[0]
 
         cur.execute("""
             SELECT COUNT(*) FROM identities
             WHERE organization_id = %s
-              AND identity_category IN ('user', 'guest')
+              AND identity_category IN ('user', 'human_user', 'guest', 'member')
               AND ca_mfa_enforced IS NOT NULL
         """, (org_id,))
         populated = cur.fetchone()[0]
@@ -350,14 +350,14 @@ class SignalValidator:
         cur.execute("""
             SELECT COUNT(*) FROM identities
             WHERE organization_id = %s
-              AND identity_category IN ('user', 'guest')
+              AND identity_category IN ('user', 'human_user', 'guest', 'member')
         """, (org_id,))
         human_count = cur.fetchone()[0]
 
         cur.execute("""
             SELECT COUNT(*) FROM identities
             WHERE organization_id = %s
-              AND identity_category IN ('user', 'guest')
+              AND identity_category IN ('user', 'human_user', 'guest', 'member')
               AND last_sign_in IS NOT NULL
         """, (org_id,))
         with_signin = cur.fetchone()[0]
@@ -493,7 +493,7 @@ class SignalValidator:
             SELECT id, display_name, enabled, last_sign_in, activity_status
             FROM identities
             WHERE organization_id = %s
-              AND identity_category IN ('user', 'guest')
+              AND identity_category IN ('user', 'human_user', 'guest', 'member')
             ORDER BY random()
             LIMIT 5
         """, (org_id,))
@@ -522,7 +522,14 @@ class SignalValidator:
             elif enabled and last_signin is None:
                 is_dormant_computed = True  # never signed in
 
+            # likely_active / recently_created are set by multi-signal
+            # behavioral intelligence (federated creds, T0/T1, active
+            # credentials, recent ARM assignments). These are valid
+            # non-dormant classifications even without sign-in data.
             db_says_dormant = activity_status in ('dormant', 'stale', 'never_used')
+            if activity_status in ('likely_active', 'recently_created'):
+                db_says_dormant = False
+                is_dormant_computed = False  # trust behavioral intelligence
 
             if is_dormant_computed != db_says_dormant:
                 mismatches.append(
@@ -551,7 +558,8 @@ class SignalValidator:
         cur = self._cur()
         cur.execute("""
             SELECT i.id, i.display_name, i.enabled, i.last_sign_in,
-                   i.owner_count, i.owner_status
+                   i.owner_count, i.owner_status,
+                   COALESCE(i.is_microsoft_first_party, FALSE)
             FROM identities i
             WHERE i.organization_id = %s
               AND i.identity_category IN ('service_principal', 'application')
@@ -572,7 +580,12 @@ class SignalValidator:
 
         mismatches = []
         for row in samples:
-            db_id, name, enabled, last_signin, owner_count, owner_status = row
+            db_id, name, enabled, last_signin, owner_count, owner_status, is_ms_fp = row
+
+            # Microsoft first-party SPNs are never orphaned — skip
+            if is_ms_fp:
+                continue
+
             # Count active role assignments
             cur.execute("""
                 SELECT COUNT(*) FROM role_assignments
@@ -580,11 +593,11 @@ class SignalValidator:
             """, (db_id,))
             role_count = cur.fetchone()[0]
 
-            # Orphan logic: disabled + has roles + no owner + stale/no sign-in
+            # SSOT orphan formula: no owner + no recent activity
+            # (matches _score_lifecycle in spn_risk_engine.py)
             is_orphan_computed = (
-                not enabled
-                and role_count > 0
-                and (owner_count is None or owner_count == 0)
+                (owner_count is None or owner_count == 0)
+                and last_signin is None
             )
 
             db_says_orphan = owner_status in ('orphaned', 'unowned')
