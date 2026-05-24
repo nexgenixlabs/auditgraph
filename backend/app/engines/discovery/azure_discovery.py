@@ -1102,27 +1102,70 @@ class AzureDiscoveryEngine:
             group['nested_group_count'] = len([m for m in members_list if m['member_type'] == 'group' and m['depth'] == 0])
         logger.info("Privileged groups: %s", sum(1 for g in groups if g['is_privileged']))
 
-        # Step 5e: Collect MFA/SSPR registration data (bulk, non-blocking)
+        # Step 5e: Collect MFA/SSPR registration data (bulk, then per-user fallback)
         if not _scan_timed_out:
+            mfa_map = {}
             try:
                 mfa_map = await self._collect_mfa_registration()
-                if mfa_map:
-                    mfa_applied = 0
-                    for identity in all_identities:
-                        oid = identity.get('object_id')
-                        if oid and oid in mfa_map:
-                            reg = mfa_map[oid]
-                            # ca_mfa_enforced: True if user has registered MFA
-                            # Only set if we got data — never overwrite with None
-                            if reg.get('mfa_registered') is not None:
-                                identity['ca_mfa_enforced'] = reg['mfa_registered']
-                                mfa_applied += 1
-                    logger.info(
-                        "[MFA] Applied registration data to %s/%s identities. org=%s",
-                        mfa_applied, len(all_identities), self.db_org_id,
-                    )
             except Exception as e:
-                logger.warning("[MFA] Step 5e failed: %s. org=%s", e, self.db_org_id)
+                logger.warning("[MFA] Bulk collection failed: %s. org=%s", e, self.db_org_id)
+
+            if mfa_map:
+                mfa_applied = 0
+                for identity in all_identities:
+                    oid = identity.get('object_id')
+                    if oid and oid in mfa_map:
+                        reg = mfa_map[oid]
+                        if reg.get('mfa_registered') is not None:
+                            identity['ca_mfa_enforced'] = reg['mfa_registered']
+                            identity['mfa_status'] = 'enrolled' if reg['mfa_registered'] else 'not_enrolled'
+                            methods = []
+                            if reg.get('mfa_registered'):
+                                methods.append('mfa')
+                            if reg.get('sspr_registered'):
+                                methods.append('sspr')
+                            if methods:
+                                identity['mfa_methods'] = methods
+                            mfa_applied += 1
+                logger.info(
+                    "[MFA] Applied bulk registration data to %s/%s identities. org=%s",
+                    mfa_applied, len(all_identities), self.db_org_id,
+                )
+            else:
+                # AG-161: Fallback — per-user /authentication/methods (no Reports.Read.All needed)
+                logger.info("[MFA] Bulk endpoint empty — falling back to per-user auth methods. org=%s", self.db_org_id)
+                human_ids = [i for i in all_identities if i.get('identity_category') in ('human_user', 'guest')]
+                try:
+                    per_user_map = await self._collect_mfa_auth_methods(human_ids)
+                    if per_user_map:
+                        mfa_applied = 0
+                        for identity in all_identities:
+                            oid = identity.get('object_id')
+                            if oid and oid in per_user_map:
+                                info = per_user_map[oid]
+                                identity['mfa_status'] = info['mfa_status']
+                                identity['ca_mfa_enforced'] = info['mfa_status'] == 'enrolled'
+                                identity['mfa_methods'] = info.get('mfa_methods', [])
+                                mfa_applied += 1
+                        logger.info(
+                            "[MFA-methods] Applied per-user MFA data to %s/%s identities. org=%s",
+                            mfa_applied, len(all_identities), self.db_org_id,
+                        )
+                    else:
+                        logger.warning(
+                            "[MFA] Both bulk and per-user collection returned empty. "
+                            "MFA will show as Unknown. org=%s", self.db_org_id,
+                        )
+                    # Set unknown for humans not covered by either collection path
+                    _unknown_set = 0
+                    for identity in all_identities:
+                        if identity.get('identity_category') in ('human_user', 'guest') and not identity.get('mfa_status'):
+                            identity['mfa_status'] = 'unknown'
+                            _unknown_set += 1
+                    if _unknown_set:
+                        logger.info("[MFA] Set mfa_status='unknown' for %s humans without MFA data. org=%s", _unknown_set, self.db_org_id)
+                except Exception as e:
+                    logger.warning("[MFA] Per-user fallback failed: %s. org=%s", e, self.db_org_id)
 
         # Step 6: Calculate risks (enhanced points-based scoring)
         logger.info("Calculating Risk Levels...")
@@ -5647,6 +5690,149 @@ class AzureDiscoveryEngine:
 
         return mfa_map
 
+    # ── AG-161: Per-user authentication methods (fallback for MFA status) ──
+
+    # Method types that count as genuine MFA factors
+    MFA_FACTOR_TYPES = {
+        'microsoftAuthenticatorAuthenticationMethod',
+        'phoneAuthenticationMethod',
+        'fido2AuthenticationMethod',
+        'windowsHelloForBusinessAuthenticationMethod',
+        'softwareOathAuthenticationMethod',
+        'temporaryAccessPassAuthenticationMethod',
+    }
+    # Non-MFA types (password, email used for SSPR only)
+    NON_MFA_TYPES = {
+        'passwordAuthenticationMethod',
+        'emailAuthenticationMethod',
+    }
+
+    async def _collect_mfa_auth_methods(self, human_identities: list) -> dict:
+        """Collect per-user MFA enrollment via /users/{id}/authentication/methods.
+
+        Requires: UserAuthenticationMethod.Read.All (Application).
+        No P2 dependency. Falls back from the bulk credentialUserRegistrationDetails
+        endpoint which requires Reports.Read.All.
+
+        Uses concurrent requests (bounded by _graph_semaphore) to cover
+        large tenants within the time budget.
+
+        Returns: dict mapping object_id -> {mfa_status, mfa_methods}
+        """
+        import time as _time
+        phase_start = _time.monotonic()
+        TIME_BUDGET = 600  # seconds — enough for ~1000+ users with concurrency
+
+        mfa_result: dict[str, dict] = {}
+        if not human_identities:
+            return mfa_result
+
+        # Only process human identities with an object_id
+        targets = [(h.get('object_id'), h.get('display_name', ''))
+                    for h in human_identities if h.get('object_id')]
+        if not targets:
+            return mfa_result
+
+        logger.info(
+            "[MFA-methods] Collecting authentication methods for %s humans (concurrent). org=%s",
+            len(targets), self.db_org_id,
+        )
+
+        # Shared mutable state for the permission-check sentinel
+        _permission_ok = True
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+
+            _diag = {'throttled': 0, 'not_found': 0, 'timeout': 0, 'other_err': 0, 'budget_skip': 0}
+
+            async def _fetch_one(session, oid):
+                nonlocal _permission_ok
+                if not _permission_ok:
+                    return None
+                if _time.monotonic() - phase_start > TIME_BUDGET:
+                    _diag['budget_skip'] += 1
+                    return None
+
+                url = f"https://graph.microsoft.com/v1.0/users/{oid}/authentication/methods"
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        async with self._graph_semaphore:
+                            if not _permission_ok:
+                                return None
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status in (401, 403):
+                                    _permission_ok = False
+                                    logger.warning(
+                                        "[MFA-methods] %s — "
+                                        "UserAuthenticationMethod.Read.All likely missing. org=%s",
+                                        resp.status, self.db_org_id,
+                                    )
+                                    return None
+                                if resp.status == 404:
+                                    _diag['not_found'] += 1
+                                    return None
+                                if resp.status == 429:
+                                    _diag['throttled'] += 1
+                                    retry_after = int(resp.headers.get('Retry-After', 2))
+                                    await asyncio.sleep(min(retry_after, 10))
+                                    continue  # retry
+                                if resp.status != 200:
+                                    _diag['other_err'] += 1
+                                    return None
+
+                                data = await resp.json()
+                                methods_raw = data.get('value', [])
+
+                                method_types = []
+                                has_mfa_factor = False
+                                for m in methods_raw:
+                                    odata_type = m.get('@odata.type', '')
+                                    suffix = odata_type.rsplit('.', 1)[-1] if '.' in odata_type else odata_type
+                                    method_types.append(suffix)
+                                    if suffix in self.MFA_FACTOR_TYPES:
+                                        has_mfa_factor = True
+
+                                return (oid, {
+                                    'mfa_status': 'enrolled' if has_mfa_factor else 'not_enrolled',
+                                    'mfa_methods': method_types,
+                                })
+                    except asyncio.TimeoutError:
+                        _diag['timeout'] += 1
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+                    except Exception as e:
+                        logger.debug("[MFA-methods] Error for %s: %s", oid, str(e)[:100])
+                        return None
+                return None  # all retries exhausted
+
+            # Fire all requests concurrently; semaphore bounds in-flight count
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+                tasks = [_fetch_one(session, oid) for oid, _ in targets]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, tuple) and r is not None:
+                        mfa_result[r[0]] = r[1]
+
+            logger.info(
+                "[MFA-methods] Collected auth methods for %s/%s humans. "
+                "throttled=%s not_found=%s timeout=%s other=%s budget_skip=%s org=%s",
+                len(mfa_result), len(targets),
+                _diag['throttled'], _diag['not_found'], _diag['timeout'],
+                _diag['other_err'], _diag['budget_skip'], self.db_org_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "[MFA-methods] Collection failed: %s. org=%s",
+                e, self.db_org_id,
+            )
+
+        return mfa_result
+
     async def _discover_conditional_access(self) -> list:
         """
         Discover Conditional Access policies via Microsoft Graph API.
@@ -8235,21 +8421,32 @@ class AzureDiscoveryEngine:
             if expiries:
                 earliest = min(expiries)
                 identity['credential_expiration'] = earliest.isoformat()
+                identity['secret_expiry_earliest'] = earliest.isoformat()
                 if earliest < now:
                     identity['credential_status'] = 'Expired'
+                    identity['secret_expiry_status'] = 'expired'
                     expired_count += 1
                 elif earliest < now + __import__('datetime').timedelta(days=30):
                     identity['credential_status'] = 'Expiring Soon'
+                    identity['secret_expiry_status'] = 'expiring_soon'
                     expiring_count += 1
+                elif earliest < now + __import__('datetime').timedelta(days=90):
+                    identity['credential_status'] = 'Valid'
+                    identity['secret_expiry_status'] = 'expiring_90d'
                 else:
                     identity['credential_status'] = 'Valid'
+                    identity['secret_expiry_status'] = 'valid'
             elif creds:
                 # Has credentials but none with expiry (federated-only or no-expiry)
                 identity['credential_status'] = 'Valid'
                 identity['credential_expiration'] = None
+                identity['secret_expiry_earliest'] = None
+                identity['secret_expiry_status'] = 'no_secret'
             else:
                 identity['credential_status'] = None
                 identity['credential_expiration'] = None
+                identity['secret_expiry_earliest'] = None
+                identity['secret_expiry_status'] = 'no_secret'
 
         logger.info("Credential check: %s expired, %s expiring soon, %s total with creds",
                      expired_count, expiring_count, len(credentials_map))
@@ -10919,6 +11116,7 @@ class AzureDiscoveryEngine:
                             pass
 
                 # Update the SPN identity record
+                fed_count = len(fed_resp.value)
                 if issuer_types_for_identity:
                     try:
                         cursor = self.db.conn.cursor()
@@ -10926,10 +11124,12 @@ class AzureDiscoveryEngine:
                             UPDATE identities SET
                                 has_federated_credentials = TRUE,
                                 federated_issuer_types = %s,
+                                federated_cred_count = %s,
                                 recommended_action = 'review_federated_dependencies'
                             WHERE id = %s
                         """, (
                             json.dumps(sorted(issuer_types_for_identity)),
+                            fed_count,
                             linked_spn_db_id,
                         ))
                         cursor.close()

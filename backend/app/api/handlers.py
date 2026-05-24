@@ -993,6 +993,7 @@ def get_identities():
     activity_filter = request.args.get("activity_status")
     privilege_tier_filter = request.args.get("privilege_tier")
     agirs_factor = request.args.get("agirs_factor")
+    tab_filter = request.args.get("tab")  # Identity Explorer tab scope
     # CISO drawer flyout params (passed through from RISK_TYPE_ROUTES)
     workload_filter = request.args.get("workload")
     owner_param = request.args.get("owner")
@@ -1041,11 +1042,22 @@ def get_identities():
                 params.extend(risk_vals)
 
         if category_filter:
+            from app.constants.identity_types import normalize_identity_category
             where_clauses += " AND COALESCE(i.identity_category, '') = %s"
-            params.append(category_filter)
+            params.append(normalize_identity_category(category_filter))
         elif type_filter:
-            where_clauses += " AND i.identity_type = %s"
-            params.append(type_filter)
+            from app.constants.identity_types import normalize_identity_category
+            where_clauses += " AND LOWER(i.identity_type) = %s"
+            params.append(normalize_identity_category(type_filter))
+
+        # Identity Explorer tab scope — reuses taxonomy constants (AG-157)
+        if tab_filter and not category_filter and not type_filter:
+            from app.constants.identity_types import TAB_CATEGORIES
+            _tab_cats = TAB_CATEGORIES.get(tab_filter.lower())
+            if _tab_cats:
+                _ph = ','.join(['%s'] * len(_tab_cats))
+                where_clauses += f" AND COALESCE(i.identity_category, '') IN ({_ph})"
+                params.extend(sorted(_tab_cats))
 
         if cloud_filter:
             where_clauses += " AND COALESCE(i.cloud, 'azure') = %s"
@@ -4926,6 +4938,18 @@ def _identity_list_select():
             i.federated_workload_name,
             COALESCE(i.has_federated_credentials, FALSE) as has_federated_credentials,
             i.federated_issuer_types,
+            -- NHI enrichment (AG-159)
+            i.secret_expiry_earliest,
+            i.secret_expiry_status,
+            COALESCE(i.federated_cred_count, 0) as federated_cred_count,
+            i.owner_resolved,
+            -- Humans enrichment (AG-160)
+            i.mfa_status,
+            i.mfa_methods,
+            i.department,
+            i.manager_id,
+            i.job_title,
+            i.upn,
             i.dependency_impact,
             i.observed_last_used,
             i.last_activity_date,
@@ -5119,6 +5143,18 @@ def _map_identity_row(row):
         "federated_workload_name": row.get('federated_workload_name'),
         "has_federated_credentials": row.get('has_federated_credentials', False),
         "federated_issuer_types": row.get('federated_issuer_types') or [],
+        # NHI enrichment (AG-159)
+        "secret_expiry_earliest": _isoformat_safe(row.get('secret_expiry_earliest')),
+        "secret_expiry_status": row.get('secret_expiry_status'),
+        "federated_cred_count": int(row.get('federated_cred_count') or 0),
+        "owner_resolved": row.get('owner_resolved'),
+        # Humans enrichment (AG-160)
+        "mfa_status": row.get('mfa_status'),
+        "mfa_methods": row.get('mfa_methods') or [],
+        "department": row.get('department'),
+        "manager_id": row.get('manager_id'),
+        "job_title": row.get('job_title'),
+        "upn": row.get('upn'),
         "dependency_impact": row.get('dependency_impact'),
         "observed_last_used": _isoformat_safe(row.get('observed_last_used')),
         "last_signin_at": _isoformat_safe(row.get('last_signin_at')),
@@ -24342,6 +24378,125 @@ DANGEROUS_ROLES = {
     'User Administrator', 'Exchange Administrator',
 }
 
+# Per-role escalation framing (impact + narrative + target node copy). Role
+# facts (description, can_do, cannot_do, docs_url) come from the central
+# registry in app/constants/role_metadata.py — do NOT duplicate them here.
+# Keys must match strings in DANGEROUS_ROLES.
+ROLE_ESCALATION_DETAILS = {
+    'Global Administrator': {
+        'impact': 'Global Administrator grants unrestricted control of the entire Entra tenant',
+        'narrative': (
+            'Global Administrator is the highest-privilege directory role: it can read and '
+            'modify every object (users, groups, apps, roles, policies), assign any other role '
+            'to any principal, and — if the "Access management for Azure resources" toggle is '
+            'enabled — elevate to root of every Azure subscription. Compromise of this identity '
+            'is equivalent to full tenant takeover.'
+        ),
+        'target_label': 'Tenant-Wide Control',
+        'target_desc': 'Unrestricted control of every directory object',
+    },
+    'Privileged Role Administrator': {
+        'impact': 'Privileged Role Administrator can grant any directory role, including Global Administrator',
+        'narrative': (
+            'Privileged Role Administrator can assign ANY Entra directory role to any principal, '
+            'including Global Administrator. It does not directly modify users, apps, or data, '
+            'but a compromised identity with this role can promote itself (or any attacker-'
+            'controlled identity) to Global Admin in a single step, achieving full tenant '
+            'takeover.'
+        ),
+        'target_label': 'Global Admin Promotion',
+        'target_desc': 'Self-elevate to Global Administrator',
+    },
+    'Application Administrator': {
+        'impact': 'Application Administrator can hijack any app/service principal in the tenant',
+        'narrative': (
+            'Application Administrator has full management over every app registration and '
+            'enterprise application, including the ability to add credentials (secrets/certs) '
+            'to ANY service principal. By adding a credential to a high-privilege app (e.g. one '
+            'holding RoleManagement.ReadWrite.All or Application.ReadWrite.All), the holder can '
+            'authenticate as that app and escalate to tenant-wide control. This role does NOT '
+            'directly manage users, groups, or directory roles.'
+        ),
+        'target_label': 'Tenant Takeover via App Hijack',
+        'target_desc': 'Add credential to a privileged SPN → impersonate the app → escalate',
+    },
+    'Cloud Application Administrator': {
+        'impact': 'Cloud Application Administrator can hijack any cloud app/service principal',
+        'narrative': (
+            'Cloud Application Administrator has the same privileges as Application Administrator '
+            '(full mgmt of app registrations and enterprise apps, including adding credentials to '
+            'any SPN) EXCEPT it cannot manage the on-prem Application Proxy. The escalation path '
+            'is identical: add a credential to a high-privilege SPN, authenticate as the app, '
+            'escalate. Does NOT manage users, groups, or directory roles.'
+        ),
+        'target_label': 'Tenant Takeover via App Hijack',
+        'target_desc': 'Add credential to a privileged SPN → impersonate the app → escalate',
+    },
+    'User Administrator': {
+        'impact': 'User Administrator can create/delete non-admin users and reset passwords for non-protected accounts',
+        'narrative': (
+            'User Administrator can create, update, and delete users who do NOT hold privileged '
+            'directory roles, manage groups, and reset passwords for non-admin users plus a small '
+            'set of helpdesk-tier admin roles (e.g. Helpdesk Administrator, Directory Readers). '
+            'It CANNOT reset passwords or delete accounts that hold protected roles such as '
+            'Global Administrator or Privileged Role Administrator, and it CANNOT grant directory '
+            'roles. Escalation typically pivots via hijacking a non-protected admin/helpdesk '
+            'account — not via direct directory takeover.'
+        ),
+        'target_label': 'Non-Admin User Takeover',
+        'target_desc': 'Reset passwords / hijack non-protected user accounts',
+    },
+    'Exchange Administrator': {
+        'impact': 'Exchange Administrator can read, modify, and exfiltrate all mailboxes in the tenant',
+        'narrative': (
+            'Exchange Administrator has full control over Exchange Online: mailboxes, transport '
+            'rules, journaling, mailbox permissions, and mail flow. A compromised identity with '
+            'this role can read every mailbox, set up silent forwarding/journaling, exfiltrate '
+            'mail, and create persistence via mailbox rules. It does NOT manage directory users, '
+            'apps, or roles — the impact is data exposure and persistence, not directory takeover.'
+        ),
+        'target_label': 'Tenant Mail Compromise',
+        'target_desc': 'Full mailbox read/modify + persistence via mail flow rules',
+    },
+}
+
+_DEFAULT_ESCALATION = {
+    'impact': '{role} confers elevated privileges',
+    'narrative': (
+        'The {role} role grants elevated privileges. Review its definition for the exact actions '
+        'it permits before reasoning about blast radius.'
+    ),
+    'target_label': 'Elevated Access',
+    'target_desc': 'Elevated privileges — see role definition',
+}
+
+
+def _role_escalation_detail(role_name: str) -> dict:
+    """Build the attack-path framing for a role: escalation copy (impact /
+    narrative / target_*) + central role metadata (description, can_do,
+    cannot_do, docs_url, provider, tier). Falls back to non-claiming defaults
+    for unknown roles."""
+    from app.constants.role_metadata import get_role_metadata_auto
+    esc = ROLE_ESCALATION_DETAILS.get(role_name)
+    if esc:
+        out = dict(esc)
+    else:
+        out = {
+            'impact':       _DEFAULT_ESCALATION['impact'].format(role=role_name),
+            'narrative':    _DEFAULT_ESCALATION['narrative'].format(role=role_name),
+            'target_label': _DEFAULT_ESCALATION['target_label'],
+            'target_desc':  _DEFAULT_ESCALATION['target_desc'],
+        }
+    meta = get_role_metadata_auto(role_name)
+    out['role_description'] = meta['description']
+    out['role_can_do']      = list(meta['can_do'])
+    out['role_cannot_do']   = list(meta['cannot_do'])
+    out['role_docs_url']    = meta['docs_url']
+    out['role_provider']    = meta['provider']
+    out['role_tier']        = meta['tier']
+    return out
+
+
 def get_identity_attack_paths(identity_id):
     """GET /api/identities/<id>/attack-paths — compute privilege escalation chains."""
     db = _db()
@@ -24400,16 +24555,26 @@ def get_identity_attack_paths(identity_id):
             """, (db_id, list(DANGEROUS_ROLES)))
             dangerous_roles = cursor.fetchall()
             for r in dangerous_roles:
+                detail = _role_escalation_detail(r[0])
                 paths.append({
                     'type': 'direct_escalation',
                     'risk_level': 'critical',
                     'steps': [
                         {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
-                        {'node_type': 'role', 'node_id': r[0], 'node_label': r[0], 'description': f'Entra directory role at scope: {r[1] or "/"}'},
-                        {'node_type': 'target', 'node_id': 'directory', 'node_label': 'Full Directory Control', 'description': 'Administrative control over all directory objects'},
+                        {'node_type': 'role',     'node_id': r[0],         'node_label': r[0],          'description': f'Entra directory role at scope: {r[1] or "/"}'},
+                        {'node_type': 'target',   'node_id': 'directory',  'node_label': detail['target_label'], 'description': detail['target_desc']},
                     ],
-                    'impact': f'{r[0]} grants full directory control',
-                    'narrative': f'The {r[0]} role provides administrative authority over the entire Entra ID directory. A compromised identity with this role can create, modify, or delete any directory object.',
+                    'impact': detail['impact'],
+                    'narrative': detail['narrative'],
+                    'role_meta': {
+                        'name':        r[0],
+                        'provider':    detail['role_provider'],
+                        'tier':        detail['role_tier'],
+                        'description': detail['role_description'],
+                        'can_do':      detail['role_can_do'],
+                        'cannot_do':   detail['role_cannot_do'],
+                        'docs_url':    detail['role_docs_url'],
+                    },
                 })
         except Exception:
             db._rollback()
@@ -24455,16 +24620,30 @@ def get_identity_attack_paths(identity_id):
             """, (db_id, list(DANGEROUS_ROLES)))
             pim_roles = cursor.fetchall()
             for pr in pim_roles:
+                detail = _role_escalation_detail(pr[0])
                 paths.append({
                     'type': 'pim_abuse',
                     'risk_level': 'high',
                     'steps': [
-                        {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
-                        {'node_type': 'pim', 'node_id': pr[0], 'node_label': f'PIM: {pr[0]}', 'description': 'Eligible for privileged role via PIM'},
-                        {'node_type': 'target', 'node_id': 'activated_role', 'node_label': pr[0], 'description': 'Activated role grants administrative control'},
+                        {'node_type': 'identity', 'node_id': identity_id,    'node_label': display_name,       'description': 'Starting identity'},
+                        {'node_type': 'pim',      'node_id': pr[0],          'node_label': f'PIM: {pr[0]}',    'description': 'Eligible for privileged role via PIM (requires activation)'},
+                        {'node_type': 'target',   'node_id': 'activated_role','node_label': detail['target_label'], 'description': detail['target_desc']},
                     ],
-                    'impact': f'Can activate {pr[0]} via PIM',
-                    'narrative': f'This identity is eligible to activate {pr[0]} through Privileged Identity Management. While PIM requires justification, a compromised identity could activate this role and gain administrative control.',
+                    'impact': f'Can activate {pr[0]} via PIM — {detail["impact"]}',
+                    'narrative': (
+                        f'This identity is eligible to activate {pr[0]} through Privileged Identity '
+                        f'Management. PIM requires activation (often with justification/MFA), but a '
+                        f'compromised identity could complete activation and then: {detail["narrative"]}'
+                    ),
+                    'role_meta': {
+                        'name':        pr[0],
+                        'provider':    detail['role_provider'],
+                        'tier':        detail['role_tier'],
+                        'description': detail['role_description'],
+                        'can_do':      detail['role_can_do'],
+                        'cannot_do':   detail['role_cannot_do'],
+                        'docs_url':    detail['role_docs_url'],
+                    },
                 })
         except Exception:
             db._rollback()

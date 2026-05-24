@@ -163,6 +163,18 @@ interface IdentityRow {
   federated_workload_name?: string | null;
   has_federated_credentials?: boolean;
   federated_issuer_types?: string[];
+  // NHI enrichment (AG-159)
+  secret_expiry_earliest?: string | null;
+  secret_expiry_status?: string | null;
+  federated_cred_count?: number;
+  owner_resolved?: string | null;
+  // Humans enrichment (AG-160)
+  mfa_status?: string | null;
+  mfa_methods?: string[];
+  department?: string | null;
+  manager_id?: string | null;
+  job_title?: string | null;
+  upn?: string | null;
   // Dependency impact
   dependency_impact?: string | null;
   // Observed usage tracking
@@ -488,9 +500,19 @@ function TypeLabel({ type }: { type?: string }) {
   return <span className="text-[11px] text-gray-600">{labels[t] || type || '—'}</span>;
 }
 
+// ─── Tab scope definitions ─────────────────────────────────────────
+
+export type TabScope = 'humans' | 'nhi' | 'all';
+
+const TAB_SCOPE_CATEGORIES: Record<TabScope, IdentityCategory[] | null> = {
+  humans: ['human_user', 'guest'],
+  nhi: ['service_principal', 'managed_identity_system', 'managed_identity_user'],
+  all: null, // no pre-filter
+};
+
 // ─── Main component ────────────────────────────────────────────────
 
-export default function IdentitiesPage() {
+export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabScope?: TabScope }) {
   const { selectedConnectionId, connectionParam, withConnection } = useConnection();
   const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -502,6 +524,7 @@ export default function IdentitiesPage() {
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
   const [multiCategoryFilter, setMultiCategoryFilter] = useState<string[]>([]);
   const [ownerFilter, setOwnerFilter] = useState<'all' | 'unowned'>('all');
+  const [tabSubPill, setTabSubPill] = useState<string>('all');
   const [activityFilter, setActivityFilter] = useState<'all' | 'dormant' | 'dormant_strict'>('all');
   const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
   const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
@@ -525,10 +548,11 @@ export default function IdentitiesPage() {
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
+  const [logIndependentChipDismissed, setLogIndependentChipDismissed] = useState(false);
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
     orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
@@ -1510,6 +1534,28 @@ export default function IdentitiesPage() {
       }
     }
 
+    // Tab-scope pre-filter: restrict to tab's identity categories
+    const scopeCats = TAB_SCOPE_CATEGORIES[tabScope];
+    if (scopeCats) {
+      result = result.filter(i => scopeCats.includes(i.identity_category as IdentityCategory));
+    }
+
+    // Tab sub-pill filter (within-tab drill-down)
+    if (tabSubPill !== 'all') {
+      if (tabSubPill === 'members') result = result.filter(i => i.identity_category === 'human_user');
+      else if (tabSubPill === 'guests') result = result.filter(i => i.identity_category === 'guest');
+      else if (tabSubPill === 'stale') result = result.filter(i => {
+        const act = safeLower(i.activity_status);
+        return act === 'stale' || act === 'never_used';
+      });
+      else if (tabSubPill === 'no_mfa') result = result.filter(i => i.mfa_status === 'not_enrolled');
+      else if (tabSubPill === 'app_spn') result = result.filter(i => i.identity_category === 'service_principal');
+      else if (tabSubPill === 'sys_msi') result = result.filter(i => i.identity_category === 'managed_identity_system');
+      else if (tabSubPill === 'usr_msi') result = result.filter(i => i.identity_category === 'managed_identity_user');
+      else if (tabSubPill === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
+      else if (tabSubPill === 'orphaned') result = result.filter(i => i.recommended_action === 'ORPHANED' || i.governance_state === 'Orphaned');
+    }
+
     const s = safeLower(search);
     if (s) result = result.filter(i => safeLower(i.display_name).includes(s) || safeLower(i.identity_id).includes(s) || safeLower(i.owner_display_name).includes(s));
     if (cloudFilter !== 'all') result = result.filter(i => safeLower(i.cloud) === cloudFilter);
@@ -1598,6 +1644,14 @@ export default function IdentitiesPage() {
       && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
     );
     if (signalChip === 'data_plane') result = result.filter(i => i.access_tier === 'data_plane');
+    // Tab-scoped KPI chip filters
+    if (signalChip === 'no_mfa') result = result.filter(i => i.mfa_status === 'not_enrolled');
+    if (signalChip === 'unknown_mfa') result = result.filter(i => !i.mfa_status || i.mfa_status === 'unknown');
+    if (signalChip === 'stale') result = result.filter(i => { const a = safeLower(i.activity_status); return a === 'stale' || a === 'never_used'; });
+    if (signalChip === 'joiners') result = result.filter(i => i.created_datetime && new Date(i.created_datetime).getTime() >= Date.now() - 30 * 24 * 60 * 60 * 1000);
+    if (signalChip === 'secrets') result = result.filter(i => i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000));
+    if (signalChip === 'no_owner') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
+    if (signalChip === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -1683,7 +1737,7 @@ export default function IdentitiesPage() {
     if (result.length === 0 && identities.length > 0) {
     }
     return result;
-  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir, tabScope, tabSubPill]);
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -1811,7 +1865,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 12; // checkbox + Identity + Type + Cloud + Status + Lifecycle + Governance + Risk + Privilege + Effective Access + Last Seen + Lineage
+  const colSpan = tabScope === 'nhi' ? 15 : tabScope === 'humans' ? 15 : 12; // +3 for NHI/Humans tab columns
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -2423,153 +2477,168 @@ export default function IdentitiesPage() {
         </div>
       )}
 
-      {/* Category Filter Tabs */}
-      {!loading && identities.length > 0 && (
-        <div className="flex items-center gap-1.5 mb-3">
-          {[
-            { key: 'all', label: 'All Identities', multi: [] as string[] },
-            { key: 'human_user', label: 'Human Users', multi: [] as string[] },
-            { key: 'service_principal', label: 'Service Principals', multi: [] as string[] },
-            { key: 'managed_ids', label: 'Managed IDs', multi: [...MANAGED_IDENTITY_GROUP] },
-            { key: 'guest', label: 'Guest', multi: [] as string[] },
-          ].map(tab => {
-            const isActive = !workloadFilter && (
-              tab.multi.length > 0
-                ? tab.multi.every(c => multiCategoryFilter.includes(c)) && multiCategoryFilter.length === tab.multi.length
-                : multiCategoryFilter.length === 0 && categoryFilter === tab.key
-            );
-            return (
-              <button
-                key={tab.key}
-                onClick={() => {
-                  setWorkloadFilter(false);
-                  clearActiveView();
-                  if (tab.multi.length > 0) {
-                    setMultiCategoryFilter(tab.multi);
-                    setCategoryFilter('all');
-                    navigate('/identities?identity_category=managed_identity', { replace: true });
-                  } else {
-                    setMultiCategoryFilter([]);
-                    setCategoryFilter(tab.key as any);
-                    if (tab.key === 'all') {
-                      navigate('/identities', { replace: true });
+      {/* Tab-scoped sub-pills */}
+      {!loading && identities.length > 0 && (() => {
+        // Define sub-pills per tab scope
+        const subPills: { key: string; label: string }[] =
+          tabScope === 'humans' ? [
+            { key: 'all', label: 'All Humans' },
+            { key: 'members', label: 'Members' },
+            { key: 'guests', label: 'Guests' },
+            { key: 'stale', label: 'Stale > 90d' },
+            { key: 'no_mfa', label: 'No MFA' },
+          ] : tabScope === 'nhi' ? [
+            { key: 'all', label: 'All NHI' },
+            { key: 'app_spn', label: 'App SPNs' },
+            { key: 'sys_msi', label: 'System MSI' },
+            { key: 'usr_msi', label: 'User MSI' },
+            { key: 'federated', label: 'Federated' },
+            { key: 'orphaned', label: 'Orphaned' },
+          ] : [
+            // "All Identities" tab — original category pills
+            { key: 'all', label: 'All Identities' },
+            { key: 'human_user', label: 'Human Users' },
+            { key: 'service_principal', label: 'Service Principals' },
+            { key: 'managed_ids', label: 'Managed IDs' },
+            { key: 'guest', label: 'Guest' },
+          ];
+
+        return (
+          <div className="flex items-center gap-1.5 mb-3">
+            {subPills.map(pill => {
+              // For "all" tab, use legacy category filter; for scoped tabs, use tabSubPill
+              const isActive = tabScope === 'all'
+                ? (pill.key === 'all' ? categoryFilter === 'all' && !workloadFilter :
+                   pill.key === 'managed_ids' ? multiCategoryFilter.length === 2 && multiCategoryFilter.includes('managed_identity_system') :
+                   categoryFilter === pill.key && !workloadFilter)
+                : tabSubPill === pill.key;
+
+              return (
+                <button
+                  key={pill.key}
+                  onClick={() => {
+                    if (tabScope === 'all') {
+                      // Legacy behavior for All Identities tab
+                      setWorkloadFilter(false);
+                      clearActiveView();
+                      if (pill.key === 'managed_ids') {
+                        setMultiCategoryFilter([...MANAGED_IDENTITY_GROUP]);
+                        setCategoryFilter('all');
+                      } else {
+                        setMultiCategoryFilter([]);
+                        setCategoryFilter(pill.key as any);
+                      }
                     } else {
-                      navigate(`/identities?identity_category=${tab.key}`, { replace: true });
+                      setTabSubPill(tabSubPill === pill.key ? 'all' : pill.key);
                     }
-                  }
+                  }}
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                    isActive
+                      ? 'bg-violet-600 text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {pill.label}
+                </button>
+              );
+            })}
+            {/* NHI + Orphaned pills only on All tab */}
+            {tabScope === 'all' && (<>
+              <button
+                onClick={() => {
+                  setWorkloadFilter(!workloadFilter);
+                  if (!workloadFilter) { setCategoryFilter('all'); setMultiCategoryFilter([]); clearActiveView(); }
                 }}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                  isActive
-                    ? 'bg-violet-600 text-white shadow-sm'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  workloadFilter ? 'bg-violet-600 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {tab.label}
+                NHI (All Non-Human)
               </button>
-            );
-          })}
-          <button
-            onClick={() => {
-              setWorkloadFilter(true);
-              setCategoryFilter('all');
-              setMultiCategoryFilter([]);
-              clearActiveView();
-              navigate('/identities?workload=true', { replace: true });
-            }}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-              workloadFilter
-                ? 'bg-violet-600 text-white shadow-sm'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            NHI (All Non-Human)
-          </button>
-          {/* AI Agent Governance: filter pill (only when feature flag enabled) */}
-          {agentFilterEnabled && (
-            <button
-              onClick={() => {
-                setAgentFilter(!agentFilter);
-                if (!agentFilter) {
-                  setWorkloadFilter(false);
-                  setCategoryFilter('all');
-                  setMultiCategoryFilter([]);
-                  clearActiveView();
-                }
-              }}
-              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
-                agentFilter
-                  ? 'bg-violet-600 text-white shadow-sm'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              AI Agents
-              {agentCount > 0 && (
-                <span className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${
-                  agentFilter ? 'bg-white/20 text-white' : 'bg-violet-100 text-violet-700'
-                }`}>
-                  {agentCount}
-                </span>
-              )}
-            </button>
-          )}
-          <button
-            onClick={() => setOrphanFilter(!orphanFilter)}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
-              orphanFilter
-                ? 'bg-amber-500 text-white shadow-sm'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Orphaned
-          </button>
-        </div>
-      )}
+              <button
+                onClick={() => setOrphanFilter(!orphanFilter)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
+                  orphanFilter ? 'bg-amber-500 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                Orphaned
+              </button>
+            </>)}
+          </div>
+        );
+      })()}
 
-      {/* Three-dimension stat cards + signal filter chips — reads from backend governance_summary (SSOT) */}
+      {/* Tab-scoped KPI tiles */}
       {queryMode === 'simple' && (() => {
-        // Use backend-computed governance_summary when available; fallback to local recomputation
+        // Compute tab-scoped counts from filtered array (already tab-scoped by pre-filter)
+        const privilegedCount = filtered.filter(i => i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged').length;
         const ungovernedCount = governanceSummary?.ungoverned ?? filtered.filter(i => i.governance_state === 'Ungoverned').length;
         const orphanedCount = governanceSummary?.orphaned ?? filtered.filter(i => i.governance_state === 'Orphaned').length;
-        const privilegedCount = governanceSummary?.privileged ?? filtered.filter(i => i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged').length;
-        const privUngovernedCount = governanceSummary?.combo ?? filtered.filter(i =>
-          (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
-          && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
-        ).length;
+
+        // Define KPI tiles per tab
+        type KpiTile = { key: string; label: string; count: number; color: string };
+        let tiles: KpiTile[];
+
+        if (tabScope === 'humans') {
+          // AG-161: Only count verified not_enrolled, not unknown/null
+          const noMfaCount = filtered.filter(i => i.mfa_status === 'not_enrolled').length;
+          const unknownMfaCount = filtered.filter(i => !i.mfa_status || i.mfa_status === 'unknown').length;
+          const staleCount = filtered.filter(i => {
+            const act = safeLower(i.activity_status);
+            return act === 'stale' || act === 'never_used';
+          }).length;
+          const joinersCount = filtered.filter(i => {
+            if (!i.created_datetime) return false;
+            const created = new Date(i.created_datetime).getTime();
+            return created >= Date.now() - 30 * 24 * 60 * 60 * 1000;
+          }).length;
+          tiles = [
+            { key: 'no_mfa', label: 'No MFA', count: noMfaCount, color: '#ef4444' },
+            ...(unknownMfaCount > 0 ? [{ key: 'unknown_mfa', label: 'Unknown MFA', count: unknownMfaCount, color: '#9ca3af' }] : []),
+            { key: 'stale', label: 'Stale', count: staleCount, color: '#f59e0b' },
+            { key: 'ungoverned', label: 'Ungoverned', count: ungovernedCount, color: '#f87171' },
+            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
+            { key: 'joiners', label: 'Joiners 30d', count: joinersCount, color: '#34d399' },
+          ];
+        } else if (tabScope === 'nhi') {
+          const noOwnerCount = filtered.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0).length;
+          const federatedCount = filtered.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated).length;
+          const secretsUrgentCount = filtered.filter(i =>
+            i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000)
+          ).length;
+          tiles = [
+            { key: 'secrets', label: 'Secrets < 30d', count: secretsUrgentCount, color: '#ef4444' },
+            { key: 'orphaned', label: 'Orphaned', count: orphanedCount, color: '#fbbf24' },
+            { key: 'no_owner', label: 'No Owner', count: noOwnerCount, color: '#fb923c' },
+            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
+            { key: 'federated', label: 'Federated', count: federatedCount, color: '#34d399' },
+          ];
+        } else {
+          // All Identities — original KPI tiles
+          const privUngovernedCount = governanceSummary?.combo ?? filtered.filter(i =>
+            (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
+            && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
+          ).length;
+          tiles = [
+            { key: 'ungoverned', label: 'Ungoverned', count: ungovernedCount, color: '#f87171' },
+            { key: 'orphaned', label: 'Orphaned', count: orphanedCount, color: '#fbbf24' },
+            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
+            { key: 'priv_ungoverned', label: 'Priv + Ungoverned', count: privUngovernedCount, color: '#fca5a5' },
+            { key: 'data_plane', label: 'Data Plane', count: governanceSummary?.data_plane ?? filtered.filter(i => i.access_tier === 'data_plane').length, color: '#38bdf8' },
+          ];
+        }
+
         return (
           <div className="mb-3 space-y-2">
-            {/* Stat cards */}
-            <div className="grid grid-cols-5 gap-2">
-              <button onClick={() => setSignalChip(s => s === 'ungoverned' ? null : 'ungoverned')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'ungoverned' ? 'chip-active-ungov' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Ungoverned</div>
-                <div className="text-lg font-bold" style={{ color: '#f87171' }}>{ungovernedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'orphaned' ? null : 'orphaned')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'orphaned' ? 'chip-active-orphan' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Orphaned</div>
-                <div className="text-lg font-bold" style={{ color: '#fbbf24' }}>{orphanedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'privileged' ? null : 'privileged')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'privileged' ? 'chip-active-priv' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Privileged</div>
-                <div className="text-lg font-bold" style={{ color: '#a78bfa' }}>{privilegedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'priv_ungoverned' ? null : 'priv_ungoverned')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'priv_ungoverned' ? 'chip-active-combo' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Priv + Ungoverned</div>
-                <div className="text-lg font-bold" style={{ color: '#fca5a5' }}>{privUngovernedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'data_plane' ? null : 'data_plane')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'data_plane' ? 'chip-active-data' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Data Plane</div>
-                <div className="text-lg font-bold" style={{ color: '#38bdf8' }}>
-                  {governanceSummary?.data_plane ?? filtered.filter(i => i.access_tier === 'data_plane').length}
-                </div>
-              </button>
+            <div className={`grid gap-2 ${tiles.length <= 5 ? 'grid-cols-5' : 'grid-cols-6'}`}>
+              {tiles.map(tile => (
+                <button key={tile.key}
+                  onClick={() => setSignalChip(s => s === tile.key ? null : tile.key as any)}
+                  className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === tile.key ? 'ring-2 ring-white/30' : ''}`}>
+                  <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>{tile.label}</div>
+                  <div className="text-lg font-bold" style={{ color: tile.color }}>{tile.count}</div>
+                </button>
+              ))}
             </div>
           </div>
         );
@@ -2581,6 +2650,19 @@ export default function IdentitiesPage() {
           identityIds={filtered.map(i => i.identity_id)}
           onNodeClick={(id) => setDrawerIdentityId(id)}
         />
+      )}
+
+      {/* Log-independent positioning chip — Humans tab only */}
+      {tabScope === 'humans' && !logIndependentChipDismissed && viewMode === 'table' && (
+        <div className="flex justify-end mb-1.5">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-[11px] text-gray-500 border border-gray-200/60 bg-transparent">
+            <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            MFA, Department, Job Title collected log-independently · no Entra P2
+            <button onClick={() => setLogIndependentChipDismissed(true)} className="ml-1 text-gray-400 hover:text-gray-600">&times;</button>
+          </span>
+        </div>
       )}
 
       {/* Table */}
@@ -2596,6 +2678,19 @@ export default function IdentitiesPage() {
                 </th>
                 <SortHeader label="Identity" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Type" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
+                {tabScope === 'nhi' && <>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Secret Expiry</th>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Owner</th>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Federated</th>
+                </>}
+                {tabScope === 'humans' && <>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap"
+                    title="Collected from Microsoft Graph authentication methods — no Entra P2 required. AuditGraph reads the directory, not the logs.">
+                    MFA{' '}<span className="text-gray-400 normal-case cursor-help">&#9432;</span>
+                  </th>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Department</th>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Job Title</th>
+                </>}
                 <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
@@ -2662,6 +2757,62 @@ export default function IdentitiesPage() {
 
                     {/* Type (Category) */}
                     <td className="px-2 py-2"><CategoryBadge category={i.identity_category} cloud={i.cloud} /></td>
+
+                    {/* NHI-specific columns (AG-159) */}
+                    {tabScope === 'nhi' && <>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {i.secret_expiry_status === 'expired' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">Expired</span>
+                        ) : i.secret_expiry_status === 'expiring_soon' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700">{'< 30d'}</span>
+                        ) : i.secret_expiry_status === 'expiring_90d' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-50 text-yellow-700">{'< 90d'}</span>
+                        ) : i.secret_expiry_status === 'valid' ? (
+                          <span className="text-[10px] text-green-600">Valid</span>
+                        ) : (
+                          <span className="text-[10px] text-gray-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 max-w-[150px]">
+                        <span className="text-[11px] text-gray-700 truncate block" title={i.owner_resolved || i.owner_display_name || ''}>
+                          {i.owner_resolved || i.owner_display_name || <span className="text-gray-400">No owner</span>}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {(i.federated_cred_count ?? 0) > 0 ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700">
+                            {i.federated_cred_count} FIC
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-gray-400">—</span>
+                        )}
+                      </td>
+                    </>}
+
+                    {/* Humans-specific columns (AG-160 / AG-161 four-state MFA) */}
+                    {tabScope === 'humans' && <>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {i.mfa_status === 'enrolled' || (i.mfa_status === 'registered' && i.ca_mfa_enforced) ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700" title="MFA enrolled">MFA ✓</span>
+                        ) : i.mfa_status === 'not_enrolled' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700" title="Verified: no MFA methods registered">No MFA</span>
+                        ) : i.mfa_status === 'conditional' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700" title="CA policy enforces MFA">Conditional</span>
+                        ) : (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500" title="MFA status not yet collected">Unknown</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 max-w-[120px]">
+                        <span className="text-[11px] text-gray-700 truncate block" title={i.department || ''}>
+                          {i.department || <span className="text-gray-400">—</span>}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 max-w-[120px]">
+                        <span className="text-[11px] text-gray-700 truncate block" title={i.job_title || ''}>
+                          {i.job_title || <span className="text-gray-400">—</span>}
+                        </span>
+                      </td>
+                    </>}
 
                     {/* Cloud */}
                     <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>

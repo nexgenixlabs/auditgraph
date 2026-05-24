@@ -3,9 +3,20 @@ import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useToast } from '../components/ToastProvider';
 
+interface RoleMeta {
+  provider: string;
+  name: string;
+  tier: string;
+  description: string;
+  can_do: string[];
+  cannot_do: string[];
+  docs_url: string;
+}
+
 interface PathNode {
   type: 'identity' | 'role' | 'scope' | 'blast_boundary' | 'keyvault';
   label: string;
+  role_meta?: RoleMeta;
   [key: string]: unknown;
 }
 
@@ -25,9 +36,95 @@ interface AttackPathDetail {
   target_resource_id: string;
   target_resource_type: string;
   path_nodes: PathNode[];
+  primary_role_meta?: RoleMeta;
   first_detected_at: string;
   last_detected_at: string;
   occurrence_count: number;
+}
+
+const PROVIDER_LABEL: Record<string, string> = {
+  entra: 'Microsoft Entra',
+  azure_rbac: 'Azure RBAC',
+  aws_iam: 'AWS IAM',
+  gcp_iam: 'GCP IAM',
+  unknown: 'Unknown',
+};
+
+const TIER_STYLE: Record<string, { bg: string; text: string; border: string; label: string }> = {
+  T0: { bg: 'rgba(239,68,68,0.12)', text: '#f87171', border: 'rgba(239,68,68,0.3)', label: 'T0 · Critical' },
+  T1: { bg: 'rgba(249,115,22,0.12)', text: '#fb923c', border: 'rgba(249,115,22,0.3)', label: 'T1 · High' },
+  T2: { bg: 'rgba(234,179,8,0.12)', text: '#facc15', border: 'rgba(234,179,8,0.3)', label: 'T2 · Medium' },
+  T3: { bg: 'rgba(59,130,246,0.12)', text: '#60a5fa', border: 'rgba(59,130,246,0.3)', label: 'T3 · Low' },
+  T4: { bg: 'rgba(59,130,246,0.12)', text: '#60a5fa', border: 'rgba(59,130,246,0.3)', label: 'T4 · Read-only' },
+  unknown: { bg: 'rgba(107,114,128,0.12)', text: '#9ca3af', border: 'rgba(107,114,128,0.3)', label: 'Uncatalogued' },
+};
+
+function RoleAboutCard({ meta }: { meta: RoleMeta }) {
+  const tier = TIER_STYLE[meta.tier] || TIER_STYLE.unknown;
+  return (
+    <div className="rounded-xl border p-5" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: 'var(--text-tertiary)' }}>
+            About this role
+          </h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{meta.name}</span>
+            <span className="text-xs font-semibold px-2 py-0.5 rounded"
+              style={{ backgroundColor: tier.bg, color: tier.text, border: `1px solid ${tier.border}` }}>
+              {tier.label}
+            </span>
+            <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
+              style={{ color: 'var(--text-tertiary)', border: '1px solid var(--border-subtle)' }}>
+              {PROVIDER_LABEL[meta.provider] || meta.provider}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <p className="text-xs leading-relaxed mb-4" style={{ color: 'var(--text-secondary)' }}>
+        {meta.description}
+      </p>
+
+      {meta.can_do.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: '#10b981' }}>
+            ✓ Can do
+          </div>
+          <ul className="space-y-1">
+            {meta.can_do.map((s, i) => (
+              <li key={i} className="text-xs leading-relaxed flex gap-2" style={{ color: 'var(--text-secondary)' }}>
+                <span style={{ color: '#10b981' }}>•</span><span>{s}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {meta.cannot_do.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: '#f87171' }}>
+            ✗ Cannot do
+          </div>
+          <ul className="space-y-1">
+            {meta.cannot_do.map((s, i) => (
+              <li key={i} className="text-xs leading-relaxed flex gap-2" style={{ color: 'var(--text-secondary)' }}>
+                <span style={{ color: '#f87171' }}>•</span><span>{s}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {meta.docs_url && (
+        <a href={meta.docs_url} target="_blank" rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs hover:underline mt-1"
+          style={{ color: '#60a5fa' }}>
+          Official documentation ↗
+        </a>
+      )}
+    </div>
+  );
 }
 
 const SEV_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -255,6 +352,25 @@ export default function AttackPathDetailPage() {
               )}
             </div>
           )}
+
+          {/* About this role — per-role metadata from the central registry.
+              Render one card per role node so paths chaining multiple roles
+              get one panel each. Falls back to primary_role_meta when nodes
+              don't carry enrichment. */}
+          {(() => {
+            const seen = new Set<string>();
+            const cards: RoleMeta[] = [];
+            (path.path_nodes || []).forEach((n) => {
+              if (n.role_meta && !seen.has(n.role_meta.name)) {
+                seen.add(n.role_meta.name);
+                cards.push(n.role_meta);
+              }
+            });
+            if (cards.length === 0 && path.primary_role_meta) {
+              cards.push(path.primary_role_meta);
+            }
+            return cards.map((m) => <RoleAboutCard key={m.name} meta={m} />);
+          })()}
         </div>
 
         {/* Right column: Risk breakdown + Details */}

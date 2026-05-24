@@ -36,6 +36,7 @@ export const IDENTITY_CSV_COLUMNS: CsvColumnDef[] = [
   { key: 'owner_display_name', header: 'Owner' },
   { key: 'ca_coverage_status', header: 'CA Coverage' },
   { key: 'ca_mfa_enforced', header: 'CA MFA Enforced' },
+  { key: 'mfa_status', header: 'MFA Status' },
   { key: 'enabled', header: 'Enabled' },
   { key: 'risk_reasons', header: 'Risk Reasons' },
 ];

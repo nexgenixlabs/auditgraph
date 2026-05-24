@@ -87,6 +87,7 @@ _BCRYPT_ROUNDS = int(os.environ.get('BCRYPT_ROUNDS', '12'))  # AG-112
 # ---------------------------------------------------------------------------
 import re as _re
 from app.constants import Verdict
+from app.constants.identity_types import normalize_identity_category as _normalize_cat
 from app.encryption import encrypt_field, decrypt_field
 
 # Patterns that suggest a SQL string was built via f-string or concatenation
@@ -2508,6 +2509,38 @@ class Database:
                     self._rollback()
             Database._ms_first_party_col_ensured = True
 
+        # Ensure NHI enrichment columns exist (AG-159)
+        if not getattr(Database, '_nhi_cols_ensured', False):
+            try:
+                cursor.execute("SAVEPOINT nhi_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS secret_expiry_earliest TIMESTAMPTZ")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS secret_expiry_status VARCHAR(20)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS federated_cred_count INTEGER DEFAULT 0")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS owner_resolved TEXT")
+                cursor.execute("RELEASE SAVEPOINT nhi_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT nhi_ddl")
+                except Exception:
+                    self._rollback()
+            Database._nhi_cols_ensured = True
+
+        # Ensure Humans enrichment columns exist (AG-160)
+        if not getattr(Database, '_human_cols_ensured', False):
+            try:
+                cursor.execute("SAVEPOINT human_ddl")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS mfa_status VARCHAR(20)")
+                cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS mfa_methods JSONB")
+                cursor.execute("RELEASE SAVEPOINT human_ddl")
+                self._commit()
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT human_ddl")
+                except Exception:
+                    self._rollback()
+            Database._human_cols_ensured = True
+
         # Normalize JSON fields
         tags_json = json.dumps(identity_data.get("tags", {}) or {})
 
@@ -2687,7 +2720,17 @@ class Database:
                 ca_mfa_enforced,
 
                 -- Microsoft first-party flag (Signal 11 orphan exclusion)
-                is_microsoft_first_party
+                is_microsoft_first_party,
+
+                -- NHI enrichment (AG-159)
+                secret_expiry_earliest,
+                secret_expiry_status,
+                federated_cred_count,
+                owner_resolved,
+
+                -- Humans enrichment (AG-160)
+                mfa_status,
+                mfa_methods
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s,
@@ -2726,7 +2769,9 @@ class Database:
                 %s,
                 %s,
                 %s,
-                %s
+                %s,
+                %s, %s, %s, %s,
+                %s, %s
             )
             ON CONFLICT (discovery_run_id, identity_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
@@ -2883,6 +2928,14 @@ class Database:
 
                 is_microsoft_first_party = EXCLUDED.is_microsoft_first_party,
 
+                secret_expiry_earliest = COALESCE(EXCLUDED.secret_expiry_earliest, identities.secret_expiry_earliest),
+                secret_expiry_status = COALESCE(EXCLUDED.secret_expiry_status, identities.secret_expiry_status),
+                federated_cred_count = COALESCE(EXCLUDED.federated_cred_count, identities.federated_cred_count),
+                owner_resolved = COALESCE(EXCLUDED.owner_resolved, identities.owner_resolved),
+
+                mfa_status = COALESCE(EXCLUDED.mfa_status, identities.mfa_status),
+                mfa_methods = COALESCE(EXCLUDED.mfa_methods, identities.mfa_methods),
+
                 created_at = NOW()
             RETURNING id
         """,
@@ -2895,8 +2948,8 @@ class Database:
                 # legacy type (keep) — always lowercase
                 identity_data.get("identity_type", "service_principal").lower().strip(),
 
-                # normalized category — always lowercase
-                identity_data.get("identity_category", "service_principal").lower().strip(),
+                # normalized category — canonical form via taxonomy map
+                _normalize_cat(identity_data.get("identity_category", "service_principal")),
 
                 identity_data.get("app_id"),
                 identity_data.get("object_id"),
@@ -3055,6 +3108,16 @@ class Database:
 
                 # Microsoft first-party flag (Signal 11)
                 identity_data.get("is_microsoft_first_party", False),
+
+                # NHI enrichment (AG-159)
+                identity_data.get("secret_expiry_earliest"),
+                identity_data.get("secret_expiry_status"),
+                identity_data.get("federated_cred_count", 0),
+                identity_data.get("owner_resolved"),
+
+                # Humans enrichment (AG-160)
+                identity_data.get("mfa_status"),
+                json.dumps(identity_data.get("mfa_methods")) if identity_data.get("mfa_methods") else None,
             ),
         )
 
@@ -3731,16 +3794,22 @@ class Database:
         # Update denormalized owner fields on identity
         primary_owner = next((o for o in owners if o.get("is_primary_owner")), owners[0] if owners else None)
         if primary_owner:
+            _dn = primary_owner.get("owner_display_name") or primary_owner.get("owner_upn")
+            _upn = primary_owner.get("owner_upn") or ''
+            # owner_resolved: "Display Name (upn)" for NHI grid (AG-159)
+            _resolved = f"{_dn} ({_upn})" if _dn and _upn and _dn != _upn else (_dn or _upn or '')
             cursor.execute(
                 """
                 UPDATE identities
                 SET owner_display_name = %s,
-                    owner_count = %s
+                    owner_count = %s,
+                    owner_resolved = %s
                 WHERE id = %s
             """,
                 (
-                    primary_owner.get("owner_display_name") or primary_owner.get("owner_upn"),
+                    _dn,
                     len(owners),
+                    _resolved,
                     identity_db_id,
                 ),
             )
@@ -22723,7 +22792,9 @@ class Database:
         return count
 
     def _format_attack_path_row(self, r: dict) -> dict:
-        """Normalize an attack_paths row dict for JSON response."""
+        """Normalize an attack_paths row dict for JSON response. Also enriches
+        role-typed nodes with role_meta from the central registry so the UI can
+        render an "About this role" card without re-fetching."""
         if r.get('path_id'):
             r['path_id'] = str(r['path_id'])
         for ts in ('created_at', 'first_detected_at', 'last_detected_at', 'discovered_at'):
@@ -22731,6 +22802,28 @@ class Database:
                 r[ts] = r[ts].isoformat()
         if r.get('path_nodes') and isinstance(r['path_nodes'], str):
             r['path_nodes'] = json.loads(r['path_nodes'])
+
+        # Enrich role-typed nodes with metadata (description, can/cannot, docs)
+        try:
+            from app.constants.role_metadata import get_role_metadata_auto
+        except Exception:
+            get_role_metadata_auto = None
+        if get_role_metadata_auto and isinstance(r.get('path_nodes'), list):
+            primary = None
+            for node in r['path_nodes']:
+                if not isinstance(node, dict):
+                    continue
+                ntype = (node.get('type') or '').lower()
+                if ntype in ('role', 'entra_role', 'rbac_role', 'iam_role'):
+                    name = (node.get('role_name') or node.get('label') or node.get('name') or '').strip()
+                    if name:
+                        meta = get_role_metadata_auto(name)
+                        node['role_meta'] = meta
+                        # T0 wins; otherwise first role node sets the primary
+                        if primary is None or (meta.get('tier') == 'T0' and primary.get('tier') != 'T0'):
+                            primary = meta
+            if primary is not None:
+                r['primary_role_meta'] = primary
         return r
 
     def get_attack_paths(self, limit=50, offset=0, severity=None,

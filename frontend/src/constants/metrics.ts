@@ -102,10 +102,12 @@ export function normalizeCategoryFromBackend(raw?: any): IdentityCategory {
   if (!v) return 'unknown';
   if (v in IDENTITY_CATEGORIES || v === 'unknown') return v as IdentityCategory;
   // Azure aliases
-  if (v === 'user' || v === 'human user') return 'human_user';
+  if (v === 'user' || v === 'human user' || v === 'member' || v === 'human') return 'human_user';
+  if (v === 'guest_user' || v === 'b2b_user') return 'guest';
   if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
   if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
-  if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
+  if (v === 'managedidentity' || v === 'managed identity') return 'managed_identity_user';
+  if (v === 'service principal' || v === 'serviceprincipal' || v === 'application' || v === 'app') return 'service_principal';
   // AWS aliases
   if (v === 'iam user' || v === 'iamuser') return 'iam_user';
   if (v === 'iam role' || v === 'iamrole') return 'iam_role';
