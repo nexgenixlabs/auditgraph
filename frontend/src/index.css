@@ -21,12 +21,12 @@
   color-scheme: dark;
 
   /* Surfaces — 6-level elevation (deepest → active) */
-  --bg-deep:      #06090f;       /* deepest — sidebar */
-  --bg-surface:   #0c1220;       /* base — page background */
-  --bg-raised:    #111a2e;       /* raised — cards, panels */
-  --bg-elevated:  #162038;       /* elevated — hover states, dropdowns */
-  --bg-hover:     #1a2744;       /* hover — interactive hover */
-  --bg-active:    #1f2f52;       /* active — pressed/selected */
+  --bg-deep:      #03060d;       /* deepest — sidebar */
+  --bg-surface:   #080f1c;       /* base — page background */
+  --bg-raised:    #0d1627;       /* raised — cards, panels */
+  --bg-elevated:  #101d33;       /* elevated — hover states, dropdowns */
+  --bg-hover:     #152440;       /* hover — interactive hover */
+  --bg-active:    #1a2b4d;       /* active — pressed/selected */
 
   /* Legacy aliases (backward compat with existing components) */
   --bg-sidebar:   var(--bg-deep);
@@ -35,7 +35,7 @@
 
   /* Text — WCAG AA+ contrast on #0c1220 */
   --text-primary:   #e8ecf4;     /* 13.2:1 — headings, values */
-  --text-secondary: #8b9dc3;     /* 5.8:1 — descriptions, labels */
+  --text-secondary: #9db3cc;     /* 5.8:1 — descriptions, labels */
   --text-tertiary:  #5a6f96;     /* 3.4:1 — captions, timestamps */
   --text-muted:     #3d5078;     /* 2.0:1 — disabled, decorative */
   --text-inverse:   #06090f;     /* dark text on light surfaces */
@@ -73,7 +73,7 @@
   --nav-group-label:    #5a6f96;
 
   /* Tabs */
-  --tab-bg:            #0c1220;
+  --tab-bg:            #080f1c;
   --tab-text:          #8b9dc3;
   --tab-active-text:   #e8ecf4;
   --tab-active-border: #2563eb;
@@ -100,17 +100,17 @@
   --tint-emerald-strong: rgba(16, 185, 129, 0.20);
 
   /* ── CISO Posture v3.1 Tokens ── */
-  --posture-navy:     #0c1220;
+  --posture-navy:     #080f1c;
   --posture-teal:     #24A2A1;
   --posture-orange:   #FF7216;
   --posture-red:      #e8465a;
   --posture-amber:    #f59e0b;
   --posture-green:    #22c55e;
-  --posture-surface1: #111827;
-  --posture-surface2: #162038;
-  --posture-surface3: #1a2744;
-  --posture-surface4: #1f2f52;
-  --posture-border:   rgba(255, 255, 255, 0.05);
+  --posture-surface1: #0d1627;
+  --posture-surface2: #101d33;
+  --posture-surface3: #152440;
+  --posture-surface4: #1a2b4d;
+  --posture-border:   rgba(36,162,161,0.15);
   --posture-text-primary:   #e8ecf4;
   --posture-text-secondary: #8b9dc3;
   --posture-text-muted:     #5a6f96;
@@ -145,14 +145,14 @@
   /* Hero (flat — no gradient) */
 
   /* Form elements */
-  --input-bg:           #0c1220;
+  --input-bg:           #080f1c;
   --input-border:       #2a3f66;
   --input-text:         #e8ecf4;
   --input-placeholder:  #5a6f96;
   --input-focus-border: #2563eb;
 
   /* Scrollbar */
-  --scrollbar-track:       #0c1220;
+  --scrollbar-track:       #080f1c;
   --scrollbar-thumb:       #2a3f66;
   --scrollbar-thumb-hover: #5a6f96;
 
@@ -164,12 +164,12 @@
   --glow-accent:   0 0 12px rgba(37, 99, 235, 0.12);
 
   /* CISO / Command Center surfaces */
-  --ciso-bg-page:          #0c1220;
-  --ciso-bg-card:          rgba(12, 18, 32, 0.7);
+  --ciso-bg-page:          #080f1c;
+  --ciso-bg-card:          rgba(8,15,28,0.75);
   --ciso-bg-card-muted:    rgba(12, 18, 32, 0.5);
-  --ciso-border-card:      rgba(255, 255, 255, 0.06);
-  --ciso-bg-hover:         rgba(255, 255, 255, 0.02);
-  --ciso-bg-subtle:        rgba(255, 255, 255, 0.03);
+  --ciso-border-card:      rgba(36,162,161,0.18);
+  --ciso-bg-hover:         rgba(255,255,255,0.03);
+  --ciso-bg-subtle:        rgba(255,255,255,0.04);
   --ciso-bg-active:        rgba(255, 255, 255, 0.05);
   --ciso-track:            rgba(255, 255, 255, 0.08);
   --ciso-divider:          rgba(255, 255, 255, 0.06);
@@ -182,7 +182,7 @@
   /* CISO text shades */
   --ciso-text-bright: #e8ecf4;
   --ciso-text-light:  #c4d0e4;
-  --ciso-text-sub:    #8b9dc3;
+  --ciso-text-sub:    #9db3cc;
   --ciso-text-muted:  #5a6f96;
   --ciso-text-dim:    #3d5078;
   --ciso-text-faint:  #2a3f66;

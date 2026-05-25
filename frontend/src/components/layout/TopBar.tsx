@@ -86,9 +86,9 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
       {/* Logo & Brand */}
       <Link to="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity mr-2 flex-shrink-0">
         <img
-          src="/auditgraph-logo.png"
+          src="/auditgraph_icon.png"
           alt="AuditGraph"
-          className="h-7 w-auto"
+          className="h-7 w-7 object-contain rounded"
         />
         <div className="leading-tight hidden sm:block">
           <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>AuditGraph</span>

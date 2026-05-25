@@ -66,7 +66,7 @@ function AdminLogin() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
-          <img src="/auditgraph-logo.png" alt="NexgenixLabs" className="w-16 h-16 rounded-2xl mb-4 mx-auto" />
+          <img src="/auditgraph_icon.png" alt="NexgenixLabs" className="w-16 h-16 object-contain rounded-2xl mb-4 mx-auto" />
           <h1 className="text-2xl font-bold text-white">NexgenixLabs</h1>
           <p className="text-sm text-gray-400 mt-1">Platform Administration</p>
         </div>
@@ -175,7 +175,7 @@ export default function AdminConsole() {
       {/* Admin Top Bar */}
       <div className="h-14 bg-gray-900 border-b border-gray-700 flex items-center justify-between px-5 flex-shrink-0">
         <div className="flex items-center gap-3">
-          <img src="/auditgraph-logo.png" alt="NexgenixLabs" className="w-8 h-8 rounded-lg" />
+          <img src="/auditgraph_icon.png" alt="NexgenixLabs" className="w-8 h-8 object-contain rounded-lg" />
           <div>
             <span className="text-sm font-semibold text-white">NexgenixLabs</span>
             <span className="text-xs text-gray-400 ml-2">Admin Portal</span>
