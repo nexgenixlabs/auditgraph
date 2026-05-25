@@ -10372,13 +10372,21 @@ class AzureDiscoveryEngine:
                 if app_roles_map and identity.get('identity_id') in app_roles_map:
                     app_roles = app_roles_map[identity.get('identity_id')]
                     self.db.store_app_roles(identity_db_id, app_roles)
+            except Exception as e:
+                logger.error("save_permissions_app_roles FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
-                # Save ownership for this identity (SPNs only)
+            try:
+                # Save ownership for this identity (SPNs only) — separate try to avoid
+                # being blocked by permissions/app_roles ON CONFLICT failures
                 if ownership_map and identity.get('identity_id') in ownership_map:
                     owners = ownership_map[identity.get('identity_id')]
                     self.db.store_ownership(identity_db_id, owners)
             except Exception as e:
-                logger.error("save_permissions_roles_owners FAILED for %s: %s", identity.get('display_name'), e)
+                logger.error("save_ownership FAILED for %s: %s", identity.get('display_name'), e)
                 try:
                     self.db._rollback()
                 except Exception:

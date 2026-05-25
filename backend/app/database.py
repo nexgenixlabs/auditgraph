@@ -2518,6 +2518,19 @@ class Database:
                 cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS federated_cred_count INTEGER DEFAULT 0")
                 cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS owner_resolved TEXT")
                 cursor.execute("RELEASE SAVEPOINT nhi_ddl")
+                # sp_ownership unique constraint (separate savepoint — may fail on permissions)
+                try:
+                    cursor.execute("SAVEPOINT sp_own_idx")
+                    cursor.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_sp_ownership_identity_owner
+                        ON sp_ownership (identity_db_id, owner_object_id)
+                    """)
+                    cursor.execute("RELEASE SAVEPOINT sp_own_idx")
+                except Exception:
+                    try:
+                        cursor.execute("ROLLBACK TO SAVEPOINT sp_own_idx")
+                    except Exception:
+                        pass
                 self._commit()
             except Exception:
                 try:
