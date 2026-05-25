@@ -18,6 +18,8 @@ import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSele
 import { maskCredential } from '../utils/maskCredential';
 import { STATUS_BADGE, type IdentityStatus } from '../utils/resolveStatus';
 import IdentityDrawer from '../components/IdentityDrawer';
+import FilterableColumnHeader, { type FilterOption } from '../components/identity/FilterableColumnHeader';
+import ActiveFilterChips from '../components/identity/ActiveFilterChips';
 import ExposureGraph from '../components/graph/ExposureGraph';
 import { OrphanBadgeCompact } from '../components/lineage';
 import LineageDetailPanel from '../components/LineageDetailPanel';
@@ -557,6 +559,9 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
   const [governanceSummary, setGovernanceSummary] = useState<{
     orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
   } | null>(null);
+  // AG-162: Column-level filters (field → selected values)
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
+
   // AI Agent Governance filter state (additive, gated by feature flag)
   const agentFilterEnabled = useFeatureFlag('ai_agent_governance');
   const [agentFilter, setAgentFilter] = useState(false);              // filter active
@@ -1327,6 +1332,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     if (tierFilter !== 'all') f.privilege_tier = tierFilter.join(',');
     if (credentialFilter !== 'all') f.credential_status = credentialFilter;
     if (caFilter !== 'all') f.ca_coverage = caFilter;
+    // AG-162: column filters
+    const activeColFilters = Object.entries(columnFilters).filter(([, v]) => v.length > 0);
+    if (activeColFilters.length > 0) {
+      f.column_filters = Object.fromEntries(activeColFilters);
+    }
     return f;
   }
 
@@ -1392,6 +1402,8 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     }
     setCredentialFilter((f.credential_status as any) || 'all');
     setCaFilter((f.ca_coverage as any) || 'all');
+    // AG-162: restore column filters
+    setColumnFilters(f.column_filters && typeof f.column_filters === 'object' ? f.column_filters : {});
     if (view.sort_field) setSortField(view.sort_field as SortField);
     if (view.sort_direction) setSortDir(view.sort_direction as 'asc' | 'desc');
     setActiveViewId(view.id);
@@ -1682,6 +1694,13 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     if (signalChip === 'no_owner') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (signalChip === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
 
+    // AG-162: Column-level filters
+    for (const [field, vals] of Object.entries(columnFilters)) {
+      if (vals.length > 0) {
+        result = result.filter(i => vals.includes(getFieldValue(i, field)));
+      }
+    }
+
     result.sort((a, b) => {
       let aVal: any, bVal: any;
       switch (sortField) {
@@ -1766,7 +1785,97 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     if (result.length === 0 && identities.length > 0) {
     }
     return result;
-  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir, tabScope, tabSubPill]);
+  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, columnFilters, sortField, sortDir, tabScope, tabSubPill]);
+
+  // AG-162: Compute filter options with live counts from visible data
+  const columnFilterOptions = useMemo(() => {
+    const countValues = (field: string): FilterOption[] => {
+      const counts: Record<string, number> = {};
+      for (const row of filtered) {
+        const v = getFieldValue(row, field);
+        counts[v] = (counts[v] || 0) + 1;
+      }
+      // Also include values from current active filter that may have been filtered out (show as 0)
+      for (const v of (columnFilters[field] || [])) {
+        if (!(v in counts)) counts[v] = 0;
+      }
+      return Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([value, count]) => ({ value, label: value, count }));
+    };
+
+    // Compute for filterable columns relevant to current tab
+    const opts: Record<string, FilterOption[]> = {
+      risk_level: countValues('risk_level'),
+      status: countValues('status'),
+      lifecycle_state: countValues('lifecycle_state'),
+      governance_state: countValues('governance_state'),
+      privilege_level: countValues('privilege_level'),
+      cloud: countValues('cloud'),
+    };
+    if (tabScope === 'humans') {
+      opts.mfa_status = countValues('mfa_status');
+    }
+    if (tabScope === 'nhi') {
+      opts.secret_expiry_status = countValues('secret_expiry_status');
+    }
+    return opts;
+  }, [filtered, columnFilters, tabScope]);
+
+  // AG-162: Column filter handler
+  function handleColumnFilter(field: string, values: string[]) {
+    setColumnFilters(prev => {
+      const next = { ...prev };
+      if (values.length === 0) delete next[field];
+      else next[field] = values;
+      return next;
+    });
+  }
+
+  function removeColumnFilterValue(field: string, value: string) {
+    setColumnFilters(prev => {
+      const vals = (prev[field] || []).filter(v => v !== value);
+      const next = { ...prev };
+      if (vals.length === 0) delete next[field];
+      else next[field] = vals;
+      return next;
+    });
+  }
+
+  function clearAllColumnFilters() {
+    setColumnFilters({});
+  }
+
+  // AG-162: Extract filterable field value from an identity row
+  function getFieldValue(row: IdentityRow, field: string): string {
+    switch (field) {
+      case 'risk_level': return safeLower(row.risk_level) || 'unknown';
+      case 'status': return row.enabled === false ? 'disabled' : 'active';
+      case 'mfa_status': return row.mfa_status || 'unknown';
+      case 'secret_expiry_status': return row.secret_expiry_status || 'no_secret';
+      case 'lifecycle_state': return row.lifecycle_state || 'Provisioned';
+      case 'governance_state': return row.governance_state || 'Governed';
+      case 'privilege_level': return row.privilege_level || 'Standard';
+      case 'activity_status': return safeLower(row.activity_status) || 'unknown';
+      case 'cloud': return safeLower(row.cloud) || 'azure';
+      case 'identity_category': return row.identity_category || 'unknown';
+      default: return String((row as any)[field] ?? 'unknown');
+    }
+  }
+
+  // AG-162: Human-readable labels for column filter chip display
+  const COLUMN_FIELD_LABELS: Record<string, string> = {
+    risk_level: 'Risk',
+    status: 'Status',
+    mfa_status: 'MFA',
+    secret_expiry_status: 'Secret Expiry',
+    lifecycle_state: 'Lifecycle',
+    governance_state: 'Governance',
+    privilege_level: 'Privilege',
+    activity_status: 'Activity',
+    cloud: 'Cloud',
+    identity_category: 'Type',
+  };
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -2694,6 +2803,14 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
         </div>
       )}
 
+      {/* AG-162: Active column filter chips */}
+      <ActiveFilterChips
+        columnFilters={columnFilters}
+        fieldLabels={COLUMN_FIELD_LABELS}
+        onRemove={removeColumnFilterValue}
+        onClearAll={clearAllColumnFilters}
+      />
+
       {/* Table */}
       {viewMode === 'table' && (<>
       <div className="bg-white border rounded-xl overflow-hidden shadow-sm">
@@ -2708,37 +2825,75 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                 <SortHeader label="Identity" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Type" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 {tabScope === 'nhi' && <>
-                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Secret Expiry</th>
+                  <FilterableColumnHeader
+                    label="Secret Expiry" field="secret_expiry_status"
+                    options={columnFilterOptions.secret_expiry_status}
+                    currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                    activeValues={columnFilters.secret_expiry_status || []}
+                    onFilterApply={handleColumnFilter}
+                  />
                   <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Owner</th>
                   <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Federated</th>
                 </>}
                 {tabScope === 'humans' && <>
-                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap"
-                    title="Collected from Microsoft Graph authentication methods — no Entra P2 required. AuditGraph reads the directory, not the logs.">
-                    MFA{' '}<span className="text-gray-400 normal-case cursor-help">&#9432;</span>
-                  </th>
+                  <FilterableColumnHeader
+                    label="MFA" field="mfa_status"
+                    options={columnFilterOptions.mfa_status}
+                    currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                    activeValues={columnFilters.mfa_status || []}
+                    onFilterApply={handleColumnFilter}
+                    title="Collected from Microsoft Graph authentication methods — no Entra P2 required."
+                    labelSuffix={<span className="text-gray-400 normal-case cursor-help ml-0.5">&#9432;</span>}
+                  />
                   <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Department</th>
                   <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Job Title</th>
                 </>}
-                <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
-                  onClick={() => handleSort('lifecycle_state')}>
-                  Lifecycle{' '}
-                  <span className="text-gray-400 normal-case" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>
-                  {sortField === 'lifecycle_state' && <span className="ml-0.5">{sortDir === 'asc' ? '▲' : '▼'}</span>}
-                </th>
-                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
-                  onClick={() => handleSort('governance_state')}>
-                  Governance{' '}
-                  <span className="text-gray-400 normal-case" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>
-                  {sortField === 'governance_state' && <span className="ml-0.5">{sortDir === 'asc' ? '▲' : '▼'}</span>}
-                </th>
-                <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">
-                  Privilege{' '}
-                  <span className="text-gray-400 normal-case" title="Highly Privileged (T0) > Privileged (T1) > Standard (T2/T3) — derived from privilege tier">&#9432;</span>
-                </th>
+                <FilterableColumnHeader
+                  label="Cloud" field="cloud"
+                  options={columnFilterOptions.cloud}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.cloud || []}
+                  onFilterApply={handleColumnFilter}
+                />
+                <FilterableColumnHeader
+                  label="Status" field="status"
+                  options={columnFilterOptions.status}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.status || []}
+                  onFilterApply={handleColumnFilter}
+                />
+                <FilterableColumnHeader
+                  label="Lifecycle" field="lifecycle_state"
+                  options={columnFilterOptions.lifecycle_state}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.lifecycle_state || []}
+                  onFilterApply={handleColumnFilter}
+                  labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>}
+                />
+                <FilterableColumnHeader
+                  label="Governance" field="governance_state"
+                  options={columnFilterOptions.governance_state}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.governance_state || []}
+                  onFilterApply={handleColumnFilter}
+                  labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>}
+                />
+                <FilterableColumnHeader
+                  label="Risk" field="risk_level"
+                  options={columnFilterOptions.risk_level}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.risk_level || []}
+                  onFilterApply={handleColumnFilter}
+                />
+                <FilterableColumnHeader
+                  label="Privilege" field="privilege_level"
+                  options={columnFilterOptions.privilege_level}
+                  sortable={false}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.privilege_level || []}
+                  onFilterApply={handleColumnFilter}
+                  title="Highly Privileged (T0) > Privileged (T1) > Standard (T2/T3) — derived from privilege tier"
+                />
                 <SortHeader label="Effective Access" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Seen" field="last_activity_date" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <th className="px-2 py-2.5 text-xs whitespace-nowrap">Lineage</th>
