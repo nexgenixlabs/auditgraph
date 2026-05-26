@@ -229,7 +229,7 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Bicep what-if output:**" >> $GITHUB_STEP_SUMMARY
             az deployment group what-if \
-              --resource-group ${{ vars.DEV_RG || 'eus2-ag-nonprod-rg' }} \
+              --resource-group ${{ vars.DEV_RG || 'cus-ag-nonprod-rg' }} \
               --template-file infra/containerapps-dev.bicep \
               --parameters environmentName=dev-cae-ext \
               --no-pretty-print \

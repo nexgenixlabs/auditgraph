@@ -8,7 +8,7 @@
 //
 // Usage:
 //   az deployment group create \
-//     --resource-group eus2-ag-nonprod-rg \
+//     --resource-group cus-ag-nonprod-rg \
 //     --template-file infra/containerapps.bicep \
 //     --parameters dbPassword='...' dbAdminPassword='...' jwtSecret='...' \
 //                  adminJwtSecret='...' clientJwtSecret='...'
@@ -20,7 +20,7 @@
 param environmentName string = 'dev-cae'
 
 @description('Azure Container Registry login server')
-param acrLoginServer string = 'auditgraphcr.azurecr.io'
+param acrLoginServer string = 'cusagnonprodcr.azurecr.io'
 
 @description('API container image tag')
 param apiImageTag string = 'dev'
@@ -32,7 +32,7 @@ param appImageTag string = 'dev'
 param adminImageTag string = 'dev'
 
 @description('PostgreSQL host')
-param dbHost string = 'eus2-ag-nonprod-pg.postgres.database.azure.com'
+param dbHost string = 'cus-ag-nonprod-pg.postgres.database.azure.com'
 
 @description('PostgreSQL database name')
 param dbName string = 'auditgraph_dev_eastus2'

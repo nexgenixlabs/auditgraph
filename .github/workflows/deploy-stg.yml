@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
 
 env:
-  RG: eus2-ag-nonprod-rg
-  ACR: auditgraphcr
-  ACR_SERVER: auditgraphcr.azurecr.io
+  RG: cus-ag-nonprod-rg
+  ACR: cusagnonprodcr
+  ACR_SERVER: cusagnonprodcr.azurecr.io
   CAE: stg-cae-ext
   API_APP: auditgraph-api-stg
   CLIENT_APP: auditgraph-app-stg

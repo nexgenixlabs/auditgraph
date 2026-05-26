@@ -5,13 +5,13 @@ on:
   workflow_dispatch:
 
 env:
-  RG: eus2-ag-nonprod-rg
-  ACR: auditgraphcr
-  ACR_SERVER: auditgraphcr.azurecr.io
+  RG: cus-ag-nonprod-rg
+  ACR: cusagnonprodcr
+  ACR_SERVER: cusagnonprodcr.azurecr.io
   CAE: dev-cae-ext
-  API_APP: auditgraph-api-dev
-  CLIENT_APP: auditgraph-app-dev
-  ADMIN_APP: auditgraph-admin-dev
+  API_APP: auditgraph-api
+  CLIENT_APP: auditgraph-app
+  ADMIN_APP: auditgraph-admin
 
   # ──────────────────────────────────────────────────────
   # Required GitHub Actions secrets for this workflow:
@@ -251,7 +251,7 @@ jobs:
   # NOTE: Database bootstrap (migrations + demo seed) must be run from within
   # the VNet since the PostgreSQL server has public access disabled.
   # Run manually: ./scripts/deploy-dev.sh --skip-build --skip-domains
-  # Or: az containerapp exec -n auditgraph-api-dev -g eus2-ag-nonprod-rg --command "python -m app.main"
+  # Or: az containerapp exec -n auditgraph-api -g cus-ag-nonprod-rg --command "python -m app.main"
   summary:
     runs-on: ubuntu-latest
     needs: [deploy]

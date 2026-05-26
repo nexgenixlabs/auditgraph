@@ -2,9 +2,9 @@
 // AuditGraph DEV Environment — Azure Container Apps
 //
 // Deploys 3 container apps into an existing Container Apps Environment (dev-cae):
-//   - auditgraph-api-dev   (backend API, port 8000, 1 CPU / 2Gi, 1–3 replicas)
-//   - auditgraph-app-dev   (client portal, port 3000, 0.5 CPU / 1Gi)
-//   - auditgraph-admin-dev (admin portal, port 3001, 0.5 CPU / 1Gi)
+//   - auditgraph-api   (backend API, port 8000, 1 CPU / 2Gi, 1–3 replicas)
+//   - auditgraph-app   (client portal, port 3000, 0.5 CPU / 1Gi)
+//   - auditgraph-admin (admin portal, port 3001, 0.5 CPU / 1Gi)
 //
 // All containers pull from ACR via admin credentials.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,7 +15,7 @@
 param environmentName string = 'dev-cae-ext'
 
 @description('Azure Container Registry login server')
-param acrLoginServer string = 'auditgraphcr.azurecr.io'
+param acrLoginServer string = 'cusagnonprodcr.azurecr.io'
 
 @secure()
 @description('ACR admin username')
@@ -125,11 +125,11 @@ resource cae 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
 // }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// API Container App — auditgraph-api-dev
+// API Container App — auditgraph-api
 // ═════════════════════════════════════════════════════════════════════════════
 
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'auditgraph-api-dev'
+  name: 'auditgraph-api'
   location: 'centralus'
   properties: {
     managedEnvironmentId: cae.id
@@ -238,11 +238,11 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Client App — auditgraph-app-dev
+// Client App — auditgraph-app
 // ═════════════════════════════════════════════════════════════════════════════
 
 resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'auditgraph-app-dev'
+  name: 'auditgraph-app'
   location: 'centralus'
   properties: {
     managedEnvironmentId: cae.id
@@ -297,11 +297,11 @@ resource clientApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Admin App — auditgraph-admin-dev
+// Admin App — auditgraph-admin
 // ═════════════════════════════════════════════════════════════════════════════
 
 resource adminApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'auditgraph-admin-dev'
+  name: 'auditgraph-admin'
   location: 'centralus'
   properties: {
     managedEnvironmentId: cae.id
