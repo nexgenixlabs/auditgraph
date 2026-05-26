@@ -1,9 +1,8 @@
-name: Build & Deploy AuditGraph Production (Container Apps)
+name: "Deploy — Production"
 
 on:
-  # push triggers disabled — infrastructure being recreated
-  # push:
-  #   branches: [main]
+  # Manual deployment only — never auto-triggered.
+  # Requires: PR merged to main + manual approval.
   workflow_dispatch:
 
 env:

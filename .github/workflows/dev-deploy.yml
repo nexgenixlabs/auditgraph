@@ -1,9 +1,7 @@
-name: Deploy AuditGraph DEV
+name: "Deploy — DEV"
 
 on:
-  # push triggers disabled — infrastructure being recreated
-  # push:
-  #   branches: [dev]
+  # Manual deployment only — never auto-triggered.
   workflow_dispatch:
 
 env:

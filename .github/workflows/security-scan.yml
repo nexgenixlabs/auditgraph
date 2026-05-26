@@ -17,9 +17,7 @@ name: "Security Scan"
 
 on:
   pull_request:
-    branches: [main, dev]
-  push:
-    branches: [main, dev]
+    branches: [main]
   schedule:
     # Weekly full scan — Sunday 03:00 UTC
     - cron: "0 3 * * 0"
