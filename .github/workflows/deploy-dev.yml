@@ -8,7 +8,7 @@ env:
   RG: cus-ag-nonprod-rg
   ACR: cusagnonprodcr
   ACR_SERVER: cusagnonprodcr.azurecr.io
-  CAE: dev-cae-ext
+  CAE: dev-cae
   API_APP: auditgraph-api
   CLIENT_APP: auditgraph-app
   ADMIN_APP: auditgraph-admin
