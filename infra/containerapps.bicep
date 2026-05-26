@@ -35,7 +35,7 @@ param adminImageTag string = 'dev'
 param dbHost string = 'cus-ag-nonprod-pg.postgres.database.azure.com'
 
 @description('PostgreSQL database name')
-param dbName string = 'auditgraph_dev_eastus2'
+param dbName string = 'auditgraph_dev'
 
 @description('PostgreSQL app user')
 param dbUser string = 'auditgraph_app'
