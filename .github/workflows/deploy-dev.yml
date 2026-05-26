@@ -210,7 +210,7 @@ jobs:
           for APP_NAME in ${{ env.API_APP }} ${{ env.CLIENT_APP }} ${{ env.ADMIN_APP }}; do
             echo ""
             echo "=== $APP_NAME ==="
-            for i in $(seq 1 24); do
+            for i in $(seq 1 60); do
               STATE=$(az containerapp revision list \
                 -n "$APP_NAME" -g ${{ env.RG }} \
                 --query "[0].properties.runningState" -o tsv 2>/dev/null || echo "Unknown")
@@ -227,8 +227,8 @@ jobs:
                 az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 20 2>/dev/null || true
                 exit 1
               fi
-              if [ "$i" = "24" ]; then
-                echo "::error::$APP_NAME not ready after 120s (state: $STATE, health: $HEALTH)"
+              if [ "$i" = "60" ]; then
+                echo "::error::$APP_NAME not ready after 300s (state: $STATE, health: $HEALTH)"
                 az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 20 2>/dev/null || true
                 exit 1
               fi

@@ -195,12 +195,22 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           ]
           probes: [
             {
+              type: 'Startup'
+              httpGet: {
+                path: '/health/ready'
+                port: 8000
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 30
+            }
+            {
               type: 'Liveness'
               httpGet: {
                 path: '/health'
                 port: 8000
               }
-              initialDelaySeconds: 15
               periodSeconds: 30
               timeoutSeconds: 5
               failureThreshold: 3
@@ -211,7 +221,6 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health/ready'
                 port: 8000
               }
-              initialDelaySeconds: 10
               periodSeconds: 10
               timeoutSeconds: 5
               failureThreshold: 3
