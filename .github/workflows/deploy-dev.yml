@@ -224,12 +224,16 @@ jobs:
               fi
               if [ "$STATE" = "Failed" ] || [ "$STATE" = "Stopped" ]; then
                 echo "::error::$APP_NAME revision failed (state: $STATE)"
-                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 20 2>/dev/null || true
+                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 100 2>/dev/null || true
+                echo "--- System logs ---"
+                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --type system --tail 30 2>/dev/null || true
                 exit 1
               fi
               if [ "$i" = "60" ]; then
                 echo "::error::$APP_NAME not ready after 300s (state: $STATE, health: $HEALTH)"
-                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 20 2>/dev/null || true
+                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --tail 100 2>/dev/null || true
+                echo "--- System logs ---"
+                az containerapp logs show -n "$APP_NAME" -g ${{ env.RG }} --type system --tail 30 2>/dev/null || true
                 exit 1
               fi
               sleep 5
