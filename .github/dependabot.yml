@@ -1,44 +1,5 @@
+# Dependabot disabled — dependency updates are managed manually via Jira stories.
+# All PRs require a Jira Story ID (AG-nnn) in the title, which dependabot cannot provide.
+# Re-enable when a Jira-integrated dependency update process is in place.
 version: 2
-updates:
-  # Python backend dependencies
-  - package-ecosystem: "pip"
-    directory: "/backend"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "backend"
-    reviewers:
-      - "sangabattula"
-    commit-message:
-      prefix: "deps(backend)"
-
-  # Frontend npm dependencies
-  - package-ecosystem: "npm"
-    directory: "/frontend"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "frontend"
-    reviewers:
-      - "sangabattula"
-    commit-message:
-      prefix: "deps(frontend)"
-
-  # GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "ci"
-    commit-message:
-      prefix: "deps(ci)"
+updates: []

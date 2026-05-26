@@ -1,0 +1,52 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AuditGraph — Deploy to QA
+#
+# Manual deployment only (workflow_dispatch).
+# Promote after successful DEV deployment and QA sign-off.
+#
+# Prerequisites: Configure GitHub Environment "qa" with required secrets
+# and update the env vars below with QA-specific resource names.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "Deploy — QA"
+
+on:
+  workflow_dispatch:
+
+env:
+  RG: eus2-ag-nonprod-rg
+  ACR: auditgraphcr
+  ACR_SERVER: auditgraphcr.azurecr.io
+  CAE: qa-cae-ext
+  API_APP: auditgraph-api-qa
+  CLIENT_APP: auditgraph-app-qa
+  ADMIN_APP: auditgraph-admin-qa
+
+  # ──────────────────────────────────────────────────────
+  # Required GitHub Actions secrets (GitHub Environment: qa):
+  #   AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_SUBSCRIPTION_ID / AZURE_TENANT_ID
+  #   QA_DB_USER / QA_DB_PASSWORD / QA_DB_ADMIN_USER / QA_DB_ADMIN_PASSWORD
+  #   QA_JWT_SECRET / QA_ADMIN_JWT_SECRET / QA_CLIENT_JWT_SECRET
+  #   QA_ADMIN_PASSWORD / QA_AZURE_DIRECTORY_ID / QA_AZURE_CLIENT_ID / QA_AZURE_CLIENT_SECRET
+  # ──────────────────────────────────────────────────────
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: qa
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QA deployment placeholder
+        run: |
+          echo "═══════════════════════════════════════════════"
+          echo "QA deployment workflow"
+          echo "═══════════════════════════════════════════════"
+          echo ""
+          echo "This workflow will deploy to the QA environment."
+          echo "Infrastructure not yet provisioned."
+          echo ""
+          echo "To activate: replace this step with build + deploy"
+          echo "jobs from deploy-dev.yml, updated with QA env vars."
+          echo ""
+          echo "::notice::QA environment not yet provisioned. Configure infrastructure and update this workflow."
