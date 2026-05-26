@@ -4669,24 +4669,37 @@ def create_app():
     # Ensure default admin user and compliance frameworks on first startup
     db = Database()
     try:
-        db.ensure_default_admin()
-        db.seed_local_admin()  # admin user — runs for local + dev
-        db.seed_compliance_frameworks()
-        db.seed_compliance_root_causes()
-        db._migrate_compliance_controls_v2()
-        db._migrate_compliance_v3()
-        db.deduplicate_auto_groups()
+        for _boot_label, _boot_fn in [
+            ('ensure_default_admin', db.ensure_default_admin),
+            ('seed_local_admin', db.seed_local_admin),
+            ('seed_compliance_frameworks', db.seed_compliance_frameworks),
+            ('seed_compliance_root_causes', db.seed_compliance_root_causes),
+            ('migrate_compliance_controls_v2', db._migrate_compliance_controls_v2),
+            ('migrate_compliance_v3', db._migrate_compliance_v3),
+            ('deduplicate_auto_groups', db.deduplicate_auto_groups),
+            ('ensure_platform_ops_tables', db._ensure_platform_ops_tables),
+            ('seed_dev_tenant', db.seed_dev_tenant),
+            ('seed_demo_tenant', db.seed_demo_tenant),
+        ]:
+            try:
+                _boot_fn()
+            except Exception as _boot_err:
+                logger.warning("Bootstrap skipped (%s): %s", _boot_label, _boot_err)
+                try:
+                    db._rollback()
+                except Exception:
+                    pass
 
         # Migration 025: Tenant index coverage — create missing org_id indexes
-        if db.migrate_025_tenant_indexes():
-            logger.info("Migration 025_tenant_indexes applied")
-
-        # Phase 8: Ensure platform operations tables
-        db._ensure_platform_ops_tables()
-
-        # Seed tenants: AzureCredits org + azadmin (local/dev), Demo org + demo users (all)
-        db.seed_dev_tenant()
-        db.seed_demo_tenant()
+        try:
+            if db.migrate_025_tenant_indexes():
+                logger.info("Migration 025_tenant_indexes applied")
+        except Exception as _m025_err:
+            logger.warning("Bootstrap skipped (migrate_025_tenant_indexes): %s", _m025_err)
+            try:
+                db._rollback()
+            except Exception:
+                pass
 
     finally:
         db.close()
