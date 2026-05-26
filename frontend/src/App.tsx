@@ -64,8 +64,10 @@ import SecurityFindings from './pages/SecurityFindings';
 import GraphFindings from './pages/GraphFindings';
 import SecurityCommandCenter from './pages/SecurityCommandCenter';
 import IdentityGraph from './pages/IdentityGraph';
+import IdentityExplorer from './pages/IdentityExplorer';
 import IdentityExposures from './pages/IdentityExposures';
 import PrivilegeDrift from './pages/PrivilegeDrift';
+import DriftAnalysis from './pages/DriftAnalysis';
 import AttackSimulator from './pages/AttackSimulator';
 import AttackPaths from './pages/AttackPaths';
 import AttackPathDetailPage from './pages/AttackPathDetail';
@@ -82,8 +84,9 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
 import Sidebar from './components/layout/Sidebar';
 import TopBar from './components/layout/TopBar';
+import { TrialBanner } from './components/layout/TrialBanner';
 import CopilotPanel from './components/CopilotPanel';
-import DemoBanner from './components/DemoBanner';
+
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { OrganizationProvider, useOrganization } from './contexts/TenantContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
@@ -123,6 +126,8 @@ function AppContent() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [orgStage, setTenantStage] = useState<string>('active');
+  const [tenantPlan, setTenantPlan] = useState<string>('');
+  const [trialExpiresAt, setTrialExpiresAt] = useState<string | null>(null);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -161,8 +166,9 @@ function AppContent() {
     Promise.all([
       fetch('/api/organization/stage').then(r => r.ok ? r.json().catch(() => null) : null),
       fetch('/api/discovery/status').then(r => r.ok ? r.json().catch(() => null) : null),
+      fetch('/api/tenant/config').then(r => r.ok ? r.json().catch(() => null) : null),
     ])
-      .then(([stageData, discData]) => {
+      .then(([stageData, discData, configData]) => {
         const stage = stageData?.stage || 'active';
         const hasSnapshot = discData?.has_snapshot || false;
         // If discovery data exists, unlock the dashboard regardless of onboarding stage
@@ -170,6 +176,11 @@ function AppContent() {
           setTenantStage('active');
         } else {
           setTenantStage(stage);
+        }
+        // Trial/plan info for expiry banner
+        if (configData) {
+          setTenantPlan(configData.plan || '');
+          setTrialExpiresAt(configData.trial_expires_at || null);
         }
       })
       .catch(() => {});
@@ -231,7 +242,7 @@ function AppContent() {
       <Routes>
         {/* Login route - no nav bar */}
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
-        <Route path="/signup" element={user ? <Navigate to="/onboarding" replace /> : <Signup />} />
+        <Route path="/signup" element={user ? <Navigate to="/onboarding" replace state={{ fromSignup: true }} /> : <Signup />} />
 
         {/* Phase 84: Password reset routes - public, no nav bar */}
         <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -270,7 +281,6 @@ function AppContent() {
         {/* All other routes - with sidebar + topbar, protected */}
         <Route path="/*" element={
           <ProtectedRoute>
-            <DemoBanner />
             <div className="min-h-screen" style={{ backgroundColor: 'var(--bg-surface)' }}>
               {/* Top Bar */}
               <TopBar onSearchOpen={() => setSearchOpen(true)} onCopilotOpen={() => openCopilot()} />
@@ -283,6 +293,9 @@ function AppContent() {
 
               {/* AI Security Copilot Panel (Phase 79 + Investigation Enhancement) */}
               <CopilotPanel open={copilotState.open} onClose={closeCopilot} />
+
+              {/* Trial Expiry Banner */}
+              <TrialBanner plan={tenantPlan} trialExpiresAt={trialExpiresAt} />
 
               {/* Page Content */}
               <main className="min-h-screen w-full overflow-x-hidden" style={{ paddingLeft: 'var(--sidebar-width, 220px)', paddingTop: 'var(--header-height, 56px)' }}>
@@ -303,28 +316,31 @@ function AppContent() {
                   <Route path="/command-center" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><SecurityCommandCenter /></ErrorBoundary>} />
                   {/* SecurityDashboard removed — consolidated into Executive Posture + Command Center */}
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
-                  <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
-                  <Route path="/identity-exposures" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExposures /></ErrorBoundary>} />
-                  <Route path="/privilege-drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PrivilegeDrift /></ErrorBoundary>} />
+                  <Route path="/identity-explorer" element={<Navigate to="/identity-explorer/humans" replace />} />
+                  <Route path="/identity-explorer/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExplorer /></ErrorBoundary>} />
+                  <Route path="/identity-graph" element={<Navigate to="/identity-explorer/graph" replace />} />
+                  <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
+                  <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
+                  <Route path="/privilege-drift" element={<Navigate to="/drift-analysis" replace />} />
                   <Route path="/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPaths /></ErrorBoundary>} />
                   <Route path="/attack-paths/:pathId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPathDetailPage /></ErrorBoundary>} />
                   <Route path="/remediation-queue" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationQueue /></ErrorBoundary>} />
                   <Route path="/remediation-queue/:itemId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationDetailPage /></ErrorBoundary>} />
                   <Route path="/attack-simulator" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackSimulator /></ErrorBoundary>} />
-                  <Route path="/identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Identities /></ErrorBoundary>} />
+                  <Route path="/identities" element={<Navigate to="/identity-explorer/all" replace />} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-                  <Route path="/ai-agents" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAgents /></ErrorBoundary>} />
+                  <Route path="/ai-agents" element={<Navigate to="/identity-explorer/ai-agents" replace />} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
                   <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />
-                  <Route path="/drift" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftHistory /></ErrorBoundary>} />
+                  <Route path="/drift" element={<Navigate to="/drift-analysis" replace />} />
                   <Route path="/exports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Exports /></ErrorBoundary>} />
                   <Route path="/access-reviews" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AccessReviews /></ErrorBoundary>} />
                   <Route path="/role-mining" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RoleMining /></ErrorBoundary>} />
                   <Route path="/groups" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGroups /></ErrorBoundary>} />
                   <Route path="/identity-correlation" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityCorrelation /></ErrorBoundary>} />
-                  <Route path="/service-accounts" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ServiceAccountGovernance /></ErrorBoundary>} />
+                  <Route path="/service-accounts" element={<Navigate to="/identity-explorer/privileged" replace />} />
                   <Route path="/workload-identities" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentities /></ErrorBoundary>} />
                   <Route path="/workload-identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><WorkloadIdentityDetail /></ErrorBoundary>} />
                   <Route path="/spns" element={<Navigate to="/workload-identities?type=spn" replace />} />

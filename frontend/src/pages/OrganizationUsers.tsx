@@ -118,7 +118,7 @@ export default function OrganizationUsers() {
 
   const handleInvite = async () => {
     setInviteError(null);
-    if (!inviteEmail || !inviteEmail.includes('@')) {
+    if (!inviteEmail || !/^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(inviteEmail.trim())) {
       setInviteError('Please enter a valid email address');
       return;
     }

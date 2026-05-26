@@ -11,12 +11,15 @@ import Sparkline from '../components/Sparkline';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { deriveIdentityState } from '../constants/identityState';
+import { normalizeScore } from '../utils/identityRiskScore';
 import { formatRelativeDate, lastSeenColor, SOURCE_LABELS, enrichIpLabel } from '../constants/activitySignals';
 import { downloadCSV, downloadJSON, exportFilename, IDENTITY_CSV_COLUMNS, buildExportMeta } from '../utils/exportUtils';
 import { MultiSelectFilter, type SelectOption } from '../components/ui/MultiSelectFilter';
 import { maskCredential } from '../utils/maskCredential';
 import { STATUS_BADGE, type IdentityStatus } from '../utils/resolveStatus';
 import IdentityDrawer from '../components/IdentityDrawer';
+import FilterableColumnHeader, { type FilterOption } from '../components/identity/FilterableColumnHeader';
+import ActiveFilterChips from '../components/identity/ActiveFilterChips';
 import ExposureGraph from '../components/graph/ExposureGraph';
 import { OrphanBadgeCompact } from '../components/lineage';
 import LineageDetailPanel from '../components/LineageDetailPanel';
@@ -160,6 +163,20 @@ interface IdentityRow {
   // Federated credential classification
   federated_workload_type?: string | null;
   federated_workload_name?: string | null;
+  has_federated_credentials?: boolean;
+  federated_issuer_types?: string[];
+  // NHI enrichment (AG-159)
+  secret_expiry_earliest?: string | null;
+  secret_expiry_status?: string | null;
+  federated_cred_count?: number;
+  owner_resolved?: string | null;
+  // Humans enrichment (AG-160)
+  mfa_status?: string | null;
+  mfa_methods?: string[];
+  department?: string | null;
+  manager_id?: string | null;
+  job_title?: string | null;
+  upn?: string | null;
   // Dependency impact
   dependency_impact?: string | null;
   // Observed usage tracking
@@ -172,6 +189,7 @@ interface IdentityRow {
   lifecycle_state?: string | null;
   governance_state?: string | null;
   privilege_level?: string | null;
+  access_tier?: 'control_plane' | 'data_plane';
   // Canonical identity state fields (from build_identity_state)
   activity_label?: string | null;
   activity_detail?: string | null;
@@ -395,18 +413,18 @@ function DormantBadge({ status }: { status: DormantStatus }) {
 }
 
 const CATEGORY_BADGE_COLORS: Record<string, string> = {
-  service_principal: 'bg-purple-50 text-purple-700',
-  managed_identity_system: 'bg-cyan-50 text-cyan-700',
-  managed_identity_user: 'bg-teal-50 text-teal-700',
-  human_user: 'bg-indigo-50 text-indigo-700',
-  guest: 'bg-pink-50 text-pink-700',
+  service_principal: 'badge-type-purple',
+  managed_identity_system: 'badge-type-cyan',
+  managed_identity_user: 'badge-type-teal',
+  human_user: 'badge-type-indigo',
+  guest: 'badge-type-pink',
 };
 
 function CategoryBadge({ category, cloud }: { category?: IdentityCategory; cloud?: string }) {
-  const color = CATEGORY_BADGE_COLORS[category || ''] || 'bg-gray-50 text-gray-600';
+  const color = CATEGORY_BADGE_COLORS[category || ''] || 'badge-type-indigo';
   const cloudLabels = cloud && CATEGORY_LABELS_MULTI[cloud.toLowerCase()];
   const label = (cloudLabels && cloudLabels[category || '']) || getCategoryShortLabel(category);
-  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${color}`}>{label}</span>;
+  return <span className={color}>{label}</span>;
 }
 
 function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
@@ -416,14 +434,14 @@ function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
 
 function LifecycleLabel({ state }: { state?: string | null }) {
   const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Provisioned') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Provisioned;
-  const colorMap: Record<string, string> = {
-    Provisioned: 'var(--accent-primary, #60a5fa)',
-    Active: 'var(--accent-success, #4ade80)',
-    Dormant: 'var(--accent-warning, #fbbf24)',
-    Disabled: 'var(--text-tertiary, #9ca3af)',
-  };
+  const isDisabled = state === 'Disabled';
   return (
-    <span style={{ fontSize: '11px', color: colorMap[state || 'Provisioned'] ?? colorMap.Provisioned, opacity: 0.75, fontWeight: 400 }} title={cfg.tooltip}>
+    <span style={{
+      fontSize: '11px',
+      color: isDisabled ? 'var(--text-tertiary, #6b7280)' : 'var(--text-secondary, #9ca3af)',
+      fontWeight: isDisabled ? 500 : 400,
+      opacity: isDisabled ? 0.7 : 0.85,
+    }} title={cfg.tooltip}>
       {cfg.label}
     </span>
   );
@@ -432,19 +450,32 @@ function LifecycleLabel({ state }: { state?: string | null }) {
 function GovernanceBadge({ state }: { state?: string | null }) {
   const key = (state || 'Governed') as GovernanceState;
   const cfg = GOVERNANCE_STATE_DISPLAY[key] || GOVERNANCE_STATE_DISPLAY.Governed;
-  const cssClass = key === 'Policy Violation' ? 'badge-governance-policy-violation'
-    : key === 'Ungoverned' ? 'badge-governance-ungoverned'
-    : key === 'Orphaned' ? 'badge-governance-orphaned'
-    : 'badge-governance-governed';
-  return <span className={cssClass} title={cfg.tooltip}>{cfg.label}</span>;
+  const dotColor: Record<string, string> = {
+    'Policy Violation': '#f87171',
+    'Ungoverned': '#f87171',
+    'Orphaned': '#fbbf24',
+    'Governed': '#6ee7b7',
+  };
+  return (
+    <span style={{ fontSize: '11px', color: 'var(--text-secondary, #9ca3af)', fontWeight: 400, display: 'inline-flex', alignItems: 'center', gap: '4px' }} title={cfg.tooltip}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: dotColor[key] || '#6ee7b7', flexShrink: 0 }} />
+      {cfg.label}
+    </span>
+  );
 }
 
 function PrivilegeLevelBadge({ level }: { level?: string | null }) {
   const key = (level || 'Standard') as PrivilegeLevel;
   const cfg = PRIVILEGE_LEVEL_DISPLAY[key] || PRIVILEGE_LEVEL_DISPLAY.Standard;
-  if (key === 'Highly Privileged') return <span className="badge-privilege-high" title={cfg.tooltip}>{cfg.label}</span>;
-  if (key === 'Privileged') return <span className="badge-privilege-med" title={cfg.tooltip}>{cfg.label}</span>;
-  return <span style={{ color: 'var(--text-tertiary, #9ca3af)', fontSize: '11px' }}>Standard</span>;
+  return (
+    <span style={{
+      fontSize: '11px',
+      color: 'var(--text-secondary, #9ca3af)',
+      fontWeight: key === 'Highly Privileged' ? 600 : 400,
+    }} title={cfg.tooltip}>
+      {cfg.label}
+    </span>
+  );
 }
 
 function ScopeBadge({ scope, cloud }: { scope?: EffectiveScope; cloud?: string }) {
@@ -471,9 +502,19 @@ function TypeLabel({ type }: { type?: string }) {
   return <span className="text-[11px] text-gray-600">{labels[t] || type || '—'}</span>;
 }
 
+// ─── Tab scope definitions ─────────────────────────────────────────
+
+export type TabScope = 'humans' | 'nhi' | 'all';
+
+const TAB_SCOPE_CATEGORIES: Record<TabScope, IdentityCategory[] | null> = {
+  humans: ['human_user', 'guest'],
+  nhi: ['service_principal', 'managed_identity_system', 'managed_identity_user'],
+  all: null, // no pre-filter
+};
+
 // ─── Main component ────────────────────────────────────────────────
 
-export default function IdentitiesPage() {
+export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabScope?: TabScope }) {
   const { selectedConnectionId, connectionParam, withConnection } = useConnection();
   const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -485,6 +526,7 @@ export default function IdentitiesPage() {
   const [categoryFilter, setCategoryFilter] = useState<IdentityCategory | 'all'>('all');
   const [multiCategoryFilter, setMultiCategoryFilter] = useState<string[]>([]);
   const [ownerFilter, setOwnerFilter] = useState<'all' | 'unowned'>('all');
+  const [tabSubPill, setTabSubPill] = useState<string>('all');
   const [activityFilter, setActivityFilter] = useState<'all' | 'dormant' | 'dormant_strict'>('all');
   const [tierFilter, setTierFilter] = useState<number[] | 'all'>('all');
   const [credentialFilter, setCredentialFilter] = useState<'all' | 'expired' | 'expiring_soon' | 'valid' | 'none'>('all');
@@ -508,19 +550,23 @@ export default function IdentitiesPage() {
   const [contributingPillar, setContributingPillar] = useState<string | null>(null);
   const [agirsFactor, setAgirsFactor] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
+  const [logIndependentChipDismissed, setLogIndependentChipDismissed] = useState(false);
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
-    orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number;
+    orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
   } | null>(null);
+  // AG-162: Column-level filters (field → selected values)
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
+
   // AI Agent Governance filter state (additive, gated by feature flag)
   const agentFilterEnabled = useFeatureFlag('ai_agent_governance');
   const [agentFilter, setAgentFilter] = useState(false);              // filter active
   const [agentCount, setAgentCount] = useState(0);                    // badge count
-  const [allGroups, setAllGroups] = useState<{id: number; name: string; color: string; group_type: string; member_count: number}[]>([]);
+  const [allGroups, setAllGroups] = useState<{id: number | string; name: string; color: string; group_type: string; member_count: number}[]>([]);
   const [groupMemberIds, setGroupMemberIds] = useState<Set<string> | null>(null);
   const [sortField, setSortField] = useState<SortField>('recommended_action');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -565,7 +611,7 @@ export default function IdentitiesPage() {
   const [scopeSummary, setScopeSummary] = useState<{ activated: number; discovered: number; tenant_name: string } | null>(null);
 
   // Phase 7: Snapshot selector state
-  const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number }[]>([]);
+  const [snapshots, setSnapshots] = useState<{ id: number; status: string; completed_at: string | null; total_identities: number; component_status?: Record<string, string> }[]>([]);
 
   const { addToast } = useToast();
   const { user, isAdmin, activeOrgId, activeOrgName } = useAuth();
@@ -714,7 +760,7 @@ export default function IdentitiesPage() {
     // AGIRS factor banners
     const AGIRS_BANNER: Record<string, string> = {
       h1_ghost: 'HIRI — Ghost Humans: disabled/deleted accounts with active role assignments',
-      h2_dormant_priv: 'HIRI — Dormant Privileged: stale/never-used humans with privileged roles',
+      h2_dormant_priv: 'HIRI — Dormant Privileged: stale/no-activity humans with privileged roles',
       h3_over_priv: 'HIRI — Over-Privileged: humans with risk score \u226570 or T0 tier',
       h4_ext_guest: 'HIRI — Privileged Guests: external guests with privileged role assignments',
       n1_orphaned: 'NHIRI — Orphaned: non-human identities with no assigned owner',
@@ -725,9 +771,9 @@ export default function IdentitiesPage() {
     if (agirsParam && AGIRS_BANNER[agirsParam]) {
       setContextBanner(AGIRS_BANNER[agirsParam]);
     } else if (activityParamForBanner === 'dormant_strict' && params.get('privileged') === 'true') {
-      setContextBanner('Dormant accounts with active privileged roles (stale or never used)');
+      setContextBanner('Dormant accounts with active privileged roles (stale or no activity observed)');
     } else if (activityParamForBanner === 'dormant_strict') {
-      setContextBanner('Dormant identities (stale or never used — excludes idle)');
+      setContextBanner('Dormant identities (stale or no activity observed — excludes idle)');
     } else if (statusParamForBanner?.toLowerCase() === 'disabled' && hasRolesParam === 'true') {
       setContextBanner('Ghost identities — disabled in Entra ID but retain active RBAC roles');
     } else if (catParamForBanner === 'guest' && hasRolesParam === 'true') {
@@ -778,6 +824,8 @@ export default function IdentitiesPage() {
             created_datetime: raw.created_datetime || null,
             last_seen_auth: raw.last_sign_in || null,
             last_sign_in: raw.last_sign_in || null,
+            last_activity_date: raw.last_activity_date || null,
+            last_activity_source: raw.last_activity_source || null,
             credential_count: raw.credential_count ?? 0,
             credential_status: raw.credential_risk || raw.credential_status || null,
             owner_display_name: raw.owner_display_name || null,
@@ -804,6 +852,17 @@ export default function IdentitiesPage() {
             recommended_action: raw.recommended_action || null,
             federated_workload_type: raw.federated_workload_type || null,
             federated_workload_name: raw.federated_workload_name || null,
+            has_federated_credentials: raw.has_federated_credentials ?? false,
+            federated_issuer_types: raw.federated_issuer_types || [],
+            secret_expiry_earliest: raw.secret_expiry_earliest || null,
+            secret_expiry_status: raw.secret_expiry_status || null,
+            federated_cred_count: raw.federated_cred_count ?? 0,
+            owner_resolved: raw.owner_resolved || null,
+            mfa_status: raw.mfa_status || null,
+            mfa_methods: raw.mfa_methods || [],
+            department: raw.department || null,
+            job_title: raw.job_title || null,
+            upn: raw.upn || null,
             dependency_impact: raw.dependency_impact || null,
             is_discovery_connector: raw.is_discovery_connector ?? false,
             app_registration_object_id: raw.app_registration_object_id || null,
@@ -820,6 +879,7 @@ export default function IdentitiesPage() {
             lifecycle_state: raw.lifecycle_state || null,
             governance_state: raw.governance_state || null,
             privilege_level: raw.privilege_level || null,
+            access_tier: raw.access_tier || 'control_plane',
             // Canonical identity state fields
             activity_label: raw.activity_label || null,
             activity_detail: raw.activity_detail || null,
@@ -864,6 +924,8 @@ export default function IdentitiesPage() {
           created_datetime: raw.created_datetime || null,
           last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
           last_sign_in: raw.last_sign_in || null,
+          last_activity_date: raw.last_activity_date || null,
+          last_activity_source: raw.last_activity_source || null,
           api_permission_count: raw.api_permission_count ?? 0,
           role_count: raw.role_count ?? 0,
           rbac_role_count: raw.rbac_role_count ?? 0,
@@ -925,6 +987,19 @@ export default function IdentitiesPage() {
           verdict_risk_summary: raw.verdict_risk_summary || [],
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
+          has_federated_credentials: raw.has_federated_credentials ?? false,
+          federated_issuer_types: raw.federated_issuer_types || [],
+          // NHI enrichment (AG-159)
+          secret_expiry_earliest: raw.secret_expiry_earliest || null,
+          secret_expiry_status: raw.secret_expiry_status || null,
+          federated_cred_count: raw.federated_cred_count ?? 0,
+          owner_resolved: raw.owner_resolved || null,
+          // Humans enrichment (AG-160)
+          mfa_status: raw.mfa_status || null,
+          mfa_methods: raw.mfa_methods || [],
+          department: raw.department || null,
+          job_title: raw.job_title || null,
+          upn: raw.upn || null,
           dependency_impact: raw.dependency_impact || null,
           observed_last_used: raw.observed_last_used || null,
           last_signin_at: raw.last_signin_at || null,
@@ -934,6 +1009,7 @@ export default function IdentitiesPage() {
           lifecycle_state: raw.lifecycle_state || null,
           governance_state: raw.governance_state || null,
           privilege_level: raw.privilege_level || null,
+          access_tier: raw.access_tier || 'control_plane',
           // Canonical identity state fields
           activity_label: raw.activity_label || null,
           activity_detail: raw.activity_detail || null,
@@ -1031,52 +1107,56 @@ export default function IdentitiesPage() {
       .catch(() => {});
   }, [agentFilterEnabled]);
 
-  // Load groups for filter (refetch on org/connection switch, deduplicate by name)
+  // Derive static category groups from loaded identities (5 fixed options)
   useEffect(() => {
-    setGroupFilter('all');
-    setMultiGroupFilter([]);
-    fetch(withConnection('/api/groups'))
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => {
-        const raw = d.groups || [];
-        // Deduplicate by group name — combine counts across subscriptions
-        const byName = new Map<string, { id: number; name: string; color: string; group_type: string; member_count: number }>();
-        for (const g of raw) {
-          const key = (g.name || g.display_name || '').toLowerCase();
-          if (byName.has(key)) {
-            const existing = byName.get(key)!;
-            existing.member_count = Math.max(existing.member_count, g.member_count || 0);
-          } else {
-            byName.set(key, { id: g.id, name: g.name || g.display_name, color: g.color || '', group_type: g.group_type || '', member_count: g.member_count || 0 });
-          }
-        }
-        setAllGroups(Array.from(byName.values()));
-      })
-      .catch(() => setAllGroups([]));
-  }, [activeOrgId, selectedConnectionId, withConnection]);
+    if (identities.length === 0) { setAllGroups([]); return; }
+    const counts = { guest: 0, human_user: 0, managed_identity: 0, service_principal: 0, nhi_other: 0 };
+    for (const i of identities) {
+      const cat = i.identity_category || '';
+      if (cat === 'guest') counts.guest++;
+      else if (cat === 'human_user') counts.human_user++;
+      else if (cat === 'managed_identity_system' || cat === 'managed_identity_user') counts.managed_identity++;
+      else if (cat === 'service_principal') counts.service_principal++;
+      else counts.nhi_other++;
+    }
+    setAllGroups([
+      { id: 'cat_guest', name: 'All Guest Users', color: '', group_type: 'auto', member_count: counts.guest },
+      { id: 'cat_human_user', name: 'All Human Users', color: '', group_type: 'auto', member_count: counts.human_user },
+      { id: 'cat_managed_identity', name: 'All Managed Identities', color: '', group_type: 'auto', member_count: counts.managed_identity },
+      { id: 'cat_service_principal', name: 'All Service Principals', color: '', group_type: 'auto', member_count: counts.service_principal },
+      { id: 'cat_nhi_other', name: 'All SPNs / Workloads', color: '', group_type: 'auto', member_count: counts.nhi_other },
+    ]);
+  }, [identities]);
 
   // Phase 7: Load snapshots for selector (refetch on org switch)
   useEffect(() => {
     fetch('/api/runs')
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => setSnapshots((d.runs || []).filter((r: any) => r.status === 'completed').slice(0, 10)))
+      .then(d => setSnapshots((d.runs || []).filter((r: any) => r.status === 'completed' || r.status === 'partial' || r.status === 'failed').slice(0, 10)))
       .catch(() => setSnapshots([]));
   }, [activeOrgId]);
 
-  // When group filter changes, fetch members (supports multi-group)
+  // When group filter changes, resolve members locally by identity_category
   useEffect(() => {
     const activeGroups = multiGroupFilter.length > 0 ? multiGroupFilter : (groupFilter !== 'all' ? [String(groupFilter)] : []);
     if (activeGroups.length === 0) { setGroupMemberIds(null); return; }
-    Promise.all(activeGroups.map(gid =>
-      fetch(`/api/groups/${gid}`)
-        .then(r => r.ok ? r.json() : Promise.reject())
-        .then(d => (d.members || []).map((m: any) => m.identity_id as string))
-        .catch(() => [] as string[])
-    )).then(results => {
-      const ids = new Set<string>(results.flat());
-      setGroupMemberIds(ids);
-    });
-  }, [groupFilter, multiGroupFilter]);
+    const catMap: Record<string, (cat: string) => boolean> = {
+      cat_guest: (c) => c === 'guest',
+      cat_human_user: (c) => c === 'human_user',
+      cat_managed_identity: (c) => c === 'managed_identity_system' || c === 'managed_identity_user',
+      cat_service_principal: (c) => c === 'service_principal',
+      cat_nhi_other: (c) => c !== 'guest' && c !== 'human_user' && c !== 'managed_identity_system' && c !== 'managed_identity_user' && c !== 'service_principal',
+    };
+    const ids = new Set<string>();
+    for (const i of identities) {
+      const cat = i.identity_category || '';
+      for (const gid of activeGroups) {
+        const matcher = catMap[gid];
+        if (matcher && matcher(cat)) { ids.add(i.identity_id); break; }
+      }
+    }
+    setGroupMemberIds(ids);
+  }, [groupFilter, multiGroupFilter, identities]);
 
   // Fetch query field definitions for advanced mode
   useEffect(() => {
@@ -1117,6 +1197,8 @@ export default function IdentitiesPage() {
           created_datetime: raw.created_datetime || null,
           last_seen_auth: raw.last_seen_auth || raw.last_sign_in || null,
           last_sign_in: raw.last_sign_in || null,
+          last_activity_date: raw.last_activity_date || null,
+          last_activity_source: raw.last_activity_source || null,
           api_permission_count: raw.api_permission_count ?? 0,
           role_count: raw.role_count ?? 0,
           rbac_role_count: raw.rbac_role_count ?? 0,
@@ -1169,12 +1251,24 @@ export default function IdentitiesPage() {
           recommended_action: raw.recommended_action || null,
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
+          has_federated_credentials: raw.has_federated_credentials ?? false,
+          federated_issuer_types: raw.federated_issuer_types || [],
+          secret_expiry_earliest: raw.secret_expiry_earliest || null,
+          secret_expiry_status: raw.secret_expiry_status || null,
+          federated_cred_count: raw.federated_cred_count ?? 0,
+          owner_resolved: raw.owner_resolved || null,
+          mfa_status: raw.mfa_status || null,
+          mfa_methods: raw.mfa_methods || [],
+          department: raw.department || null,
+          job_title: raw.job_title || null,
+          upn: raw.upn || null,
           dependency_impact: raw.dependency_impact || null,
           observed_last_used: raw.observed_last_used || null,
           // Three-dimension governance fields — SSOT from backend
           lifecycle_state: raw.lifecycle_state || null,
           governance_state: raw.governance_state || null,
           privilege_level: raw.privilege_level || null,
+          access_tier: raw.access_tier || 'control_plane',
           // Canonical identity state fields
           activity_label: raw.activity_label || null,
           activity_detail: raw.activity_detail || null,
@@ -1238,6 +1332,11 @@ export default function IdentitiesPage() {
     if (tierFilter !== 'all') f.privilege_tier = tierFilter.join(',');
     if (credentialFilter !== 'all') f.credential_status = credentialFilter;
     if (caFilter !== 'all') f.ca_coverage = caFilter;
+    // AG-162: column filters
+    const activeColFilters = Object.entries(columnFilters).filter(([, v]) => v.length > 0);
+    if (activeColFilters.length > 0) {
+      f.column_filters = Object.fromEntries(activeColFilters);
+    }
     return f;
   }
 
@@ -1303,6 +1402,8 @@ export default function IdentitiesPage() {
     }
     setCredentialFilter((f.credential_status as any) || 'all');
     setCaFilter((f.ca_coverage as any) || 'all');
+    // AG-162: restore column filters
+    setColumnFilters(f.column_filters && typeof f.column_filters === 'object' ? f.column_filters : {});
     if (view.sort_field) setSortField(view.sort_field as SortField);
     if (view.sort_direction) setSortDir(view.sort_direction as 'asc' | 'desc');
     setActiveViewId(view.id);
@@ -1467,9 +1568,33 @@ export default function IdentitiesPage() {
       if (activatedSubIds.size > 0) {
         result = result.filter(i => {
           const subId = i.primary_subscription_id || i.subscription_id;
-          return !subId || activatedSubIds.has(subId);
+          if (!subId) return true;
+          // subscription_id may be comma-separated for multi-sub discovery runs
+          return subId.split(',').some(s => activatedSubIds.has(s.trim()));
         });
       }
+    }
+
+    // Tab-scope pre-filter: restrict to tab's identity categories
+    const scopeCats = TAB_SCOPE_CATEGORIES[tabScope];
+    if (scopeCats) {
+      result = result.filter(i => scopeCats.includes(i.identity_category as IdentityCategory));
+    }
+
+    // Tab sub-pill filter (within-tab drill-down)
+    if (tabSubPill !== 'all') {
+      if (tabSubPill === 'members') result = result.filter(i => i.identity_category === 'human_user');
+      else if (tabSubPill === 'guests') result = result.filter(i => i.identity_category === 'guest');
+      else if (tabSubPill === 'stale') result = result.filter(i => {
+        const act = safeLower(i.activity_status);
+        return act === 'stale' || act === 'never_used';
+      });
+      else if (tabSubPill === 'no_mfa') result = result.filter(i => i.mfa_status === 'not_enrolled');
+      else if (tabSubPill === 'app_spn') result = result.filter(i => i.identity_category === 'service_principal');
+      else if (tabSubPill === 'sys_msi') result = result.filter(i => i.identity_category === 'managed_identity_system');
+      else if (tabSubPill === 'usr_msi') result = result.filter(i => i.identity_category === 'managed_identity_user');
+      else if (tabSubPill === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
+      else if (tabSubPill === 'orphaned') result = result.filter(i => i.recommended_action === 'ORPHANED' || i.governance_state === 'Orphaned');
     }
 
     const s = safeLower(search);
@@ -1487,9 +1612,16 @@ export default function IdentitiesPage() {
     }
     if (workloadFilter) result = result.filter(i => ['service_principal', 'managed_identity_system', 'managed_identity_user'].includes(i.identity_category || ''));
     if (multiSubscriptionFilter.length > 0) {
-      result = result.filter(i => multiSubscriptionFilter.includes(i.subscription_id || '') || multiSubscriptionFilter.includes(i.primary_subscription_id || ''));
+      result = result.filter(i => {
+        if (multiSubscriptionFilter.includes(i.primary_subscription_id || '')) return true;
+        const subs = (i.subscription_id || '').split(',').map(s => s.trim());
+        return subs.some(s => multiSubscriptionFilter.includes(s));
+      });
     } else if (subscriptionFilter !== 'all') {
-      result = result.filter(i => i.subscription_id === subscriptionFilter);
+      result = result.filter(i => {
+        const subs = (i.subscription_id || '').split(',').map(s => s.trim());
+        return subs.includes(subscriptionFilter) || i.primary_subscription_id === subscriptionFilter;
+      });
     }
     if (ownerFilter === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (activityFilter === 'dormant_strict') {
@@ -1552,6 +1684,22 @@ export default function IdentitiesPage() {
       (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
       && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
     );
+    if (signalChip === 'data_plane') result = result.filter(i => i.access_tier === 'data_plane');
+    // Tab-scoped KPI chip filters
+    if (signalChip === 'no_mfa') result = result.filter(i => i.mfa_status === 'not_enrolled');
+    if (signalChip === 'unknown_mfa') result = result.filter(i => !i.mfa_status || i.mfa_status === 'unknown');
+    if (signalChip === 'stale') result = result.filter(i => { const a = safeLower(i.activity_status); return a === 'stale' || a === 'never_used'; });
+    if (signalChip === 'joiners') result = result.filter(i => i.created_datetime && new Date(i.created_datetime).getTime() >= Date.now() - 30 * 24 * 60 * 60 * 1000);
+    if (signalChip === 'secrets') result = result.filter(i => i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000));
+    if (signalChip === 'no_owner') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
+    if (signalChip === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
+
+    // AG-162: Column-level filters
+    for (const [field, vals] of Object.entries(columnFilters)) {
+      if (vals.length > 0) {
+        result = result.filter(i => vals.includes(getFieldValue(i, field)));
+      }
+    }
 
     result.sort((a, b) => {
       let aVal: any, bVal: any;
@@ -1634,8 +1782,100 @@ export default function IdentitiesPage() {
       if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
+    if (result.length === 0 && identities.length > 0) {
+    }
     return result;
-  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, sortField, sortDir]);
+  }, [queryMode, queryResults, identities, search, cloudFilter, riskFilter, multiRiskFilter, categoryFilter, multiCategoryFilter, workloadFilter, subscriptionFilter, multiSubscriptionFilter, allSubscriptions, ownerFilter, activityFilter, tierFilter, credentialFilter, caFilter, groupFilter, multiGroupFilter, groupMemberIds, statusFilter, multiStatusFilter, hasRolesFilter, signalChip, columnFilters, sortField, sortDir, tabScope, tabSubPill]);
+
+  // AG-162: Compute filter options with live counts from visible data
+  const columnFilterOptions = useMemo(() => {
+    const countValues = (field: string): FilterOption[] => {
+      const counts: Record<string, number> = {};
+      for (const row of filtered) {
+        const v = getFieldValue(row, field);
+        counts[v] = (counts[v] || 0) + 1;
+      }
+      // Also include values from current active filter that may have been filtered out (show as 0)
+      for (const v of (columnFilters[field] || [])) {
+        if (!(v in counts)) counts[v] = 0;
+      }
+      return Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([value, count]) => ({ value, label: value, count }));
+    };
+
+    // Compute for filterable columns relevant to current tab
+    const opts: Record<string, FilterOption[]> = {
+      risk_level: countValues('risk_level'),
+      status: countValues('status'),
+      lifecycle_state: countValues('lifecycle_state'),
+      governance_state: countValues('governance_state'),
+      privilege_level: countValues('privilege_level'),
+      cloud: countValues('cloud'),
+    };
+    if (tabScope === 'humans') {
+      opts.mfa_status = countValues('mfa_status');
+    }
+    if (tabScope === 'nhi') {
+      opts.secret_expiry_status = countValues('secret_expiry_status');
+    }
+    return opts;
+  }, [filtered, columnFilters, tabScope]);
+
+  // AG-162: Column filter handler
+  function handleColumnFilter(field: string, values: string[]) {
+    setColumnFilters(prev => {
+      const next = { ...prev };
+      if (values.length === 0) delete next[field];
+      else next[field] = values;
+      return next;
+    });
+  }
+
+  function removeColumnFilterValue(field: string, value: string) {
+    setColumnFilters(prev => {
+      const vals = (prev[field] || []).filter(v => v !== value);
+      const next = { ...prev };
+      if (vals.length === 0) delete next[field];
+      else next[field] = vals;
+      return next;
+    });
+  }
+
+  function clearAllColumnFilters() {
+    setColumnFilters({});
+  }
+
+  // AG-162: Extract filterable field value from an identity row
+  function getFieldValue(row: IdentityRow, field: string): string {
+    switch (field) {
+      case 'risk_level': return safeLower(row.risk_level) || 'unknown';
+      case 'status': return row.enabled === false ? 'disabled' : 'active';
+      case 'mfa_status': return row.mfa_status || 'unknown';
+      case 'secret_expiry_status': return row.secret_expiry_status || 'no_secret';
+      case 'lifecycle_state': return row.lifecycle_state || 'Provisioned';
+      case 'governance_state': return row.governance_state || 'Governed';
+      case 'privilege_level': return row.privilege_level || 'Standard';
+      case 'activity_status': return safeLower(row.activity_status) || 'unknown';
+      case 'cloud': return safeLower(row.cloud) || 'azure';
+      case 'identity_category': return row.identity_category || 'unknown';
+      default: return String((row as any)[field] ?? 'unknown');
+    }
+  }
+
+  // AG-162: Human-readable labels for column filter chip display
+  const COLUMN_FIELD_LABELS: Record<string, string> = {
+    risk_level: 'Risk',
+    status: 'Status',
+    mfa_status: 'MFA',
+    secret_expiry_status: 'Secret Expiry',
+    lifecycle_state: 'Lifecycle',
+    governance_state: 'Governance',
+    privilege_level: 'Privilege',
+    activity_status: 'Activity',
+    cloud: 'Cloud',
+    identity_category: 'Type',
+  };
 
   function handleSort(field: SortField) {
     if (field === sortField) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -1693,11 +1933,11 @@ export default function IdentitiesPage() {
   // Export CSV
   function exportToCSV() {
     if (selectedIds.size === 0) { alert('Select identities first.'); return; }
-    const headers = ['Display Name','Identity ID','Type','Category','Subscription Name','Subscription ID','Cloud','Risk','Score','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
+    const headers = ['Display Name','Identity ID','Type','Category','Subscription Name','Subscription ID','Cloud','Risk','Score (0-10)','Tier','Entra Roles','RBAC Roles','Graph Perms','Secret/Expiry','Created','Last Used','Dormant','Compliance','Owner'];
     const rows = selectedIdentities.map(i => [
       i.display_name, i.identity_id, i.identity_type || '', getCategoryLabel(i.identity_category),
       i.subscription_name || '', i.subscription_id || '',
-      i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), i.risk_score ?? 0,
+      i.cloud || 'azure', (i.risk_level || 'unknown').toUpperCase(), normalizeScore(i.risk_score, 10).toFixed(1),
       `T${getPrivilegeTier(i)}`, i.entra_role_count ?? 0, i.rbac_role_count ?? 0,
       i.api_permission_count ?? 0, i.credential_expiration || '', i.created_datetime || '',
       i.last_seen_auth || 'N/A', getDormantStatus(i), getComplianceRelevance(i), i.owner_display_name || '',
@@ -1726,7 +1966,7 @@ export default function IdentitiesPage() {
       body: selectedIdentities.map(i => [
         i.display_name.substring(0, 28) + (i.display_name.length > 28 ? '..' : ''),
         getCategoryLabel(i.identity_category), (i.risk_level || '?').toUpperCase(),
-        String(i.risk_score ?? 0), `T${getPrivilegeTier(i)}`,
+        normalizeScore(i.risk_score, 10).toFixed(1), `T${getPrivilegeTier(i)}`,
         String((i.entra_role_count ?? 0) + (i.rbac_role_count ?? 0)),
         String(i.api_permission_count ?? 0), getDormantStatus(i).toUpperCase(),
         getComplianceRelevance(i),
@@ -1763,7 +2003,7 @@ export default function IdentitiesPage() {
     addToast(`Exported ${filtered.length} identities as JSON`, 'success');
   }
 
-  const colSpan = 12; // checkbox + Identity + Type + Cloud + Status + Lifecycle + Governance + Risk + Privilege + Effective Access + Last Seen + Lineage
+  const colSpan = tabScope === 'nhi' ? 15 : tabScope === 'humans' ? 15 : 12; // +3 for NHI/Humans tab columns
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1921,6 +2161,74 @@ export default function IdentitiesPage() {
           <span>Schema: <span className="font-mono font-semibold text-gray-700">v1.0</span></span>
         </div>
       )}
+
+      {/* Failed Scan Error Banner */}
+      {snapshots.length > 0 && snapshots[0]?.status === 'failed' && (() => {
+        const cs = snapshots[0].component_status;
+        return (
+          <div className="px-3 py-2 rounded-lg border border-red-300 bg-red-50 text-red-800 text-xs mb-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd"/></svg>
+                <span className="font-semibold">Scan Failed</span>
+                <span>Critical components could not be collected. Data below may be from a previous scan.</span>
+              </div>
+              <button
+                onClick={() => fetch('/api/runs/trigger', { method: 'POST' }).then(() => window.location.reload())}
+                className="ml-3 px-2.5 py-1 bg-red-700 text-white rounded text-xs font-medium hover:bg-red-800 transition flex-shrink-0"
+              >
+                Retry Scan
+              </button>
+            </div>
+            {cs && Object.keys(cs).length > 0 && (
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 ml-6">
+                {Object.entries(cs).map(([name, status]) => (
+                  <span key={name} className="inline-flex items-center gap-1">
+                    <span className="capitalize">{name.replace(/_/g, ' ')}:</span>
+                    <span className={status === 'success' ? 'text-green-700 font-medium' : 'text-red-700 font-medium'}>
+                      {status === 'success' ? 'OK' : status.toUpperCase()} {status === 'success' ? '\u2705' : '\u274C'}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Partial Scan Warning Banner */}
+      {snapshots.length > 0 && snapshots[0]?.status === 'partial' && (() => {
+        const cs = snapshots[0].component_status;
+        return (
+          <div className="px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-xs mb-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/></svg>
+                <span className="font-semibold">Partial Scan</span>
+                <span>Some data could not be collected. Results may not reflect your full environment.</span>
+              </div>
+              <button
+                onClick={() => fetch('/api/runs/trigger', { method: 'POST' }).then(() => window.location.reload())}
+                className="ml-3 px-2.5 py-1 bg-amber-700 text-white rounded text-xs font-medium hover:bg-amber-800 transition flex-shrink-0"
+              >
+                Retry Scan
+              </button>
+            </div>
+            {cs && Object.keys(cs).length > 0 && (
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 ml-6">
+                {Object.entries(cs).map(([name, status]) => (
+                  <span key={name} className="inline-flex items-center gap-1">
+                    <span className="capitalize">{name.replace(/_/g, ' ')}:</span>
+                    <span className={status === 'success' ? 'text-green-700 font-medium' : 'text-amber-700 font-medium'}>
+                      {status === 'success' ? 'OK' : status.toUpperCase()} {status === 'success' ? '\u2705' : '\u26A0\uFE0F'}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Saved Views Bar */}
       {savedViews.length > 0 || !loading ? (
@@ -2269,7 +2577,7 @@ export default function IdentitiesPage() {
             )}
             {agentFilter && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
-                AI Agents
+                AI Identities
                 <button onClick={() => { setAgentFilter(false); }} className="hover:text-violet-600">&times;</button>
               </span>
             )}
@@ -2307,146 +2615,168 @@ export default function IdentitiesPage() {
         </div>
       )}
 
-      {/* Category Filter Tabs */}
-      {!loading && identities.length > 0 && (
-        <div className="flex items-center gap-1.5 mb-3">
-          {[
-            { key: 'all', label: 'All Identities', multi: [] as string[] },
-            { key: 'human_user', label: 'Human Users', multi: [] as string[] },
-            { key: 'service_principal', label: 'Service Principals', multi: [] as string[] },
-            { key: 'managed_ids', label: 'Managed IDs', multi: [...MANAGED_IDENTITY_GROUP] },
-            { key: 'guest', label: 'Guest', multi: [] as string[] },
-          ].map(tab => {
-            const isActive = !workloadFilter && (
-              tab.multi.length > 0
-                ? tab.multi.every(c => multiCategoryFilter.includes(c)) && multiCategoryFilter.length === tab.multi.length
-                : multiCategoryFilter.length === 0 && categoryFilter === tab.key
-            );
-            return (
-              <button
-                key={tab.key}
-                onClick={() => {
-                  setWorkloadFilter(false);
-                  clearActiveView();
-                  if (tab.multi.length > 0) {
-                    setMultiCategoryFilter(tab.multi);
-                    setCategoryFilter('all');
-                    navigate('/identities?identity_category=managed_identity', { replace: true });
-                  } else {
-                    setMultiCategoryFilter([]);
-                    setCategoryFilter(tab.key as any);
-                    if (tab.key === 'all') {
-                      navigate('/identities', { replace: true });
+      {/* Tab-scoped sub-pills */}
+      {!loading && identities.length > 0 && (() => {
+        // Define sub-pills per tab scope
+        const subPills: { key: string; label: string }[] =
+          tabScope === 'humans' ? [
+            { key: 'all', label: 'All Humans' },
+            { key: 'members', label: 'Members' },
+            { key: 'guests', label: 'Guests' },
+            { key: 'stale', label: 'Stale > 90d' },
+            { key: 'no_mfa', label: 'No MFA' },
+          ] : tabScope === 'nhi' ? [
+            { key: 'all', label: 'All NHI' },
+            { key: 'app_spn', label: 'App SPNs' },
+            { key: 'sys_msi', label: 'System MSI' },
+            { key: 'usr_msi', label: 'User MSI' },
+            { key: 'federated', label: 'Federated' },
+            { key: 'orphaned', label: 'Orphaned' },
+          ] : [
+            // "All Identities" tab — original category pills
+            { key: 'all', label: 'All Identities' },
+            { key: 'human_user', label: 'Human Users' },
+            { key: 'service_principal', label: 'Service Principals' },
+            { key: 'managed_ids', label: 'Managed IDs' },
+            { key: 'guest', label: 'Guest' },
+          ];
+
+        return (
+          <div className="flex items-center gap-1.5 mb-3">
+            {subPills.map(pill => {
+              // For "all" tab, use legacy category filter; for scoped tabs, use tabSubPill
+              const isActive = tabScope === 'all'
+                ? (pill.key === 'all' ? categoryFilter === 'all' && !workloadFilter :
+                   pill.key === 'managed_ids' ? multiCategoryFilter.length === 2 && multiCategoryFilter.includes('managed_identity_system') :
+                   categoryFilter === pill.key && !workloadFilter)
+                : tabSubPill === pill.key;
+
+              return (
+                <button
+                  key={pill.key}
+                  onClick={() => {
+                    if (tabScope === 'all') {
+                      // Legacy behavior for All Identities tab
+                      setWorkloadFilter(false);
+                      clearActiveView();
+                      if (pill.key === 'managed_ids') {
+                        setMultiCategoryFilter([...MANAGED_IDENTITY_GROUP]);
+                        setCategoryFilter('all');
+                      } else {
+                        setMultiCategoryFilter([]);
+                        setCategoryFilter(pill.key as any);
+                      }
                     } else {
-                      navigate(`/identities?identity_category=${tab.key}`, { replace: true });
+                      setTabSubPill(tabSubPill === pill.key ? 'all' : pill.key);
                     }
-                  }
+                  }}
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                    isActive
+                      ? 'bg-violet-600 text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {pill.label}
+                </button>
+              );
+            })}
+            {/* NHI + Orphaned pills only on All tab */}
+            {tabScope === 'all' && (<>
+              <button
+                onClick={() => {
+                  setWorkloadFilter(!workloadFilter);
+                  if (!workloadFilter) { setCategoryFilter('all'); setMultiCategoryFilter([]); clearActiveView(); }
                 }}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                  isActive
-                    ? 'bg-violet-600 text-white shadow-sm'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  workloadFilter ? 'bg-violet-600 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {tab.label}
+                NHI (All Non-Human)
               </button>
-            );
-          })}
-          <button
-            onClick={() => {
-              setWorkloadFilter(true);
-              setCategoryFilter('all');
-              setMultiCategoryFilter([]);
-              clearActiveView();
-              navigate('/identities?workload=true', { replace: true });
-            }}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-              workloadFilter
-                ? 'bg-violet-600 text-white shadow-sm'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            NHI (All Non-Human)
-          </button>
-          {/* AI Agent Governance: filter pill (only when feature flag enabled) */}
-          {agentFilterEnabled && (
-            <button
-              onClick={() => {
-                setAgentFilter(!agentFilter);
-                if (!agentFilter) {
-                  setWorkloadFilter(false);
-                  setCategoryFilter('all');
-                  setMultiCategoryFilter([]);
-                  clearActiveView();
-                }
-              }}
-              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
-                agentFilter
-                  ? 'bg-violet-600 text-white shadow-sm'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              AI Agents
-              {agentCount > 0 && (
-                <span className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${
-                  agentFilter ? 'bg-white/20 text-white' : 'bg-violet-100 text-violet-700'
-                }`}>
-                  {agentCount}
-                </span>
-              )}
-            </button>
-          )}
-          <button
-            onClick={() => setOrphanFilter(!orphanFilter)}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
-              orphanFilter
-                ? 'bg-amber-500 text-white shadow-sm'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Orphaned
-          </button>
-        </div>
-      )}
+              <button
+                onClick={() => setOrphanFilter(!orphanFilter)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
+                  orphanFilter ? 'bg-amber-500 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                Orphaned
+              </button>
+            </>)}
+          </div>
+        );
+      })()}
 
-      {/* Three-dimension stat cards + signal filter chips — reads from backend governance_summary (SSOT) */}
+      {/* Tab-scoped KPI tiles */}
       {queryMode === 'simple' && (() => {
-        // Use backend-computed governance_summary when available; fallback to local recomputation
+        // Compute tab-scoped counts from filtered array (already tab-scoped by pre-filter)
+        const privilegedCount = filtered.filter(i => i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged').length;
         const ungovernedCount = governanceSummary?.ungoverned ?? filtered.filter(i => i.governance_state === 'Ungoverned').length;
         const orphanedCount = governanceSummary?.orphaned ?? filtered.filter(i => i.governance_state === 'Orphaned').length;
-        const privilegedCount = governanceSummary?.privileged ?? filtered.filter(i => i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged').length;
-        const privUngovernedCount = governanceSummary?.combo ?? filtered.filter(i =>
-          (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
-          && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
-        ).length;
+
+        // Define KPI tiles per tab
+        type KpiTile = { key: string; label: string; count: number; color: string };
+        let tiles: KpiTile[];
+
+        if (tabScope === 'humans') {
+          // AG-161: Only count verified not_enrolled, not unknown/null
+          const noMfaCount = filtered.filter(i => i.mfa_status === 'not_enrolled').length;
+          const unknownMfaCount = filtered.filter(i => !i.mfa_status || i.mfa_status === 'unknown').length;
+          const staleCount = filtered.filter(i => {
+            const act = safeLower(i.activity_status);
+            return act === 'stale' || act === 'never_used';
+          }).length;
+          const joinersCount = filtered.filter(i => {
+            if (!i.created_datetime) return false;
+            const created = new Date(i.created_datetime).getTime();
+            return created >= Date.now() - 30 * 24 * 60 * 60 * 1000;
+          }).length;
+          tiles = [
+            { key: 'no_mfa', label: 'No MFA', count: noMfaCount, color: '#ef4444' },
+            ...(unknownMfaCount > 0 ? [{ key: 'unknown_mfa', label: 'Unknown MFA', count: unknownMfaCount, color: '#9ca3af' }] : []),
+            { key: 'stale', label: 'Stale', count: staleCount, color: '#f59e0b' },
+            { key: 'ungoverned', label: 'Ungoverned', count: ungovernedCount, color: '#f87171' },
+            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
+            { key: 'joiners', label: 'Joiners 30d', count: joinersCount, color: '#34d399' },
+          ];
+        } else if (tabScope === 'nhi') {
+          const noOwnerCount = filtered.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0).length;
+          const federatedCount = filtered.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated).length;
+          const secretsUrgentCount = filtered.filter(i =>
+            i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000)
+          ).length;
+          tiles = [
+            { key: 'secrets', label: 'Secrets < 30d', count: secretsUrgentCount, color: '#ef4444' },
+            { key: 'orphaned', label: 'Orphaned', count: orphanedCount, color: '#fbbf24' },
+            { key: 'no_owner', label: 'No Owner', count: noOwnerCount, color: '#fb923c' },
+            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
+            { key: 'federated', label: 'Federated', count: federatedCount, color: '#34d399' },
+          ];
+        } else {
+          // All Identities — original KPI tiles
+          const privUngovernedCount = governanceSummary?.combo ?? filtered.filter(i =>
+            (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
+            && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged')
+          ).length;
+          tiles = [
+            { key: 'ungoverned', label: 'Ungoverned', count: ungovernedCount, color: '#f87171' },
+            { key: 'orphaned', label: 'Orphaned', count: orphanedCount, color: '#fbbf24' },
+            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
+            { key: 'priv_ungoverned', label: 'Priv + Ungoverned', count: privUngovernedCount, color: '#fca5a5' },
+            { key: 'data_plane', label: 'Data Plane', count: governanceSummary?.data_plane ?? filtered.filter(i => i.access_tier === 'data_plane').length, color: '#38bdf8' },
+          ];
+        }
+
         return (
           <div className="mb-3 space-y-2">
-            {/* Stat cards */}
-            <div className="grid grid-cols-4 gap-2">
-              <button onClick={() => setSignalChip(s => s === 'ungoverned' ? null : 'ungoverned')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'ungoverned' ? 'chip-active-ungov' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Ungoverned</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'ungoverned' ? '#f87171' : '#f87171' }}>{ungovernedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'orphaned' ? null : 'orphaned')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'orphaned' ? 'chip-active-orphan' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Orphaned</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'orphaned' ? '#fbbf24' : '#fbbf24' }}>{orphanedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'privileged' ? null : 'privileged')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'privileged' ? 'chip-active-priv' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Privileged</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'privileged' ? '#a78bfa' : '#a78bfa' }}>{privilegedCount}</div>
-              </button>
-              <button onClick={() => setSignalChip(s => s === 'priv_ungoverned' ? null : 'priv_ungoverned')}
-                className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === 'priv_ungoverned' ? 'chip-active-combo' : ''}`}>
-                <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>Priv + Ungoverned</div>
-                <div className="text-lg font-bold" style={{ color: signalChip === 'priv_ungoverned' ? '#fca5a5' : '#fca5a5' }}>{privUngovernedCount}</div>
-              </button>
+            <div className={`grid gap-2 ${tiles.length <= 5 ? 'grid-cols-5' : 'grid-cols-6'}`}>
+              {tiles.map(tile => (
+                <button key={tile.key}
+                  onClick={() => setSignalChip(s => s === tile.key ? null : tile.key as any)}
+                  className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === tile.key ? 'ring-2 ring-white/30' : ''}`}>
+                  <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>{tile.label}</div>
+                  <div className="text-lg font-bold" style={{ color: tile.color }}>{tile.count}</div>
+                </button>
+              ))}
             </div>
           </div>
         );
@@ -2459,6 +2789,27 @@ export default function IdentitiesPage() {
           onNodeClick={(id) => setDrawerIdentityId(id)}
         />
       )}
+
+      {/* Log-independent positioning chip — Humans tab only */}
+      {tabScope === 'humans' && !logIndependentChipDismissed && viewMode === 'table' && (
+        <div className="flex justify-end mb-1.5">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-[11px] text-gray-500 border border-gray-200/60 bg-transparent">
+            <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            MFA, Department, Job Title collected log-independently · no Entra P2
+            <button onClick={() => setLogIndependentChipDismissed(true)} className="ml-1 text-gray-400 hover:text-gray-600">&times;</button>
+          </span>
+        </div>
+      )}
+
+      {/* AG-162: Active column filter chips */}
+      <ActiveFilterChips
+        columnFilters={columnFilters}
+        fieldLabels={COLUMN_FIELD_LABELS}
+        onRemove={removeColumnFilterValue}
+        onClearAll={clearAllColumnFilters}
+      />
 
       {/* Table */}
       {viewMode === 'table' && (<>
@@ -2473,25 +2824,76 @@ export default function IdentitiesPage() {
                 </th>
                 <SortHeader label="Identity" field="display_name" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Type" field="identity_category" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Cloud" field="cloud" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortHeader label="Status" field="status" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
-                  onClick={() => handleSort('lifecycle_state')}>
-                  Lifecycle{' '}
-                  <span className="text-gray-400 normal-case" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>
-                  {sortField === 'lifecycle_state' && <span className="ml-0.5">{sortDir === 'asc' ? '▲' : '▼'}</span>}
-                </th>
-                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap cursor-pointer select-none"
-                  onClick={() => handleSort('governance_state')}>
-                  Governance{' '}
-                  <span className="text-gray-400 normal-case" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>
-                  {sortField === 'governance_state' && <span className="ml-0.5">{sortDir === 'asc' ? '▲' : '▼'}</span>}
-                </th>
-                <SortHeader label="Risk" field="risk_level" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
-                <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">
-                  Privilege{' '}
-                  <span className="text-gray-400 normal-case" title="Highly Privileged (T0) > Privileged (T1) > Standard (T2/T3) — derived from privilege tier">&#9432;</span>
-                </th>
+                {tabScope === 'nhi' && <>
+                  <FilterableColumnHeader
+                    label="Secret Expiry" field="secret_expiry_status"
+                    options={columnFilterOptions.secret_expiry_status}
+                    currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                    activeValues={columnFilters.secret_expiry_status || []}
+                    onFilterApply={handleColumnFilter}
+                  />
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Owner</th>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Federated</th>
+                </>}
+                {tabScope === 'humans' && <>
+                  <FilterableColumnHeader
+                    label="MFA" field="mfa_status"
+                    options={columnFilterOptions.mfa_status}
+                    currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                    activeValues={columnFilters.mfa_status || []}
+                    onFilterApply={handleColumnFilter}
+                    title="Collected from Microsoft Graph authentication methods — no Entra P2 required."
+                    labelSuffix={<span className="text-gray-400 normal-case cursor-help ml-0.5">&#9432;</span>}
+                  />
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Department</th>
+                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Job Title</th>
+                </>}
+                <FilterableColumnHeader
+                  label="Cloud" field="cloud"
+                  options={columnFilterOptions.cloud}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.cloud || []}
+                  onFilterApply={handleColumnFilter}
+                />
+                <FilterableColumnHeader
+                  label="Status" field="status"
+                  options={columnFilterOptions.status}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.status || []}
+                  onFilterApply={handleColumnFilter}
+                />
+                <FilterableColumnHeader
+                  label="Lifecycle" field="lifecycle_state"
+                  options={columnFilterOptions.lifecycle_state}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.lifecycle_state || []}
+                  onFilterApply={handleColumnFilter}
+                  labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>}
+                />
+                <FilterableColumnHeader
+                  label="Governance" field="governance_state"
+                  options={columnFilterOptions.governance_state}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.governance_state || []}
+                  onFilterApply={handleColumnFilter}
+                  labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>}
+                />
+                <FilterableColumnHeader
+                  label="Risk" field="risk_level"
+                  options={columnFilterOptions.risk_level}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.risk_level || []}
+                  onFilterApply={handleColumnFilter}
+                />
+                <FilterableColumnHeader
+                  label="Privilege" field="privilege_level"
+                  options={columnFilterOptions.privilege_level}
+                  sortable={false}
+                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
+                  activeValues={columnFilters.privilege_level || []}
+                  onFilterApply={handleColumnFilter}
+                  title="Highly Privileged (T0) > Privileged (T1) > Standard (T2/T3) — derived from privilege tier"
+                />
                 <SortHeader label="Effective Access" field="privilege_tier" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <SortHeader label="Last Seen" field="last_activity_date" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 <th className="px-2 py-2.5 text-xs whitespace-nowrap">Lineage</th>
@@ -2539,6 +2941,62 @@ export default function IdentitiesPage() {
 
                     {/* Type (Category) */}
                     <td className="px-2 py-2"><CategoryBadge category={i.identity_category} cloud={i.cloud} /></td>
+
+                    {/* NHI-specific columns (AG-159) */}
+                    {tabScope === 'nhi' && <>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {i.secret_expiry_status === 'expired' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">Expired</span>
+                        ) : i.secret_expiry_status === 'expiring_soon' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700">{'< 30d'}</span>
+                        ) : i.secret_expiry_status === 'expiring_90d' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-50 text-yellow-700">{'< 90d'}</span>
+                        ) : i.secret_expiry_status === 'valid' ? (
+                          <span className="text-[10px] text-green-600">Valid</span>
+                        ) : (
+                          <span className="text-[10px] text-gray-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 max-w-[150px]">
+                        <span className="text-[11px] text-gray-700 truncate block" title={i.owner_resolved || i.owner_display_name || ''}>
+                          {i.owner_resolved || i.owner_display_name || <span className="text-gray-400">No owner</span>}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {(i.federated_cred_count ?? 0) > 0 ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700">
+                            {i.federated_cred_count} FIC
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-gray-400">—</span>
+                        )}
+                      </td>
+                    </>}
+
+                    {/* Humans-specific columns (AG-160 / AG-161 four-state MFA) */}
+                    {tabScope === 'humans' && <>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {i.mfa_status === 'enrolled' || (i.mfa_status === 'registered' && i.ca_mfa_enforced) ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 text-green-700" title="MFA enrolled">MFA ✓</span>
+                        ) : i.mfa_status === 'not_enrolled' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700" title="Verified: no MFA methods registered">No MFA</span>
+                        ) : i.mfa_status === 'conditional' ? (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700" title="CA policy enforces MFA">Conditional</span>
+                        ) : (
+                          <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500" title="MFA status not yet collected">Unknown</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 max-w-[120px]">
+                        <span className="text-[11px] text-gray-700 truncate block" title={i.department || ''}>
+                          {i.department || <span className="text-gray-400">—</span>}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 max-w-[120px]">
+                        <span className="text-[11px] text-gray-700 truncate block" title={i.job_title || ''}>
+                          {i.job_title || <span className="text-gray-400">—</span>}
+                        </span>
+                      </td>
+                    </>}
 
                     {/* Cloud */}
                     <td className="px-2 py-2"><CloudBadge cloud={i.cloud} /></td>
@@ -2650,6 +3108,18 @@ export default function IdentitiesPage() {
                             : i.federated_workload_name || i.federated_workload_type;
                           return lineageBtn(
                             <span className="text-[10px] text-purple-700 font-semibold truncate group-hover:text-purple-800">{fedLabel}</span>,
+                            'Federated Credential'
+                          );
+                        }
+
+                        // P2.5: AG-148 — has_federated_credentials but no federated_workload_type
+                        if (i.has_federated_credentials && !i.federated_workload_type) {
+                          const issuerTypes = i.federated_issuer_types || [];
+                          const label = Array.isArray(issuerTypes) && issuerTypes.length > 0
+                            ? issuerTypes[0].replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())
+                            : 'External OIDC';
+                          return lineageBtn(
+                            <span className="text-[10px] text-purple-700 font-semibold truncate group-hover:text-purple-800">{label}</span>,
                             'Federated Credential'
                           );
                         }

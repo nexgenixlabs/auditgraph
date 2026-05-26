@@ -18,31 +18,39 @@ interface EntraGroup {
 
 interface EntraGroupsTabProps {
   identityId: string;
-  riskLevel?: string; // kept for backwards compat, no longer used for finding logic
+  riskLevel?: string;
 }
 
 export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
   const { withConnection } = useConnection();
   const [groups, setGroups] = useState<EntraGroup[]>([]);
+  const [totalGroups, setTotalGroups] = useState(0);
+  const [withAzureAccess, setWithAzureAccess] = useState(0);
   const [directPrivWithoutGroups, setDirectPrivWithoutGroups] = useState(false);
   const [privilegeLevel, setPrivilegeLevel] = useState('unknown');
+  const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
       setLoading(true);
       try {
-        const res = await fetch(withConnection(`/api/identities/${identityId}/entra-groups`));
+        const accessOnly = !showAll;
+        const res = await fetch(withConnection(
+          `/api/identities/${identityId}/entra-groups?access_only=${accessOnly}`
+        ));
         if (res.ok) {
           const data = await res.json();
           setGroups(data.groups || []);
+          setTotalGroups(data.total_groups || 0);
+          setWithAzureAccess(data.with_azure_access || 0);
           setDirectPrivWithoutGroups(!!data.direct_privilege_without_groups);
           setPrivilegeLevel(data.privilege_level || 'unknown');
         }
       } catch { /* ignore */ }
       setLoading(false);
     })();
-  }, [identityId, withConnection]);
+  }, [identityId, withConnection, showAll]);
 
   if (loading) {
     return (
@@ -54,7 +62,9 @@ export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
     );
   }
 
-  if (groups.length === 0) {
+  const directoryOnlyCount = totalGroups - withAzureAccess;
+
+  if (groups.length === 0 && !showAll) {
     return (
       <div className="py-8 space-y-4 px-4">
         {directPrivWithoutGroups && (
@@ -73,33 +83,57 @@ export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
           <p className="text-gray-500">
             {privilegeLevel === 'highly_privileged'
               ? 'This identity is not a member of any Entra security groups'
-              : 'This identity has no Entra security group memberships. No security implication \u2014 standard privilege only.'}
+              : 'No groups with Azure role assignments found.'}
           </p>
+          {directoryOnlyCount > 0 && (
+            <button
+              onClick={() => setShowAll(true)}
+              className="mt-2 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              View all {directoryOnlyCount} directory groups &rarr;
+            </button>
+          )}
         </div>
       </div>
     );
   }
 
+  const nestedCount = groups.filter(g => g.is_nested).length;
+
   return (
     <div className="space-y-4 p-4">
       {/* Summary */}
-      <div className="grid grid-cols-3 gap-3">
-        <div className="rounded-lg border border-gray-200 p-3 bg-gray-50">
-          <div className="text-2xl font-bold font-mono text-gray-900">{groups.length}</div>
-          <div className="text-xs text-gray-500">Total Groups</div>
+      <div className="flex items-end gap-3">
+        <div className="rounded-lg border border-purple-200 p-3 bg-purple-50 min-w-[140px]">
+          <div className="text-2xl font-bold font-mono text-purple-700">{withAzureAccess}</div>
+          <div className="text-xs text-gray-500">Groups with Azure access</div>
         </div>
-        <div className="rounded-lg border border-red-200 p-3 bg-red-50">
-          <div className="text-2xl font-bold font-mono text-red-600">
-            {groups.filter(g => g.is_privileged).length}
-          </div>
-          <div className="text-xs text-gray-500">Privileged Groups</div>
-        </div>
-        <div className="rounded-lg border border-blue-200 p-3 bg-blue-50">
-          <div className="text-2xl font-bold font-mono text-blue-600">
-            {groups.filter(g => g.is_nested).length}
-          </div>
+        <div className="rounded-lg border border-blue-200 p-3 bg-blue-50 min-w-[140px]">
+          <div className="text-2xl font-bold font-mono text-blue-600">{nestedCount}</div>
           <div className="text-xs text-gray-500">Nested Memberships</div>
         </div>
+        {directoryOnlyCount > 0 && (
+          <div className="pb-1">
+            <span className="text-xs text-gray-400">
+              {directoryOnlyCount} additional directory group{directoryOnlyCount !== 1 ? 's' : ''} (no Azure roles)
+            </span>
+            {!showAll ? (
+              <button
+                onClick={() => setShowAll(true)}
+                className="ml-2 text-xs text-blue-500 hover:text-blue-700 hover:underline"
+              >
+                View all &rarr;
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowAll(false)}
+                className="ml-2 text-xs text-blue-500 hover:text-blue-700 hover:underline"
+              >
+                Show access-relevant only
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Group Table */}
@@ -113,7 +147,7 @@ export function EntraGroupsTab({ identityId }: EntraGroupsTabProps) {
             </tr>
           </thead>
           <tbody>
-            {groups.map((g, i) => (
+            {groups.map((g) => (
               <tr key={`${g.group_id}-${g.depth}`} className="border-b hover:bg-gray-50">
                 <td className="px-4 py-3">
                   <div className="font-medium text-gray-900">{g.display_name || 'Unnamed Group'}</div>

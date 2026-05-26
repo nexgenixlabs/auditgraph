@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 
 
 interface NavItem {
@@ -103,10 +104,14 @@ const connectorsIcon = icon('M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 0
 // Billing
 const billingIcon = icon('M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z');
 
+// Feature gate: set to true to reveal pages that require data to be populated
+const SHOW_ADVANCED_FEATURES = false;
+
 // ── Sidebar Component ─────────────────────────────────────────────
 
 const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
   const location = useLocation();
+  const { isDemo } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [openSubGroups, setOpenSubGroups] = useState<Record<string, boolean>>({});
   const navGroups: NavGroup[] = useMemo(() => {
@@ -118,19 +123,17 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
           { to: '/command-center', label: 'Command Center', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
+          { to: '/drift-analysis', label: 'Drift Analysis', icon: driftIcon },
           { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
           { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
-          { to: '/drift', label: 'Drift History', icon: driftIcon },
+          { to: '/remediation-queue', label: 'Change Control Center', icon: remediationIcon },
         ],
       },
       {
         label: 'Identity Truth',
         color: '#8b5cf6',
         items: [
-          { to: '/identities', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/ai-agents', label: 'AI Agents', icon: agentBotIcon },
-          { to: '/service-accounts', label: 'Privileged Access', icon: governanceIcon },
-          { to: '/identity-graph', label: 'Identity Graph', icon: accessGraphIcon },
+          { to: '/identity-explorer', label: 'Identity Explorer', icon: identityIcon },
         ],
       },
       {
@@ -138,8 +141,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         color: '#0891b2',
         items: [
           { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
-          { to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon },
-          { to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon },
+          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon }] : []),
+          ...(SHOW_ADVANCED_FEATURES ? [{ to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon }] : []),
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
         ],
       },
@@ -147,11 +150,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Attack Surface',
         color: '#dc2626',
         items: [
-          { to: '/identity-exposures', label: 'Identity Exposures', icon: attackIcon },
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
-          { to: '/remediation-queue', label: 'Remediation Queue', icon: remediationIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
-          { to: '/privilege-drift', label: 'Privilege Drift', icon: driftIcon },
         ],
       },
       {
@@ -320,8 +320,13 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         })}
       </nav>
 
-      {/* Bottom section: Collapse toggle */}
+      {/* Bottom section: Demo badge + Collapse toggle */}
       <div className="border-t px-2 py-2 space-y-1" style={{ borderColor: 'var(--border-subtle)' }}>
+        {isDemo && !collapsed && (
+          <div className="px-3 pb-0.5" style={{ fontSize: 11, color: 'var(--color-text-tertiary, #6b7280)' }}>
+            Demo mode &middot; simulated data
+          </div>
+        )}
         {/* Collapse toggle */}
         <button
           onClick={() => setCollapsed(!collapsed)}

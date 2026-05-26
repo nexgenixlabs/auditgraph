@@ -539,7 +539,7 @@ function PostureGauge({ score }: { score: number }) {
         <text x="80" y="95" textAnchor="middle" fill={color} fontSize="12" fontWeight="500">{label}</text>
       </svg>
       <div className="text-xs text-slate-500 mt-1 flex items-center justify-center gap-1">
-        Identity Health Score
+        Identity Hygiene Score
         <span className="relative group">
           <span className="text-slate-600 cursor-help" style={{ fontSize: 14 }}>{'\u24D8'}</span>
           <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block bg-slate-900 border border-slate-700 text-slate-200 text-[10px] px-2.5 py-1.5 rounded-md max-w-[280px] whitespace-normal z-50 shadow-lg pointer-events-none leading-relaxed">
@@ -547,7 +547,7 @@ function PostureGauge({ score }: { score: number }) {
           </span>
         </span>
       </div>
-      <div className="text-[10px] text-slate-600 -mt-0.5">% of identities with no critical or high findings</div>
+      <div className="text-[10px] text-slate-600 -mt-0.5">% of identities with clean governance status</div>
     </div>
   );
 }

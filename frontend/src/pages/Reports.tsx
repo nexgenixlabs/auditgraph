@@ -46,6 +46,8 @@ export default function Reports() {
     if (t && TYPE_MAP[t]) setReportType(TYPE_MAP[t]);
   }, [searchParams]);
 
+  const [hasRuns, setHasRuns] = useState<boolean | null>(null);
+
   // Fetch latest snapshot for metadata display
   useEffect(() => {
     fetch(withConnection('/api/runs'))
@@ -54,9 +56,12 @@ export default function Reports() {
         const runs = data?.runs || data || [];
         if (Array.isArray(runs) && runs.length > 0) {
           setLatestSnapshot({ id: runs[0].id, completed_at: runs[0].completed_at });
+          setHasRuns(true);
+        } else {
+          setHasRuns(false);
         }
       })
-      .catch(() => {});
+      .catch(() => { setHasRuns(false); });
   }, [withConnection]);
 
   async function handleGenerate() {
@@ -79,7 +84,10 @@ export default function Reports() {
       setLastGenerated(new Date().toLocaleString());
       addToast('Report generated successfully', 'success');
     } catch (e: any) {
-      const msg = e?.message || 'Failed to generate report';
+      const raw = e?.message || '';
+      const msg = raw.includes('404')
+        ? 'No identity data available for report generation. Run a discovery scan first.'
+        : raw || 'Report generation failed. Ensure a discovery scan has completed successfully.';
       setError(msg);
       addToast(msg, 'error');
     } finally {
@@ -248,6 +256,13 @@ export default function Reports() {
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
             {error}
+          </div>
+        )}
+
+        {hasRuns === false && !error && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+            No reports generated yet. Reports will appear here after your first discovery scan completes.{' '}
+            <a href="/settings" className="font-medium text-amber-900 underline hover:no-underline">Go to Discovery</a>
           </div>
         )}
       </div>

@@ -56,8 +56,35 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+# Suppress noisy Azure SDK HTTP-level logging.  Each ARM/Graph request
+# logs full request + response at INFO → thousands of lines for large
+# tenants.  WARNING level still surfaces auth failures and throttling.
+logging.getLogger('azure.core.pipeline.policies.http_logging_policy').setLevel(logging.WARNING)
+logging.getLogger('azure.identity').setLevel(logging.WARNING)
+logging.getLogger('azure.mgmt.authorization').setLevel(logging.WARNING)
+logging.getLogger('azure.mgmt.resource').setLevel(logging.WARNING)
+
+import asyncio
+import aiohttp
+
 from azure.identity import ClientSecretCredential
 from msgraph import GraphServiceClient
+
+# ── Graph API timeout constants ──────────────────────────────────────
+# Prevents hung network calls from blocking the discovery thread forever.
+# total=60s  — absolute max per HTTP request (connect + transfer)
+# connect=10s — TCP handshake timeout
+# sock_read=30s — max silence between bytes from the server
+GRAPH_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=10, sock_read=30)
+
+# Timeout for individual Graph SDK (Kiota) calls, in seconds.
+GRAPH_SDK_TIMEOUT = 30
+
+# Timeout kwargs for synchronous ARM management clients (SubscriptionClient,
+# AuthorizationManagementClient, ResourceGraphClient, KeyVaultManagementClient).
+# Azure SDK defaults are 300s each — far too long for a single API call.
+ARM_TIMEOUT_KWARGS = {'connection_timeout': 10, 'read_timeout': 30}
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.resource import SubscriptionClient
 try:
@@ -96,6 +123,61 @@ _CONFIRMED_WORKLOAD_TYPES: frozenset[str] = frozenset({
     'lab_workload',
 })
 
+# ── AG-148: Federated Identity Credential Issuer Type Mapping ─────────
+# Maps known issuer URL patterns to issuer_type labels.
+# Order matters: first match wins.
+FEDERATED_ISSUER_MAP = [
+    ('token.actions.githubusercontent.com', 'github_actions'),
+    ('app.terraform.io', 'terraform_cloud'),
+    ('vstoken.dev.azure.com', 'azure_devops'),
+    ('accounts.google.com', 'google_workload'),
+    ('sts.windows.net', 'azure_managed_identity'),
+    ('login.microsoftonline.com', 'azure_managed_identity'),
+]
+
+def _classify_issuer_type(issuer: str) -> str:
+    """Classify a federated credential issuer URL into a known type."""
+    issuer_lower = (issuer or '').lower()
+    for pattern, issuer_type in FEDERATED_ISSUER_MAP:
+        if pattern in issuer_lower:
+            return issuer_type
+    return 'external_oidc'
+
+# ── Access Tier Classification Constants ─────────────────────────────
+# Control-plane role keywords (case-insensitive substring)
+_CONTROL_PLANE_KEYWORDS = frozenset({'owner', 'contributor', 'administrator', 'manager', 'operator'})
+
+# Data-plane-only roles (exact match, lowered)
+_DATA_PLANE_ROLES = frozenset({
+    'storage file data smb share reader',
+    'storage file data smb share contributor',
+    'storage file data smb share elevated contributor',
+    'storage file data privileged contributor',
+    'storage file data privileged reader',
+    'storage blob data reader',
+    'storage blob data contributor',
+    'storage blob data owner',
+    'storage queue data reader',
+    'storage queue data contributor',
+    'storage queue data message sender',
+    'storage queue data message processor',
+    'storage table data reader',
+    'storage table data contributor',
+    'key vault secrets user',
+    'key vault certificates user',
+    'key vault crypto user',
+    'key vault reader',
+    'virtual machine user login',
+    'desktop virtualization user',
+    'desktop virtualization session host operator',
+})
+
+# Scope types that indicate broad visibility → always control_plane
+_CONTROL_PLANE_SCOPES = frozenset({'subscription', 'management_group'})
+
+# PHI/PII indicators in resource/group names → upgrade to control_plane
+_SENSITIVE_DATA_INDICATORS = frozenset({'phi', 'pii', 'hipaa', 'health', 'patient', 'ssn', 'confidential'})
+
 
 def load_tenant_lab_patterns(db, tenant_id) -> tuple:
     """Load lab name patterns: tenant settings > platform_settings > empty tuple.
@@ -126,6 +208,14 @@ def load_tenant_lab_patterns(db, tenant_id) -> tuple:
     except Exception:
         pass  # fail open — never block discovery over config lookup failure
     return ()
+
+class ScanTimeoutError(Exception):
+    """Raised when a scan exceeds its time budget."""
+    pass
+
+
+MAX_SCAN_MINUTES = 45
+
 
 class AzureDiscoveryEngine:
     """
@@ -168,13 +258,27 @@ class AzureDiscoveryEngine:
         self.client_secret = client_secret
         self.db_org_id = db_org_id
         self.cloud_connection_id = cloud_connection_id
+        logger.info(
+            "AzureDiscovery initialized: org_id=%s connection_id=%s tenant=%s",
+            self.db_org_id, self.cloud_connection_id, self.azure_directory_id
+        )
         self.db = Database(organization_id=db_org_id)
+
+        # Concurrency control: max 20 concurrent Graph API calls
+        self._graph_semaphore = asyncio.Semaphore(20)
+        # Time budget tracking (set at scan start)
+        self._scan_start_time: float | None = None
 
         self.credential = ClientSecretCredential(
             tenant_id=azure_directory_id,
             client_id=client_id,
-            client_secret=client_secret
+            client_secret=client_secret,
+            connection_timeout=10,
+            read_timeout=30,
         )
+        # AG-116: zero after SDK credential init — prevent memory retention
+        self.client_secret = None
+        client_secret = None
 
         self.graph_client = GraphServiceClient(
             credentials=self.credential,
@@ -190,8 +294,10 @@ class AzureDiscoveryEngine:
 
         # Filter to only ACTIVATED (monitored) subscriptions — the user chose which
         # subscriptions to scan in the UI.  If no cloud_subscriptions rows exist yet
-        # (very first connection, before any sync), scan all native subscriptions so
-        # the initial sync can populate the registry.
+        # (very first connection), eagerly sync ALL discovered subscriptions to
+        # cloud_subscriptions so the UI can display them, then auto-activate the
+        # first one so the scan doesn't iterate all N subscriptions (which can
+        # take 76+ min for tenants with 10+ idle subs).
         monitored_ids = self._get_monitored_subscription_ids()
         if monitored_ids is not None:
             before = len(native_subs)
@@ -200,8 +306,42 @@ class AzureDiscoveryEngine:
             if skipped:
                 logger.info("Filtered to %s activated subscription(s), skipping %s inactive", len(self.subscriptions), skipped)
         else:
-            # No cloud_subscriptions rows yet — scan everything for initial sync
-            self.subscriptions = native_subs
+            # First scan — eagerly sync subscriptions to registry + auto-activate first
+            logger.info("First scan: syncing %s discovered subscription(s) to registry", len(native_subs))
+            first_activated = None
+            for idx, sub in enumerate(native_subs):
+                try:
+                    cursor = self.db.conn.cursor()
+                    # Auto-activate the first subscription so the initial scan is fast
+                    is_first = (idx == 0)
+                    cursor.execute("""
+                        INSERT INTO cloud_subscriptions
+                            (organization_id, cloud, account_id, account_name, status,
+                             cloud_connection_id, monitored)
+                        VALUES (%s, 'azure', %s, %s, %s, %s, %s)
+                        ON CONFLICT (cloud_connection_id, account_id) DO NOTHING
+                    """, (
+                        db_org_id, sub['id'], sub['name'],
+                        'active' if is_first else 'discovered',
+                        self.cloud_connection_id,
+                        is_first,
+                    ))
+                    self.db._commit()
+                    cursor.close()
+                    if is_first:
+                        first_activated = sub
+                except Exception as e:
+                    logger.warning("Early subscription sync failed for %s: %s", sub['name'], e)
+                    try:
+                        self.db._rollback()
+                    except Exception:
+                        pass
+            if first_activated:
+                self.subscriptions = [first_activated]
+                logger.info("Auto-activated first subscription: %s (%s)",
+                            first_activated['name'], first_activated['id'][:8])
+            else:
+                self.subscriptions = native_subs
 
         sub_names = [f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions]
         logger.info("Discovery Engine initialized for %s subscription(s): %s", len(self.subscriptions), ', '.join(sub_names) or 'none')
@@ -210,32 +350,108 @@ class AzureDiscoveryEngine:
         # Key: resource_spn_id, Value: dict mapping appRoleId -> role value
         self._resource_spn_cache: Dict[str, Dict[str, str]] = {}
 
-    def _update_job_progress(self, stage, progress, discovery_run_id=None):
-        """Report progress to snapshot_jobs. Non-fatal on failure.
+        # ── Pipeline health metrics counters ──
+        # Populated during discovery for pipeline_stage_metrics collection.
+        self._entra_roles_fetched: int = 0
+        self._entra_roles_matched: int = 0
+        self._entra_roles_saved: int = 0
+        self._entra_roles_failed: int = 0
+        self._role_assignments_fetched: int = 0
+        self._role_assignments_saved: int = 0
+        self._credentials_fetched: int = 0
+        self._credentials_saved: int = 0
+        self._app_registrations_fetched: int = 0
+        self._app_registrations_saved: int = 0
+        self._all_principal_count: int = 0
 
-        Uses _commit()/_rollback() to preserve RLS context after
-        transaction boundary changes.
+    def _check_time_budget(self, phase_name: str) -> bool:
+        """Check if the scan has exceeded its time budget.
+        Returns True if budget exceeded (caller should skip remaining phases).
         """
+        if self._scan_start_time is None:
+            return False
+        import time
+        elapsed_minutes = (time.monotonic() - self._scan_start_time) / 60
+        if elapsed_minutes > MAX_SCAN_MINUTES:
+            logger.error(
+                "[scan] TIME BUDGET EXCEEDED at phase '%s' after %.1fmin — "
+                "skipping remaining discovery phases org=%s",
+                phase_name, elapsed_minutes, self.db_org_id
+            )
+            return True
+        return False
+
+    def _update_job_progress(self, stage, progress, discovery_run_id=None):
+        """Report progress to snapshot_jobs with per-stage timing.
+
+        Tracks stage_timings JSONB: {stage: {started: epoch, elapsed: secs}}
+        and computes estimated_remaining_seconds from progress rate.
+        Non-fatal on failure.
+        """
+        import time as _t
         job_id = getattr(self, 'snapshot_job_id', None)
         if not job_id:
             return
+
+        # Track per-stage timing in memory
+        now = _t.monotonic()
+        if not hasattr(self, '_stage_timings'):
+            self._stage_timings = {}
+            self._stage_start_wall = {}
+        prev_stage = getattr(self, '_current_stage', None)
+        if prev_stage and prev_stage != stage and prev_stage in self._stage_timings:
+            # Close previous stage
+            self._stage_timings[prev_stage]['elapsed'] = round(
+                now - self._stage_timings[prev_stage]['_mono_start'], 1
+            )
+        if stage not in self._stage_timings:
+            self._stage_timings[stage] = {
+                'started': _t.time(),
+                '_mono_start': now,
+                'elapsed': 0,
+            }
+        self._current_stage = stage
+
+        # Build serializable timings dict (strip internal _mono_start)
+        timings_json = {
+            k: {'started': round(v['started'], 1), 'elapsed': round(v.get('elapsed', now - v['_mono_start']), 1)}
+            for k, v in self._stage_timings.items()
+        }
+
+        # ETA: estimated remaining seconds from progress rate
+        scan_start = self._scan_start_time or now
+        elapsed_total = max(now - scan_start, 1)
+        eta = None
+        if progress > 5:
+            rate = progress / elapsed_total  # % per second
+            remaining_pct = 100 - progress
+            eta = max(0, int(remaining_pct / rate))
+
         try:
             cursor = self.db.conn.cursor()
             try:
+                import json as _json
                 if discovery_run_id is not None:
                     cursor.execute("""
                         UPDATE snapshot_jobs
                         SET stage = %s, progress = %s, discovery_run_id = %s,
-                            last_heartbeat_at = NOW()
+                            last_heartbeat_at = NOW(),
+                            duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::integer,
+                            stage_timings = %s,
+                            estimated_remaining_seconds = %s
                         WHERE id = %s AND status = 'running'
-                    """, (stage, progress, discovery_run_id, job_id))
+                    """, (stage, progress, discovery_run_id,
+                          _json.dumps(timings_json), eta, job_id))
                 else:
                     cursor.execute("""
                         UPDATE snapshot_jobs
-                        SET stage = %s, progress = %s, last_heartbeat_at = NOW()
+                        SET stage = %s, progress = %s, last_heartbeat_at = NOW(),
+                            duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::integer,
+                            stage_timings = %s,
+                            estimated_remaining_seconds = %s
                         WHERE id = %s AND status = 'running'
-                    """, (stage, progress, job_id))
-                self.db._commit()
+                    """, (stage, progress, _json.dumps(timings_json), eta, job_id))
+                self.db._force_commit()  # Always commit progress updates (even in batch mode)
             except Exception as e:
                 logger.warning("Job progress update failed: %s", e)
                 try:
@@ -319,7 +535,7 @@ class AzureDiscoveryEngine:
         classified as cross-tenant and routed to their own cloud_connection.
         """
         try:
-            sub_client = SubscriptionClient(self.credential)
+            sub_client = SubscriptionClient(self.credential, **ARM_TIMEOUT_KWARGS)
             subs = []
             for sub in sub_client.subscriptions.list():
                 if sub.state and sub.state.lower() in ('enabled', 'warned'):
@@ -349,12 +565,33 @@ class AzureDiscoveryEngine:
         This is the main entry point that wraps the async discovery
         in asyncio.run() for synchronous calling contexts (like the scheduler).
 
+        Creates a fresh event loop for the current thread if one doesn't exist,
+        which is required for Python 3.10+ where daemon threads do not
+        auto-create an event loop.
+
         Returns:
             DiscoveryResult or None on completion
         """
-        return asyncio.run(self._async_run_discovery())
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        try:
+            return loop.run_until_complete(self._async_run_discovery())
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
 
     async def _async_run_discovery(self) -> DiscoveryResult:
+        import time as _time
+        self._scan_start_time = _time.monotonic()
+
         sub_summary = ", ".join(f"{s['name']} ({s['id'][:8]}...)" for s in self.subscriptions) or "No subscriptions"
         logger.info("=" * 60)
         logger.info("AuditGraph Discovery Engine")
@@ -377,7 +614,7 @@ class AzureDiscoveryEngine:
         self._scanner_ip = None
         try:
             import aiohttp as _aio
-            async with _aio.ClientSession() as _ip_session:
+            async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=5)) as _ip_session:
                 async with _ip_session.get(
                     'https://api.ipify.org?format=json',
                     timeout=_aio.ClientTimeout(total=5)
@@ -416,21 +653,88 @@ class AzureDiscoveryEngine:
         all_principal_ids = principal_ids_with_roles.union(entra_principal_ids)
         logger.info("Total unique principals (RBAC + Entra): %s", len(all_principal_ids))
 
+        # ── Scan component status tracking ──
+        scan_component_status = {
+            "service_principals": "pending",
+            "users": "pending",
+            "groups": "pending",
+            "memberships": "pending",
+            "roles": "success",  # already completed above
+        }
+        # Defaults — used if timeout fires before a phase runs
+        service_principals = []
+        users = []
+        groups = []
+        group_memberships = {}
+        total_memberships = 0
+        relevant_group_ids: Set[str] = set()
+        two_tier_active = False
+        control_count = 0
+        data_count = 0
+        self._data_plane_findings = []
+        _scan_timed_out = False
+
+        def _mark_remaining_timeout():
+            """Mark all pending components as timeout."""
+            nonlocal _scan_timed_out
+            _scan_timed_out = True
+            for k, v in scan_component_status.items():
+                if v == "pending":
+                    scan_component_status[k] = "timeout"
+
         # Step 3: Discover Service Principals
         logger.info("Discovering Service Principals...")
         self._update_job_progress('discovering_identities', 25)
         service_principals = await self._discover_service_principals()
+        scan_component_status["service_principals"] = "success"
         logger.info("Found %s service principals", len(service_principals))
 
         # Step 3.1: Link SPNs to parent App Registrations (lineage)
         app_reg_map = await self._fetch_app_registration_map()
         self._enrich_spns_with_app_registrations(service_principals, app_reg_map)
 
-        # Step 3.5: Discover SPN Credentials
-        credentials_map = await self._discover_credentials(service_principals)
-        self._update_job_progress('discovering_identities', 30)
+        # Steps 3.5–3.12: Parallel Graph API discovery
+        # Credentials must finish first (federated enrichment depends on it),
+        # then remaining steps run concurrently via asyncio.gather().
+        logger.info("[parallel-discovery] Starting parallel SPN enrichment (7 concurrent tasks, owned_objects deferred)...")
+        import time as _perf_time
+        _parallel_start = _perf_time.monotonic()
 
-        # Step 3.55: Enrich SPNs with federated credential classification
+        # Steps 3.5–3.11: ALL run concurrently (credentials moved into gather)
+        # Federated enrichment (step 3.55) runs after gather since it depends on credentials.
+        # NOTE: _discover_owned_objects (step 3.12) deferred to background post-scan job.
+        async def _timed(name, coro):
+            t0 = _perf_time.monotonic()
+            result = await coro
+            elapsed = round(_perf_time.monotonic() - t0, 1)
+            logger.info("[parallel-discovery] %s finished in %.1fs", name, elapsed)
+            return result
+
+        (
+            credentials_map,
+            permissions_map,
+            app_roles_map,
+            ownership_map,
+            pim_map,
+            ca_policies,
+            _audit_prov_result,
+        ) = await asyncio.gather(
+            _timed("credentials", self._discover_credentials(service_principals)),      # 3.5
+            _timed("permissions", self._discover_permissions(service_principals)),       # 3.6
+            _timed("app_roles", self._discover_app_roles(service_principals)),           # 3.7
+            _timed("ownership", self._discover_ownership(service_principals)),           # 3.8
+            _timed("pim", self._discover_pim_assignments()),                             # 3.9
+            _timed("conditional_access", self._discover_conditional_access()),           # 3.10
+            _timed("audit_provenance", self._discover_audit_provenance(service_principals)),  # 3.11
+        )
+        self._update_job_progress('discovering_identities', 35)
+        _parallel_elapsed = round(_perf_time.monotonic() - _parallel_start, 1)
+        logger.info(
+            "[parallel-discovery] SPN enrichment complete in %.1fs (7 tasks) org=%s",
+            _parallel_elapsed, self.db_org_id,
+        )
+
+        # Step 3.55: Enrich SPNs with federated credential classification (depends on credentials_map)
         fed_count = 0
         for sp in service_principals:
             creds = credentials_map.get(sp.get('identity_id'), [])
@@ -443,65 +747,334 @@ class AzureDiscoveryEngine:
         if fed_count:
             logger.info("Federated credential classification: %s SPNs enriched", fed_count)
 
-        # Step 3.6: Discover API Permissions
-        permissions_map = await self._discover_permissions(service_principals)
+        if self._check_time_budget("service_principals"):
+            _mark_remaining_timeout()
 
-        # Step 3.7: Discover Custom App Roles
-        app_roles_map = await self._discover_app_roles(service_principals)
+        # Step 4: Discover Entra Groups (moved before users for AG-75 inclusion criteria)
+        if not _scan_timed_out:
+            logger.info("Discovering Entra Groups...")
+            self._update_job_progress('discovering_groups', 38)
+            try:
+                groups = await self._discover_groups()
+                scan_component_status["groups"] = "success"
+            except Exception as e:
+                logger.error("[scan] groups FAILED org=%s error=%s", self.db_org_id, e, exc_info=True)
+                scan_component_status["groups"] = "failed"
+                groups = []
+            logger.info("Found %s security groups", len(groups))
+            if self._check_time_budget("groups"):
+                _mark_remaining_timeout()
 
-        # Step 3.8: Discover Application Owners
-        ownership_map = await self._discover_ownership(service_principals)
+        # Step 4b: Discover Group Memberships (two-tier with pre-flight)
+        # Tier 1: Groups with RBAC or Entra roles → full Graph API expansion
+        # Tier 2: Remaining groups → populated by identity-centric memberOf (Step 5c)
+        # Pre-flight: test memberOf permission before committing to two-tier.
+        #             If memberOf returns 403 → fall back to expanding ALL groups.
+        if not _scan_timed_out:
+            try:
+                group_id_set_all = {g['group_id'] for g in groups}
 
-        # Step 3.9: Discover PIM Assignments
-        pim_map = await self._discover_pim_assignments()
+                # Compute relevant (role-bearing) group IDs
+                relevant_group_ids = set()
+                for ra in role_assignments:
+                    pid = ra.get('principal_id')
+                    if pid and pid in group_id_set_all:
+                        relevant_group_ids.add(pid)
+                for er in entra_roles:
+                    pid = er.get('principal_id')
+                    if pid and pid in group_id_set_all:
+                        relevant_group_ids.add(pid)
 
-        # Step 3.10: Discover Conditional Access Policies
-        ca_policies = await self._discover_conditional_access()
-        self._update_job_progress('discovering_identities', 35)
+                # Pre-flight: test memberOf permission
+                memberof_ok = await self._check_memberof_permission()
+                two_tier_active = memberof_ok
 
-        # Step 3.11: Module 3 — Audit Provenance (creation/modification history)
-        logger.info("Discovering audit provenance (M3)...")
-        await self._discover_audit_provenance(service_principals)
+                if memberof_ok:
+                    logger.info(
+                        "[two-tier] memberOf pre-flight PASSED. "
+                        "%d/%d groups have roles → Tier 1 expansion. "
+                        "%d groups → Tier 2 (memberOf in Step 5c). org=%s",
+                        len(relevant_group_ids), len(groups),
+                        len(groups) - len(relevant_group_ids), self.db_org_id,
+                    )
+                    group_memberships = await self._discover_group_memberships(
+                        groups, relevant_group_ids=relevant_group_ids,
+                    )
+                else:
+                    logger.info(
+                        "[two-tier] memberOf pre-flight FAILED (403). "
+                        "Falling back to full expansion of all %d groups. org=%s",
+                        len(groups), self.db_org_id,
+                    )
+                    group_memberships = await self._discover_group_memberships(
+                        groups,
+                    )
+                self._update_job_progress('discovering_groups', 40)
+                total_memberships = sum(len(v) for v in group_memberships.values())
+                scan_component_status["memberships"] = "success"
+            except Exception as e:
+                logger.error("[scan] memberships FAILED org=%s error=%s", self.db_org_id, e, exc_info=True)
+                scan_component_status["memberships"] = "failed"
 
-        # Step 3.12: Module 5 — Owned Objects Scanner
-        logger.info("Discovering owned objects (M5)...")
-        await self._discover_owned_objects(service_principals)
+        # Step 4c: Collect relevant principal IDs (AG-75 inclusion criteria)
+        all_principal_ids = self._collect_relevant_principal_ids(
+            role_assignments, entra_roles, pim_map,
+            groups, group_memberships, ownership_map, ca_policies,
+            service_principals
+        )
 
-        # Step 4: Discover ALL users in the tenant
-        logger.info("Discovering Users...")
-        users = await self._discover_users(all_principal_ids)
-        logger.info("Found %s users", len(users))
-        self._update_job_progress('discovering_identities', 40)
-        
-        # Step 5: Discover Managed Identities
+        # Step 4d: Pure access-based filter for user discovery.
+        # Include a principal if and only if it has an access path to Azure
+        # or Entra — directly or via a security group.
+        #
+        # PATH 1 — Direct RBAC on monitored subscriptions
+        # PATH 2 — Direct Entra directory role
+        # PATH 3 — Member of a security group with RBAC on monitored subs
+        # PATH 4 — Member of a security group with an Entra directory role
+        #
+        # No name patterns. No type assumptions. Access paths only.
+        # _collect_relevant_principal_ids() still builds full access_paths
+        # for all 6 sources (PIM, ownership, CA) — used for graph and risk
+        # scoring on any identity that qualifies via the 4 paths above.
+
+        group_id_set_for_filter = {g['group_id'] for g in groups}
+        access_qualified_ids = set()   # non-group principals with direct roles
+        privileged_group_ids = set()   # groups that hold roles
+
+        # Scan RBAC role assignments (already scoped to monitored subscriptions)
+        for ra in role_assignments:
+            pid = ra.get('principal_id')
+            if pid:
+                if pid in group_id_set_for_filter:
+                    privileged_group_ids.add(pid)
+                else:
+                    access_qualified_ids.add(pid)
+
+        # Scan Entra directory role assignments
+        for er in entra_roles:
+            pid = er.get('principal_id')
+            if pid:
+                if pid in group_id_set_for_filter:
+                    privileged_group_ids.add(pid)
+                else:
+                    access_qualified_ids.add(pid)
+
+        # Expand members of privileged groups.
+        # _discover_group_memberships() already resolves nested groups
+        # (MAX_DEPTH=3), so nested members appear with is_nested=True.
+        # We include ALL member types from privileged groups — the
+        # intersection with all_principal_ids below ensures only
+        # validated principals pass through.
+        for gid in privileged_group_ids:
+            for member in group_memberships.get(gid, []):
+                mid = member.get('member_object_id')
+                mtype = member.get('member_type', '')
+                if mid and mtype != 'group':
+                    access_qualified_ids.add(mid)
+
+        # Intersect with all_principal_ids (defensive — ensures every ID
+        # was validated by _collect_relevant_principal_ids and has
+        # access_paths populated).
+        user_principal_ids = all_principal_ids & access_qualified_ids
+        # Pipeline health: record total principal count for metrics
+        self._all_principal_count = len(user_principal_ids)
+
+        direct_rbac_count = sum(
+            1 for pid in user_principal_ids
+            if (getattr(self, '_principal_access_paths', {}).get(pid, {}).get('direct_rbac'))
+        )
+        direct_entra_count = sum(
+            1 for pid in user_principal_ids
+            if (getattr(self, '_principal_access_paths', {}).get(pid, {}).get('direct_entra'))
+        )
+        via_group_count = sum(
+            1 for pid in user_principal_ids
+            if (getattr(self, '_principal_access_paths', {}).get(pid, {}).get('group_membership'))
+        )
+        logger.info(
+            "[access-filter] Qualified principals: %d "
+            "(direct_rbac=%d, direct_entra=%d, via_group=%d) "
+            "from %d total candidates, %d privileged groups expanded",
+            len(user_principal_ids),
+            direct_rbac_count, direct_entra_count, via_group_count,
+            len(all_principal_ids), len(privileged_group_ids),
+        )
+
+        # Step 5: Discover users (scoped to access-qualified principals)
+        if not _scan_timed_out:
+            logger.info("Discovering Users...")
+            try:
+                users = await self._discover_users(user_principal_ids)
+                scan_component_status["users"] = "success"
+            except Exception as e:
+                logger.error(
+                    "[scan] users FAILED org=%s error=%s",
+                    self.db_org_id, e, exc_info=True
+                )
+                scan_component_status["users"] = "failed"
+                users = []
+            logger.info(
+                "Found %s users (from %s access-qualified principals, %s total candidates)",
+                len(users), len(user_principal_ids), len(all_principal_ids),
+            )
+
+            # Sanity check: if we had principals to find but got 0 users
+            if len(user_principal_ids) > 10 and len(users) == 0:
+                logger.error(
+                    "[scan] ANOMALY: %s access-qualified principals but 0 users "
+                    "for org=%s tenant=%s. Check throttling/permissions/pagination.",
+                    len(user_principal_ids), self.db_org_id, self.azure_directory_id
+                )
+
+            # Post-discovery validation: remove any human_user whose
+            # access_paths contain zero RBAC, Entra, or group-inherited
+            # access.  This is a safety net for edge cases the pre-filter
+            # might miss (e.g. stale group data, race conditions).
+            pre_validation = len(users)
+            validated_users = []
+            for u in users:
+                ap = u.get('access_paths') or {}
+                has_rbac = bool(ap.get('direct_rbac'))
+                has_entra = bool(ap.get('direct_entra'))
+                has_group = any(
+                    gm.get('role', '') != ''
+                    for gm in (ap.get('group_membership') or [])
+                )
+                if has_rbac or has_entra or has_group:
+                    validated_users.append(u)
+            removed = pre_validation - len(validated_users)
+            if removed > 0:
+                logger.warning(
+                    "[access-filter] Post-validation removed %d human_user(s) "
+                    "with no RBAC/Entra/group access (org=%s)",
+                    removed, self.db_org_id,
+                )
+            users = validated_users
+
+            # Step 4e: Access tier classification for human users
+            for u in users:
+                u['access_tier'] = self._classify_access_tier(u, role_assignments, entra_roles, group_memberships)
+
+            control_count = sum(1 for u in users if u.get('access_tier') == 'control_plane')
+            data_count = sum(1 for u in users if u.get('access_tier') == 'data_plane')
+            logger.info(
+                "Access tier: %d control_plane, %d data_plane (of %d humans) org=%s",
+                control_count, data_count, len(users), self.db_org_id,
+            )
+
+            # Step 4f: Generate BROAD_DATA_PLANE_ACCESS findings for large groups
+            data_plane_findings = []
+            group_lookup = {g['group_id']: g for g in groups}
+
+            group_dp_stats = {}  # group_id → {name, roles, scopes, member_count}
+            for ra in role_assignments:
+                pid = ra.get('principal_id')
+                if pid and pid in group_lookup:
+                    role_lower = (ra.get('role_name') or '').lower()
+                    if role_lower in _DATA_PLANE_ROLES:
+                        if pid not in group_dp_stats:
+                            grp = group_lookup[pid]
+                            group_dp_stats[pid] = {
+                                'name': grp.get('display_name', ''),
+                                'roles': set(), 'scopes': set(),
+                                'member_count': grp.get('member_count', 0),
+                            }
+                        group_dp_stats[pid]['roles'].add(ra.get('role_name', ''))
+                        rn = ra.get('resource_name') or ra.get('scope', '').rsplit('/', 1)[-1]
+                        group_dp_stats[pid]['scopes'].add(rn)
+
+            for gid, st in group_dp_stats.items():
+                if st['member_count'] >= 100:
+                    roles_str = ', '.join(sorted(st['roles']))
+                    resources_str = ', '.join(sorted(list(st['scopes'])[:3]))
+                    data_plane_findings.append({
+                        'entity_type': 'security_group',
+                        'entity_id': gid,
+                        'finding_type': 'BROAD_DATA_PLANE_ACCESS',
+                        'severity': 'medium',
+                        'risk_score': min(st['member_count'] // 10, 100),
+                        'title': f"Group '{st['name']}' grants {roles_str} to {st['member_count']} users",
+                        'description': (
+                            f"{st['member_count']} users have {roles_str} access to "
+                            f"{resources_str} via group membership. Review if all members "
+                            f"require this access."
+                        ),
+                        'recommended_fix': "Audit group membership and remove users who no longer need access.",
+                        'metadata': {
+                            'group_name': st['name'], 'group_id': gid,
+                            'member_count': st['member_count'],
+                            'roles': list(st['roles']), 'resources': list(st['scopes']),
+                        },
+                        'finding_fingerprint': f"broad_data_plane_{gid}",
+                    })
+
+            self._data_plane_findings = data_plane_findings
+            if data_plane_findings:
+                logger.info("Generated %d BROAD_DATA_PLANE_ACCESS findings org=%s",
+                            len(data_plane_findings), self.db_org_id)
+
+            self._update_job_progress('discovering_identities', 42)
+            if self._check_time_budget("users"):
+                _mark_remaining_timeout()
+
+        # Step 5.5: Discover Managed Identities
         logger.info("Discovering Managed Identities...")
         managed_identities = []
         logger.info("Found %s user-assigned managed identities", len(managed_identities))
-        
+
         all_identities = service_principals + users + managed_identities
 
-        # Step 5a: Discover Entra Groups
-        logger.info("Discovering Entra Groups...")
-        self._update_job_progress('discovering_groups', 42)
-        groups = await self._discover_groups()
-        logger.info("Found %s security groups", len(groups))
+        # Step 5c: Identity-centric memberOf enrichment (Tier 2 gap-fill)
+        # Only needed when two-tier is active — Tier 2 groups have no memberships
+        # from Step 4b and need identity-centric memberOf to populate them.
+        # When two_tier_active=False, all groups were fully expanded in Step 4b.
+        if not _scan_timed_out and two_tier_active:
+            # Pre-flight: verify memberOf permission before calling per-identity
+            memberof_5c_ok = await self._check_memberof_permission()
+            if memberof_5c_ok:
+                try:
+                    tier2_count = len(groups) - len(relevant_group_ids)
+                    logger.info(
+                        "[Step 5c] Running identity-centric memberOf enrichment "
+                        "for %d Tier 2 groups (%d identities). org=%s",
+                        tier2_count, len(all_identities), self.db_org_id,
+                    )
+                    group_memberships = await self._discover_identity_group_memberships(
+                        all_identities, groups, group_memberships
+                    )
+                    total_memberships = sum(len(v) for v in group_memberships.values())
+                except Exception as e:
+                    logger.error("[Step 5c] identity memberOf enrichment FAILED org=%s error=%s",
+                                self.db_org_id, e, exc_info=True)
+            else:
+                logger.warning(
+                    "[Step 5c] memberOf pre-flight FAILED (403) — skipping "
+                    "identity-centric enrichment. Groups tab will show Tier 1 "
+                    "data only (%d role-bearing groups). org=%s",
+                    len(relevant_group_ids), self.db_org_id,
+                )
+        elif not _scan_timed_out and not two_tier_active:
+            logger.info(
+                "[Step 5c] SKIPPED — two-tier inactive, all %d groups "
+                "already expanded in Step 4b. org=%s",
+                len(groups), self.db_org_id,
+            )
 
-        # Step 5b: Discover Group Memberships (nested up to 3 levels)
-        group_memberships = await self._discover_group_memberships(groups)
-        self._update_job_progress('discovering_groups', 44)
+        groups_with_members = sum(1 for v in group_memberships.values() if v)
+        logger.info("After memberOf enrichment: %s groups with members, %s total memberships",
+                    groups_with_members, total_memberships)
 
-        # Step 5b2: Identity-centric memberOf enrichment
-        # Always run — merges with group-centric results and catches memberships
-        # that group-centric discovery may miss (e.g. if GroupMember.Read.All is
-        # not granted, or if the group-centric approach returns partial data).
-        logger.info("Running identity-centric memberOf enrichment...")
-        group_memberships = await self._discover_identity_group_memberships(
-            all_identities, groups, group_memberships
-        )
-        logger.info("After memberOf enrichment: %s groups with members",
-                    sum(1 for v in group_memberships.values() if v))
+        # Membership validation
+        if len(groups) > 0 and total_memberships == 0:
+            logger.warning(
+                "[scan] ANOMALY: %s groups discovered but 0 memberships "
+                "org=%s — group member API may have failed or groups are empty",
+                len(groups), self.db_org_id
+            )
+            if scan_component_status["memberships"] == "success":
+                scan_component_status["memberships"] = "empty"
 
-        # Step 5c: Compute member/nested counts (rbac_roles populated at save time
+        # Step 5d: Compute member/nested counts (rbac_roles populated at save time
         # from the canonical role_assignments list to avoid JSONB drift — FIX A)
         from app.constants.roles import RBACRole
         PRIVILEGED_ROLES = {
@@ -529,6 +1102,71 @@ class AzureDiscoveryEngine:
             group['nested_group_count'] = len([m for m in members_list if m['member_type'] == 'group' and m['depth'] == 0])
         logger.info("Privileged groups: %s", sum(1 for g in groups if g['is_privileged']))
 
+        # Step 5e: Collect MFA/SSPR registration data (bulk, then per-user fallback)
+        if not _scan_timed_out:
+            mfa_map = {}
+            try:
+                mfa_map = await self._collect_mfa_registration()
+            except Exception as e:
+                logger.warning("[MFA] Bulk collection failed: %s. org=%s", e, self.db_org_id)
+
+            if mfa_map:
+                mfa_applied = 0
+                for identity in all_identities:
+                    oid = identity.get('object_id')
+                    if oid and oid in mfa_map:
+                        reg = mfa_map[oid]
+                        if reg.get('mfa_registered') is not None:
+                            identity['ca_mfa_enforced'] = reg['mfa_registered']
+                            identity['mfa_status'] = 'enrolled' if reg['mfa_registered'] else 'not_enrolled'
+                            methods = []
+                            if reg.get('mfa_registered'):
+                                methods.append('mfa')
+                            if reg.get('sspr_registered'):
+                                methods.append('sspr')
+                            if methods:
+                                identity['mfa_methods'] = methods
+                            mfa_applied += 1
+                logger.info(
+                    "[MFA] Applied bulk registration data to %s/%s identities. org=%s",
+                    mfa_applied, len(all_identities), self.db_org_id,
+                )
+            else:
+                # AG-161: Fallback — per-user /authentication/methods (no Reports.Read.All needed)
+                logger.info("[MFA] Bulk endpoint empty — falling back to per-user auth methods. org=%s", self.db_org_id)
+                human_ids = [i for i in all_identities if i.get('identity_category') in ('human_user', 'guest')]
+                try:
+                    per_user_map = await self._collect_mfa_auth_methods(human_ids)
+                    if per_user_map:
+                        mfa_applied = 0
+                        for identity in all_identities:
+                            oid = identity.get('object_id')
+                            if oid and oid in per_user_map:
+                                info = per_user_map[oid]
+                                identity['mfa_status'] = info['mfa_status']
+                                identity['ca_mfa_enforced'] = info['mfa_status'] == 'enrolled'
+                                identity['mfa_methods'] = info.get('mfa_methods', [])
+                                mfa_applied += 1
+                        logger.info(
+                            "[MFA-methods] Applied per-user MFA data to %s/%s identities. org=%s",
+                            mfa_applied, len(all_identities), self.db_org_id,
+                        )
+                    else:
+                        logger.warning(
+                            "[MFA] Both bulk and per-user collection returned empty. "
+                            "MFA will show as Unknown. org=%s", self.db_org_id,
+                        )
+                    # Set unknown for humans not covered by either collection path
+                    _unknown_set = 0
+                    for identity in all_identities:
+                        if identity.get('identity_category') in ('human_user', 'guest') and not identity.get('mfa_status'):
+                            identity['mfa_status'] = 'unknown'
+                            _unknown_set += 1
+                    if _unknown_set:
+                        logger.info("[MFA] Set mfa_status='unknown' for %s humans without MFA data. org=%s", _unknown_set, self.db_org_id)
+                except Exception as e:
+                    logger.warning("[MFA] Per-user fallback failed: %s. org=%s", e, self.db_org_id)
+
         # Step 6: Calculate risks (enhanced points-based scoring)
         logger.info("Calculating Risk Levels...")
         self._update_job_progress('analyzing_risk', 48)
@@ -540,7 +1178,7 @@ class AzureDiscoveryEngine:
         # Step 7: Check credentials
         logger.info("Checking Credential Expiration...")
         self._update_job_progress('analyzing_risk', 52)
-        identities_with_creds = self._check_credentials(identities_with_risks)
+        identities_with_creds = self._check_credentials(identities_with_risks, credentials_map)
 
         # Attach role_assignments to each identity dict for the activity waterfall
         _ra_by_pid = {}
@@ -556,17 +1194,19 @@ class AzureDiscoveryEngine:
         self._update_job_progress('analyzing_risk', 56)
         final_identities = self._check_activity(identities_with_creds)
 
-        # Step 8.05: Enrich with last observed IP from ARM Activity Log (no P2 required)
-        self._update_job_progress('analyzing_risk', 57)
-        if await self._validate_arm_activity_log_permission():
-            logger.info("Enriching identities with ARM Activity Log IPs...")
-            await self._fetch_last_observed_ips(final_identities)
-        else:
-            logger.info("Skipping ARM Activity Log IP enrichment — permission not available")
+        # Step 8.01: Telemetry coverage classification
+        final_identities = self._compute_telemetry_coverage(final_identities)
 
-        # Step 8.1: Module 4 — Sign-in Intelligence
-        logger.info("Discovering sign-in intelligence (M4)...")
-        await self._discover_signin_intelligence(final_identities)
+        # Step 8.05: IP enrichment deferred to background thread (post-scan)
+        # Was 121s (65% of scan time) for 305 identities with 0.3% hit rate.
+        # Data not displayed in UI or used in risk scoring — safe to defer.
+        self._update_job_progress('analyzing_risk', 57)
+        logger.info("IP enrichment deferred to background (post-scan)")
+
+        # Step 8.1: Sign-in intelligence deferred to background thread (post-scan)
+        # Was ~205s (sequential, 150ms rate limit × ~1018 SPNs).
+        # Data only used in lineage narrative — not in risk scoring or identity list.
+        logger.info("Sign-in intelligence deferred to background (post-scan)")
 
         # Step 8.5: Infer workload type from role topology
         logger.info("Inferring workload types from role topology...")
@@ -633,20 +1273,45 @@ class AzureDiscoveryEngine:
         # (identity_orphan_classifications, identity_lineage_scores, lineage_verdicts)
         self._populate_lineage_tables(run_id, final_identities)
 
+        # Step 9.6: Save data-plane group findings
+        if self._data_plane_findings:
+            try:
+                self.db.save_security_findings(run_id, self._data_plane_findings)
+            except Exception as e:
+                logger.warning("Failed to save data-plane findings: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
         self._update_job_progress('discovering_resources', 68)
+
+        # Step 9.7: ARM Activity Log collection (no P2 required)
+        # Fetches recent ARM management events per subscription, matches to
+        # known identities, stores top 3 per identity in identity_arm_connections,
+        # and backfills role_assignments.last_used_at.
+        try:
+            self._collect_arm_activity(run_id, final_identities)
+        except Exception as e:
+            logger.warning("ARM activity collection error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
 
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
         # MUST run before exposure scoring so fresh sign-in data is available
         p2_enabled = False
         try:
-            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', organization_id=self.db._organization_id) == 'true'
+            p2_enabled = self.db.get_setting('p2_telemetry_enabled', 'false', organization_id=self.db_org_id) == 'true'
+            logger.debug("P2 telemetry enabled=%s for org_id=%s", p2_enabled, self.db_org_id)
             if p2_enabled:
                 logger.info("Ingesting P2 sign-in telemetry...")
                 from app.engines.telemetry.p2_ingestion import P2TelemetryService
                 telemetry = P2TelemetryService(self.credential, self.db)
-                org_id = self.db._organization_id
-                telemetry.ingest_signin_logs(run_id, org_id)
-                telemetry.compute_activity_stats(run_id, org_id)
+                telemetry.ingest_signin_logs(run_id, self.db_org_id)
+                telemetry.ingest_user_signin_logs(run_id, self.db_org_id)
+                telemetry.compute_activity_stats(run_id, self.db_org_id)
                 telemetry.backfill_last_sign_in(run_id)
                 logger.info("P2 telemetry ingested -- activity stats ready for scoring")
         except Exception as e:
@@ -701,6 +1366,16 @@ class AzureDiscoveryEngine:
         except Exception as e:
             logger.error("App registration discovery error: %s", e, exc_info=True)
             self.db._rollback()
+
+        # Step 9b.5: AG-148 — Discover Federated Identity Credentials
+        try:
+            await self._discover_federated_credentials(run_id, app_regs if 'app_regs' in dir() else [], spn_app_id_map if 'spn_app_id_map' in dir() else {})
+        except Exception as e:
+            logger.warning("Federated credential discovery error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
 
         # Step 9c: ARM Resource Graph — find resources referencing SPN appIds
         self._update_job_progress('scanning_resources', 90)
@@ -900,31 +1575,163 @@ class AzureDiscoveryEngine:
             logger.warning("Dependency impact analysis failed: %s", e)
             self.db._rollback()
 
-        # Step 10: Complete discovery run
+        # Step 10: Evaluate scan integrity and complete discovery run
         self._update_job_progress('finalizing', 92)
         logger.info("Completing discovery run...")
+
+        # Determine final scan status from component results
+        CRITICAL_COMPONENTS = {"users", "groups", "memberships"}
+
+        failed = [k for k, v in scan_component_status.items() if v == "failed"]
+        critical_failed = [k for k in failed if k in CRITICAL_COMPONENTS]
+
+        if critical_failed:
+            final_scan_status = "failed"
+            logger.error(
+                "[scan] FAILED org=%s critical components failed: %s",
+                self.db_org_id, critical_failed
+            )
+        elif failed:
+            final_scan_status = "partial"
+        else:
+            final_scan_status = "completed"
+
+        # Anomaly guard: SPNs present but 0 users → force failed
+        spns_count = len(service_principals)
+        users_count = len(users)
+        if spns_count > 10 and users_count == 0 and final_scan_status != "failed":
+            final_scan_status = "failed"
+            logger.error(
+                "[scan] INTEGRITY ANOMALY: %s SPNs but 0 users — "
+                "marking scan FAILED org=%s",
+                spns_count, self.db_org_id
+            )
+
+        # Regression guard: check previous run for relevant_group/human count drops.
+        # Uses relevant_group_count (groups with roles) for the group regression
+        # check — total_group_count includes informational groups that don't
+        # affect access and shouldn't trigger false regression alarms.
+        # When the previous run lacks relevant_group_count (pre-optimization),
+        # the group check is skipped to avoid false alarms during the transition.
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                SELECT total_identities,
+                       (metadata->>'relevant_group_count')::int,
+                       COALESCE((metadata->>'human_identity_count')::int, 0)
+                FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND id < %s AND total_identities > 0
+                ORDER BY id DESC LIMIT 1
+            """, (self.db_org_id, run_id))
+            prev = cursor.fetchone()
+            cursor.close()
+
+            if prev:
+                prev_relevant_groups = prev[1]  # None if pre-optimization run
+                prev_humans = prev[2]
+                curr_relevant_groups = len(relevant_group_ids)
+                curr_humans = len(users)
+
+                # Only check group regression if previous run tracked relevant_group_count.
+                # Pre-optimization runs stored group_count (total) which is much larger
+                # than relevant_group_count and would cause false regression alarms.
+                if prev_relevant_groups is not None and prev_relevant_groups > 20 and curr_relevant_groups < prev_relevant_groups * 0.5:
+                    final_scan_status = "failed"
+                    logger.error(
+                        "[scan] REGRESSION: relevant groups dropped >50%% (%d -> %d) — "
+                        "marking scan FAILED org=%s",
+                        prev_relevant_groups, curr_relevant_groups, self.db_org_id
+                    )
+
+                if prev_humans > 10 and curr_humans < prev_humans * 0.5 and final_scan_status != "failed":
+                    final_scan_status = "failed"
+                    logger.error(
+                        "[scan] REGRESSION: humans dropped >50%% (%d -> %d) — "
+                        "marking scan FAILED org=%s",
+                        prev_humans, curr_humans, self.db_org_id
+                    )
+        except Exception as e:
+            logger.warning("[scan] Regression guard check failed: %s", e)
+            try:
+                self.db.conn.rollback()
+            except Exception:
+                pass
+
         try:
             critical_count = sum(1 for i in final_identities if i['risk_level'] == 'critical')
             high_count = sum(1 for i in final_identities if i['risk_level'] == 'high')
             medium_count = sum(1 for i in final_identities if i['risk_level'] == 'medium')
             low_count = sum(1 for i in final_identities if i['risk_level'] == 'low')
 
+            # Write metadata BEFORE complete_discovery_run() — that method
+            # sets snapshot_hash which triggers the immutability guard and
+            # would block any subsequent UPDATE on this row.
+            _relevant_count = len(relevant_group_ids)
+            _expansion_count = _relevant_count if two_tier_active else len(groups)
+            tracking_metadata = json.dumps({
+                'component_status': scan_component_status,
+                'group_count': len(groups),
+                'relevant_group_count': _relevant_count,
+                'total_group_count': len(groups),
+                'member_expansion_count': _expansion_count,
+                'two_tier_mode': two_tier_active,
+                'membership_count': total_memberships,
+                'human_identity_count': len(users),
+                'control_plane_count': control_count,
+                'data_plane_count': data_count,
+            })
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                UPDATE discovery_runs
+                SET metadata = COALESCE(metadata, '{}')::jsonb || %s::jsonb
+                WHERE id = %s
+            """, (tracking_metadata, run_id))
+            cursor.close()
+            self.db._commit()
+
             self.db.complete_discovery_run(
                 run_id, len(final_identities),
                 critical_count, high_count, medium_count, low_count
             )
-            logger.info("Discovery run completed")
+
+            # complete_discovery_run sets status='completed'; override if
+            # scan_component_status dictates a different final status.
+            if final_scan_status != "completed":
+                cursor = self.db.conn.cursor()
+                cursor.execute(
+                    "UPDATE discovery_runs SET status = %s WHERE id = %s",
+                    (final_scan_status, run_id)
+                )
+                cursor.close()
+                self.db._commit()
+
+            logger.info("Discovery run completed with status=%s", final_scan_status)
         except Exception as e:
             logger.error("complete_discovery_run error: %s", e)
             self.db._rollback()
             # Try a simpler completion
             try:
+                _rel_count = len(relevant_group_ids)
+                _exp_count = _rel_count if two_tier_active else len(groups)
+                tracking_metadata = json.dumps({
+                    'component_status': scan_component_status,
+                    'group_count': len(groups),
+                    'relevant_group_count': _rel_count,
+                    'total_group_count': len(groups),
+                    'member_expansion_count': _exp_count,
+                    'two_tier_mode': two_tier_active,
+                    'membership_count': total_memberships,
+                    'human_identity_count': len(users),
+                })
                 cursor = self.db.conn.cursor()
-                cursor.execute("UPDATE discovery_runs SET status='completed', completed_at=NOW(), total_identities=%s WHERE id=%s",
-                               (len(final_identities), run_id))
+                cursor.execute(
+                    "UPDATE discovery_runs SET status=%s, completed_at=NOW(), total_identities=%s, metadata=COALESCE(metadata,'{}')::jsonb || %s::jsonb WHERE id=%s",
+                    (final_scan_status, len(final_identities), tracking_metadata, run_id)
+                )
                 cursor.close()
                 self.db._commit()
-                logger.info("Discovery run completed (fallback)")
+                logger.info("Discovery run completed (fallback) status=%s", final_scan_status)
             except Exception as e2:
                 logger.error("Fallback completion also failed: %s", e2)
                 self.db._rollback()
@@ -977,10 +1784,7 @@ class AzureDiscoveryEngine:
         try:
             for sub in self.subscriptions:
                 cursor = self.db.conn.cursor()
-                # Use organization_id from the discovery run
-                cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
-                run_row = cursor.fetchone()
-                run_org_id = run_row[0] if run_row and run_row[0] else 1
+                run_org_id = self.db_org_id
                 if not self.cloud_connection_id:
                     logger.warning("Skipping subscription sync -- cloud_connection_id is required (NOT NULL)")
                     break
@@ -1000,11 +1804,7 @@ class AzureDiscoveryEngine:
         # Sync foreign-tenant subscriptions to their own connections
         if self.foreign_subscriptions:
             try:
-                cursor = self.db.conn.cursor()
-                cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (run_id,))
-                run_row = cursor.fetchone()
-                run_org_id = run_row[0] if run_row and run_row[0] else 1
-                cursor.close()
+                run_org_id = self.db_org_id
                 # Look up source connection label for provenance tracking
                 source_label = None
                 try:
@@ -1053,8 +1853,25 @@ class AzureDiscoveryEngine:
             logger.warning("Auto groups seed warning: %s", e)
             self.db._rollback()
 
+        # ── Structured scan summary log ──
+        import time as _time_final
+        scan_duration = (_time_final.monotonic() - self._scan_start_time) / 60 if self._scan_start_time else 0
+        logger.info(
+            "[SCAN COMPLETE] org=%s run=%s status=%s duration=%.1fmin "
+            "users=%s spns=%s groups=%s memberships=%s "
+            "components=%s",
+            self.db_org_id, run_id, final_scan_status,
+            scan_duration,
+            users_count, spns_count, len(groups),
+            total_memberships,
+            json.dumps(scan_component_status)
+        )
+
         return None
     
+    # Safety limit: max pages for Graph API pagination to prevent infinite loops
+    _MAX_GRAPH_PAGES = 50  # 50 pages × 999 per page = ~50,000 entities
+
     async def _discover_service_principals(self) -> List[Dict[str, Any]]:
         """Discover ALL service principals via direct HTTP with pagination.
 
@@ -1084,27 +1901,76 @@ class AzureDiscoveryEngine:
                 f"?$select={select_fields}&$top=999"
             )
 
-            async with aiohttp.ClientSession() as session:
+            MAX_PAGE_RETRIES = 5
+
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
                 page = 0
                 sign_in_available = True
                 while url:
                     page += 1
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status != 200:
-                            body = await resp.text()
-                            # If signInActivity fails (403 / needs P2), retry page 1 without it
-                            if page == 1 and ('signInActivity' in body or resp.status == 403):
-                                logger.warning("SP signInActivity requires Entra ID P2 — retrying without it")
-                                sign_in_available = False
-                                select_no_sia = select_fields.replace(',signInActivity', '')
-                                url = (
-                                    f"https://graph.microsoft.com/v1.0/servicePrincipals"
-                                    f"?$select={select_no_sia}&$top=999"
-                                )
-                                continue
-                            logger.error("Graph API error %s on SP page %s: %s", resp.status, page, body[:500])
-                            break
-                        data = await resp.json()
+                    data = None
+
+                    for attempt in range(MAX_PAGE_RETRIES):
+                        async with self._graph_semaphore:
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    break
+                                elif resp.status == 429:
+                                    retry_after = int(resp.headers.get('Retry-After', '10'))
+                                    retry_after = min(retry_after, 60)
+                                    logger.warning(
+                                        "[_discover_service_principals] 429 on page %s, Retry-After=%ss (attempt %s/%s)",
+                                        page, retry_after, attempt + 1, MAX_PAGE_RETRIES
+                                    )
+                                    await asyncio.sleep(retry_after)
+                                    continue
+                                elif resp.status == 503:
+                                    wait = 5 * (attempt + 1)
+                                    logger.warning(
+                                        "[_discover_service_principals] 503 on page %s — waiting %ss (attempt %s/%s)",
+                                        page, wait, attempt + 1, MAX_PAGE_RETRIES
+                                    )
+                                    await asyncio.sleep(wait)
+                                    continue
+                                else:
+                                    body = await resp.text()
+                                    # If signInActivity fails (403 / needs P2), retry page 1 without it
+                                    if page == 1 and ('signInActivity' in body or resp.status == 403):
+                                        logger.warning("SP signInActivity requires Entra ID P2 — retrying without it")
+                                        self._persist_permission(
+                                            'p2_signin_activity', 'denied',
+                                            error_detail='Entra ID P2 license required for signInActivity field',
+                                            impact_description='Interactive/non-interactive sign-in timestamps '
+                                                              'unavailable. Activity inference will rely on '
+                                                              'ARM Activity Logs and heuristics.')
+                                        sign_in_available = False
+                                        select_no_sia = select_fields.replace(',signInActivity', '')
+                                        url = (
+                                            f"https://graph.microsoft.com/v1.0/servicePrincipals"
+                                            f"?$select={select_no_sia}&$top=999"
+                                        )
+                                        page = 0
+                                        data = None
+                                        break
+                                    logger.error(
+                                        "[_discover_service_principals] FAILED status=%s body=%s",
+                                        resp.status, body[:500]
+                                    )
+                                    raise Exception(
+                                        f"Graph API /servicePrincipals failed on page {page}: "
+                                        f"status={resp.status} body={body[:300]}"
+                                    )
+                    else:
+                        # All retries exhausted
+                        raise Exception(
+                            f"Graph API /servicePrincipals failed after {MAX_PAGE_RETRIES} retries on page {page} "
+                            f"(collected {len(identities)} SPNs so far)"
+                        )
+
+                    if data is None:
+                        # signInActivity retry — loop back with new URL
+                        continue
 
                     for sp in data.get('value', []):
                         # --- Parse fields from JSON dict ---
@@ -1210,8 +2076,18 @@ class AzureDiscoveryEngine:
                             identity_dict["is_microsoft_system"] = False
                             identities.append(identity_dict)
 
-                    # Follow pagination
+                    page_count = len(data.get('value', []))
+                    logger.info(
+                        "[_discover_service_principals] org=%s page=%s spns_this_page=%s total_so_far=%s",
+                        self.db_org_id, page, page_count, len(identities)
+                    )
+
+                    # Follow pagination (with safety limit)
                     url = data.get('@odata.nextLink')
+                    if page >= self._MAX_GRAPH_PAGES:
+                        logger.warning("SP pagination hit safety limit (%d pages, %d SPNs) — stopping",
+                                       page, len(identities))
+                        break
 
             sami_count = sum(1 for i in identities if i.get('identity_category') == 'managed_identity_system')
             uami_count = sum(1 for i in identities if i.get('identity_category') == 'managed_identity_user')
@@ -1222,6 +2098,8 @@ class AzureDiscoveryEngine:
 
             logger.info("Discovered %s service principals across %s page(s) (signInActivity=%s)",
                         len(identities), page, sign_in_available)
+            if sign_in_available:
+                self._persist_permission('p2_signin_activity', 'granted')
             # Persist P2 license availability on the cloud connection
             try:
                 cur = self.db.conn.cursor()
@@ -1236,8 +2114,8 @@ class AzureDiscoveryEngine:
                 logger.warning("Failed to persist has_p2_license: %s", e)
             return identities
         except Exception as e:
-            logger.error("Error discovering service principals: %s", e)
-            return []
+            logger.error("[_discover_service_principals] FAILED org=%s error=%s", self.db_org_id, e)
+            raise
 
     @staticmethod
     def _parse_sami_resource(identity_dict: dict, arm_resource_id: str):
@@ -1305,7 +2183,7 @@ class AzureDiscoveryEngine:
             lookup: Dict[str, Dict[str, Any]] = {}
             page = 0
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
                 while url:
                     page += 1
                     async with session.get(url, headers=headers) as resp:
@@ -1337,6 +2215,8 @@ class AzureDiscoveryEngine:
                             }
 
                     url = data.get('@odata.nextLink')
+
+                logger.info("Fetched %s app registrations across %s page(s)", len(lookup), page)
 
                 # Fetch first owner for each app registration
                 owner_fetched = 0
@@ -2204,9 +3084,24 @@ class AzureDiscoveryEngine:
         # ── Signal 4: Federated credential ────────────────────────────
         fed_wt = identity.get('federated_workload_type')
         fed_wn = identity.get('federated_workload_name') or ''
+        # AG-148: Also check has_federated_credentials (Graph API confirmed)
+        has_fed_creds = identity.get('has_federated_credentials', False)
+        fed_issuer_types = identity.get('federated_issuer_types') or []
+        if isinstance(fed_issuer_types, str):
+            try:
+                fed_issuer_types = json.loads(fed_issuer_types)
+            except Exception:
+                fed_issuer_types = []
+
         if fed_wt:
             signals.append({'source': 'federated_credential', 'weight': 35,
                             'detail': f'Federated credential: {fed_wt} ({fed_wn})'})
+            score += 35
+        elif has_fed_creds:
+            # Graph API confirmed federated credentials exist (AG-148)
+            issuer_label = ', '.join(t.replace('_', ' ').title() for t in fed_issuer_types[:3]) or 'External OIDC'
+            signals.append({'source': 'federated_credential', 'weight': 35,
+                            'detail': f'Federated credential confirmed: {issuer_label}'})
             score += 35
 
         # ── Federated usage inference ─────────────────────────────────
@@ -2360,7 +3255,7 @@ class AzureDiscoveryEngine:
             confidence = 'high'
         elif has_arm_binding:
             confidence = 'high'
-        elif fed_wt:
+        elif fed_wt or has_fed_creds:
             confidence = 'high'
         elif heuristic and heuristic['confidence'] == 'medium':
             confidence = 'medium'
@@ -2444,6 +3339,7 @@ class AzureDiscoveryEngine:
         has_confirmed_signal = (
             has_arm_binding
             or bool(fed_wt)
+            or has_fed_creds  # AG-148: Graph API confirmed federated credentials
             or bool(app_reg_owner)
             or (signin_pattern and signin_pattern not in ('unknown', 'none', 'never_used'))
             or bool(last_sign_in)
@@ -2493,6 +3389,13 @@ class AzureDiscoveryEngine:
             action_text = (f'Never authenticated but {dep_count} resource(s) depend on this identity. '
                            f'Deletion could break dependent workloads.')
             risk_summary.append('Has dependents but never authenticated — deletion risk')
+        elif (fed_wt or has_fed_creds) and not has_roles and not last_sign_in:
+            # AG-148: Federated SPN — never classify as UNUSED even without roles/sign-in.
+            # External pipelines depend on this identity.
+            action = 'FEDERATED_UNVERIFIED'
+            action_text = ('External pipeline dependency detected via federated credentials. '
+                           'Review federated credentials before any action.')
+            risk_summary.append('Federated pipeline dependency — deletion risk HIGH')
         elif not has_roles and not last_sign_in and not has_deps:
             action = 'UNUSED'
             action_text = 'No roles, no sign-in activity, and no dependents detected. Consider removing.'
@@ -2509,8 +3412,8 @@ class AzureDiscoveryEngine:
         elif inactivity_signal in ('high_privilege_never_used', 'high_privilege_long_inactive') and has_roles:
             action = 'AT_RISK'
             if inactivity_signal == 'high_privilege_never_used':
-                action_text = f'{highest_tier} privilege identity never authenticated. Review necessity or disable.'
-                risk_summary.append(f'{highest_tier} privilege never authenticated')
+                action_text = f'{highest_tier} privilege identity — no authentication observed. Review necessity or disable.'
+                risk_summary.append(f'{highest_tier} privilege — no authentication observed')
             else:
                 action_text = f'{highest_tier} privilege identity inactive for {days_since} days. Rotate credentials or disable.'
                 risk_summary.append(f'{highest_tier} privilege inactive {days_since}d')
@@ -2536,6 +3439,22 @@ class AzureDiscoveryEngine:
         else:
             action = 'NEEDS_REVIEW'
             action_text = 'No lineage signals found. Periodic review recommended.'
+
+        # ── AG-148: Federated verdict override ───────────────────────
+        # If federated credentials confirmed AND identity has activity → ACTIVE_FEDERATED.
+        # Suppresses any delete/disable recommendation.
+        if (fed_wt or has_fed_creds) and action in ('HEALTHY', 'STALE', 'AT_RISK'):
+            if last_sign_in or _recently_active or has_arm_binding:
+                action = 'ACTIVE_FEDERATED'
+                issuer_label = (fed_wt or (fed_issuer_types[0] if fed_issuer_types else 'external_oidc')).replace('_', ' ').title()
+                action_text = (f'Active federated identity ({issuer_label}). '
+                               f'External pipeline dependency — review federated credentials before any action.')
+            elif action in ('STALE', 'AT_RISK') and not last_sign_in:
+                # No activity but has federated creds — don't delete
+                action = 'FEDERATED_UNVERIFIED'
+                action_text = ('External pipeline dependency detected via federated credentials. '
+                               'Review federated credentials before any action.')
+                risk_summary.append('Federated pipeline dependency — deletion risk HIGH')
 
         # ── Human-readable lineage_signals ────────────────────────────
         # Structured signals for executive-readable lineage panel.
@@ -2702,7 +3621,7 @@ class AzureDiscoveryEngine:
         # Inactivity tier signal
         if inactivity_signal:
             _inactivity_labels = {
-                'high_privilege_never_used': f'{highest_tier} privilege — never authenticated',
+                'high_privilege_never_used': f'{highest_tier} privilege — no authentication observed',
                 'high_privilege_long_inactive': f'{highest_tier} privilege — inactive {days_since}d',
                 'high_privilege_short_inactive': f'{highest_tier} privilege — inactive {days_since}d',
                 'medium_privilege_inactive': f'MEDIUM privilege — inactive {days_since}d',
@@ -2859,6 +3778,11 @@ class AzureDiscoveryEngine:
         Sets owned_objects, created_objects, owned_object_count, created_object_count,
         is_platform_spn, platform_spn_evidence on each identity dict.
         """
+        import os
+        if os.environ.get('DISABLE_OWNED_OBJECTS', 'false').lower() == 'true':
+            logger.info("[owned_objects] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
 
@@ -2868,7 +3792,7 @@ class AzureDiscoveryEngine:
         enriched = 0
         platform_count = 0
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
             for sp in service_principals:
                 if sp.get('is_microsoft_system'):
                     continue
@@ -2883,7 +3807,7 @@ class AzureDiscoveryEngine:
                 try:
                     url = (
                         f"https://graph.microsoft.com/v1.0/servicePrincipals/{obj_id}"
-                        f"/ownedObjects?$select=id,displayName&$top=100"
+                        f"/ownedObjects?$select=id,displayName&$top=999"
                     )
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 200:
@@ -2905,7 +3829,7 @@ class AzureDiscoveryEngine:
                 try:
                     url = (
                         f"https://graph.microsoft.com/v1.0/servicePrincipals/{obj_id}"
-                        f"/createdObjects?$select=id,displayName&$top=100"
+                        f"/createdObjects?$select=id,displayName&$top=999"
                     )
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 200:
@@ -2950,6 +3874,200 @@ class AzureDiscoveryEngine:
 
         logger.info("Owned objects: %s SPNs enriched, %s platform SPNs detected", enriched, platform_count)
 
+    # ── Module 5b: Background Owned Objects Enrichment ────────────────
+
+    @classmethod
+    async def enrich_owned_objects_background(
+        cls,
+        azure_directory_id: str,
+        client_id: str,
+        client_secret: str,
+        db_org_id: int,
+        run_id: int,
+    ):
+        """Background job: enrich SPNs with owned/created objects data.
+
+        Runs AFTER scan completes. Queries SPN object_ids from the DB,
+        calls Graph API in parallel (semaphore-throttled), then batch-updates
+        the identities table with owned_objects, is_platform_spn, etc.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+        import time as _bg_time
+        from azure.identity import ClientSecretCredential
+        from app.database import Database
+
+        _start = _bg_time.monotonic()
+        logger.info("[owned_objects_bg] START org=%s run=%s", db_org_id, run_id)
+
+        # Get credential token
+        credential = ClientSecretCredential(
+            tenant_id=azure_directory_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        client_secret = None  # AG-116: zero after SDK init
+        token = credential.get_token("https://graph.microsoft.com/.default")
+        headers = {"Authorization": f"Bearer {token.token}"}
+
+        # Fetch SPN object_ids from the latest run (non-Microsoft only)
+        db = Database()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT id, identity_id
+                FROM identities
+                WHERE discovery_run_id = %s
+                  AND identity_category = 'service_principal'
+                  AND COALESCE(is_microsoft_system, false) = false
+                  AND identity_id IS NOT NULL
+            """, (run_id,))
+            spn_rows = cursor.fetchall()
+            cursor.close()
+        except Exception as e:
+            logger.error("[owned_objects_bg] DB query failed: %s", e)
+            db.close()
+            return
+        finally:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        if not spn_rows:
+            logger.info("[owned_objects_bg] No SPNs found for run=%s", run_id)
+            db.close()
+            return
+
+        logger.info("[owned_objects_bg] Processing %d SPNs org=%s", len(spn_rows), db_org_id)
+
+        # Parallel enrichment with semaphore throttling
+        sem = _asyncio.Semaphore(25)
+        enriched = 0
+        platform_count = 0
+        updates = []  # (db_id, owned_objects, created_objects, owned_count, created_count, is_platform, platform_evidence)
+
+        async def _enrich_one(session, db_id, obj_id):
+            nonlocal enriched, platform_count
+            async with sem:
+                owned = []
+                created = []
+
+                # Fetch ownedObjects
+                try:
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/servicePrincipals/{obj_id}"
+                        f"/ownedObjects?$select=id,displayName&$top=999"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for obj in data.get('value', []):
+                                owned.append({
+                                    'id': obj.get('id'),
+                                    'display_name': obj.get('displayName'),
+                                    'odata_type': obj.get('@odata.type', ''),
+                                })
+                except Exception:
+                    pass
+
+                # Fetch createdObjects
+                try:
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/servicePrincipals/{obj_id}"
+                        f"/createdObjects?$select=id,displayName&$top=999"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for obj in data.get('value', []):
+                                created.append({
+                                    'id': obj.get('id'),
+                                    'display_name': obj.get('displayName'),
+                                    'odata_type': obj.get('@odata.type', ''),
+                                })
+                except Exception:
+                    pass
+
+                # Detect platform SPNs
+                owned_apps = sum(1 for o in owned if 'application' in (o.get('odata_type') or '').lower())
+                created_apps = sum(1 for c in created if 'application' in (c.get('odata_type') or '').lower())
+                is_platform = owned_apps >= 2 or created_apps >= 3
+                platform_evidence = None
+                if is_platform:
+                    platform_evidence = {
+                        'owned_app_count': owned_apps,
+                        'created_app_count': created_apps,
+                        'owned_total': len(owned),
+                        'created_total': len(created),
+                    }
+                    platform_count += 1
+
+                if owned or created:
+                    enriched += 1
+
+                updates.append((
+                    db_id,
+                    owned or None,
+                    created or None,
+                    len(owned),
+                    len(created),
+                    is_platform,
+                    platform_evidence,
+                ))
+
+        async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+            tasks = [_enrich_one(session, row[0], row[1]) for row in spn_rows]
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
+        # Batch update identities table
+        import json
+        update_count = 0
+        try:
+            cursor = db.conn.cursor()
+            for (db_id, owned, created, owned_cnt, created_cnt, is_plat, plat_ev) in updates:
+                try:
+                    cursor.execute("""
+                        UPDATE identities SET
+                            owned_objects = %s,
+                            created_objects = %s,
+                            owned_object_count = %s,
+                            created_object_count = %s,
+                            is_platform_spn = %s,
+                            platform_spn_evidence = %s
+                        WHERE id = %s
+                    """, (
+                        json.dumps(owned) if owned else None,
+                        json.dumps(created) if created else None,
+                        owned_cnt,
+                        created_cnt,
+                        is_plat,
+                        json.dumps(plat_ev) if plat_ev else None,
+                        db_id,
+                    ))
+                    update_count += 1
+                except Exception as e:
+                    logger.debug("[owned_objects_bg] Update failed for id=%s: %s", db_id, e)
+                    try:
+                        db.conn.rollback()
+                    except Exception:
+                        pass
+            db.conn.commit()
+            cursor.close()
+        except Exception as e:
+            logger.error("[owned_objects_bg] Batch update failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        db.close()
+        _elapsed = round(_bg_time.monotonic() - _start, 1)
+        logger.info(
+            "[owned_objects_bg] DONE in %.1fs: %d/%d SPNs enriched, %d platform SPNs, %d DB updates org=%s",
+            _elapsed, enriched, len(spn_rows), platform_count, update_count, db_org_id,
+        )
+
     # ── Module 3: AAD Audit Log Provenance ────────────────────────────
 
     @staticmethod
@@ -2987,23 +4105,65 @@ class AzureDiscoveryEngine:
 
         Bails on 403 (AuditLog.Read.All not granted).
         Skips Microsoft system SPNs.
+        Time-boxed to MAX_PHASE_SECONDS (default 180s) and capped at
+        MAX_SPNS_PROCESSED (default 500) to prevent scan stalls.
         """
+        import os
+        if os.environ.get('DISABLE_AUDIT_PROVENANCE', 'false').lower() == 'true':
+            logger.info("[audit_provenance] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
+        import time as _time
         from urllib.parse import quote
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('AUDIT_PROVENANCE_MAX_SECONDS', '180'))
+        MAX_SPNS_PROCESSED = int(os.environ.get('AUDIT_PROVENANCE_MAX_SPNS', '500'))
 
         token = self.credential.get_token("https://graph.microsoft.com/.default")
         headers = {"Authorization": f"Bearer {token.token}"}
 
         enriched = 0
+        processed = 0
+        skipped_ms = 0
+        skipped_no_id = 0
         ninety_days_ago = (datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%dT00:00:00Z')
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
             for sp in service_principals:
+                processed += 1
+
+                if processed % 50 == 0:
+                    elapsed = _time.monotonic() - phase_start
+                    logger.info(
+                        "[audit_provenance] progress: processed=%d enriched=%d elapsed=%.1fs",
+                        processed, enriched, elapsed
+                    )
+
+                elapsed = _time.monotonic() - phase_start
+                if elapsed > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[audit_provenance] TIME BUDGET EXCEEDED at %.1fs — "
+                        "enriched %d/%d SPNs, skipping remainder",
+                        elapsed, enriched, processed
+                    )
+                    break
+                if processed >= MAX_SPNS_PROCESSED:
+                    logger.warning(
+                        "[audit_provenance] SPN CAP REACHED (%d) — "
+                        "enriched %d SPNs, skipping remainder",
+                        MAX_SPNS_PROCESSED, enriched
+                    )
+                    break
+
                 if sp.get('is_microsoft_system'):
+                    skipped_ms += 1
                     continue
                 obj_id = sp.get('object_id')
                 if not obj_id:
+                    skipped_no_id += 1
                     continue
 
                 # Fetch creation event
@@ -3022,8 +4182,14 @@ class AzureDiscoveryEngine:
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 403:
                             logger.info("Audit provenance: AuditLog.Read.All not granted — skipping module")
+                            self._persist_permission(
+                                'directory_audit_log', 'denied',
+                                error_detail='AuditLog.Read.All Graph API permission not granted',
+                                impact_description='Identity creation provenance, modification history, '
+                                                  'and Entra role exercise evidence unavailable.')
                             return  # Bail entirely
                         if resp.status == 200:
+                            self._persist_permission('directory_audit_log', 'granted')
                             data = await resp.json()
                             events = data.get('value', [])
                             if events:
@@ -3054,7 +4220,7 @@ class AzureDiscoveryEngine:
                     )
                     url = (
                         f"https://graph.microsoft.com/v1.0/auditLogs/directoryAudits"
-                        f"?$filter={quote(filter_str)}&$top=10&$orderby=activityDateTime desc"
+                        f"?$filter={quote(filter_str)}&$top=999&$orderby=activityDateTime desc"
                     )
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 200:
@@ -3089,7 +4255,12 @@ class AzureDiscoveryEngine:
                 if created_by:
                     enriched += 1
 
-        logger.info("Audit provenance: %s SPNs enriched with creation/modification data", enriched)
+        elapsed = _time.monotonic() - phase_start
+        logger.info(
+            "[audit_provenance] COMPLETE: processed=%d enriched=%d "
+            "skipped_ms=%d skipped_no_id=%d elapsed=%.1fs",
+            processed, enriched, skipped_ms, skipped_no_id, elapsed
+        )
 
     # ── Module 4: AAD Sign-in Intelligence ────────────────────────────
 
@@ -3185,6 +4356,11 @@ class AzureDiscoveryEngine:
         Calls GET /v1.0/auditLogs/signIns with servicePrincipalId filter.
         6-hour cache via setting key. Rate limit 150ms. Bails on 403.
         """
+        import os
+        if os.environ.get('DISABLE_SIGNIN_INTELLIGENCE', 'false').lower() == 'true':
+            logger.info("[signin_intelligence] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
         from urllib.parse import quote
@@ -3209,7 +4385,7 @@ class AzureDiscoveryEngine:
         enriched = 0
         batch_count = 0
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
             for identity in identities:
                 if identity.get('identity_category') not in ('service_principal', 'managed_identity_user', 'managed_identity_system'):
                     continue
@@ -3226,7 +4402,7 @@ class AzureDiscoveryEngine:
                     )
                     url = (
                         f"https://graph.microsoft.com/v1.0/auditLogs/signIns"
-                        f"?$filter={quote(filter_str)}&$top=50"
+                        f"?$filter={quote(filter_str)}&$top=999"
                         f"&$orderby=createdDateTime desc&$select={select_fields}"
                     )
                     async with session.get(url, headers=headers) as resp:
@@ -3614,7 +4790,7 @@ class AzureDiscoveryEngine:
             logger.info("ARM scan skipped — no subscriptions available")
             return {}
 
-        rg_client = ResourceGraphClient(self.credential)
+        rg_client = ResourceGraphClient(self.credential, **ARM_TIMEOUT_KWARGS)
 
         # Batch app_ids
         all_app_ids = list(app_id_set.keys())
@@ -3765,7 +4941,7 @@ class AzureDiscoveryEngine:
         if not oid_to_iid and not uami_arm_to_oid:
             return {}
 
-        rg_client = ResourceGraphClient(self.credential)
+        rg_client = ResourceGraphClient(self.credential, **ARM_TIMEOUT_KWARGS)
         result_map: Dict[str, List[Dict]] = {}
 
         try:
@@ -3872,14 +5048,21 @@ class AzureDiscoveryEngine:
         Returns:
             Dictionary mapping identity_id to list of credentials
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — credentials are Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_credentials] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         credentials_map = {}
-        
+
         logger.info("Discovering SPN Credentials...")
         
         for sp in service_principals:
             try:
                 # Get full service principal details including credentials
-                sp_response = await self.graph_client.service_principals.by_service_principal_id(sp['object_id']).get()
+                sp_response = await asyncio.wait_for(self.graph_client.service_principals.by_service_principal_id(sp['object_id']).get(), timeout=GRAPH_SDK_TIMEOUT)
                 
                 credentials = []
                 
@@ -3949,9 +5132,9 @@ class AzureDiscoveryEngine:
 
         if resource_spn_id not in self._resource_spn_cache:
             try:
-                resource_sp = await self.graph_client.service_principals.by_service_principal_id(
+                resource_sp = await asyncio.wait_for(self.graph_client.service_principals.by_service_principal_id(
                     resource_spn_id
-                ).get()
+                ).get(), timeout=GRAPH_SDK_TIMEOUT)
                 roles_lookup = {}
                 if hasattr(resource_sp, 'app_roles') and resource_sp.app_roles:
                     for role in resource_sp.app_roles:
@@ -3979,6 +5162,13 @@ class AzureDiscoveryEngine:
         Returns:
             Dictionary mapping identity_id to list of permissions
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — permissions are Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_permissions] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         permissions_map: Dict[str, List[Dict]] = {}
         app_perm_total = 0
         delegated_perm_total = 0
@@ -3996,9 +5186,9 @@ class AzureDiscoveryEngine:
 
             # ── Application permissions (appRoleAssignments) ──
             try:
-                assignments = await self.graph_client.service_principals.by_service_principal_id(
+                assignments = await asyncio.wait_for(self.graph_client.service_principals.by_service_principal_id(
                     sp_object_id
-                ).app_role_assignments.get()
+                ).app_role_assignments.get(), timeout=GRAPH_SDK_TIMEOUT)
 
                 if assignments and assignments.value:
                     for assignment in assignments.value:
@@ -4030,7 +5220,7 @@ class AzureDiscoveryEngine:
                     filter=f"clientId eq '{sp_object_id}'",
                 )
                 config = RequestConfiguration(query_parameters=query)
-                grants = await self.graph_client.oauth2_permission_grants.get(request_configuration=config)
+                grants = await asyncio.wait_for(self.graph_client.oauth2_permission_grants.get(request_configuration=config), timeout=GRAPH_SDK_TIMEOUT)
 
                 if grants and grants.value:
                     for grant in grants.value:
@@ -4044,9 +5234,9 @@ class AzureDiscoveryEngine:
                             resource_app_id = cached.get('app_id', '')
                         elif resource_spn_id:
                             try:
-                                res_sp = await self.graph_client.service_principals.by_service_principal_id(
+                                res_sp = await asyncio.wait_for(self.graph_client.service_principals.by_service_principal_id(
                                     resource_spn_id
-                                ).get()
+                                ).get(), timeout=GRAPH_SDK_TIMEOUT)
                                 if res_sp:
                                     resource_name = res_sp.display_name or 'Microsoft Graph'
                                     resource_app_id = str(res_sp.app_id) if res_sp.app_id else ''
@@ -4129,15 +5319,22 @@ class AzureDiscoveryEngine:
         """
         Discover custom application role assignments for service principals.
         Returns assignments to custom apps (NOT Microsoft Graph).
-        
+
         Similar to _discover_permissions but filters OUT Microsoft Graph.
-        
+
         Args:
             service_principals: List of service principal dicts
-            
+
         Returns:
             Dict mapping identity_id to list of app role assignments
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — app roles are Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_app_roles] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         logger.info("Discovering Custom App Roles...")
         app_roles_map = {}
         found_count = 0
@@ -4149,9 +5346,9 @@ class AzureDiscoveryEngine:
             
             try:
                 # Fetch app role assignments (same endpoint as permissions)
-                response = await self.graph_client.service_principals.by_service_principal_id(
+                response = await asyncio.wait_for(self.graph_client.service_principals.by_service_principal_id(
                     identity_id
-                ).app_role_assignments.get()
+                ).app_role_assignments.get(), timeout=GRAPH_SDK_TIMEOUT)
                 
                 assignments = response.value if response and response.value else []
                 
@@ -4196,6 +5393,13 @@ class AzureDiscoveryEngine:
         Returns:
             Dict mapping identity_id -> list of owner dicts
         """
+        # AG-74 Phase 1: Skip Microsoft system SPNs — ownership is Microsoft-managed
+        customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
+        logger.info("[_discover_ownership] processing %s/%s customer SPNs (skipping %s MS system)",
+                    len(customer_sps), len(service_principals),
+                    len(service_principals) - len(customer_sps))
+        service_principals = customer_sps
+
         logger.info("Discovering Application Owners...")
         ownership_map = {}
         found_count = 0
@@ -4225,13 +5429,13 @@ class AzureDiscoveryEngine:
                 )
                 request_config = RequestConfiguration(query_parameters=query_params)
 
-                apps = await self.graph_client.applications.get(request_configuration=request_config)
+                apps = await asyncio.wait_for(self.graph_client.applications.get(request_configuration=request_config), timeout=GRAPH_SDK_TIMEOUT)
 
                 if apps and apps.value and len(apps.value) > 0:
                     app_object_id = apps.value[0].id
 
                     # Now get the owners
-                    owners_response = await self.graph_client.applications.by_application_id(app_object_id).owners.get()
+                    owners_response = await asyncio.wait_for(self.graph_client.applications.by_application_id(app_object_id).owners.get(), timeout=GRAPH_SDK_TIMEOUT)
 
                     if owners_response and owners_response.value:
                         owners = []
@@ -4294,7 +5498,7 @@ class AzureDiscoveryEngine:
             if role_definition_id in role_def_cache:
                 return role_def_cache[role_definition_id]
             try:
-                role_def = await self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(role_definition_id).get()
+                role_def = await asyncio.wait_for(self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(role_definition_id).get(), timeout=GRAPH_SDK_TIMEOUT)
                 name = role_def.display_name if role_def else "Unknown Role"
             except Exception:
                 name = "Unknown Role"
@@ -4304,7 +5508,7 @@ class AzureDiscoveryEngine:
         # --- Eligible assignments ---
         eligible_count = 0
         try:
-            eligible_response = await self.graph_client.role_management.directory.role_eligibility_schedule_instances.get()
+            eligible_response = await asyncio.wait_for(self.graph_client.role_management.directory.role_eligibility_schedule_instances.get(), timeout=GRAPH_SDK_TIMEOUT)
             if eligible_response and eligible_response.value:
                 for item in eligible_response.value:
                     principal_id = item.principal_id
@@ -4338,7 +5542,7 @@ class AzureDiscoveryEngine:
         # --- Active activations ---
         activation_count = 0
         try:
-            activations_response = await self.graph_client.role_management.directory.role_assignment_schedule_instances.get()
+            activations_response = await asyncio.wait_for(self.graph_client.role_management.directory.role_assignment_schedule_instances.get(), timeout=GRAPH_SDK_TIMEOUT)
             if activations_response and activations_response.value:
                 for item in activations_response.value:
                     # Only track activated (JIT) assignments, skip permanently assigned
@@ -4376,7 +5580,7 @@ class AzureDiscoveryEngine:
         try:
             from kiota_abstractions.base_request_configuration import RequestConfiguration
 
-            requests_response = await self.graph_client.role_management.directory.role_assignment_schedule_requests.get()
+            requests_response = await asyncio.wait_for(self.graph_client.role_management.directory.role_assignment_schedule_requests.get(), timeout=GRAPH_SDK_TIMEOUT)
             if requests_response and requests_response.value:
                 for item in requests_response.value:
                     principal_id = item.principal_id
@@ -4413,6 +5617,222 @@ class AzureDiscoveryEngine:
 
         return pim_map
 
+    async def _collect_mfa_registration(self) -> dict:
+        """Collect per-user MFA/SSPR registration status via Graph API.
+
+        Uses the beta credentialUserRegistrationDetails report endpoint
+        (one bulk call for all users in the tenant).
+
+        Requires: Reports.Read.All permission.
+        Returns: dict mapping user object_id -> {mfa_registered, sspr_registered}
+        """
+        logger.info("Collecting MFA/SSPR registration data...")
+        mfa_map: dict[str, dict] = {}
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+
+            url: str | None = (
+                "https://graph.microsoft.com/beta"
+                "/reports/credentialUserRegistrationDetails?$top=999"
+            )
+
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+                page = 0
+                while url:
+                    page += 1
+                    async with self._graph_semaphore:
+                        async with session.get(url, headers=headers) as resp:
+                            if resp.status == 403:
+                                logger.warning(
+                                    "[MFA] 403 Forbidden — Reports.Read.All "
+                                    "permission likely missing. MFA data will "
+                                    "be NULL (unknown). org=%s",
+                                    self.db_org_id,
+                                )
+                                return mfa_map
+                            if resp.status == 404:
+                                logger.warning(
+                                    "[MFA] 404 — credentialUserRegistrationDetails "
+                                    "endpoint not available. org=%s",
+                                    self.db_org_id,
+                                )
+                                return mfa_map
+                            if resp.status != 200:
+                                body = await resp.text()
+                                logger.warning(
+                                    "[MFA] HTTP %s on page %s — %s. org=%s",
+                                    resp.status, page, body[:200], self.db_org_id,
+                                )
+                                return mfa_map
+                            data = await resp.json()
+
+                    for entry in data.get('value', []):
+                        uid = entry.get('id')
+                        if uid:
+                            mfa_map[uid] = {
+                                'mfa_registered': entry.get('isMfaRegistered'),
+                                'sspr_registered': entry.get('isSsprRegistered'),
+                            }
+
+                    url = data.get('@odata.nextLink')
+
+            logger.info(
+                "[MFA] Collected registration data for %s users. org=%s",
+                len(mfa_map), self.db_org_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "[MFA] Collection failed: %s. MFA data will be NULL. org=%s",
+                e, self.db_org_id,
+            )
+
+        return mfa_map
+
+    # ── AG-161: Per-user authentication methods (fallback for MFA status) ──
+
+    # Method types that count as genuine MFA factors
+    MFA_FACTOR_TYPES = {
+        'microsoftAuthenticatorAuthenticationMethod',
+        'phoneAuthenticationMethod',
+        'fido2AuthenticationMethod',
+        'windowsHelloForBusinessAuthenticationMethod',
+        'softwareOathAuthenticationMethod',
+        'temporaryAccessPassAuthenticationMethod',
+    }
+    # Non-MFA types (password, email used for SSPR only)
+    NON_MFA_TYPES = {
+        'passwordAuthenticationMethod',
+        'emailAuthenticationMethod',
+    }
+
+    async def _collect_mfa_auth_methods(self, human_identities: list) -> dict:
+        """Collect per-user MFA enrollment via /users/{id}/authentication/methods.
+
+        Requires: UserAuthenticationMethod.Read.All (Application).
+        No P2 dependency. Falls back from the bulk credentialUserRegistrationDetails
+        endpoint which requires Reports.Read.All.
+
+        Uses concurrent requests (bounded by _graph_semaphore) to cover
+        large tenants within the time budget.
+
+        Returns: dict mapping object_id -> {mfa_status, mfa_methods}
+        """
+        import time as _time
+        phase_start = _time.monotonic()
+        TIME_BUDGET = 600  # seconds — enough for ~1000+ users with concurrency
+
+        mfa_result: dict[str, dict] = {}
+        if not human_identities:
+            return mfa_result
+
+        # Only process human identities with an object_id
+        targets = [(h.get('object_id'), h.get('display_name', ''))
+                    for h in human_identities if h.get('object_id')]
+        if not targets:
+            return mfa_result
+
+        logger.info(
+            "[MFA-methods] Collecting authentication methods for %s humans (concurrent). org=%s",
+            len(targets), self.db_org_id,
+        )
+
+        # Shared mutable state for the permission-check sentinel
+        _permission_ok = True
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+
+            _diag = {'throttled': 0, 'not_found': 0, 'timeout': 0, 'other_err': 0, 'budget_skip': 0}
+
+            async def _fetch_one(session, oid):
+                nonlocal _permission_ok
+                if not _permission_ok:
+                    return None
+                if _time.monotonic() - phase_start > TIME_BUDGET:
+                    _diag['budget_skip'] += 1
+                    return None
+
+                url = f"https://graph.microsoft.com/v1.0/users/{oid}/authentication/methods"
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        async with self._graph_semaphore:
+                            if not _permission_ok:
+                                return None
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status in (401, 403):
+                                    _permission_ok = False
+                                    logger.warning(
+                                        "[MFA-methods] %s — "
+                                        "UserAuthenticationMethod.Read.All likely missing. org=%s",
+                                        resp.status, self.db_org_id,
+                                    )
+                                    return None
+                                if resp.status == 404:
+                                    _diag['not_found'] += 1
+                                    return None
+                                if resp.status == 429:
+                                    _diag['throttled'] += 1
+                                    retry_after = int(resp.headers.get('Retry-After', 2))
+                                    await asyncio.sleep(min(retry_after, 10))
+                                    continue  # retry
+                                if resp.status != 200:
+                                    _diag['other_err'] += 1
+                                    return None
+
+                                data = await resp.json()
+                                methods_raw = data.get('value', [])
+
+                                method_types = []
+                                has_mfa_factor = False
+                                for m in methods_raw:
+                                    odata_type = m.get('@odata.type', '')
+                                    suffix = odata_type.rsplit('.', 1)[-1] if '.' in odata_type else odata_type
+                                    method_types.append(suffix)
+                                    if suffix in self.MFA_FACTOR_TYPES:
+                                        has_mfa_factor = True
+
+                                return (oid, {
+                                    'mfa_status': 'enrolled' if has_mfa_factor else 'not_enrolled',
+                                    'mfa_methods': method_types,
+                                })
+                    except asyncio.TimeoutError:
+                        _diag['timeout'] += 1
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+                    except Exception as e:
+                        logger.debug("[MFA-methods] Error for %s: %s", oid, str(e)[:100])
+                        return None
+                return None  # all retries exhausted
+
+            # Fire all requests concurrently; semaphore bounds in-flight count
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+                tasks = [_fetch_one(session, oid) for oid, _ in targets]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, tuple) and r is not None:
+                        mfa_result[r[0]] = r[1]
+
+            logger.info(
+                "[MFA-methods] Collected auth methods for %s/%s humans. "
+                "throttled=%s not_found=%s timeout=%s other=%s budget_skip=%s org=%s",
+                len(mfa_result), len(targets),
+                _diag['throttled'], _diag['not_found'], _diag['timeout'],
+                _diag['other_err'], _diag['budget_skip'], self.db_org_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "[MFA-methods] Collection failed: %s. org=%s",
+                e, self.db_org_id,
+            )
+
+        return mfa_result
+
     async def _discover_conditional_access(self) -> list:
         """
         Discover Conditional Access policies via Microsoft Graph API.
@@ -4427,7 +5847,7 @@ class AzureDiscoveryEngine:
         policies = []
 
         try:
-            ca_response = await self.graph_client.identity.conditional_access.policies.get()
+            ca_response = await asyncio.wait_for(self.graph_client.identity.conditional_access.policies.get(), timeout=GRAPH_SDK_TIMEOUT)
             if ca_response and ca_response.value:
                 for policy in ca_response.value:
                     state = getattr(policy, 'state', None)
@@ -4507,9 +5927,16 @@ class AzureDiscoveryEngine:
             err_str = str(e)
             if '403' in err_str or 'Forbidden' in err_str or 'Authorization' in err_str:
                 logger.info("Conditional Access: requires Policy.Read.All permission (403)")
+                self._persist_permission(
+                    'conditional_access', 'denied',
+                    error_detail='Policy.Read.All permission not granted',
+                    impact_description='Conditional Access policy coverage and MFA enforcement '
+                                      'data unavailable.')
             else:
                 logger.warning("Conditional Access error: %s", err_str[:80])
 
+        if policies:
+            self._persist_permission('conditional_access', 'granted')
         return policies
 
     def _compute_ca_coverage(self, ca_policies: list, identities: list) -> dict:
@@ -4594,15 +6021,172 @@ class AzureDiscoveryEngine:
             logger.warning("Could not discover managed identities: %s", e)
         
         return managed_identities
-    
-    async def _discover_users(self, principal_ids_with_roles: Set[str]) -> List[Dict[str, Any]]:
-        """Discover ALL users in the tenant via direct HTTP with pagination.
 
-        Every user is returned regardless of role assignments. The
-        principal_ids_with_roles set is only used to optimise manager lookups
-        (fetching managers for every user would be O(N) API calls).
+    # ── AG-75: Identity Inclusion Criteria ─────────────────────────────
+    def _collect_relevant_principal_ids(
+        self,
+        role_assignments: List[Dict],
+        entra_roles: List[Dict],
+        pim_map: Dict[str, Dict],
+        groups: List[Dict],
+        group_memberships: Dict[str, List[Dict]],
+        ownership_map: Dict[str, List[Dict]],
+        ca_policies: List[Dict],
+        service_principals: List[Dict],
+    ) -> Set[str]:
+        """Compute the canonical set of principal IDs with actionable access.
+
+        Returns a Set[str] of Azure AD object IDs satisfying inclusion criteria.
+        Also populates self._principal_access_paths: Dict[str, Dict] with
+        per-principal access_paths JSONB for persistence.
+        """
+        access_paths: Dict[str, Dict] = {}
+
+        def _ensure(pid: str):
+            if pid not in access_paths:
+                access_paths[pid] = {
+                    'direct_rbac': [],
+                    'direct_entra': [],
+                    'group_membership': [],
+                    'pim_eligible': [],
+                    'ca_targeted': [],
+                    'spn_ownership': [],
+                }
+
+        # 1. Direct RBAC principals
+        for ra in role_assignments:
+            pid = ra.get('principal_id')
+            if pid:
+                _ensure(pid)
+                access_paths[pid]['direct_rbac'].append({
+                    'role': ra.get('role_name', ''),
+                    'scope': ra.get('scope', ''),
+                })
+
+        # 2. Direct Entra role principals
+        for er in entra_roles:
+            pid = er.get('principal_id')
+            if pid:
+                _ensure(pid)
+                access_paths[pid]['direct_entra'].append({
+                    'role': er.get('role_name', ''),
+                })
+
+        # 3. PIM-eligible principals
+        for pid, pim_data in pim_map.items():
+            eligible = pim_data.get('eligible', [])
+            if eligible:
+                _ensure(pid)
+                for e in eligible:
+                    access_paths[pid]['pim_eligible'].append({
+                        'role': e.get('role_name', ''),
+                        'scope': e.get('directory_scope', '/'),
+                    })
+
+        # 4. Group members from role-bearing groups
+        # IMPORTANT: Only expand groups that have RBAC or Entra directory roles.
+        # PIM eligibility alone does NOT make a group "role-bearing" for member
+        # expansion — PIM tracks individual principal eligibility, not inherited
+        # group access.  Using set(access_paths.keys()) would include PIM-only
+        # groups, pulling in all their members with empty inherited roles.
+        group_id_set = {g['group_id'] for g in groups}
+        group_name_map = {g['group_id']: g.get('display_name', '') for g in groups}
+
+        # Build role_bearing_group_ids strictly from RBAC + Entra sources
+        role_bearing_group_ids = set()
+        group_roles_index: Dict[str, List[str]] = {}
+        for ra in role_assignments:
+            pid = ra.get('principal_id')
+            if pid and pid in group_id_set:
+                role_bearing_group_ids.add(pid)
+                group_roles_index.setdefault(pid, []).append(ra.get('role_name', ''))
+        for er in entra_roles:
+            pid = er.get('principal_id')
+            if pid and pid in group_id_set:
+                role_bearing_group_ids.add(pid)
+                group_roles_index.setdefault(pid, []).append(er.get('role_name', ''))
+
+        expanded_from_groups = 0
+        for gid in role_bearing_group_ids:
+            members = group_memberships.get(gid, [])
+            g_name = group_name_map.get(gid, gid)
+            g_roles = group_roles_index.get(gid, [])
+            for member in members:
+                mid = member.get('member_object_id')
+                if mid and member.get('member_type') != 'group':
+                    _ensure(mid)
+                    access_paths[mid]['group_membership'].append({
+                        'group_id': gid,
+                        'group_name': g_name,
+                        'role': ', '.join(g_roles) if g_roles else '',
+                    })
+                    expanded_from_groups += 1
+
+        # 5. SPN owners (user type only)
+        spn_lookup = {sp.get('identity_id'): sp for sp in service_principals}
+        owner_count = 0
+        for spn_identity_id, owners in ownership_map.items():
+            sp = spn_lookup.get(spn_identity_id)
+            spn_obj_id = sp.get('object_id', '') if sp else ''
+            spn_name = sp.get('display_name', '') if sp else ''
+            for owner in owners:
+                if owner.get('owner_type') == 'user':
+                    oid = owner.get('owner_object_id')
+                    if oid:
+                        _ensure(oid)
+                        access_paths[oid]['spn_ownership'].append({
+                            'spn_id': spn_obj_id,
+                            'spn_name': spn_name,
+                        })
+                        owner_count += 1
+
+        # 6. CA policy targets (named users, not 'All')
+        ca_count = 0
+        for policy in ca_policies:
+            include_users = policy.get('include_users', [])
+            p_name = policy.get('display_name', '')
+            p_id = policy.get('policy_id', '')
+            for uid in include_users:
+                if uid and uid != 'All':
+                    _ensure(uid)
+                    access_paths[uid]['ca_targeted'].append({
+                        'policy_id': p_id,
+                        'policy_name': p_name,
+                    })
+                    ca_count += 1
+
+        self._principal_access_paths = access_paths
+        result_set = set(access_paths.keys())
+
+        logger.info(
+            "[_collect_relevant_principal_ids] %d unique principals "
+            "(RBAC=%d Entra=%d PIM=%d group_expanded=%d SPN_owners=%d CA=%d)",
+            len(result_set),
+            len({ra['principal_id'] for ra in role_assignments if ra.get('principal_id')}),
+            len({er['principal_id'] for er in entra_roles if er.get('principal_id')}),
+            len({pid for pid, d in pim_map.items() if d.get('eligible')}),
+            expanded_from_groups,
+            owner_count,
+            ca_count,
+        )
+
+        return result_set
+
+    async def _discover_users(self, principal_ids: Set[str]) -> List[Dict[str, Any]]:
+        """Discover users scoped to the AG-75 inclusion criteria principal set.
+
+        Only users whose Azure AD object ID is in principal_ids are returned.
+        Pages through all tenant users but filters client-side, with early
+        termination when all principals have been found.
         """
         import aiohttp
+
+        if not principal_ids:
+            logger.info("[_discover_users] No relevant principals — skipping user discovery")
+            return []
+
+        logger.info("[_discover_users] org=%s tenant=%s starting (target=%d principals)",
+                    self.db_org_id, self.azure_directory_id, len(principal_ids))
 
         try:
             token = self.credential.get_token("https://graph.microsoft.com/.default")
@@ -4622,32 +6206,147 @@ class AzureDiscoveryEngine:
             page = 0
             sign_in_available = True
 
-            async with aiohttp.ClientSession() as session:
+            MAX_PAGE_RETRIES = 5
+
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
                 while url:
                     page += 1
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status != 200:
-                            body = await resp.text()
-                            # If signInActivity fails (403 / needs P2), retry page 1 without it
-                            if page == 1 and ('signInActivity' in body or resp.status == 403):
-                                logger.warning("signInActivity requires Entra ID P2 — retrying without it")
-                                sign_in_available = False
-                                select_no_sia = select_fields.replace(',signInActivity', '')
-                                url = (
-                                    f"https://graph.microsoft.com/v1.0/users"
-                                    f"?$select={select_no_sia}&$top=999"
-                                )
-                                continue
-                            logger.error("Graph API error %s on users page %s: %s", resp.status, page, body[:500])
-                            break
-                        data = await resp.json()
+                    data = None
 
-                    for u in data.get('value', []):
-                        all_users.append(u)
+                    for attempt in range(MAX_PAGE_RETRIES):
+                        async with self._graph_semaphore:
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    break
+                                elif resp.status == 429:
+                                    retry_after = int(resp.headers.get('Retry-After', '10'))
+                                    retry_after = min(retry_after, 60)
+                                    logger.warning(
+                                        "[_discover_users] 429 throttled on page %s — waiting %ss (attempt %s/%s)",
+                                        page, retry_after, attempt + 1, MAX_PAGE_RETRIES
+                                    )
+                                    await asyncio.sleep(retry_after)
+                                    continue
+                                elif resp.status == 503:
+                                    wait = 5 * (attempt + 1)
+                                    logger.warning(
+                                        "[_discover_users] 503 on page %s — waiting %ss (attempt %s/%s)",
+                                        page, wait, attempt + 1, MAX_PAGE_RETRIES
+                                    )
+                                    await asyncio.sleep(wait)
+                                    continue
+                                else:
+                                    body = await resp.text()
+                                    # If signInActivity fails (403 / needs P2), retry page 1 without it
+                                    if page == 1 and ('signInActivity' in body or resp.status == 403):
+                                        logger.warning("[_discover_users] signInActivity requires Entra ID P2 — retrying without it")
+                                        sign_in_available = False
+                                        select_no_sia = select_fields.replace(',signInActivity', '')
+                                        url = (
+                                            f"https://graph.microsoft.com/v1.0/users"
+                                            f"?$select={select_no_sia}&$top=999"
+                                        )
+                                        page = 0  # reset so retry starts as page 1
+                                        data = None
+                                        break
+                                    logger.error("[_discover_users] FAILED status=%s body=%s",
+                                                 resp.status, body[:500])
+                                    raise Exception(
+                                        f"Graph API /users failed on page {page}: status={resp.status} body={body[:300]}"
+                                    )
+                    else:
+                        # All retries exhausted
+                        raise Exception(
+                            f"Graph API /users failed after {MAX_PAGE_RETRIES} retries on page {page} "
+                            f"(collected {len(all_users)} users so far)"
+                        )
+
+                    if data is None:
+                        # signInActivity retry — loop back with new URL
+                        continue
+
+                    page_users = data.get('value', [])
+                    matched = [u for u in page_users if u.get('id') in principal_ids]
+                    all_users.extend(matched)
+
+                    logger.info(
+                        "[_discover_users] org=%s page=%s scanned=%s matched=%s found_so_far=%s/%s",
+                        self.db_org_id, page, len(page_users), len(matched),
+                        len(all_users), len(principal_ids)
+                    )
+
+                    # Early termination: found all principals
+                    if len(all_users) >= len(principal_ids):
+                        logger.info(
+                            "[_discover_users] All %d relevant principals found — "
+                            "stopping pagination early at page %d",
+                            len(all_users), page
+                        )
+                        break
 
                     url = data.get('@odata.nextLink')
+                    if page >= self._MAX_GRAPH_PAGES:
+                        logger.warning("User pagination hit safety limit (%d pages, %d users) — stopping",
+                                       page, len(all_users))
+                        break
 
             logger.info("Fetched %s users across %s page(s) (signInActivity=%s)", len(all_users), page, sign_in_available)
+
+            # ── Beta endpoint fallback for signInActivity ─────────────
+            # If v1.0 stripped signInActivity (no P2 on v1.0), try beta endpoint
+            # which may expose signInActivity on some tenants.
+            if not sign_in_available and all_users:
+                logger.info("[_discover_users] Attempting beta endpoint for signInActivity (%d users)", len(all_users))
+                beta_enriched = 0
+                try:
+                    # Batch fetch via beta with signInActivity in $select
+                    beta_select = ','.join(['id', 'signInActivity'])
+                    beta_url: str | None = (
+                        f"https://graph.microsoft.com/beta/users"
+                        f"?$select={beta_select}&$top=999"
+                    )
+                    user_ids_needed = {u['id'] for u in all_users}
+                    sia_map: dict[str, dict] = {}
+                    beta_page = 0
+
+                    async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as beta_session:
+                        while beta_url and beta_page < 10:
+                            beta_page += 1
+                            async with self._graph_semaphore:
+                                async with beta_session.get(beta_url, headers=headers) as bresp:
+                                    if bresp.status != 200:
+                                        body = await bresp.text()
+                                        if 'signInActivity' in body or bresp.status == 403:
+                                            logger.info("[_discover_users] Beta endpoint also lacks signInActivity — giving up")
+                                        else:
+                                            logger.debug("[_discover_users] Beta /users error: %s %s", bresp.status, body[:200])
+                                        break
+                                    bdata = await bresp.json()
+
+                            for bu in bdata.get('value', []):
+                                uid = bu.get('id')
+                                if uid in user_ids_needed and bu.get('signInActivity'):
+                                    sia_map[uid] = bu['signInActivity']
+
+                            # If we've gathered enough, stop
+                            if len(sia_map) >= len(user_ids_needed):
+                                break
+                            beta_url = bdata.get('@odata.nextLink')
+
+                    # Merge signInActivity back into all_users
+                    if sia_map:
+                        sign_in_available = True
+                        for u in all_users:
+                            uid = u.get('id')
+                            if uid in sia_map:
+                                u['signInActivity'] = sia_map[uid]
+                                beta_enriched += 1
+                        logger.info("[_discover_users] Beta enriched %d/%d users with signInActivity",
+                                    beta_enriched, len(all_users))
+                except Exception as e:
+                    logger.warning("[_discover_users] Beta signInActivity fallback failed: %s", e)
+
             # Persist P2 license availability on the cloud connection (only upgrade, never downgrade)
             if sign_in_available:
                 try:
@@ -4662,20 +6361,41 @@ class AzureDiscoveryEngine:
                 except Exception as e:
                     logger.warning("Failed to persist has_p2_license (users): %s", e)
 
-            # Fetch manager info only for users that have roles (optimisation)
+            # Fetch manager info for included users — parallel with Semaphore(20)
             manager_map: dict[str, dict] = {}
-            for u in all_users:
-                uid = u.get('id')
-                if uid and uid in principal_ids_with_roles:
+            mgr_sem = asyncio.Semaphore(20)
+            mgr_lock = asyncio.Lock()
+            mgr_t0 = __import__('time').time()
+
+            async def _fetch_manager(uid: str):
+                async with mgr_sem:
                     try:
-                        mgr = await self.graph_client.users.by_user_id(uid).manager.get()
+                        mgr = await asyncio.wait_for(
+                            self.graph_client.users.by_user_id(uid).manager.get(),
+                            timeout=GRAPH_SDK_TIMEOUT
+                        )
                         if mgr:
-                            manager_map[uid] = {
+                            entry = {
                                 'manager_id': getattr(mgr, 'id', None),
                                 'manager_upn': getattr(mgr, 'user_principal_name', None),
                             }
+                            async with mgr_lock:
+                                manager_map[uid] = entry
                     except Exception:
                         pass
+
+            mgr_tasks = [
+                _fetch_manager(u['id'])
+                for u in all_users
+                if u.get('id') and u['id'] in principal_ids
+            ]
+            if mgr_tasks:
+                await asyncio.gather(*mgr_tasks)
+            mgr_elapsed = __import__('time').time() - mgr_t0
+            logger.info(
+                "[_discover_users] Manager fetch: %d users in %.1fs (parallel sem=20)",
+                len(mgr_tasks), mgr_elapsed
+            )
 
             ice_config = self._load_ice_config()
 
@@ -4717,17 +6437,20 @@ class AzureDiscoveryEngine:
                     user_principal_name = upn
                 user_proxy = _UserProxy()
 
+                _user_category = 'guest' if is_guest else 'human_user'
                 identities.append({
                     'identity_id': uid,
                     'object_id': uid,
                     'app_id': None,
                     'display_name': display_name,
                     'user_principal_name': upn,
-                    'identity_type': 'user',
-                    'identity_category': 'guest' if is_guest else 'human_user',
+                    'identity_type': _user_category,
+                    'identity_category': _user_category,
                     'enabled': u.get('accountEnabled', True),
                     'created_datetime': created,
                     'last_sign_in': last_sign_in,
+                    'last_signin_datetime': sia.get('lastSignInDateTime') if sia else None,
+                    'last_noninteractive_signin_datetime': sia.get('lastNonInteractiveSignInDateTime') if sia else None,
                     'on_premises_sync_enabled': u.get('onPremisesSyncEnabled'),
                     'mail': u.get('mail'),
                     'assigned_licenses': u.get('assignedLicenses', []),
@@ -4746,16 +6469,21 @@ class AzureDiscoveryEngine:
                     'manager_upn': mgr_info.get('manager_upn'),
                     'account_category': self._classify_account_category(user_proxy, ice_config),
                     '_signin_activity_raw': _signin_raw,
+                    'access_paths': getattr(self, '_principal_access_paths', {}).get(uid, {}),
                 })
 
-            logger.info("Discovered %s users (%s with roles, %s without)",
-                        len(identities),
-                        sum(1 for i in identities if i['identity_id'] in principal_ids_with_roles),
-                        sum(1 for i in identities if i['identity_id'] not in principal_ids_with_roles))
+            guests = sum(1 for i in identities if i['identity_category'] == 'guest')
+            humans = sum(1 for i in identities if i['identity_category'] == 'human_user')
+            logger.info("[_discover_users] Complete: org=%s total=%s human_user=%s guest=%s",
+                        self.db_org_id, len(identities), humans, guests)
             return identities
         except Exception as e:
-            logger.error("Error discovering users: %s", e)
-            return []
+            logger.error(
+                "[_discover_users] FATAL: user fetch failed org=%s tenant=%s error=%s",
+                self.db_org_id, self.azure_directory_id, e,
+                exc_info=True
+            )
+            raise  # Let the caller decide — do NOT return empty list silently
     
     _ice_config_cache = None
 
@@ -4769,11 +6497,12 @@ class AzureDiscoveryEngine:
         }
         try:
             from app.database import Database
-            db = Database()
+            # AG-94: Use org-scoped connection instead of admin to prevent cross-tenant settings leak
+            db = Database(organization_id=self.db_org_id)
             try:
                 from psycopg2.extras import RealDictCursor
                 cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-                cursor.execute("SELECT key, value FROM settings WHERE key IN ('ice_privileged_prefixes', 'ice_privileged_suffixes')")
+                cursor.execute("SELECT key, value FROM settings WHERE key IN ('ice_privileged_prefixes', 'ice_privileged_suffixes') AND organization_id = %s", (self.db_org_id,))
                 rows = cursor.fetchall()
                 cursor.close()
                 for row in rows:
@@ -4810,22 +6539,145 @@ class AzureDiscoveryEngine:
 
         return 'regular'
 
+    def _classify_access_tier(self, identity, role_assignments, entra_roles, group_memberships):
+        """Return 'control_plane' or 'data_plane' for a human identity.
+
+        control_plane if ANY qualifying role is:
+        - Any Entra directory role
+        - Role name contains a control-plane keyword
+        - Scope is subscription or management_group
+        - Resource-group scope with non-data-plane role
+        - Data-plane role on a sensitive resource (PHI/PII in scope or group name)
+
+        data_plane if ALL roles are data-plane-only at resource scope.
+        """
+        ap = identity.get('access_paths') or {}
+        identity_id = identity.get('identity_id', '')
+
+        # Entra directory role → always control_plane
+        if ap.get('direct_entra'):
+            return 'control_plane'
+
+        # Check group names for sensitive data indicators
+        for gm in (ap.get('group_membership') or []):
+            gname = (gm.get('group_name') or '').lower()
+            for ind in _SENSITIVE_DATA_INDICATORS:
+                if ind in gname:
+                    return 'control_plane'
+
+        # Build all role tuples: (role_name_lower, scope_type, scope_lower)
+        role_tuples = []
+
+        # Direct RBAC
+        for ra in role_assignments:
+            if ra.get('principal_id') == identity_id:
+                role_tuples.append((
+                    (ra.get('role_name') or '').lower(),
+                    (ra.get('scope_type') or '').lower(),
+                    (ra.get('scope') or '').lower(),
+                ))
+
+        # Group-inherited from access_paths
+        for gm in (ap.get('group_membership') or []):
+            roles_str = gm.get('role', '')
+            if roles_str:
+                for rn in roles_str.split(', '):
+                    role_tuples.append((
+                        rn.strip().lower(),
+                        (gm.get('scope_type') or 'resource').lower(),
+                        (gm.get('scope') or '').lower(),
+                    ))
+
+        if not role_tuples:
+            return 'data_plane'
+
+        for role_lower, scope_type, scope in role_tuples:
+            # Control-plane keyword in role name
+            if any(kw in role_lower for kw in _CONTROL_PLANE_KEYWORDS):
+                return 'control_plane'
+            # Broad scope
+            if scope_type in _CONTROL_PLANE_SCOPES:
+                return 'control_plane'
+            # Resource-group scope with non-data-plane role
+            if scope_type == 'resource_group' and role_lower not in _DATA_PLANE_ROLES:
+                return 'control_plane'
+            # Sensitive data in scope path
+            for ind in _SENSITIVE_DATA_INDICATORS:
+                if ind in scope:
+                    return 'control_plane'
+
+        return 'data_plane'
+
     def _discover_role_assignments(self) -> List[Dict[str, Any]]:
-        """Discover RBAC role assignments across ALL accessible subscriptions using Azure SDK."""
+        """Discover RBAC role assignments across ALL accessible subscriptions using Azure SDK.
+
+        Each subscription has a 20-minute timeout — if exceeded, that subscription is
+        skipped and discovery continues with the remaining subscriptions.
+
+        Performance: Role definitions are pre-fetched with a single LIST call per
+        subscription (instead of one GET per role assignment).  The resulting map is
+        keyed by the short UUID at the tail of the full ARM role-definition ID so
+        that scope-path variations all resolve to the same entry.  The map is also
+        carried across subscriptions — built-in role UUIDs are identical across
+        subscriptions, so later subscriptions get near-100% cache hits with zero
+        API calls for role definitions.
+        """
         from datetime import datetime, timezone
+        import time as _time
 
         role_assignments = []
         printed = 0
+        SUB_TIMEOUT_SECONDS = 20 * 60  # 20-minute per-subscription timeout
 
-        for sub in self.subscriptions:
+        # Cache: short role-definition UUID → role_name (shared across subscriptions)
+        # Keyed by the last path segment of role_definition_id to avoid
+        # scope-path mismatches (the same role UUID appears with different
+        # subscription/management-group prefixes).
+        role_def_cache: Dict[str, str] = {}
+        cache_hits = 0
+        api_calls = 0
+
+        for sub_idx, sub in enumerate(self.subscriptions):
             sub_id = sub['id']
             sub_name = sub['name']
-            logger.info("Subscription: %s (%s...)", sub_name, sub_id[:8])
+            sub_start = _time.monotonic()
+            sub_count = 0
+            logger.info("Subscription [%d/%d]: %s (%s...)", sub_idx + 1, len(self.subscriptions), sub_name, sub_id[:8])
 
             try:
-                auth_client = AuthorizationManagementClient(self.credential, sub_id)
+                auth_client = AuthorizationManagementClient(self.credential, sub_id, **ARM_TIMEOUT_KWARGS)
+
+                # Pre-fetch ALL role definitions for this subscription in ONE call.
+                # Built-in + custom roles are returned (~70-150 entries).
+                # On the 2nd+ subscription most UUIDs are already cached, so this
+                # call only adds net-new custom roles.
+                pre_fetch_count = 0
+                try:
+                    for rd in auth_client.role_definitions.list(
+                        scope=f'/subscriptions/{sub_id}'
+                    ):
+                        short_id = rd.id.rsplit('/', 1)[-1] if rd.id else ''
+                        if short_id and short_id not in role_def_cache:
+                            role_def_cache[short_id] = rd.role_name or rd.display_name or short_id
+                            pre_fetch_count += 1
+                    api_calls += 1
+                    logger.info("  Pre-fetched %d new role definitions (cache total: %d)",
+                                pre_fetch_count, len(role_def_cache))
+                except Exception as e:
+                    logger.warning("  Could not pre-fetch role definitions for %s: %s", sub_name, e)
+
+                sub_timed_out = False
 
                 for assignment in auth_client.role_assignments.list_for_subscription():
+                    # Per-subscription timeout check
+                    if _time.monotonic() - sub_start > SUB_TIMEOUT_SECONDS:
+                        logger.warning(
+                            "⏰ Subscription %s exceeded 20-minute timeout after %d role assignments — skipping remainder",
+                            sub_name, sub_count
+                        )
+                        sub_timed_out = True
+                        break
+
                     principal_id = assignment.principal_id
                     if not principal_id:
                         continue
@@ -4833,14 +6685,14 @@ class AzureDiscoveryEngine:
                     scope = assignment.scope or ''
                     role_def_id = assignment.role_definition_id or ''
 
-                    # Get role name from role definition
-                    role_name = 'Unknown'
-                    try:
-                        role_def = auth_client.role_definitions.get_by_id(role_def_id)
-                        role_name = role_def.role_name or role_def.display_name or 'Unknown'
-                    except Exception:
-                        # Extract role name from the ID as fallback
-                        pass
+                    # Resolve role name from cache using the short UUID
+                    short_id = role_def_id.rsplit('/', 1)[-1] if role_def_id else ''
+                    if short_id and short_id in role_def_cache:
+                        role_name = role_def_cache[short_id]
+                        cache_hits += 1
+                    else:
+                        # Fallback: use the short UUID as the display name
+                        role_name = short_id or 'Unknown'
 
                     scope_type = 'subscription'
                     scope_lower = scope.lower()
@@ -4868,6 +6720,7 @@ class AzureDiscoveryEngine:
                         logger.info("... (listing remaining silently)")
                         printed += 1
 
+                    sub_count += 1
                     role_assignments.append({
                         'principal_id': principal_id,
                         'assignment_id': assignment.id,
@@ -4888,11 +6741,22 @@ class AzureDiscoveryEngine:
                         'subscription_name': sub_name,
                     })
 
+                elapsed = _time.monotonic() - sub_start
+                if sub_timed_out:
+                    logger.warning("Subscription %s: %d roles discovered in %.1fs (TIMED OUT)", sub_name, sub_count, elapsed)
+                else:
+                    logger.info("Subscription %s: %d roles discovered in %.1fs", sub_name, sub_count, elapsed)
+
             except Exception as e:
                 logger.warning("Error discovering roles for subscription %s: %s", sub_name, e)
                 continue
 
-        logger.info("Total: %s role assignments across %s subscription(s)", len(role_assignments), len(self.subscriptions))
+        logger.info(
+            "Total: %s role assignments across %s subscription(s) "
+            "(role_def_cache: %d unique defs, %d cache hits, %d LIST calls)",
+            len(role_assignments), len(self.subscriptions),
+            len(role_def_cache), cache_hits, api_calls
+        )
         return role_assignments
 
     # Exact-match role risk map: role_name_lower → { scope_type → (risk_level, description) }
@@ -5136,15 +7000,50 @@ class AzureDiscoveryEngine:
             page = 0
             first_error_logged = False
 
-            async with aiohttp.ClientSession() as session:
+            MAX_PAGE_RETRIES = 5
+
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
                 while url:
                     page += 1
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status != 200:
-                            body = await resp.text()
-                            logger.error("Graph API error %s on groups page %s: %s", resp.status, page, body[:500])
-                            break
-                        data = await resp.json()
+                    data = None
+
+                    for attempt in range(MAX_PAGE_RETRIES):
+                        async with self._graph_semaphore:
+                            async with session.get(url, headers=headers) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    break
+                                elif resp.status == 429:
+                                    retry_after = int(resp.headers.get('Retry-After', '10'))
+                                    retry_after = min(retry_after, 60)
+                                    logger.warning(
+                                        "[_discover_groups] 429 throttled on page %s — waiting %ss (attempt %s/%s)",
+                                        page, retry_after, attempt + 1, MAX_PAGE_RETRIES
+                                    )
+                                    await asyncio.sleep(retry_after)
+                                    continue
+                                elif resp.status == 503:
+                                    wait = 5 * (attempt + 1)
+                                    logger.warning(
+                                        "[_discover_groups] 503 on page %s — waiting %ss (attempt %s/%s)",
+                                        page, wait, attempt + 1, MAX_PAGE_RETRIES
+                                    )
+                                    await asyncio.sleep(wait)
+                                    continue
+                                else:
+                                    body = await resp.text()
+                                    logger.error("Graph API error %s on groups page %s: %s", resp.status, page, body[:500])
+                                break
+
+                    if data is None:
+                        break
+
+                    logger.info(
+                        "[_discover_groups] org=%s page=%s groups_this_page=%s total_so_far=%s",
+                        self.db_org_id, page, len(data.get('value', [])), len(all_groups) + len([
+                            g for g in data.get('value', []) if g.get('securityEnabled', False)
+                        ])
+                    )
 
                     for g in data.get('value', []):
                         try:
@@ -5184,6 +7083,10 @@ class AzureDiscoveryEngine:
                                 first_error_logged = True
 
                     url = data.get('@odata.nextLink')
+                    if page >= self._MAX_GRAPH_PAGES:
+                        logger.warning("Group pagination hit safety limit (%d pages, %d groups) — stopping",
+                                       page, len(all_groups))
+                        break
 
             logger.info("Fetched %s security groups across %s page(s)", len(all_groups), page)
             return all_groups
@@ -5192,8 +7095,20 @@ class AzureDiscoveryEngine:
             logger.error("Group discovery failed: %s", e)
             return []
 
-    async def _discover_group_memberships(self, groups: List[Dict[str, Any]]) -> Dict[str, List[Dict]]:
+    async def _discover_group_memberships(
+        self, groups: List[Dict[str, Any]],
+        relevant_group_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, List[Dict]]:
         """Discover group memberships with nested resolution up to 3 levels.
+
+        Two-tier optimization (when relevant_group_ids is provided):
+          Tier 1 (relevant_group_ids): Groups with Azure RBAC or Entra roles.
+                  Full Graph API member expansion via /groups/{id}/members.
+          Tier 2 (remaining groups): Skipped here. Memberships are populated
+                  by identity-centric memberOf enrichment (Step 5c).
+
+        When relevant_group_ids is None, expands ALL groups (fallback mode
+        used when memberOf pre-flight fails).
 
         Returns dict mapping group_id → list of member dicts.
         """
@@ -5206,12 +7121,29 @@ class AzureDiscoveryEngine:
         if not groups:
             return memberships
 
+        # Determine which groups to expand via Graph API
+        if relevant_group_ids is not None:
+            expand_groups = [g for g in groups if g.get('group_id') in relevant_group_ids]
+            skipped = len(groups) - len(expand_groups)
+            logger.info(
+                "[memberships] Tier 1: %d groups for Graph API expansion, "
+                "Tier 2: %d groups deferred to memberOf (Step 5c)",
+                len(expand_groups), skipped,
+            )
+        else:
+            expand_groups = groups
+            logger.info("[memberships] Full expansion: %d groups", len(expand_groups))
+
+        if not expand_groups:
+            logger.info("[memberships] 0 groups to expand — returning empty")
+            return memberships
+
         try:
             token = self.credential.get_token("https://graph.microsoft.com/.default")
             headers = {"Authorization": f"Bearer {token.token}"}
             first_error_logged = False
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
 
                 async def _fetch_members(group_id: str, depth: int, visited: set) -> List[Dict]:
                     """Recursively fetch members, resolving nested groups."""
@@ -5223,7 +7155,7 @@ class AzureDiscoveryEngine:
                     members: list[dict] = []
                     url: str | None = (
                         f"https://graph.microsoft.com/v1.0/groups/{group_id}/members"
-                        f"?$select=id,displayName,@odata.type&$top=999"
+                        f"?$select=id,displayName&$top=999"
                     )
 
                     while url:
@@ -5241,6 +7173,7 @@ class AzureDiscoveryEngine:
                                         first_error_logged = True
                                     break
                                 if resp.status != 200:
+                                    logger.warning("[memberships] group %s returned status %s — skipping", group_id, resp.status)
                                     break
                                 data = await resp.json()
 
@@ -5281,25 +7214,91 @@ class AzureDiscoveryEngine:
 
                     return members
 
-                # Fetch memberships sequentially with rate limiting
-                for i, group in enumerate(groups):
+                # Fetch memberships in parallel with concurrency limiter
+                sem = _asyncio.Semaphore(20)
+
+                async def _fetch_group(group):
                     gid = group.get('group_id')
                     if not gid:
+                        return (None, [])
+                    async with sem:
+                        visited: set = set()
+                        members = await _fetch_members(gid, 0, visited)
+                        return (gid, members)
+
+                tasks = [_fetch_group(g) for g in expand_groups]
+                results = await _asyncio.gather(*tasks, return_exceptions=True)
+
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.warning("Group membership task %s failed: %s", i, result)
                         continue
-                    visited: set = set()
-                    members = await _fetch_members(gid, 0, visited)
-                    memberships[gid] = members
+                    gid, members = result
+                    if gid:
+                        memberships[gid] = members
 
-                    if i > 0 and i % 50 == 0:
-                        logger.info("Group membership progress: %s/%s groups", i, len(groups))
-
-                    await _asyncio.sleep(0.15)  # Rate limit
+                    if (i + 1) % 50 == 0:
+                        logger.info("Group membership progress: %s/%s groups", i + 1, len(expand_groups))
 
             return memberships
 
         except Exception as e:
             logger.error("Group membership discovery failed: %s", e)
             return memberships
+
+    async def _check_memberof_permission(self) -> bool:
+        """Pre-flight check: test if the service principal can call memberOf.
+
+        Calls GET /users?$top=1 to get a test user, then tries
+        GET /users/{id}/memberOf?$top=1. Returns True if 200, False if 403.
+        On any error (network, token, no users), returns False (safe fallback).
+        """
+        import aiohttp
+
+        try:
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {token.token}"}
+        except Exception as e:
+            logger.warning("memberOf pre-flight: token error: %s", e)
+            return False
+
+        try:
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+                # Get one user to test with
+                async with session.get(
+                    "https://graph.microsoft.com/v1.0/users?$top=1&$select=id",
+                    headers=headers,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning("memberOf pre-flight: /users returned %s", resp.status)
+                        return False
+                    data = await resp.json()
+                    users = data.get('value', [])
+                    if not users:
+                        logger.warning("memberOf pre-flight: no users found in tenant")
+                        return False
+                    test_uid = users[0]['id']
+
+                # Test memberOf on that user
+                async with session.get(
+                    f"https://graph.microsoft.com/v1.0/users/{test_uid}/memberOf?$top=1",
+                    headers=headers,
+                ) as resp:
+                    if resp.status == 403:
+                        logger.warning(
+                            "memberOf pre-flight: 403 on /users/%s/memberOf — "
+                            "GroupMember.Read.All or Directory.Read.All may be missing",
+                            test_uid,
+                        )
+                        return False
+                    if resp.status == 200:
+                        logger.info("memberOf pre-flight: PASSED (200 OK)")
+                        return True
+                    logger.warning("memberOf pre-flight: unexpected status %s", resp.status)
+                    return False
+        except Exception as e:
+            logger.warning("memberOf pre-flight: request error: %s", e)
+            return False
 
     async def _discover_identity_group_memberships(
         self, identities: List[Dict], groups: List[Dict],
@@ -5312,19 +7311,22 @@ class AzureDiscoveryEngine:
           - GET /servicePrincipals/{object_id}/memberOf  (service_principal, managed_identity_*)
 
         Works with Directory.Read.All, GroupMember.Read.All, or Group.Read.All.
-        Always runs to enrich group-centric results with identity-centric data.
+        Enriches group-centric results with identity-centric data (Tier 2 groups).
+        Uses Semaphore(20) for parallel API calls.
+
+        403 handling: per-identity skip with one retry. A 403 on one identity
+        does NOT abort the entire step — only that identity is skipped.
 
         Returns updated memberships dict: group_id -> list of member dicts.
         Merges with existing_memberships (deduplicates by member_object_id per group).
         """
         import aiohttp
+        import time as _time
+
+        _phase_start = _time.monotonic()
 
         # Build lookup structures from discovered groups
         group_id_set = {g.get('group_id') or g.get('id') for g in groups if g.get('group_id') or g.get('id')}
-        group_name_map = {
-            (g.get('group_id') or g.get('id')): g.get('display_name', '')
-            for g in groups if g.get('group_id') or g.get('id')
-        }
 
         memberships: Dict[str, List[Dict]] = {gid: list(members) for gid, members in existing_memberships.items()}
         # Track existing members per group for dedup
@@ -5344,52 +7346,72 @@ class AzureDiscoveryEngine:
             return memberships
 
         total_added = 0
+        skipped_403 = 0
+        skipped_other = 0
         groups_touched = set()
-        permission_denied = False
-        select_fields = "id,displayName,@odata.type,securityEnabled,groupTypes,isAssignableToRole,mailEnabled"
+        # Note: @odata.type is always returned automatically — including it in
+        # $select causes a 400 "not valid in $select" on the memberOf endpoint.
+        select_fields = "id,displayName,securityEnabled,groupTypes,isAssignableToRole,mailEnabled"
+        _lock = asyncio.Lock()
+        sem = asyncio.Semaphore(20)
+        _first_error_logged = False
 
-        async with aiohttp.ClientSession() as session:
-            for idx, identity in enumerate(identities):
-                oid = identity.get('object_id') or identity.get('id')
-                if not oid:
-                    continue
+        async def _fetch_memberof(session, identity):
+            nonlocal total_added, skipped_403, skipped_other, _first_error_logged
 
-                cat = identity.get('identity_category', '')
-                if cat in ('human_user', 'guest'):
-                    endpoint = f"https://graph.microsoft.com/v1.0/users/{oid}/memberOf"
-                elif cat in ('service_principal', 'managed_identity_system', 'managed_identity_user'):
-                    endpoint = f"https://graph.microsoft.com/v1.0/servicePrincipals/{oid}/memberOf"
-                else:
-                    continue
+            oid = identity.get('object_id') or identity.get('id')
+            if not oid:
+                return
 
+            cat = identity.get('identity_category', '')
+            if cat in ('human_user', 'guest'):
+                endpoint = f"https://graph.microsoft.com/v1.0/users/{oid}/memberOf"
+            elif cat in ('service_principal', 'managed_identity_system', 'managed_identity_user'):
+                endpoint = f"https://graph.microsoft.com/v1.0/servicePrincipals/{oid}/memberOf"
+            else:
+                return
+
+            async with sem:
                 url: Optional[str] = f"{endpoint}?$select={select_fields}&$top=999"
+                local_results = []
+                retried_403 = False
 
-                # Paginate through all memberOf results
                 while url:
                     try:
                         async with session.get(url, headers=headers) as resp:
                             if resp.status == 403:
-                                if not permission_denied:
-                                    logger.warning(
-                                        "Identity memberOf discovery: 403 on %s. "
-                                        "Required permission (Directory.Read.All or GroupMember.Read.All) "
-                                        "may not be granted. Aborting memberOf enrichment.", oid
-                                    )
-                                    permission_denied = True
-                                url = None
-                                break
+                                if not retried_403:
+                                    retried_403 = True
+                                    await asyncio.sleep(1)
+                                    continue
+                                async with _lock:
+                                    skipped_403 += 1
+                                    if skipped_403 <= 3:
+                                        logger.warning(
+                                            "memberOf 403 for %s (%s) — skipping this identity",
+                                            oid, identity.get('display_name', '?'),
+                                        )
+                                return
                             if resp.status == 404:
-                                url = None
-                                break
+                                return
+                            if resp.status == 429:
+                                retry_after = int(resp.headers.get('Retry-After', 5))
+                                await asyncio.sleep(min(retry_after, 15))
+                                continue
                             if resp.status != 200:
-                                logger.debug("memberOf returned %s for %s", resp.status, oid)
-                                url = None
-                                break
+                                async with _lock:
+                                    skipped_other += 1
+                                    if not _first_error_logged:
+                                        _first_error_logged = True
+                                        logger.warning(
+                                            "memberOf: unexpected status %s for %s — skipping",
+                                            resp.status, oid,
+                                        )
+                                return
                             data = await resp.json()
                     except Exception as e:
                         logger.debug("memberOf request error for %s: %s", oid, e)
-                        url = None
-                        break
+                        return
 
                     display_name = identity.get('display_name', '')
                     for obj in data.get('value', []):
@@ -5403,50 +7425,72 @@ class AzureDiscoveryEngine:
                         if not grp_id or grp_id not in group_id_set:
                             continue
 
-                        # Dedup
-                        if grp_id not in existing_members:
-                            existing_members[grp_id] = set()
-                        if oid in existing_members[grp_id]:
-                            continue
-
-                        if grp_id not in memberships:
-                            memberships[grp_id] = []
-
                         if cat in ('human_user', 'guest'):
                             member_type = 'user'
                         else:
                             member_type = 'servicePrincipal'
 
-                        memberships[grp_id].append({
+                        local_results.append((grp_id, {
                             'member_object_id': oid,
                             'member_type': member_type,
                             'member_display_name': display_name,
                             'is_nested': False,
                             'depth': 0,
-                        })
-                        existing_members[grp_id].add(oid)
-                        total_added += 1
-                        groups_touched.add(grp_id)
+                        }))
 
-                    # Follow pagination link
                     url = data.get('@odata.nextLink')
 
-                if permission_denied:
-                    break
+                # Merge results under lock
+                if local_results:
+                    async with _lock:
+                        for grp_id, member in local_results:
+                            if grp_id not in existing_members:
+                                existing_members[grp_id] = set()
+                            if member['member_object_id'] in existing_members[grp_id]:
+                                _diag_deduped += 1
+                                continue
+                            if grp_id not in memberships:
+                                memberships[grp_id] = []
+                            memberships[grp_id].append(member)
+                            existing_members[grp_id].add(member['member_object_id'])
+                            total_added += 1
+                            groups_touched.add(grp_id)
 
-                # Rate limit — sleep every 10 identities
-                if idx > 0 and idx % 10 == 0:
-                    await asyncio.sleep(0.1)
+        async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+            tasks = [_fetch_memberof(session, identity) for identity in identities]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
+        _elapsed = round(_time.monotonic() - _phase_start, 1)
+        if skipped_403 > 0:
+            logger.warning(
+                "Identity-centric memberOf: %d identities skipped due to 403 "
+                "(out of %d total). Groups tab may have partial data for those identities.",
+                skipped_403, len(identities),
+            )
         logger.info(
-            "Identity-centric memberOf: discovered %s memberships across %s groups",
-            total_added, len(groups_touched)
+            "Identity-centric memberOf: discovered %s new memberships across %s groups "
+            "(%d identities in %.1fs, skipped_403=%d)",
+            total_added, len(groups_touched), len(identities), _elapsed, skipped_403,
+        )
+        logger.info(
+            "[memberOf-diag] no_oid=%d no_category=%d api_ok=%d "
+            "status_404=%d status_other=%d request_error=%d "
+            "total_objects=%d not_group=%d not_security=%d not_in_set=%d "
+            "deduped=%d added=%d group_id_set_size=%d existing_groups=%d",
+            _diag_no_oid, _diag_no_category, _diag_api_ok,
+            _diag_status_404, _diag_status_other, _diag_request_error,
+            _diag_total_objects, _diag_not_group, _diag_not_security,
+            _diag_not_in_set, _diag_deduped, total_added,
+            len(group_id_set), len(existing_memberships),
         )
         return memberships
 
     def _save_entra_groups(self, run_id: int, groups: List[Dict], group_memberships: Dict[str, List[Dict]]):
         """Save discovered groups and their memberships to the database."""
         saved = 0
+        membership_saved = 0
+        membership_failed = 0
+        total_membership_attempted = 0
         for group in groups:
             try:
                 group_db_id = self.db.save_entra_group(run_id, group)
@@ -5457,10 +7501,20 @@ class AzureDiscoveryEngine:
                 # Save memberships for this group
                 members = group_memberships.get(group.get('group_id', ''), [])
                 for member in members:
+                    total_membership_attempted += 1
                     try:
                         self.db.save_entra_group_membership(group_db_id, member, run_id)
+                        membership_saved += 1
                     except Exception as e:
-                        logger.debug("Save membership error: %s", e)
+                        membership_failed += 1
+                        logger.warning(
+                            "Save membership error for group_db_id=%s member=%s: %s",
+                            group_db_id, member.get('member_object_id', '?'), e,
+                        )
+                        try:
+                            self.db._rollback()
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error("Save group error for %s: %s", group.get('display_name'), e)
                 try:
@@ -5468,7 +7522,10 @@ class AzureDiscoveryEngine:
                 except Exception:
                     pass
 
-        logger.info("Saved %s/%s Entra groups with memberships", saved, len(groups))
+        logger.info(
+            "Saved %s/%s Entra groups | memberships: %s saved, %s failed out of %s attempted",
+            saved, len(groups), membership_saved, membership_failed, total_membership_attempted,
+        )
 
     def _enrich_keyvault_metadata(self, role_assignments: List[Dict]) -> None:
         """Fetch key/secret/certificate metadata for vaults found in role assignment scopes.
@@ -5518,7 +7575,7 @@ class AzureDiscoveryEngine:
             vault_name = rid_parts[-1]
 
             try:
-                kv_mgmt = KeyVaultManagementClient(self.credential, sub_id)
+                kv_mgmt = KeyVaultManagementClient(self.credential, sub_id, **ARM_TIMEOUT_KWARGS)
             except Exception as e:
                 logger.warning("KV mgmt client error for sub %s: %s", sub_id[:8], e)
                 continue
@@ -5599,51 +7656,111 @@ class AzureDiscoveryEngine:
             logger.info("Key Vault metadata: saved %s items across %s vault(s)", total_items, len(vault_scopes))
 
     async def _discover_entra_roles(self) -> List[Dict[str, Any]]:
-        """Discover Entra ID directory role assignments for given principals"""
+        """Discover Entra ID directory role assignments for given principals.
+
+        Role definition names are cached to avoid N+1 API calls — Entra
+        tenants typically have ~60-80 built-in role definitions reused across
+        many assignments.
+        """
+        MAX_ATTEMPTS = 3
+        role_assignments_response = None
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                logger.info("Discovering Entra ID Directory Roles (attempt %s/%s)...", attempt, MAX_ATTEMPTS)
+                role_assignments_response = await asyncio.wait_for(
+                    self.graph_client.role_management.directory.role_assignments.get(),
+                    timeout=GRAPH_SDK_TIMEOUT,
+                )
+                break  # success
+            except Exception as e:
+                logger.warning(
+                    "Entra role assignment fetch attempt %s/%s failed: %s",
+                    attempt, MAX_ATTEMPTS, e, exc_info=True,
+                )
+                if attempt < MAX_ATTEMPTS:
+                    await asyncio.sleep(2 ** attempt)  # exponential backoff: 2s, 4s
+                else:
+                    logger.error("Entra role discovery failed after %s attempts — returning empty", MAX_ATTEMPTS)
+                    return []
+
+        entra_roles = []
+        entra_role_def_cache: Dict[str, str] = {}
+
         try:
-            logger.info("Discovering Entra ID Directory Roles...")
-            
-            # Get all directory role assignments
-            role_assignments_response = await self.graph_client.role_management.directory.role_assignments.get()
-            
-            entra_roles = []
+            # Collect all assignments with pagination (Graph API default page = 100)
+            all_assignments = []
             if role_assignments_response and role_assignments_response.value:
-                for assignment in role_assignments_response.value:
-                    # Include ALL Entra role assignments
+                all_assignments.extend(role_assignments_response.value)
+
+            next_link = getattr(role_assignments_response, 'odata_next_link', None) if role_assignments_response else None
+            while next_link:
+                try:
+                    role_assignments_response = await asyncio.wait_for(
+                        self.graph_client.role_management.directory.role_assignments.with_url(next_link).get(),
+                        timeout=GRAPH_SDK_TIMEOUT,
+                    )
+                    if role_assignments_response and role_assignments_response.value:
+                        all_assignments.extend(role_assignments_response.value)
+                    next_link = getattr(role_assignments_response, 'odata_next_link', None) if role_assignments_response else None
+                except Exception as e:
+                    logger.warning("Entra role pagination failed at page — returning partial results: %s", e)
+                    break
+
+            if all_assignments:
+                for assignment in all_assignments:
+                    rd_id = assignment.role_definition_id
+                    if rd_id in entra_role_def_cache:
+                        role_name = entra_role_def_cache[rd_id]
+                    else:
                         # Get role definition to get role name
                         try:
-                            role_def = await self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(assignment.role_definition_id).get()
+                            role_def = await asyncio.wait_for(self.graph_client.role_management.directory.role_definitions.by_unified_role_definition_id(rd_id).get(), timeout=GRAPH_SDK_TIMEOUT)
                             role_name = role_def.display_name if role_def else "Unknown Role"
                         except Exception:
                             role_name = "Unknown Role"
-                        
-                        # Calculate Entra role risk level
-                        risk_level, why_critical = self._calculate_entra_role_risk(role_name)
+                        entra_role_def_cache[rd_id] = role_name
 
-                        entra_roles.append({
-                            'principal_id': assignment.principal_id,
-                            'role_name': role_name,
-                            'role_definition_id': assignment.role_definition_id,
-                            'directory_scope': assignment.directory_scope_id or '/',
-                            # Usage intelligence fields
-                            'usage_status': 'unknown',
-                            'assigned_on': None,  # Entra doesn't expose this easily
-                            'days_since_assigned': None,
-                            'redundant_with': None,
-                            'role_type': 'entra',
-                            'risk_level': risk_level,
-                            'why_critical': why_critical,
-                        })
-                        
-                        if len(entra_roles) <= 10:
-                            logger.info("Entra role: %s", role_name)
-            
-            logger.info("Found %s Entra ID role assignments", len(entra_roles))
+                    # Calculate Entra role risk level
+                    risk_level, why_critical = self._calculate_entra_role_risk(role_name)
+
+                    entra_roles.append({
+                        'principal_id': assignment.principal_id,
+                        'role_name': role_name,
+                        'role_definition_id': rd_id,
+                        'directory_scope': assignment.directory_scope_id or '/',
+                        # Usage intelligence fields
+                        'usage_status': 'unknown',
+                        'assigned_on': None,  # Entra doesn't expose this easily
+                        'days_since_assigned': None,
+                        'redundant_with': None,
+                        'role_type': 'entra',
+                        'risk_level': risk_level,
+                        'why_critical': why_critical,
+                    })
+
+                    if len(entra_roles) <= 10:
+                        logger.info("Entra role: %s", role_name)
+
+            if len(entra_roles) == 0:
+                logger.warning("Entra role discovery returned ZERO assignments — verify RoleManagement.Read.Directory permission")
+                self._persist_permission(
+                    'entra_role_management', 'denied',
+                    error_detail='Zero role assignments returned — RoleManagement.Read.Directory likely missing',
+                    impact_description='Entra directory roles (Global Administrator, Security Admin, etc.) '
+                                      'will not appear in identity privilege assessment.')
+            else:
+                self._persist_permission('entra_role_management', 'granted')
+
+            logger.info("Found %s Entra ID role assignments (%d unique role defs cached)",
+                        len(entra_roles), len(entra_role_def_cache))
+            # Pipeline health: record fetched count
+            self._entra_roles_fetched = len(entra_roles)
             return entra_roles
-            
+
         except Exception as e:
-            logger.error("Error discovering Entra roles: %s", e)
-            return []
+            logger.error("Error processing Entra role assignments: %s", e, exc_info=True)
+            return entra_roles  # return whatever we got so far
 
 
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
@@ -5849,23 +7966,28 @@ class AzureDiscoveryEngine:
         # Get identity status indicators
         is_disabled = not identity.get('enabled', True)
         last_sign_in = identity.get('last_sign_in')
+        last_activity = identity.get('last_activity_date')
         credential_status = identity.get('credential_status', '')
 
-        # Calculate days since sign-in
+        # Best available activity proxy: prefer P2 sign-in, fall back to
+        # discovery-level last_activity_date (e.g. observed_last_used).
+        best_activity = last_sign_in or last_activity
+
+        # Calculate days since activity
         days_since_signin = None
-        if last_sign_in:
+        if best_activity:
             try:
                 from datetime import datetime, timezone
-                if isinstance(last_sign_in, str):
-                    signin_dt = datetime.fromisoformat(last_sign_in.replace('Z', '+00:00'))
+                if isinstance(best_activity, str):
+                    signin_dt = datetime.fromisoformat(best_activity.replace('Z', '+00:00'))
                 else:
-                    signin_dt = last_sign_in
+                    signin_dt = best_activity
                 days_since_signin = (datetime.now(timezone.utc) - signin_dt).days
             except Exception:
                 pass
 
         has_expired_creds = credential_status and 'expired' in credential_status.lower()
-        never_signed_in = last_sign_in is None
+        never_signed_in = best_activity is None
 
         # Check for redundant roles (Owner makes Contributor redundant, etc.)
         role_hierarchy = {
@@ -5881,11 +8003,11 @@ class AzureDiscoveryEngine:
         entra_role_names = [r['role_name'].lower() for r in entra_roles]
         all_role_names = azure_role_names + entra_role_names
 
-        # Set last_used_at from identity sign-in (proxy for role usage)
+        # Set last_used_at from best available activity proxy
         for role in roles:
-            role['last_used_at'] = last_sign_in
+            role['last_used_at'] = best_activity
         for role in entra_roles:
-            role['last_used_at'] = last_sign_in
+            role['last_used_at'] = best_activity
 
         # Update Azure RBAC roles
         for role in roles:
@@ -6028,7 +8150,7 @@ class AzureDiscoveryEngine:
 
         # Process ALL identities - don't filter any out
         for identity in identities:
-            if identity.get('identity_type') == 'user':
+            if identity.get('identity_type') in ('human_user', 'guest'):
                 if not identity.get('identity_category'):
                     identity['identity_category'] = 'human_user'
                 identity['is_microsoft_system'] = False
@@ -6180,8 +8302,15 @@ class AzureDiscoveryEngine:
             # 7. Orphaned identity
             # ============================================================
             if not has_roles and not has_permissions and not identity_app_roles:
-                if identity.get('identity_type') != 'user':
+                if identity.get('identity_type') not in ('human_user', 'guest'):
                     risk_factors.append(make_factor("ORPHANED_IDENTITY", "No role assignments"))
+
+            # ============================================================
+            # 8. Ghost identity — CIS v8 Control 5.3 / MITRE T1078.001
+            # ============================================================
+            if not identity.get('enabled', True) and has_roles:
+                risk_factors.append(make_factor("GHOST_ACCESS",
+                    f"Disabled identity with {len(identity_roles) + len(identity_entra_roles)} active role assignment(s)"))
 
             # ============================================================
             # Sum V2 score and derive level
@@ -6265,12 +8394,62 @@ class AzureDiscoveryEngine:
                 self._cached_custom_rules = []
         return self._cached_custom_rules
 
-    def _check_credentials(self, identities: List[Dict]) -> List[Dict]:
-        logger.info("Checking %s identities...", len(identities))
+    def _check_credentials(self, identities: List[Dict], credentials_map: Dict[str, List[Dict]] = None) -> List[Dict]:
+        from datetime import datetime, timezone
+        credentials_map = credentials_map or {}
+        now = datetime.now(timezone.utc)
+        expired_count = 0
+        expiring_count = 0
+
+        logger.info("Checking %s identities for credential expiration...", len(identities))
         for identity in identities:
-            identity['credential_status'] = 'Valid'
-            identity['credential_expiration'] = None
-        logger.info("All credentials are valid for 30+ days")
+            creds = credentials_map.get(identity.get('identity_id'), [])
+            # Find earliest non-federated expiry
+            expiries = []
+            for c in creds:
+                if c.get('credential_type') == 'federated':
+                    continue
+                end = c.get('end_datetime')
+                if end:
+                    if isinstance(end, str):
+                        try:
+                            end = datetime.fromisoformat(end.replace('Z', '+00:00'))
+                        except (ValueError, TypeError):
+                            continue
+                    expiries.append(end)
+
+            if expiries:
+                earliest = min(expiries)
+                identity['credential_expiration'] = earliest.isoformat()
+                identity['secret_expiry_earliest'] = earliest.isoformat()
+                if earliest < now:
+                    identity['credential_status'] = 'Expired'
+                    identity['secret_expiry_status'] = 'expired'
+                    expired_count += 1
+                elif earliest < now + __import__('datetime').timedelta(days=30):
+                    identity['credential_status'] = 'Expiring Soon'
+                    identity['secret_expiry_status'] = 'expiring_soon'
+                    expiring_count += 1
+                elif earliest < now + __import__('datetime').timedelta(days=90):
+                    identity['credential_status'] = 'Valid'
+                    identity['secret_expiry_status'] = 'expiring_90d'
+                else:
+                    identity['credential_status'] = 'Valid'
+                    identity['secret_expiry_status'] = 'valid'
+            elif creds:
+                # Has credentials but none with expiry (federated-only or no-expiry)
+                identity['credential_status'] = 'Valid'
+                identity['credential_expiration'] = None
+                identity['secret_expiry_earliest'] = None
+                identity['secret_expiry_status'] = 'no_secret'
+            else:
+                identity['credential_status'] = None
+                identity['credential_expiration'] = None
+                identity['secret_expiry_earliest'] = None
+                identity['secret_expiry_status'] = 'no_secret'
+
+        logger.info("Credential check: %s expired, %s expiring soon, %s total with creds",
+                     expired_count, expiring_count, len(credentials_map))
         return identities
     
     def _check_activity(self, identities: List[Dict]) -> List[Dict]:
@@ -6295,6 +8474,15 @@ class AzureDiscoveryEngine:
         unknown_count = 0
 
         for identity in identities:
+            # ── DISABLED ACCOUNT GATE (P0 trust rule) ────────────────────
+            # A disabled Azure AD account CANNOT perform interactive sign-ins.
+            # Any activity signal is either pre-disable history, ARM noise,
+            # or group-level misattribution. Disabled = Inactive. No exceptions.
+            if not identity.get('enabled', True):
+                identity['activity_status'] = 'inactive'
+                inactive_count += 1
+                continue
+
             last_sign_in = identity.get('last_sign_in')
             observed = identity.get('observed_last_used')
 
@@ -6464,6 +8652,16 @@ class AzureDiscoveryEngine:
         """
         from datetime import datetime, timezone
 
+        # ── DISABLED ACCOUNT GUARD (defense-in-depth, AG-145) ──────────
+        # Disabled accounts must never have activity attributed.
+        # Primary gate is in _check_activity (continue), but this guards
+        # against future calling-code changes.
+        if not identity.get('enabled', True):
+            identity['last_activity_date'] = None
+            identity['last_activity_source'] = None
+            identity['last_activity_confidence'] = 'none'
+            return
+
         def _parse(v):
             if not v:
                 return None
@@ -6546,17 +8744,96 @@ class AzureDiscoveryEngine:
         identity['last_activity_source'] = source
         identity['last_activity_confidence'] = confidence
 
+    def _compute_telemetry_coverage(self, identities: List[Dict]) -> List[Dict]:
+        """Classify telemetry coverage for each identity based on connector permissions.
+
+        Coverage levels:
+        - full: All relevant telemetry sources available for this identity type.
+        - partial: Some telemetry sources available but not all.
+        - blind: No meaningful telemetry sources available (only metadata).
+
+        Classification rules by identity_category:
+        - human_user/guest: Needs p2_signin_activity OR arm_activity_log for full.
+        - service_principal: Needs arm_activity_log for full. p2_signin alone = partial.
+        - managed_identity_*: Needs arm_activity_log for full (sign-in logs don't cover MI).
+
+        This method reads the connector_permissions table once (batch) and applies
+        the coverage classification to all identities in the list.
+        """
+        # Fetch permission statuses for this connection
+        perm_status = {}  # permission_name → status
+        if self.cloud_connection_id:
+            try:
+                rows = self.db.get_connector_permissions(
+                    self.db_org_id, connection_id=self.cloud_connection_id)
+                for row in rows:
+                    # Single connection: (permission_name, status, tested_at, error_detail, impact)
+                    perm_status[row[0]] = row[1]
+            except Exception as e:
+                logger.debug("Could not fetch connector permissions for coverage: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        has_arm = perm_status.get('arm_activity_log') == 'granted'
+        has_p2 = perm_status.get('p2_signin_activity') == 'granted'
+        has_audit = perm_status.get('directory_audit_log') == 'granted'
+
+        for identity in identities:
+            category = (identity.get('identity_category') or '').lower()
+
+            if category in ('human_user', 'guest'):
+                # Humans need sign-in telemetry (P2) or ARM activity
+                if has_p2 and has_arm:
+                    identity['telemetry_coverage'] = 'full'
+                elif has_p2 or has_arm:
+                    identity['telemetry_coverage'] = 'partial'
+                else:
+                    identity['telemetry_coverage'] = 'blind'
+
+            elif category in ('managed_identity_system', 'managed_identity_user'):
+                # Managed identities: ARM is the only meaningful signal
+                # (sign-in logs don't cover MI; P2 doesn't help)
+                if has_arm:
+                    identity['telemetry_coverage'] = 'full'
+                elif has_audit:
+                    identity['telemetry_coverage'] = 'partial'
+                else:
+                    identity['telemetry_coverage'] = 'blind'
+
+            elif category == 'service_principal':
+                # SPNs: ARM + P2 = full, either alone = partial
+                if has_arm and has_p2:
+                    identity['telemetry_coverage'] = 'full'
+                elif has_arm or has_p2:
+                    identity['telemetry_coverage'] = 'partial'
+                else:
+                    identity['telemetry_coverage'] = 'blind'
+
+            else:
+                # microsoft_internal or unknown — best-effort
+                if has_arm or has_p2:
+                    identity['telemetry_coverage'] = 'partial'
+                else:
+                    identity['telemetry_coverage'] = 'blind'
+
+        return identities
+
     async def _validate_arm_activity_log_permission(self) -> bool:
         """Verify ARM Activity Log read permission exists before bulk fetch.
 
         Tests a single $top=1 call against the first subscription.
         Logs clear guidance if permission is missing (403).
+        Persists result to connector_permissions table.
         Returns True if ARM Activity Log is accessible.
         """
         import aiohttp
 
         sub_ids = [s['id'] for s in self.subscriptions]
         if not sub_ids:
+            self._persist_permission('arm_activity_log', 'not_tested',
+                                     error_detail='No subscriptions available')
             return False
 
         try:
@@ -6564,6 +8841,8 @@ class AzureDiscoveryEngine:
             arm_headers = {"Authorization": f"Bearer {arm_token.token}"}
         except Exception as e:
             logger.warning("ARM token acquisition failed — cannot validate Activity Log permission: %s", e)
+            self._persist_permission('arm_activity_log', 'denied',
+                                     error_detail=f'Token acquisition failed: {str(e)[:200]}')
             return False
 
         test_sub = sub_ids[0]
@@ -6573,7 +8852,7 @@ class AzureDiscoveryEngine:
             # ARM Activity Log requires $filter with eventTimestamp
             cutoff = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
             filter_str = f"eventTimestamp ge '{cutoff}'"
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
                 url = (
                     f"https://management.azure.com"
                     f"/subscriptions/{test_sub}"
@@ -6586,6 +8865,7 @@ class AzureDiscoveryEngine:
                 async with session.get(url, headers=arm_headers) as resp:
                     if resp.status == 200:
                         logger.info("ARM Activity Log permission verified for subscription %s", test_sub[:8])
+                        self._persist_permission('arm_activity_log', 'granted')
                         return True
                     elif resp.status == 403:
                         logger.warning(
@@ -6595,14 +8875,452 @@ class AzureDiscoveryEngine:
                             "on subscription %s. No P2 license required.",
                             test_sub, test_sub
                         )
+                        self._persist_permission(
+                            'arm_activity_log', 'denied',
+                            error_detail='HTTP 403 — Monitoring Reader role not assigned',
+                            impact_description='Identity activity evidence and role last-used '
+                                              'timestamps unavailable. Identities will show as '
+                                              'telemetry-blind for activity.')
                         return False
                     else:
                         body = await resp.text()
                         logger.warning("ARM Activity Log validation returned HTTP %s for %s: %s", resp.status, test_sub[:8], body[:500])
+                        self._persist_permission('arm_activity_log', 'denied',
+                                                 error_detail=f'HTTP {resp.status}: {body[:200]}')
                         return False
         except Exception as e:
             logger.warning("ARM Activity Log validation failed: %s", e)
+            self._persist_permission('arm_activity_log', 'denied',
+                                     error_detail=f'Validation error: {str(e)[:200]}')
             return False
+
+    def _persist_permission(self, permission_name: str, status: str,
+                            error_detail: str = None, impact_description: str = None):
+        """Persist a connector permission check result to the database."""
+        if not self.cloud_connection_id:
+            return
+        try:
+            self.db.save_connector_permission(
+                connection_id=self.cloud_connection_id,
+                org_id=self.db_org_id,
+                permission_name=permission_name,
+                status=status,
+                error_detail=error_detail,
+                impact_description=impact_description,
+            )
+        except Exception as e:
+            logger.debug("Failed to persist permission check for %s: %s", permission_name, e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+    # Noisy Azure platform operations that add no security signal
+    _ARM_SKIP_OPERATION_PREFIXES = (
+        'Microsoft.Resources/deployments/',
+        'Microsoft.Resources/tags/',
+        'Microsoft.Resources/subscriptions/read',
+        'Microsoft.Resources/checkResourceName',
+        'Microsoft.Authorization/policies/',
+        'Microsoft.Authorization/policyAssignments/',
+        'Microsoft.Authorization/roleAssignments/read',
+        'Microsoft.Authorization/permissions/read',
+        'Microsoft.Advisor/',
+        'Microsoft.Security/assessments/',
+        'Microsoft.Security/subAssessments/',
+        'Microsoft.Security/autoProvisioningSettings/',
+        'Microsoft.Insights/diagnosticSettings/',
+        'Microsoft.Insights/autoscalesettings/',
+        'Microsoft.Insights/metrics/',
+        'Microsoft.Insights/logs/',
+        'Microsoft.Compute/restorePointCollections/',
+        'Microsoft.AlertsManagement/',
+        'Microsoft.PolicyInsights/',
+        'Microsoft.CostManagement/',
+        'Microsoft.Billing/',
+    )
+
+    # Operations ending with these suffixes NEVER count as meaningful role exercise.
+    # Read/list operations prove network reachability but not privilege usage.
+    _ARM_NOISE_SUFFIXES = (
+        '/read',
+        '/listKeys',
+        '/listkeys',
+        '/list',
+    )
+
+    def _collect_arm_activity(self, run_id: int, identities: list) -> None:
+        """Collect ARM management activity events per subscription (no P2 required).
+
+        For each subscription:
+        1. Fetches recent management events from ARM Activity Log API
+        2. Matches events to known identity principal IDs
+        3. Stores top events in identity_arm_connections table
+        4. Updates role_assignments.last_used_at from matched events
+
+        Uses ARM Reader token (same as role assignment reads).
+        Rate limit: ~12,000 requests/hour. One request per subscription.
+        """
+        import time as _time
+        from urllib.parse import quote
+
+        phase_start = _time.monotonic()
+        sub_ids = [s['id'] for s in self.subscriptions]
+        if not sub_ids:
+            logger.debug("[arm_activity] No subscriptions — skipping")
+            return
+
+        # Build caller → identity_db_id lookup
+        # ARM Activity Log caller field values:
+        #   - Human users: UPN (email)
+        #   - Service principals: app_id (client_id / application_id)
+        #   - Claims OID fallback: object_id
+        # AG-145: Exclude disabled identities — they cannot perform actions.
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            "SELECT id, object_id, principal_id, identity_id, display_name, upn, enabled, app_id "
+            "FROM identities WHERE discovery_run_id = %s",
+            (run_id,)
+        )
+        pid_map = {}  # caller string → identity_db_id
+        disabled_skipped = 0
+        for row in cursor.fetchall():
+            db_id, obj_id, principal_id, identity_id, display_name, upn, enabled, app_id = row
+            # ── AG-145 Rule 1: Disabled identities must never receive ARM attribution
+            if enabled is False:
+                disabled_skipped += 1
+                continue
+            if obj_id:
+                pid_map[obj_id] = db_id
+            if principal_id and principal_id != obj_id:
+                pid_map[principal_id] = db_id
+            # AG-147: ARM caller for SPNs is app_id (client_id), NOT object_id.
+            # Terraform, Azure DevOps, and other SPN-authenticated tools use
+            # the application (client) ID as the ARM caller value.
+            if app_id and app_id != obj_id:
+                pid_map[app_id] = db_id
+            # For human users, ARM uses UPN as caller (looks like email)
+            if identity_id and '@' in str(identity_id):
+                pid_map[identity_id] = db_id
+                pid_map[str(identity_id).lower()] = db_id
+            # UPN column (most reliable for human user ARM matching)
+            if upn and '@' in str(upn):
+                pid_map[upn] = db_id
+                pid_map[str(upn).lower()] = db_id
+            # AG-145 Rule 2: display_name removed from pid_map — unreliable,
+            # causes cross-identity misattribution when multiple identities
+            # share similar display names containing '@'.
+        cursor.close()
+        if disabled_skipped:
+            logger.info("[arm_activity] Excluded %d disabled identities from caller map", disabled_skipped)
+        logger.info("[arm_activity] Starting for org=%s, run=%s: %d caller_map entries, %d subscriptions",
+                     self.db_org_id, run_id, len(pid_map), len(sub_ids))
+
+        if not pid_map:
+            logger.debug("[arm_activity] No identities with principal IDs — skipping")
+            return
+
+        # Get ARM token
+        try:
+            arm_token = self.credential.get_token("https://management.azure.com/.default")
+        except Exception as e:
+            logger.warning("[arm_activity] ARM token acquisition failed: %s", e)
+            return
+
+        import requests
+        session = requests.Session()
+        session.headers.update({
+            "Authorization": f"Bearer {arm_token.token}",
+            "Content-Type": "application/json",
+        })
+
+        # AG-147: Configurable lookback window. End is always scan-time (utcnow).
+        import os as _os
+        arm_lookback_days = int(_os.environ.get('ARM_ACTIVITY_LOOKBACK_DAYS', '90'))
+        cutoff = (datetime.utcnow() - timedelta(days=arm_lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        all_events = []  # list of dicts for identity_arm_connections
+        role_updates = {}  # (principal_id, resource_id) → best event per scope
+
+        for sub_id in sub_ids:
+            elapsed = _time.monotonic() - phase_start
+            if elapsed > 180:  # 3 minute budget
+                logger.warning("[arm_activity] Time budget exceeded at %.1fs — processed %d/%d subs",
+                               elapsed, sub_ids.index(sub_id), len(sub_ids))
+                break
+
+            filter_str = f"eventTimestamp ge '{cutoff}'"
+            url = (
+                f"https://management.azure.com"
+                f"/subscriptions/{sub_id}"
+                f"/providers/microsoft.insights"
+                f"/eventtypes/management/values"
+                f"?api-version=2015-04-01"
+                f"&$filter={quote(filter_str)}"
+                f"&$top=500"
+            )
+
+            try:
+                resp = session.get(url, timeout=30)
+                if resp.status_code == 403:
+                    logger.debug("[arm_activity] Permission denied for sub %s -- skipping", sub_id[:8])
+                    continue
+                if resp.status_code != 200:
+                    logger.debug("[arm_activity] HTTP %s for sub %s: %s",
+                                resp.status_code, sub_id[:8], resp.text[:300])
+                    continue
+                data = resp.json()
+            except Exception as e:
+                logger.warning("[arm_activity] Request failed for sub %s: %s", sub_id[:8], e)
+                continue
+
+            events = data.get('value', [])
+            raw_event_count = len(events)
+            logger.info("[arm_activity] Sub %s: %d raw events before filtering",
+                        sub_id[:8], raw_event_count)
+
+            # Per-identity event counters to limit to 5 per identity per subscription
+            identity_event_counts = {}
+            noise_skipped = 0
+            matched_count = 0
+            unmatched_callers = []
+
+            for evt in events:
+                # ── 1. Extract claims (may be str in some API versions) ──
+                claims = evt.get('claims') or {}
+                if isinstance(claims, str):
+                    try:
+                        claims = json.loads(claims)
+                    except Exception:
+                        claims = {}
+
+                # ── 2. Extract IP FIRST — claims.ipaddr has real human IPs ──
+                ip_addr = None
+                if isinstance(claims, dict):
+                    ip_addr = claims.get('ipaddr')
+                if not ip_addr:
+                    ip_addr = evt.get('callerIpAddress')
+
+                # ── 3. Extract operation name ──
+                op_name_raw = evt.get('operationName', {})
+                if isinstance(op_name_raw, dict):
+                    op_name = op_name_raw.get('localizedValue') or op_name_raw.get('value', '')
+                else:
+                    op_name = str(op_name_raw)
+
+                # ── 4. Operation noise filter (skip platform ops + read/list) ──
+                if any(op_name.startswith(pfx) for pfx in self._ARM_SKIP_OPERATION_PREFIXES):
+                    noise_skipped += 1
+                    continue
+                # Read/list operations never prove privilege exercise
+                op_lower = op_name.lower()
+                if any(op_lower.endswith(sfx) for sfx in self._ARM_NOISE_SUFFIXES):
+                    noise_skipped += 1
+                    continue
+
+                # ── 5. Extract caller + OID from claims ──
+                caller = evt.get('caller', '')
+                oid_from_claims = ''
+                if isinstance(claims, dict):
+                    oid_from_claims = (
+                        claims.get('oid')
+                        or claims.get('http://schemas.microsoft.com/identity/claims/objectidentifier')
+                        or ''
+                    )
+
+                # Skip only if BOTH caller AND ip are empty (pure system noise)
+                if not caller and not ip_addr:
+                    continue
+
+                # ── 6. Caller matching: direct → lowercase → claims.oid ──
+                identity_db_id = (
+                    pid_map.get(caller)
+                    or (pid_map.get(caller.lower()) if caller else None)
+                    or (pid_map.get(oid_from_claims) if oid_from_claims else None)
+                )
+                if not identity_db_id:
+                    if len(unmatched_callers) < 10:
+                        unmatched_callers.append(caller or oid_from_claims or '(empty)')
+                    continue
+
+                matched_count += 1
+
+                # Limit events per identity
+                count = identity_event_counts.get(identity_db_id, 0)
+                if count >= 5:
+                    continue
+                identity_event_counts[identity_db_id] = count + 1
+
+                status_raw = evt.get('status', {})
+                if isinstance(status_raw, dict):
+                    status_val = status_raw.get('localizedValue') or status_raw.get('value', '')
+                else:
+                    status_val = str(status_raw)
+
+                # Only successful operations count as meaningful role exercise
+                if status_val and status_val.lower() not in ('succeeded', 'accepted', 'started', 'success', ''):
+                    noise_skipped += 1
+                    continue
+
+                resource_id = evt.get('resourceId', '')
+                resource_type_raw = evt.get('resourceType', {})
+                if isinstance(resource_type_raw, dict):
+                    resource_type = resource_type_raw.get('value', '')
+                else:
+                    resource_type = str(resource_type_raw) if resource_type_raw else ''
+
+                event_ts = evt.get('eventTimestamp')
+
+                all_events.append({
+                    'identity_db_id': identity_db_id,
+                    'principal_id': caller,
+                    'event_timestamp': event_ts,
+                    'caller_ip_address': ip_addr,
+                    'operation_name': op_name,
+                    'resource_id': resource_id,
+                    'resource_type': resource_type,
+                    'subscription_id': sub_id,
+                    'status': status_val,
+                })
+
+                # Track best (most recent) event per (principal, resource_id) for scope-aware role updates
+                key = (caller, resource_id or sub_id)
+                if key not in role_updates or event_ts > role_updates[key]['last_used_at']:
+                    role_updates[key] = {
+                        'principal_id': caller,
+                        'subscription_id': sub_id,
+                        'resource_id': resource_id or f'/subscriptions/{sub_id}',
+                        'last_used_at': event_ts,
+                        'last_used_operation': op_name,
+                    }
+
+            # ── Diagnostic logging per subscription ──
+            logger.info("[arm_activity] Sub %s: %d after noise filter (%d skipped), %d matched to %d identities",
+                        sub_id[:8], raw_event_count - noise_skipped, noise_skipped,
+                        matched_count, len(identity_event_counts))
+            if matched_count == 0 and raw_event_count > 0:
+                logger.warning("[arm_activity] Sub %s: 0 matches — sample unmatched callers: %s",
+                               sub_id[:8], unmatched_callers[:5])
+                logger.warning("[arm_activity] Sub %s: sample caller_map keys: %s",
+                               sub_id[:8], list(pid_map.keys())[:10])
+
+        # Batch-insert into identity_arm_connections
+        if all_events:
+            try:
+                inserted = self.db.save_arm_connections_batch(
+                    self.db_org_id, run_id, all_events
+                )
+                logger.info("[arm_activity] Stored %d ARM connection events for %d identities",
+                            inserted, len({e['identity_db_id'] for e in all_events}))
+            except Exception as e:
+                logger.warning("[arm_activity] Failed to save ARM connections: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        # Update role_assignments.last_used_at from ARM events
+        if role_updates:
+            try:
+                updated = self.db.update_role_last_used_from_arm(
+                    self.db_org_id, list(role_updates.values())
+                )
+                logger.info("[arm_activity] Updated last_used_at on %d role assignments", updated)
+            except Exception as e:
+                logger.warning("[arm_activity] Failed to update role last_used_at: %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        # Update identities.last_observed_ip from ARM events (most recent per identity WITH IP)
+        best_per_identity_ip = {}
+        for evt in all_events:
+            iid = evt['identity_db_id']
+            if evt.get('caller_ip_address') and (
+                iid not in best_per_identity_ip or evt['event_timestamp'] > best_per_identity_ip[iid]['event_timestamp']
+            ):
+                best_per_identity_ip[iid] = evt
+
+        # AG-147: Most recent ARM event per identity (regardless of IP) for last_activity_date
+        best_per_identity_all = {}
+        for evt in all_events:
+            iid = evt['identity_db_id']
+            if iid not in best_per_identity_all or evt['event_timestamp'] > best_per_identity_all[iid]['event_timestamp']:
+                best_per_identity_all[iid] = evt
+
+        cursor = self.db.conn.cursor()
+
+        # IP enrichment (only events with caller_ip_address)
+        if best_per_identity_ip:
+            for iid, evt in best_per_identity_ip.items():
+                try:
+                    cursor.execute("""
+                        UPDATE identities SET
+                            last_observed_ip = %s,
+                            last_observed_ip_source = 'arm_activity_log',
+                            last_observed_ip_date = %s,
+                            last_observed_operation = %s
+                        WHERE id = %s AND (last_observed_ip IS NULL OR last_observed_ip_date < %s)
+                    """, (
+                        evt['caller_ip_address'],
+                        evt['event_timestamp'],
+                        evt['operation_name'],
+                        iid,
+                        evt['event_timestamp'],
+                    ))
+                except Exception as e:
+                    logger.debug("[arm_activity] IP update failed for id=%s: %s", iid, e)
+                    try:
+                        self.db.conn.rollback()
+                    except Exception:
+                        pass
+
+        # Commit IP updates before starting activity updates
+        try:
+            self.db._commit()
+        except Exception:
+            pass
+
+        # ── AG-147 Fix 3: ARM activity → last_activity_date waterfall ──
+        # ARM events prove actual API calls (high confidence). Update
+        # last_activity_date if the ARM event is more recent than whatever
+        # the initial waterfall computed. Uses ALL events (not just those with IPs).
+        if best_per_identity_all:
+            arm_activity_updated = 0
+            for iid, evt in best_per_identity_all.items():
+                try:
+                    cursor.execute("""
+                        UPDATE identities SET
+                            last_activity_date = %s,
+                            last_activity_source = 'arm_activity_log',
+                            last_activity_confidence = 'high'
+                        WHERE id = %s
+                          AND (last_activity_date IS NULL OR last_activity_date < %s::timestamptz)
+                    """, (
+                        evt['event_timestamp'],
+                        iid,
+                        evt['event_timestamp'],
+                    ))
+                    if cursor.rowcount > 0:
+                        arm_activity_updated += 1
+                except Exception as e:
+                    logger.debug("[arm_activity] last_activity_date update failed for id=%s: %s", iid, e)
+                    try:
+                        self.db.conn.rollback()
+                    except Exception:
+                        pass
+            logger.info("[arm_activity] Updated last_activity_date on %d/%d identities from ARM events",
+                        arm_activity_updated, len(best_per_identity_all))
+
+        try:
+            self.db._commit()
+        except Exception:
+            pass
+        cursor.close()
+
+        elapsed = _time.monotonic() - phase_start
+        logger.info("[arm_activity] COMPLETE: %d events, %d role updates, %.1fs",
+                    len(all_events), len(role_updates), elapsed)
 
     async def _fetch_last_observed_ips(self, identities: List[Dict]) -> None:
         """Fetch last observed IP from ARM Activity Log for all identities.
@@ -6611,16 +9329,32 @@ class AzureDiscoveryEngine:
         Falls back to directory audit log for identities with no ARM activity.
         Runs as a batch enrichment pass after _check_activity().
         """
+        import os
+        if os.environ.get('DISABLE_IP_ENRICHMENT', 'false').lower() == 'true':
+            logger.info("[ip_enrichment] SKIPPED via env flag")
+            return
+
         import aiohttp
         import asyncio as _asyncio
+        import time as _time
         from urllib.parse import quote
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('IP_ENRICHMENT_MAX_SECONDS', '120'))
+        MAX_IDENTITIES_PROCESSED = int(os.environ.get('IP_ENRICHMENT_MAX_IDENTITIES', '300'))
+        processed = 0
+        enriched = 0
+        skipped_ms = 0
+        skipped_no_id = 0
 
         sub_ids = [s['id'] for s in self.subscriptions]
         if not sub_ids:
             logger.debug("No subscriptions — skipping ARM activity IP enrichment")
             return
 
-        cutoff = (datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        # AG-147: Use same configurable lookback as _collect_arm_activity
+        arm_lookback_days = int(os.environ.get('ARM_ACTIVITY_LOOKBACK_DAYS', '90'))
+        cutoff = (datetime.utcnow() - timedelta(days=arm_lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
         # Get ARM token for Activity Log API
         try:
@@ -6638,7 +9372,6 @@ class AzureDiscoveryEngine:
             logger.debug("Graph token acquisition failed for audit fallback: %s", e)
             graph_headers = None
 
-        enriched = 0
         scanner_client_id = getattr(self, 'client_id', None)
         scanner_ip = getattr(self, '_scanner_ip', None)
 
@@ -6745,12 +9478,42 @@ class AzureDiscoveryEngine:
             return False
 
         # ── Main enrichment loop ──
-        async with aiohttp.ClientSession() as session:
+        IP_ENRICHMENT_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+        async with aiohttp.ClientSession(timeout=IP_ENRICHMENT_TIMEOUT) as session:
             for identity in identities:
+                processed += 1
+
+                # Progress log every 50 identities
+                if processed % 50 == 0:
+                    elapsed = _time.monotonic() - phase_start
+                    logger.info(
+                        "[ip_enrichment] progress: processed=%d enriched=%d elapsed=%.1fs",
+                        processed, enriched, elapsed
+                    )
+
+                # Phase budget check
+                elapsed = _time.monotonic() - phase_start
+                if elapsed > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[ip_enrichment] TIME BUDGET EXCEEDED at %.1fs — "
+                        "enriched %d/%d identities, skipping remainder",
+                        elapsed, enriched, processed
+                    )
+                    break
+                if processed >= MAX_IDENTITIES_PROCESSED:
+                    logger.warning(
+                        "[ip_enrichment] IDENTITY CAP REACHED (%d) — "
+                        "enriched %d identities, skipping remainder",
+                        MAX_IDENTITIES_PROCESSED, enriched
+                    )
+                    break
+
                 if identity.get('is_microsoft_system'):
+                    skipped_ms += 1
                     continue
                 principal_id = identity.get('object_id') or identity.get('principal_id')
                 if not principal_id:
+                    skipped_no_id += 1
                     continue
 
                 # Scanner self-IP: assign to the discovery SPN (we know our own IP)
@@ -6783,14 +9546,528 @@ class AzureDiscoveryEngine:
                         enriched += 1
                         continue
 
-        if enriched > 0:
-            logger.info("IP enrichment: %s identities enriched (ARM + directory audit + scanner self)", enriched)
+        elapsed = _time.monotonic() - phase_start
+        logger.info(
+            "[ip_enrichment] COMPLETE: processed=%d enriched=%d "
+            "skipped_ms=%d skipped_no_id=%d elapsed=%.1fs",
+            processed, enriched, skipped_ms, skipped_no_id, elapsed
+        )
+
+    # ── Background IP Enrichment (post-scan) ─────────────────────────────
+
+    @classmethod
+    async def enrich_ips_background(
+        cls,
+        azure_directory_id: str,
+        client_id: str,
+        client_secret: str,
+        db_org_id: int,
+        run_id: int,
+        subscription_ids: list = None,
+    ):
+        """Background job: enrich identities with last observed IP from ARM Activity Log.
+
+        Runs AFTER scan completes. Queries identity object_ids from the DB,
+        calls ARM Activity Log + Directory Audit Log APIs in parallel (semaphore-throttled),
+        then batch-updates the identities table with IP fields.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+        import time as _bg_time
+        import json
+        import os
+        from azure.identity import ClientSecretCredential
+        from app.database import Database
+
+        if os.environ.get('DISABLE_IP_ENRICHMENT', 'false').lower() == 'true':
+            logger.info("[ip_enrichment_bg] SKIPPED via env flag")
+            return
+
+        _start = _bg_time.monotonic()
+        logger.info("[ip_enrichment_bg] START org=%s run=%s", db_org_id, run_id)
+
+        # Get credential
+        credential = ClientSecretCredential(
+            tenant_id=azure_directory_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        client_secret = None  # AG-116: zero after SDK init
+
+        # Get ARM token
+        try:
+            arm_token = credential.get_token("https://management.azure.com/.default")
+            arm_headers = {"Authorization": f"Bearer {arm_token.token}"}
+        except Exception as e:
+            logger.warning("[ip_enrichment_bg] ARM token failed: %s", e)
+            return
+
+        # Get Graph token for directory audit fallback
+        try:
+            graph_token = credential.get_token("https://graph.microsoft.com/.default")
+            graph_headers = {"Authorization": f"Bearer {graph_token.token}"}
+        except Exception as e:
+            logger.warning("[ip_enrichment_bg] Graph token failed (audit fallback unavailable): %s", e)
+            graph_headers = None
+
+        # Fetch identities from the latest run (non-Microsoft only)
+        db = Database()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT id, identity_id, identity_category, app_id
+                FROM identities
+                WHERE discovery_run_id = %s
+                  AND COALESCE(is_microsoft_system, false) = false
+                  AND identity_id IS NOT NULL
+            """, (run_id,))
+            rows = cursor.fetchall()
+            cursor.close()
+        except Exception as e:
+            logger.error("[ip_enrichment_bg] DB query failed: %s", e)
+            db.close()
+            return
+        finally:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        if not rows:
+            logger.info("[ip_enrichment_bg] No identities found for run=%s", run_id)
+            db.close()
+            return
+
+        # Get subscription IDs for ARM Activity Log queries
+        if not subscription_ids:
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT subscription_id FROM identity_subscription_access
+                    WHERE discovery_run_id = %s AND subscription_id IS NOT NULL
+                    LIMIT 20
+                """, (run_id,))
+                subscription_ids = [r[0] for r in cursor.fetchall()]
+                cursor.close()
+            except Exception:
+                subscription_ids = []
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+
+        if not subscription_ids:
+            logger.warning("[ip_enrichment_bg] No subscriptions found — skipping ARM queries")
+
+        logger.info("[ip_enrichment_bg] Processing %d identities, %d subscriptions, org=%s",
+                    len(rows), len(subscription_ids), db_org_id)
+
+        from datetime import datetime, timedelta
+        from urllib.parse import quote
+        import os as _os
+
+        # AG-147: Use same configurable lookback as _collect_arm_activity
+        arm_lookback_days = int(_os.environ.get('ARM_ACTIVITY_LOOKBACK_DAYS', '90'))
+        cutoff = (datetime.utcnow() - timedelta(days=arm_lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        audit_cutoff = (datetime.utcnow() - timedelta(days=29)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        sem = _asyncio.Semaphore(20)
+        enriched = 0
+        updates = []  # (db_id, ip, source, date, operation)
+
+        async def _try_arm_bg(session, principal_id):
+            """Try ARM Activity Log across subscriptions."""
+            for sub_id in subscription_ids:
+                try:
+                    filter_str = (
+                        f"eventTimestamp ge '{cutoff}'"
+                        f" and caller eq '{principal_id}'"
+                    )
+                    url = (
+                        f"https://management.azure.com"
+                        f"/subscriptions/{sub_id}"
+                        f"/providers/microsoft.insights"
+                        f"/eventtypes/management/values"
+                        f"?api-version=2015-04-01"
+                        f"&$filter={quote(filter_str)}"
+                        f"&$select=caller,callerIpAddress,eventTimestamp,operationName"
+                        f"&$top=1"
+                        f"&$orderby=eventTimestamp desc"
+                    )
+                    async with session.get(url, headers=arm_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            events = data.get('value', [])
+                            if events and events[0].get('callerIpAddress'):
+                                event = events[0]
+                                op_name = event.get('operationName')
+                                if isinstance(op_name, dict):
+                                    op_name = op_name.get('localizedValue') or op_name.get('value')
+                                return (event['callerIpAddress'], 'arm_activity_log',
+                                        event.get('eventTimestamp'), op_name)
+                except Exception:
+                    pass
+                await _asyncio.sleep(0.02)
+            return None
+
+        async def _try_audit_bg(session, principal_id, app_id, is_human):
+            """Try Graph directory audit log."""
+            if not graph_headers:
+                return None
+            try:
+                if not is_human and app_id:
+                    filter_clause = f"initiatedBy/app/appId eq '{app_id}'"
+                else:
+                    filter_clause = f"initiatedBy/user/id eq '{principal_id}'"
+                full_filter = f"{filter_clause} and activityDateTime ge {audit_cutoff}"
+                audit_url = (
+                    f"https://graph.microsoft.com/v1.0"
+                    f"/auditLogs/directoryAudits"
+                    f"?$filter={quote(full_filter)}"
+                    f"&$top=1"
+                    f"&$orderby=activityDateTime desc"
+                    f"&$select=activityDateTime,initiatedBy,operationType"
+                )
+                for attempt in range(2):
+                    async with session.get(audit_url, headers=graph_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            audits = data.get('value', [])
+                            if audits:
+                                initiated_by = audits[0].get('initiatedBy', {})
+                                ip = (
+                                    initiated_by.get('user', {}).get('ipAddress')
+                                    or initiated_by.get('app', {}).get('ipAddress')
+                                )
+                                if ip:
+                                    return (ip, 'directory_audit_log',
+                                            audits[0].get('activityDateTime'),
+                                            audits[0].get('operationType'))
+                            return None
+                        elif resp.status == 429:
+                            retry_after = int(resp.headers.get('Retry-After', 2 ** (attempt + 1)))
+                            await _asyncio.sleep(min(retry_after, 10))
+                            continue
+                        else:
+                            return None
+            except Exception:
+                pass
+            return None
+
+        async def _enrich_one(session, db_id, principal_id, category, app_id):
+            nonlocal enriched
+            async with sem:
+                is_human = category in ('human_user', 'guest')
+                result = None
+
+                if is_human:
+                    result = await _try_audit_bg(session, principal_id, app_id, True)
+                    if not result and subscription_ids:
+                        result = await _try_arm_bg(session, principal_id)
+                else:
+                    if subscription_ids:
+                        result = await _try_arm_bg(session, principal_id)
+                    if not result:
+                        result = await _try_audit_bg(session, principal_id, app_id, False)
+
+                if result:
+                    updates.append((db_id, result[0], result[1], result[2], result[3]))
+                    enriched += 1
+
+        IP_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+        async with aiohttp.ClientSession(timeout=IP_TIMEOUT) as session:
+            tasks = [
+                _enrich_one(session, row[0], row[1], row[2], row[3])
+                for row in rows
+            ]
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
+        # Batch update identities table
+        update_count = 0
+        try:
+            cursor = db.conn.cursor()
+            for (db_id, ip, source, ip_date, operation) in updates:
+                try:
+                    cursor.execute("""
+                        UPDATE identities SET
+                            last_observed_ip = %s,
+                            last_observed_ip_source = %s,
+                            last_observed_ip_date = %s,
+                            last_observed_operation = %s
+                        WHERE id = %s
+                    """, (ip, source, ip_date, operation, db_id))
+                    update_count += 1
+                except Exception as e:
+                    logger.debug("[ip_enrichment_bg] Update failed for id=%s: %s", db_id, e)
+                    try:
+                        db.conn.rollback()
+                    except Exception:
+                        pass
+            db.conn.commit()
+            cursor.close()
+        except Exception as e:
+            logger.error("[ip_enrichment_bg] Batch update failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        db.close()
+        _elapsed = round(_bg_time.monotonic() - _start, 1)
+        logger.info(
+            "[ip_enrichment_bg] DONE in %.1fs: %d/%d identities enriched, %d DB updates org=%s",
+            _elapsed, enriched, len(rows), update_count, db_org_id,
+        )
+
+    # ── Background Sign-in Intelligence (post-scan) ────────────────────
+
+    @classmethod
+    async def enrich_signin_intelligence_background(
+        cls,
+        azure_directory_id: str,
+        client_id: str,
+        client_secret: str,
+        db_org_id: int,
+        run_id: int,
+        cloud_connection_id: int = None,
+    ):
+        """Background job: enrich SPN identities with sign-in intelligence from Graph API.
+
+        Runs AFTER scan completes. Queries SPN object_ids from the DB,
+        calls Graph auditLogs/signIns in parallel (semaphore-throttled),
+        then batch-updates the identities table with signin fields.
+        """
+        import aiohttp
+        import asyncio as _asyncio
+        import time as _bg_time
+        import json
+        import os
+        from azure.identity import ClientSecretCredential
+        from app.database import Database
+        from urllib.parse import quote
+
+        if os.environ.get('DISABLE_SIGNIN_INTELLIGENCE', 'false').lower() == 'true':
+            logger.info("[signin_intel_bg] SKIPPED via env flag")
+            return
+
+        # 6-hour cache check
+        if cloud_connection_id:
+            db_check = Database()
+            try:
+                cache_key = f'signin_intelligence_last_run_{cloud_connection_id}'
+                last_run = db_check.get_setting(cache_key, None, organization_id=db_org_id)
+                if last_run:
+                    from datetime import datetime
+                    last_dt = datetime.fromisoformat(last_run.replace('Z', '+00:00').replace('+00:00', ''))
+                    if (datetime.utcnow() - last_dt).total_seconds() < 6 * 3600:
+                        logger.info("[signin_intel_bg] cached (last run %s) — skipping", last_run)
+                        db_check.close()
+                        return
+            except Exception:
+                pass
+            finally:
+                db_check.close()
+
+        _start = _bg_time.monotonic()
+        logger.info("[signin_intel_bg] START org=%s run=%s", db_org_id, run_id)
+
+        credential = ClientSecretCredential(
+            tenant_id=azure_directory_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        client_secret = None  # AG-116: zero after SDK init
+
+        try:
+            graph_token = credential.get_token("https://graph.microsoft.com/.default")
+            headers = {"Authorization": f"Bearer {graph_token.token}"}
+        except Exception as e:
+            logger.warning("[signin_intel_bg] Graph token failed: %s", e)
+            return
+
+        # Fetch SPN identities from the latest run
+        db = Database()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT id, identity_id, object_id
+                FROM identities
+                WHERE discovery_run_id = %s
+                  AND identity_category IN ('service_principal', 'managed_identity_user', 'managed_identity_system')
+                  AND COALESCE(is_microsoft_system, false) = false
+                  AND identity_id IS NOT NULL
+            """, (run_id,))
+            rows = cursor.fetchall()
+            cursor.close()
+        except Exception as e:
+            logger.error("[signin_intel_bg] DB query failed: %s", e)
+            db.close()
+            return
+        finally:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        if not rows:
+            logger.info("[signin_intel_bg] No SPN identities for run=%s", run_id)
+            db.close()
+            return
+
+        logger.info("[signin_intel_bg] Processing %d SPNs org=%s", len(rows), db_org_id)
+
+        from datetime import datetime, timedelta
+        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00Z')
+        select_fields = 'createdDateTime,resourceDisplayName,ipAddress,location,clientAppUsed,status,servicePrincipalId'
+
+        sem = _asyncio.Semaphore(20)
+        enriched = 0
+        updates = []  # (db_id, signin_ips, signin_resources, signin_locations, signin_client_apps, fail, success, total)
+
+        async def _fetch_signins(session, db_id, obj_id):
+            nonlocal enriched
+            async with sem:
+                try:
+                    filter_str = (
+                        f"servicePrincipalId eq '{obj_id}' "
+                        f"and createdDateTime ge {thirty_days_ago}"
+                    )
+                    url = (
+                        f"https://graph.microsoft.com/v1.0/auditLogs/signIns"
+                        f"?$filter={quote(filter_str)}&$top=999"
+                        f"&$orderby=createdDateTime desc&$select={select_fields}"
+                    )
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 403:
+                            return  # signIns API not available
+                        if resp.status == 429:
+                            retry_after = int(resp.headers.get('Retry-After', '5'))
+                            await _asyncio.sleep(min(retry_after, 30))
+                            return
+                        if resp.status != 200:
+                            return
+                        data = await resp.json()
+                        sign_ins = data.get('value', [])
+                        if not sign_ins:
+                            return
+
+                    # Process sign-in data
+                    ips, resources, locations, client_apps = {}, {}, {}, {}
+                    failures, successes = 0, 0
+                    for si in sign_ins:
+                        ip = si.get('ipAddress')
+                        if ip:
+                            if ip not in ips:
+                                ips[ip] = {'ip': ip, 'classification': cls._classify_ip(ip), 'count': 0}
+                            ips[ip]['count'] += 1
+                        res = si.get('resourceDisplayName')
+                        if res:
+                            if res not in resources:
+                                resources[res] = {'name': res, 'count': 0}
+                            resources[res]['count'] += 1
+                        loc = si.get('location') or {}
+                        city = loc.get('city') or ''
+                        country = loc.get('countryOrRegion') or ''
+                        loc_key = f"{city},{country}" if city or country else ''
+                        if loc_key:
+                            if loc_key not in locations:
+                                locations[loc_key] = {'city': city, 'country': country, 'count': 0}
+                            locations[loc_key]['count'] += 1
+                        client = si.get('clientAppUsed') or ''
+                        if client:
+                            if client not in client_apps:
+                                client_apps[client] = {'app': client, 'count': 0}
+                            client_apps[client]['count'] += 1
+                        status = si.get('status') or {}
+                        error_code = status.get('errorCode', 0)
+                        if error_code and error_code != 0:
+                            failures += 1
+                        else:
+                            successes += 1
+
+                    updates.append((
+                        db_id,
+                        json.dumps(list(ips.values())) if ips else None,
+                        json.dumps(list(resources.values())) if resources else None,
+                        json.dumps(list(locations.values())) if locations else None,
+                        json.dumps(list(client_apps.values())) if client_apps else None,
+                        failures, successes, len(sign_ins),
+                    ))
+                    enriched += 1
+                except Exception as e:
+                    logger.debug("[signin_intel_bg] Error for %s: %s", obj_id, e)
+
+        SIGNIN_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
+        async with aiohttp.ClientSession(timeout=SIGNIN_TIMEOUT) as session:
+            tasks = [_fetch_signins(session, row[0], row[2]) for row in rows]
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
+        # Batch update identities table
+        update_count = 0
+        try:
+            cursor = db.conn.cursor()
+            for (db_id, s_ips, s_res, s_loc, s_apps, fail, succ, total) in updates:
+                try:
+                    cursor.execute("""
+                        UPDATE identities SET
+                            signin_ips = %s,
+                            signin_resources_accessed = %s,
+                            signin_locations = %s,
+                            signin_client_apps = %s,
+                            signin_failure_count_30d = %s,
+                            signin_success_count_30d = %s,
+                            signin_total_events_30d = %s
+                        WHERE id = %s
+                    """, (s_ips, s_res, s_loc, s_apps, fail, succ, total, db_id))
+                    update_count += 1
+                except Exception as e:
+                    logger.debug("[signin_intel_bg] Update failed for id=%s: %s", db_id, e)
+                    try:
+                        db.conn.rollback()
+                    except Exception:
+                        pass
+            db.conn.commit()
+            cursor.close()
+        except Exception as e:
+            logger.error("[signin_intel_bg] Batch update failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        # Update cache timestamp
+        if cloud_connection_id:
+            try:
+                cache_key = f'signin_intelligence_last_run_{cloud_connection_id}'
+                db_cache = Database()
+                try:
+                    cur = db_cache.conn.cursor()
+                    cur.execute("""
+                        INSERT INTO settings (key, value, organization_id)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (key, organization_id) DO UPDATE SET value = EXCLUDED.value
+                    """, (cache_key, datetime.utcnow().isoformat(), db_org_id))
+                    db_cache.conn.commit()
+                    cur.close()
+                finally:
+                    db_cache.close()
+            except Exception:
+                pass
+
+        db.close()
+        _elapsed = round(_bg_time.monotonic() - _start, 1)
+        logger.info(
+            "[signin_intel_bg] DONE in %.1fs: %d/%d SPNs enriched, %d DB updates org=%s",
+            _elapsed, enriched, len(rows), update_count, db_org_id,
+        )
 
     def _save_identities(self, run_id: int, identities: List[Dict], all_role_assignments: List[Dict], credentials_map: Dict[str, List[Dict]] = None, permissions_map: Dict[str, List[Dict]] = None, app_roles_map: Dict[str, List[Dict]] = None, ownership_map: Dict[str, List[Dict]] = None, pim_map: Dict[str, Dict] = None, ca_policies: List[Dict] = None) -> int:
         """Save all identities to database (customer-owned only, Microsoft system apps excluded at discovery)"""
         saved_count = 0
 
         # Phase 23: Enforce identity count limit based on organization plan
+        # trial and pro: no identity limit (None). free: capped at max_identities.
         if self.db_org_id:
             try:
                 from app.api.handlers import TIER_LIMITS
@@ -6802,9 +10079,27 @@ class AzureDiscoveryEngine:
                     plan = row[0] or 'free'
                     limits = TIER_LIMITS.get(plan, TIER_LIMITS['free'])
                     max_ids = limits.get('max_identities')
-                    if max_ids and len(identities) > max_ids:
-                        logger.warning("Organization %s (%s plan): truncating %s identities to %s", self.db_org_id, plan, len(identities), max_ids)
+                    if max_ids is not None and len(identities) > max_ids:
+                        # Prioritize humans/guests (security-critical), then by risk score.
+                        # This prevents machine identities from consuming all cap slots.
+                        _CAT_PRIORITY = {'human_user': 3, 'guest': 2}
+                        identities.sort(
+                            key=lambda x: (
+                                _CAT_PRIORITY.get(x.get('identity_category', ''), 0),
+                                x.get('risk_score', 0),
+                            ),
+                            reverse=True,
+                        )
+                        _humans = sum(1 for i in identities[:max_ids] if i.get('identity_category') in ('human_user', 'guest'))
+                        logger.warning(
+                            "Organization %s (%s plan): truncating %s identities to %s "
+                            "(humans/guests kept: %s, sorted by category+risk)",
+                            self.db_org_id, plan, len(identities), max_ids, _humans,
+                        )
                         identities = identities[:max_ids]
+                    else:
+                        logger.info("Organization %s (%s plan): %s identities, limit=%s — no truncation",
+                                    self.db_org_id, plan, len(identities), max_ids or 'unlimited')
             except Exception as e:
                 logger.error("Entitlement check failed, proceeding without limit: %s", e)
 
@@ -6816,42 +10111,113 @@ class AzureDiscoveryEngine:
         except Exception:
             pass
 
-        for identity in identities:
+        import time as _save_time
+        _save_start = _save_time.monotonic()
+
+        # Pre-fetch created_datetime from previous runs in one query (batch lookup)
+        _prev_dates = {}
+        _ids_needing_dates = [
+            i.get('identity_id') for i in identities
+            if not i.get('created_datetime') and not any(
+                r.get('created_on') for r in i.get('roles', []) if r.get('created_on')
+            )
+        ]
+        if _ids_needing_dates:
+            try:
+                from psycopg2.extras import execute_values as _exec_vals
+                _date_cursor = self.db.conn.cursor()
+                _date_cursor.execute("""
+                    SELECT DISTINCT ON (i.identity_id)
+                        i.identity_id, i.created_datetime
+                    FROM identities i
+                    JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                    WHERE i.identity_id = ANY(%s)
+                    AND i.created_datetime IS NOT NULL
+                    AND dr.cloud_connection_id = %s
+                    ORDER BY i.identity_id, i.discovery_run_id DESC
+                """, (_ids_needing_dates, self.cloud_connection_id))
+                for row in _date_cursor.fetchall():
+                    _prev_dates[row[0]] = row[1]
+                _date_cursor.close()
+            except Exception as e:
+                logger.warning("Batch date prefetch failed (non-blocking): %s", e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
+
+        for idx, identity in enumerate(identities):
 
             # Set source for multi-cloud
             identity['source'] = 'azure'
             if not identity.get('permission_plane'):
                 identity['permission_plane'] = 'entra_id'
-            
+
             # For SPNs without created_datetime, calculate from roles or previous runs
             if not identity.get('created_datetime'):
                 # Try role assignment dates first
                 role_dates = [r.get('created_on') for r in identity.get('roles', []) if r.get('created_on')]
                 if role_dates:
                     identity['created_datetime'] = min(role_dates)
+                elif identity.get('identity_id') in _prev_dates:
+                    identity['created_datetime'] = _prev_dates[identity['identity_id']]
                 else:
-                    # Check previous runs for this identity_id (scoped to current connection)
                     from datetime import datetime
-                    cursor = self.db.conn.cursor()
-                    cursor.execute("""
-                        SELECT i.created_datetime
-                        FROM identities i
-                        JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-                        WHERE i.identity_id = %s
-                        AND i.created_datetime IS NOT NULL
-                        AND dr.cloud_connection_id = %s
-                        ORDER BY i.discovery_run_id DESC
-                        LIMIT 1
-                    """, (identity.get('identity_id'), self.cloud_connection_id))
-                    prev_result = cursor.fetchone()
-                    cursor.close()
-                    
-                    if prev_result and prev_result[0]:
-                        identity['created_datetime'] = prev_result[0]
-                    else:
-                        # Truly new identity
-                        identity['created_datetime'] = datetime.utcnow().isoformat()
-            
+                    identity['created_datetime'] = datetime.utcnow().isoformat()
+
+            # ── AG-78: Compute privilege_tier from roles before persist ──
+            if 'privilege_tier' not in identity:
+                _roles = list(identity.get('roles', [])) + list(identity.get('entra_roles', []))
+                _pt = 3
+                _T0_ENTRA = {'global administrator', 'privileged role administrator',
+                             'privileged authentication administrator', 'security operator',
+                             'application administrator', 'cloud application administrator',
+                             'hybrid identity administrator', 'domain name administrator',
+                             'external identity provider administrator'}
+                _T0_ARM = {'owner', 'user access administrator'}
+                _T1_ENTRA = {'user administrator', 'exchange administrator',
+                             'sharepoint administrator', 'teams administrator',
+                             'intune administrator', 'conditional access administrator',
+                             'authentication administrator', 'groups administrator',
+                             'license administrator', 'password administrator',
+                             'security administrator', 'compliance administrator',
+                             'billing administrator', 'helpdesk administrator'}
+                _T1_ARM = {'owner', 'contributor', 'user access administrator'}
+                for r in _roles:
+                    rn = (r.get('role_name') or '').lower()
+                    rt = (r.get('role_type') or '').lower()
+                    if rt == 'entra' and rn in _T0_ENTRA:
+                        _pt = 0; break
+                    st = (r.get('scope_type') or '').lower()
+                    if rt == 'azure' and rn in _T0_ARM and st in ('subscription', 'tenant', ''):
+                        _pt = 0; break
+                if _pt > 0:
+                    for r in _roles:
+                        rn = (r.get('role_name') or '').lower()
+                        rt = (r.get('role_type') or '').lower()
+                        if rt == 'entra' and rn in _T1_ENTRA:
+                            _pt = 1; break
+                        if rt == 'azure' and rn in _T1_ARM:
+                            _pt = 1; break
+                if _pt > 1:
+                    for r in _roles:
+                        if (r.get('role_type') or '').lower() in ('entra', 'azure'):
+                            _pt = 2; break
+                identity['privilege_tier'] = f'T{_pt}'
+
+            # ── Signal 11: Flag Microsoft first-party SPNs ──
+            if 'is_microsoft_first_party' not in identity:
+                from app.constants.identity_status import (
+                    MICROSOFT_FIRST_PARTY_OWNER_IDS,
+                    MICROSOFT_FIRST_PARTY_NAME_PREFIXES,
+                )
+                _owner_org = identity.get('app_owner_org_id') or ''
+                _dname = identity.get('display_name') or ''
+                identity['is_microsoft_first_party'] = (
+                    _owner_org in MICROSOFT_FIRST_PARTY_OWNER_IDS
+                    or any(_dname.startswith(p) for p in MICROSOFT_FIRST_PARTY_NAME_PREFIXES)
+                )
+
             try:
                 identity_db_id = self.db.save_identity(run_id, identity)
                 identity['_db_id'] = identity_db_id
@@ -6877,14 +10243,25 @@ class AzureDiscoveryEngine:
                 except Exception as e:
                     logger.warning("save_resource_identity_link failed for %s: %s", identity.get('display_name'), e)
 
-            # Save all per-identity metadata (roles, subs, creds, permissions, PIM, etc.)
+            # Save all per-identity metadata (roles, subs, entra, creds, permissions, PIM, etc.)
+            # AG-151 FIX: Each section isolated so a failure in one doesn't skip the rest.
             try:
                 # Save role assignments for this identity
                 identity_roles = identity.get('roles', [])
+                self._role_assignments_fetched += len(identity_roles)
                 for role in identity_roles:
                     self.db.save_role_assignment(identity_db_id, role)
+                    self._role_assignments_saved += 1
+            except Exception as e:
+                logger.error("save_role_assignments FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
+            try:
                 # Save identity ↔ subscription access (multi-subscription junction table)
+                identity_roles = identity.get('roles', [])
                 seen_sub_roles = set()
                 for role in identity_roles:
                     sub_id_from_role = role.get('subscription_id')
@@ -6903,21 +10280,89 @@ class AzureDiscoveryEngine:
                 # Compute primary subscription + additional count
                 if seen_sub_roles:
                     self.db.update_identity_subscription_summary(identity_db_id)
+            except Exception as e:
+                logger.error("save_subscription_access FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
-                # Save Entra ID role assignments for this identity
-                identity_entra_roles = identity.get('entra_roles', [])
-                for entra_role in identity_entra_roles:
+            # Save Entra ID role assignments for this identity (per-role resilience)
+            identity_entra_roles = identity.get('entra_roles', [])
+            _entra_saved = 0
+            _entra_consecutive_failures = 0
+            for entra_role in identity_entra_roles:
+                try:
                     self.db.save_entra_role_assignment(identity_db_id, entra_role)
+                    _entra_saved += 1
+                    _entra_consecutive_failures = 0
+                except Exception as _er:
+                    _entra_consecutive_failures += 1
+                    logger.warning(
+                        "save_entra_role_assignment failed for %s role=%s: %s",
+                        identity.get('display_name'), entra_role.get('role_name'), _er,
+                    )
+                    try:
+                        self.db._rollback()
+                    except Exception:
+                        pass
+                    if _entra_consecutive_failures >= 3 and _entra_saved == 0:
+                        logger.error(
+                            "Entra role save SYSTEMIC FAILURE — %d consecutive failures, "
+                            "0 successes. Aborting Entra saves for %s.",
+                            _entra_consecutive_failures, identity.get('display_name'),
+                        )
+                        break
+            # Pipeline health: accumulate per-identity save metrics
+            self._entra_roles_matched += len(identity_entra_roles)
+            self._entra_roles_saved += _entra_saved
+            self._entra_roles_failed += (len(identity_entra_roles) - _entra_saved)
+            if identity_entra_roles and _entra_saved < len(identity_entra_roles):
+                logger.warning(
+                    "Entra role save partial: %d/%d saved for %s",
+                    _entra_saved, len(identity_entra_roles), identity.get('display_name'),
+                )
 
+            try:
                 # Save credentials for this identity (SPNs only)
                 if credentials_map and identity.get('identity_id') in credentials_map:
                     credentials = credentials_map[identity.get('identity_id')]
+                    self._credentials_fetched += len(credentials)
                     for credential in credentials:
                         self.db.save_credential(identity_db_id, credential)
-
-                    # Update credential summary on identity record
+                        self._credentials_saved += 1
+                        # Also populate identity_credentials inventory
+                        # (skip 'federated' — tracked in federated_credentials table)
+                        _ic_type = credential.get('credential_type', '')
+                        if _ic_type in ('secret', 'certificate', 'key', 'password', 'token'):
+                            try:
+                                self.db.save_identity_credential(
+                                    org_id=self.db_org_id,
+                                    connection_id=self.cloud_connection_id,
+                                    identity_id=identity.get('identity_id', ''),
+                                    credential_type=_ic_type,
+                                    created_at=credential.get('start_datetime'),
+                                    expires_at=credential.get('end_datetime'),
+                                    metadata={
+                                        'key_id': credential.get('key_id'),
+                                        'display_name': credential.get('display_name'),
+                                    },
+                                )
+                            except Exception as _ic_err:
+                                logger.debug("save_identity_credential skipped: %s", _ic_err)
+                                try:
+                                    self.db._rollback()
+                                except Exception:
+                                    pass
                     self.db.update_identity_credential_summary(identity_db_id)
+            except Exception as e:
+                logger.error("save_credentials FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
+            try:
                 # Save API permissions for this identity (SPNs only)
                 if permissions_map and identity.get('identity_id') in permissions_map:
                     permissions = permissions_map[identity.get('identity_id')]
@@ -6927,12 +10372,27 @@ class AzureDiscoveryEngine:
                 if app_roles_map and identity.get('identity_id') in app_roles_map:
                     app_roles = app_roles_map[identity.get('identity_id')]
                     self.db.store_app_roles(identity_db_id, app_roles)
+            except Exception as e:
+                logger.error("save_permissions_app_roles FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
-                # Save ownership for this identity (SPNs only)
+            try:
+                # Save ownership for this identity (SPNs only) — separate try to avoid
+                # being blocked by permissions/app_roles ON CONFLICT failures
                 if ownership_map and identity.get('identity_id') in ownership_map:
                     owners = ownership_map[identity.get('identity_id')]
                     self.db.store_ownership(identity_db_id, owners)
+            except Exception as e:
+                logger.error("save_ownership FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
+            try:
                 # Save PIM data for this identity (keyed by object_id)
                 object_id = identity.get('object_id')
                 if pim_map and object_id and object_id in pim_map:
@@ -6943,10 +10403,159 @@ class AzureDiscoveryEngine:
                         self.db.save_pim_activation(identity_db_id, activation)
                     self.db.update_identity_pim_summary(identity_db_id)
             except Exception as e:
-                logger.error("save_identity_metadata FAILED for %s: %s", identity.get('display_name'), e)
-                self.db._rollback()
+                logger.error("save_pim FAILED for %s: %s", identity.get('display_name'), e)
+                try:
+                    self.db._rollback()
+                except Exception:
+                    pass
 
             saved_count += 1
+
+        # Explicit commit after all identities saved
+        try:
+            self.db.conn.commit()
+        except Exception:
+            pass
+        _save_elapsed = round(_save_time.monotonic() - _save_start, 1)
+        logger.info(
+            "Identity write complete: org=%s run=%s total=%s elapsed=%.1fs",
+            self.db_org_id, run_id, saved_count, _save_elapsed,
+        )
+
+        # ── Post-save: recompute activity_status from actual DB values ──
+        # Fixes Signal 10 drift: ensures activity_status matches the
+        # authoritative last_sign_in / enabled columns after upsert.
+        # Preserves multi-signal intelligence (likely_active, recently_created)
+        # for identities that have no sign-in data.
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                UPDATE identities
+                SET activity_status = CASE
+                    WHEN enabled = FALSE THEN 'inactive'
+                    WHEN last_sign_in IS NOT NULL
+                         AND last_sign_in >= NOW() - INTERVAL '30 days'
+                        THEN 'active'
+                    WHEN last_sign_in IS NOT NULL
+                         AND last_sign_in >= NOW() - INTERVAL '90 days'
+                        THEN 'inactive'
+                    WHEN last_sign_in IS NOT NULL
+                        THEN 'stale'
+                    WHEN last_sign_in IS NULL
+                         AND activity_status NOT IN ('likely_active', 'recently_created')
+                        THEN 'never_used'
+                    ELSE activity_status
+                END
+                WHERE discovery_run_id = %s
+            """, (run_id,))
+            recomputed = cursor.rowcount
+            self.db._commit()
+            cursor.close()
+            logger.info(
+                "activity_status recomputed: org=%s run=%s rows=%s",
+                self.db_org_id, run_id, recomputed,
+            )
+        except Exception as e:
+            logger.warning("activity_status recompute failed: org=%s error=%s", self.db_org_id, e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # ── Post-save: backfill is_microsoft_first_party for existing rows ──
+        # Catches rows saved before the flag was added or identities that
+        # didn't pass through the inline check above.
+        try:
+            from app.constants.identity_status import (
+                MICROSOFT_FIRST_PARTY_OWNER_IDS,
+                MICROSOFT_FIRST_PARTY_NAME_PREFIXES,
+            )
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                UPDATE identities
+                SET is_microsoft_first_party = TRUE
+                WHERE discovery_run_id = %s
+                  AND COALESCE(is_microsoft_first_party, FALSE) = FALSE
+                  AND (
+                      app_owner_org_id = ANY(%s)
+                      OR display_name LIKE 'Microsoft %%'
+                      OR display_name LIKE 'Agent (%%'
+                      OR display_name LIKE 'Windows %%'
+                  )
+            """, (run_id, list(MICROSOFT_FIRST_PARTY_OWNER_IDS)))
+            ms_fp_count = cursor.rowcount
+            self.db._commit()
+            cursor.close()
+            if ms_fp_count:
+                logger.info(
+                    "is_microsoft_first_party backfill: org=%s run=%s rows=%s",
+                    self.db_org_id, run_id, ms_fp_count,
+                )
+        except Exception as e:
+            logger.warning("is_microsoft_first_party backfill failed: org=%s error=%s", self.db_org_id, e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # ── Bulk reconciliation: backfill identity_list for any missed dual-writes ──
+        try:
+            logger.info("Reconciling identity_list: org=%s run=%s", self.db_org_id, run_id)
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                INSERT INTO identity_list (
+                    organization_id, identity_id, global_identity_id,
+                    display_name, identity_type, cloud_provider,
+                    is_microsoft_system, governance, lifecycle_state,
+                    privilege_level, risk_label, risk_score, last_seen,
+                    identity_class
+                )
+                SELECT
+                    %s,
+                    i.identity_id,
+                    md5(concat(%s, '|', i.identity_id))::uuid,
+                    i.display_name,
+                    CASE
+                        WHEN i.identity_category = 'guest' THEN 'guest'
+                        WHEN i.identity_category = 'human_user' THEN 'human_user'
+                        WHEN i.identity_category IN ('managed_identity_system','managed_identity_user') THEN i.identity_category
+                        ELSE 'service_principal'
+                    END,
+                    COALESCE(i.cloud, 'azure'),
+                    COALESCE(i.is_microsoft_system, false),
+                    CASE WHEN i.owner_count > 0 THEN 'Governed' ELSE 'Orphaned' END,
+                    COALESCE(i.lifecycle_state, 'Active'),
+                    'standard',
+                    COALESCE(i.risk_level, 'low'),
+                    COALESCE(i.risk_score, 0),
+                    NOW(),
+                    CASE
+                        WHEN i.identity_category IN ('guest','guest_user','b2b_user') OR i.is_federated THEN 'EXTERNAL'
+                        WHEN i.identity_category IN ('human_user','user','member') THEN 'HUMAN'
+                        ELSE 'WORKLOAD'
+                    END
+                FROM identities i
+                WHERE i.discovery_run_id = %s
+                ON CONFLICT (organization_id, identity_id) DO UPDATE SET
+                    display_name     = EXCLUDED.display_name,
+                    identity_type    = EXCLUDED.identity_type,
+                    is_microsoft_system = EXCLUDED.is_microsoft_system,
+                    identity_class   = EXCLUDED.identity_class,
+                    governance       = EXCLUDED.governance,
+                    risk_label       = EXCLUDED.risk_label,
+                    risk_score       = EXCLUDED.risk_score,
+                    last_seen        = NOW()
+            """, (self.db_org_id, str(self.db_org_id), run_id))
+            il_count = cursor.rowcount
+            self.db._commit()
+            cursor.close()
+            logger.info("identity_list reconciled: org=%s upserted=%s", self.db_org_id, il_count)
+        except Exception as e:
+            logger.error("identity_list reconciliation FAILED: org=%s error=%s", self.db_org_id, e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
 
         # Save CA policies and compute coverage after all identities are saved
         try:
@@ -7166,7 +10775,7 @@ class AzureDiscoveryEngine:
 
     def _create_result(self, identities: List[Dict], role_assignments: List[Dict], run_id: int) -> DiscoveryResult:
         service_principals = [i for i in identities if i['identity_type'] == 'service_principal']
-        users = [i for i in identities if i['identity_type'] == 'user']
+        users = [i for i in identities if i['identity_type'] in ('human_user', 'guest')]
         managed_identities = [i for i in identities if i['identity_type'] == 'managed_identity']
         
         critical_count = sum(1 for i in identities if i['risk_level'] == 'critical')
@@ -7213,7 +10822,7 @@ class AzureDiscoveryEngine:
             )
             request_config = RequestConfiguration(query_parameters=query_params)
 
-            apps = await self.graph_client.applications.get(request_configuration=request_config)
+            apps = await asyncio.wait_for(self.graph_client.applications.get(request_configuration=request_config), timeout=GRAPH_SDK_TIMEOUT)
             all_apps = []
             if apps and apps.value:
                 all_apps.extend(apps.value)
@@ -7223,7 +10832,7 @@ class AzureDiscoveryEngine:
             while next_link:
                 try:
                     from msgraph.generated.applications.applications_request_builder import ApplicationsRequestBuilder as AB2
-                    apps = await self.graph_client.applications.with_url(next_link).get()
+                    apps = await asyncio.wait_for(self.graph_client.applications.with_url(next_link).get(), timeout=GRAPH_SDK_TIMEOUT)
                     if apps and apps.value:
                         all_apps.extend(apps.value)
                     next_link = getattr(apps, 'odata_next_link', None) if apps else None
@@ -7331,7 +10940,7 @@ class AzureDiscoveryEngine:
                 # ── Owners ──
                 owners_list = []
                 try:
-                    owners_resp = await self.graph_client.applications.by_application_id(object_id).owners.get()
+                    owners_resp = await asyncio.wait_for(self.graph_client.applications.by_application_id(object_id).owners.get(), timeout=GRAPH_SDK_TIMEOUT)
                     if owners_resp and owners_resp.value:
                         for o in owners_resp.value:
                             owners_list.append({
@@ -7418,6 +11027,195 @@ class AzureDiscoveryEngine:
         except Exception as e:
             logger.error("App registration discovery failed: %s", e, exc_info=True)
             return []
+
+    async def _discover_federated_credentials(self, run_id: int, app_regs: list, spn_app_id_map: dict) -> None:
+        """AG-148: Discover federated identity credentials from application objects.
+
+        Calls GET /applications/{object_id}/federatedIdentityCredentials for each
+        app registration that has a linked SPN. Stores results in federated_credentials
+        table and updates has_federated_credentials on the identity.
+
+        Handles 403/404 gracefully — logs and skips without failing the run.
+        """
+        import time as _time
+        phase_start = _time.monotonic()
+        org_id = getattr(self, '_organization_id', None) or self.db_org_id
+
+        if not app_regs:
+            logger.debug("[federated_creds] No app registrations — skipping")
+            return
+
+        fetched = 0
+        stored = 0
+        errors = 0
+        identities_updated = set()
+
+        for ar in app_regs:
+            app_object_id = ar.get('app_object_id')
+            app_id = ar.get('app_id')
+            linked_spn_db_id = None
+
+            # Only fetch for apps that have a linked SPN
+            spn_info = spn_app_id_map.get(app_id)
+            if not spn_info:
+                continue
+            linked_spn_db_id = spn_info.get('id')
+            if not linked_spn_db_id:
+                continue
+
+            # Time budget: 60s
+            if _time.monotonic() - phase_start > 60:
+                logger.warning("[federated_creds] Time budget exceeded — stopping")
+                break
+
+            try:
+                fed_resp = await asyncio.wait_for(
+                    self.graph_client.applications.by_application_id(app_object_id)
+                    .federated_identity_credentials.get(),
+                    timeout=GRAPH_SDK_TIMEOUT
+                )
+                if not fed_resp or not fed_resp.value:
+                    continue
+
+                fetched += 1
+                issuer_types_for_identity = set()
+
+                for fc in fed_resp.value:
+                    cred_id = getattr(fc, 'id', '') or ''
+                    name = getattr(fc, 'name', None) or ''
+                    issuer = getattr(fc, 'issuer', '') or ''
+                    subject = getattr(fc, 'subject', '') or ''
+                    audiences = getattr(fc, 'audiences', None) or []
+                    description = getattr(fc, 'description', None) or ''
+
+                    issuer_type = _classify_issuer_type(issuer)
+                    issuer_types_for_identity.add(issuer_type)
+
+                    # Store in federated_credentials table
+                    try:
+                        cursor = self.db.conn.cursor()
+                        cursor.execute("""
+                            INSERT INTO federated_credentials
+                            (organization_id, identity_db_id, identity_id, discovery_run_id,
+                             credential_id, name, issuer, subject, audiences, issuer_type, description)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (organization_id, identity_id, credential_id, discovery_run_id)
+                            DO UPDATE SET
+                                name = EXCLUDED.name,
+                                issuer = EXCLUDED.issuer,
+                                subject = EXCLUDED.subject,
+                                audiences = EXCLUDED.audiences,
+                                issuer_type = EXCLUDED.issuer_type,
+                                description = EXCLUDED.description,
+                                discovered_at = NOW()
+                        """, (
+                            org_id, linked_spn_db_id, app_id, run_id,
+                            cred_id, name, issuer, subject,
+                            json.dumps(audiences) if audiences else '[]',
+                            issuer_type, description,
+                        ))
+                        cursor.close()
+                        stored += 1
+                    except Exception as e:
+                        logger.debug("[federated_creds] Insert failed for %s: %s", app_id, e)
+                        try:
+                            self.db.conn.rollback()
+                        except Exception:
+                            pass
+
+                # Update the SPN identity record
+                fed_count = len(fed_resp.value)
+                if issuer_types_for_identity:
+                    try:
+                        cursor = self.db.conn.cursor()
+                        cursor.execute("""
+                            UPDATE identities SET
+                                has_federated_credentials = TRUE,
+                                federated_issuer_types = %s,
+                                federated_cred_count = %s,
+                                recommended_action = 'review_federated_dependencies'
+                            WHERE id = %s
+                        """, (
+                            json.dumps(sorted(issuer_types_for_identity)),
+                            fed_count,
+                            linked_spn_db_id,
+                        ))
+                        cursor.close()
+                        identities_updated.add(linked_spn_db_id)
+                    except Exception as e:
+                        logger.debug("[federated_creds] Identity update failed: %s", e)
+                        try:
+                            self.db.conn.rollback()
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                err_str = str(e)
+                # 403/404 are expected — skip gracefully
+                if '403' in err_str or '404' in err_str or 'Forbidden' in err_str or 'NotFound' in err_str:
+                    continue
+                errors += 1
+                if errors <= 3:
+                    logger.debug("[federated_creds] Error for app %s: %s", app_object_id, e)
+                continue
+
+        # Commit all changes
+        try:
+            self.db._commit()
+        except Exception:
+            pass
+
+        # AG-148: Fix verdict for identities that now have federated credentials.
+        # The lineage verdict was computed before federated discovery, so identities
+        # classified as UNUSED/ORPHANED need correction.
+        if identities_updated:
+            verdict_fixed = 0
+            try:
+                cursor = self.db.conn.cursor()
+                for iid in identities_updated:
+                    # Check current verdict — only fix UNUSED/ORPHANED/NEEDS_REVIEW
+                    cursor.execute("""
+                        SELECT recommended_action, last_activity_source
+                        FROM identities WHERE id = %s
+                    """, (iid,))
+                    row = cursor.fetchone()
+                    if not row:
+                        continue
+                    current_action, activity_src = row
+                    if current_action in ('UNUSED', 'ORPHANED', 'NEEDS_REVIEW', 'STALE', 'AT_RISK',
+                                          'FEDERATED_UNVERIFIED', 'ACTIVE_FEDERATED'):
+                        new_action = 'review_federated_dependencies'
+                        if activity_src and activity_src not in ('created_date', 'none', None):
+                            new_text = ('Active federated identity. External pipeline dependency — '
+                                        'review federated credentials before any action.')
+                        else:
+                            new_text = ('External pipeline dependency detected via federated credentials. '
+                                        'Review federated credentials before any action.')
+                        cursor.execute("""
+                            UPDATE identities SET
+                                recommended_action = %s,
+                                verdict_action_text = %s,
+                                verdict_confidence = 'high'
+                            WHERE id = %s
+                        """, (new_action, new_text, iid))
+                        verdict_fixed += 1
+                cursor.close()
+                self.db._commit()
+                if verdict_fixed:
+                    logger.info("[federated_creds] Fixed verdicts for %d identities", verdict_fixed)
+            except Exception as e:
+                logger.debug("[federated_creds] Verdict fix error: %s", e)
+                try:
+                    self.db.conn.rollback()
+                except Exception:
+                    pass
+
+        elapsed = _time.monotonic() - phase_start
+        logger.info(
+            "[federated_creds] Complete: %d apps with creds, %d credentials stored, "
+            "%d identities updated, %d errors, %.1fs",
+            fetched, stored, len(identities_updated), errors, elapsed
+        )
 
     def _compute_app_registration_risk(self, owner_count, audience, app_perm_count,
                                         high_risk_list, has_expired, has_expiring_soon,

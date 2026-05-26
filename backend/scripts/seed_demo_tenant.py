@@ -376,9 +376,9 @@ def seed_identities(db, org_id, run_id):
                  risk_level, risk_score, risk_reasons,
                  credential_expiration, credential_status, credential_count,
                  last_sign_in, activity_status, owner_count, cloud,
-                 created_datetime, created_at)
+                 created_datetime, created_at, organization_id)
             VALUES (%s,%s,%s,'azure',%s,%s,%s,%s,%s,false,
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,'azure',%s,NOW())
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,'azure',%s,NOW(),%s)
             RETURNING id
         """, (
             run_id, identity_id, display_name,
@@ -391,6 +391,7 @@ def seed_identities(db, org_id, run_id):
             cred_exp, cred_status, cred_count,
             last_sign_in, activity, owner_count,
             _past(30, 730),
+            org_id,
         ))
         db_id = cursor.fetchone()[0]
         identity_map[identity_id] = db_id
@@ -1457,4 +1458,21 @@ def main():
 
 
 if __name__ == "__main__":
+    # AG-105: Production guard — refuse to seed in production environments
+    _APP_ENV = os.environ.get('APP_ENV', 'production')
+    _DB_HOST = os.environ.get('DB_HOST', '')
+    if _APP_ENV == 'production' or 'prod' in _DB_HOST.lower():
+        print("ERROR: Refusing to run seed script in production.")
+        print(f"  APP_ENV={_APP_ENV}")
+        print(f"  DB_HOST={_DB_HOST}")
+        print("Set APP_ENV=local to run seed scripts.")
+        sys.exit(1)
+    _confirm = input(
+        f"Seeding DB at {_DB_HOST} (APP_ENV={_APP_ENV}). "
+        "Type 'yes' to continue: "
+    )
+    if _confirm.strip().lower() != 'yes':
+        print("Aborted.")
+        sys.exit(0)
+
     main()

@@ -306,6 +306,7 @@ def resolve_last_seen_multisource(row):
         'source': best_label,
         'available': True,
         'confidence': best_conf,
+        'timestamp': best_dt.isoformat(),
     }
 
 
@@ -460,38 +461,24 @@ _GRAPH_ACTIVITY_IMPLIES_USAGE_LOWER = frozenset(
 
 
 def infer_role_usage(roles, auth_activity):
-    """Infer whether each assigned role was likely exercised.
+    """Infer per-role usage from the canonical classification model.
 
-    Azure does not expose direct role usage data.  This function applies
-    behavioural inference using ARM and directory activity signals.
+    This function is a *consumer* of ``role_usage_classification`` set by
+    the handler enrichment loop — it does NOT compute its own classification.
+    When ``role_usage_classification`` is present, it is authoritative.
 
-    Rules come from app.constants.roles — never hardcode role names here.
-    Applies identically to every identity regardless of who they are.
+    When called in a legacy path where the handler has not yet enriched the
+    roles, it falls back to a conservative heuristic that respects the 90-day
+    observation window and never blanket-credits identity-level activity to
+    individual roles.
 
     Role-name keys are normalized via ``_normalize_role_key`` — the frontend
     must apply the same normalization at lookup time.
 
-    Contract
-    --------
-    If ``auth_activity['any_activity_observed']`` is True, this function
-    guarantees that every role is marked ``used=True`` with a distinct
-    evidence string that names the signal source. Sign-in logs are
-    NOT required — ARM activity, AuditGraph scan observations, lineage,
-    token use, and non-interactive sign-ins all flow through the cascade.
-
-    Priority cascade (highest to lowest confidence):
-      1. Interactive sign-in     → high,   all roles
-      2. ARM activity            → medium, all roles
-      3. AuditGraph scan         → medium, all roles
-      4. Lineage activity        → medium, all roles
-      5. Non-interactive sign-in → medium, all roles
-      6. Token activity          → low,    all roles
-      7. Otherwise               → not used
-
     Parameters
     ----------
     roles : list[dict]
-        Role assignments (each must have role_name / display_name / name).
+        Role assignments (each must have role_name + last_used_at + scope).
     auth_activity : dict
         Activity breakdown from build_identity_state.
 
@@ -500,53 +487,25 @@ def infer_role_usage(roles, auth_activity):
     dict[str, dict]
         ``{normalized_role_name: {used: bool, confidence: str, evidence: str}}``
     """
-    # Resolve the single "winning" signal ONCE for this identity so every
-    # role gets an identical verdict. This mirrors the real world: if the
-    # identity signed in, *every* role it holds was usable during that
-    # session — we cannot attribute activity to individual roles without
-    # per-role telemetry that Azure does not expose.
+    identity_active = auth_activity.get('any_activity_observed', False)
+    _OBSERVATION_WINDOW_DAYS = 90
+
+    # Determine identity-level activity source for context (not for attribution)
+    _identity_signal = None
     if auth_activity.get('interactive_signin'):
-        verdict = {
-            'used': True,
-            'confidence': 'high',
-            'evidence': 'Interactive sign-in observed',
-        }
+        _identity_signal = 'Interactive sign-in observed'
     elif auth_activity.get('arm_activity'):
-        verdict = {
-            'used': True,
-            'confidence': 'medium',
-            'evidence': 'ARM deployment/resource activity observed',
-        }
-    elif auth_activity.get('auditgraph_scan'):
-        verdict = {
-            'used': True,
-            'confidence': 'medium',
-            'evidence': 'AuditGraph scan observation',
-        }
-    elif auth_activity.get('lineage_activity'):
-        verdict = {
-            'used': True,
-            'confidence': 'medium',
-            'evidence': 'Resource lineage activity observed',
-        }
+        _identity_signal = 'ARM activity observed'
     elif auth_activity.get('non_interactive_signin'):
-        verdict = {
-            'used': True,
-            'confidence': 'medium',
-            'evidence': 'Non-interactive sign-in observed',
-        }
+        _identity_signal = 'Non-interactive sign-in observed'
+    elif auth_activity.get('auditgraph_scan'):
+        _identity_signal = 'AuditGraph scan observation'
+    elif auth_activity.get('lineage_activity'):
+        _identity_signal = 'Lineage activity observed'
     elif auth_activity.get('token_usage'):
-        verdict = {
-            'used': True,
-            'confidence': 'low',
-            'evidence': 'Token activity observed',
-        }
-    else:
-        verdict = {
-            'used': False,
-            'confidence': 'none',
-            'evidence': 'No activity signal correlated to this role',
-        }
+        _identity_signal = 'Token activity observed'
+
+    now = datetime.now(timezone.utc)
 
     results = {}
     for role in (roles or []):
@@ -559,7 +518,68 @@ def infer_role_usage(roles, auth_activity):
         role_name = _normalize_role_key(role_name_raw)
         if not role_name:
             continue
-        results[role_name] = dict(verdict)
+
+        # Authoritative: use handler-computed classification if available
+        classification = role.get('role_usage_classification', '')
+
+        if classification == 'proven':
+            results[role_name] = {
+                'used': True,
+                'confidence': 'high',
+                'evidence': 'Role-scoped ARM activity confirmed (proven)',
+            }
+        elif classification == 'likely':
+            results[role_name] = {
+                'used': True,
+                'confidence': 'medium',
+                'evidence': 'Role-scoped activity detected but overlapping roles prevent deterministic attribution',
+            }
+        elif classification in ('unknown', 'no_observed_usage',
+                                'telemetry_blind', 'insufficient_coverage'):
+            # Handler already classified — respect it
+            results[role_name] = {
+                'used': False,
+                'confidence': 'none',
+                'evidence': {
+                    'unknown': f'Identity active ({_identity_signal}) but no role-specific evidence',
+                    'no_observed_usage': 'No activity signal within observation window',
+                    'telemetry_blind': 'No telemetry connectors — cannot determine usage',
+                    'insufficient_coverage': 'Coverage data unavailable',
+                }.get(classification, 'No activity signal correlated to this role'),
+            }
+        else:
+            # Legacy fallback: classification not set by handler.
+            # Respect observation window for P1 — stale P1 is NOT proof.
+            p1 = role.get('last_used_at')
+            _p1_recent = False
+            if p1:
+                try:
+                    if isinstance(p1, datetime):
+                        _p1_recent = (now - p1).days <= _OBSERVATION_WINDOW_DAYS
+                    elif isinstance(p1, str):
+                        dt = datetime.fromisoformat(p1.replace('Z', '+00:00'))
+                        _p1_recent = (now - dt).days <= _OBSERVATION_WINDOW_DAYS
+                except Exception:
+                    pass
+
+            if _p1_recent:
+                results[role_name] = {
+                    'used': True,
+                    'confidence': 'medium',
+                    'evidence': 'Role-level activity record (within window)',
+                }
+            elif identity_active:
+                results[role_name] = {
+                    'used': False,
+                    'confidence': 'none',
+                    'evidence': f'Identity active ({_identity_signal}) but no role-specific evidence',
+                }
+            else:
+                results[role_name] = {
+                    'used': False,
+                    'confidence': 'none',
+                    'evidence': 'No activity signal correlated to this role',
+                }
     return results
 
 
@@ -727,9 +747,11 @@ def build_identity_state(row, roles=None, attack_path_count=0):
     return {
         # Activity signals
         'last_seen': last_seen_info['display'],
+        'last_seen_display': last_seen_info['display'],
         'last_seen_source': last_seen_info['source'],
         'last_seen_available': last_seen_info['available'],
         'last_seen_confidence': last_seen_info['confidence'],
+        'last_seen_timestamp': last_seen_info.get('timestamp'),
         'activity_label': activity_label,
         'activity_detail': activity_detail,
         'auth_activity': auth_activity,

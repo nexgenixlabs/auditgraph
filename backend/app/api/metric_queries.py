@@ -30,32 +30,46 @@ HIDE_DELETED_WHERE = """
 METRIC_DORMANT = """
     AND i.activity_status IN ('stale', 'never_used')
     AND i.identity_category IN ('human_user', 'guest')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_DORMANT_NHI = """
     AND i.activity_status IN ('stale', 'never_used')
     AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_DORMANT_HUMAN = """
     AND i.activity_status IN ('stale', 'never_used')
     AND i.identity_category = 'human_user'
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_PRIVILEGED = """
     AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_HIGH_RISK = """
     AND i.risk_level IN ('critical', 'high')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_CRITICAL = """
     AND i.risk_level = 'critical'
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_OVER_PERMISSIONED = """
     AND (COALESCE(i.risk_score, 0) >= 70 OR i.privilege_tier = 'T0')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 # SSOT: governance_service.derive_governance_state() step 1 — owner_count==0 → Orphaned
@@ -63,26 +77,36 @@ METRIC_OVER_PERMISSIONED = """
 METRIC_UNOWNED_NHI = """
     AND (i.owner_count = 0 OR i.owner_count IS NULL)
     AND COALESCE(i.identity_category, '') NOT IN ('human_user', 'guest', 'microsoft_internal')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_CREDENTIAL_EXPIRED = """
     AND i.credential_expiration IS NOT NULL
     AND i.credential_expiration < NOW()
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_CREDENTIAL_EXPIRING = """
     AND i.credential_expiration IS NOT NULL
     AND i.credential_expiration >= NOW()
     AND i.credential_expiration < NOW() + INTERVAL '30 days'
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_CREDENTIAL_HEALTHY = """
     AND i.credential_expiration IS NOT NULL
     AND i.credential_expiration >= NOW() + INTERVAL '30 days'
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_NO_CREDENTIALS = """
     AND (i.credential_count = 0 OR i.credential_count IS NULL)
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_GHOST = """
@@ -90,13 +114,50 @@ METRIC_GHOST = """
     AND (
         EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
         OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+        OR EXISTS (
+            SELECT 1 FROM entra_group_memberships egm
+            JOIN entra_groups eg ON eg.id = egm.group_db_id
+            WHERE egm.member_object_id = i.object_id
+              AND eg.discovery_run_id = i.discovery_run_id
+              AND eg.rbac_roles != '[]'::jsonb
+        )
     )
 """
 
 METRIC_DORMANT_PRIVILEGED = """
-    AND i.activity_status IN ('stale', 'never_used')
     AND i.identity_category IN ('human_user', 'guest')
-    AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
+    AND (
+        -- Tier 1: privilege_tier classified (log-dependent)
+        (i.privilege_tier IN ('T0', 'T1')
+         AND (i.activity_status IN ('stale', 'never_used')
+              OR i.days_since_last_signin > 90))
+        OR
+        -- Tier 2: privilege_tier NULL (log-independent fallback) —
+        -- detect privilege via Owner/Contributor/UAA RBAC roles
+        -- or any Entra directory role assignment.
+        (i.privilege_tier IS NULL
+         AND (i.activity_status IN ('stale', 'never_used')
+              OR i.days_since_last_signin > 90)
+         AND (
+           EXISTS (SELECT 1 FROM role_assignments ra
+                   WHERE ra.identity_db_id = i.id
+                     AND ra.role_name IN (
+                       'Owner', 'Contributor',
+                       'User Access Administrator',
+                       'Global Administrator'))
+           OR EXISTS (SELECT 1 FROM entra_role_assignments era
+                      WHERE era.identity_db_id = i.id)
+         ))
+    )
+"""
+
+METRIC_PROVISIONED_UNOWNED = """
+    AND i.activity_status = 'never_used'
+    AND COALESCE(i.owner_count, 0) = 0
+    AND i.enabled IS NOT FALSE
+    AND i.deleted_at IS NULL
 """
 
 METRIC_SA_CATEGORIES = "('service_principal', 'managed_identity_system', 'managed_identity_user')"
@@ -123,6 +184,7 @@ METRIC_REGISTRY = {
     'no_credentials': METRIC_NO_CREDENTIALS,
     'ghost': METRIC_GHOST,
     'dormant_privileged': METRIC_DORMANT_PRIVILEGED,
+    'provisioned_unowned': METRIC_PROVISIONED_UNOWNED,
 }
 
 

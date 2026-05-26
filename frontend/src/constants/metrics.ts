@@ -102,10 +102,12 @@ export function normalizeCategoryFromBackend(raw?: any): IdentityCategory {
   if (!v) return 'unknown';
   if (v in IDENTITY_CATEGORIES || v === 'unknown') return v as IdentityCategory;
   // Azure aliases
-  if (v === 'user' || v === 'human user') return 'human_user';
+  if (v === 'user' || v === 'human user' || v === 'member' || v === 'human') return 'human_user';
+  if (v === 'guest_user' || v === 'b2b_user') return 'guest';
   if (v.includes('user assigned') || v.includes('user-assigned')) return 'managed_identity_user';
   if (v.includes('system assigned') || v.includes('system-assigned')) return 'managed_identity_system';
-  if (v === 'service principal' || v === 'serviceprincipal') return 'service_principal';
+  if (v === 'managedidentity' || v === 'managed identity') return 'managed_identity_user';
+  if (v === 'service principal' || v === 'serviceprincipal' || v === 'application' || v === 'app') return 'service_principal';
   // AWS aliases
   if (v === 'iam user' || v === 'iamuser') return 'iam_user';
   if (v === 'iam role' || v === 'iamrole') return 'iam_role';
@@ -266,8 +268,8 @@ export const DATA_EXPLANATIONS = {
 export type PrivilegedLevel = 'privileged' | 'elevated' | 'standard';
 
 export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: string; tooltip: string }> = {
-  privileged: { label: 'Privileged',  color: 'bg-red-100 text-red-800 border-red-200',     tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
-  elevated:   { label: 'Elevated',    color: 'bg-orange-100 text-orange-800 border-orange-200', tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
+  privileged: { label: 'Privileged',  color: 'bg-orange-100 text-orange-700 border-orange-200', tooltip: 'Tier 0: Global Admin, Privileged Role Admin, Subscription Owner' },
+  elevated:   { label: 'Elevated',    color: 'bg-orange-100 text-orange-700 border-orange-200', tooltip: 'Tier 1: User Admin, Exchange Admin, Contributor' },
   standard:   { label: 'Standard',    color: 'bg-gray-100 text-gray-600 border-gray-200',  tooltip: 'Tier 2-3: Limited or no privileged roles' },
 };
 
@@ -276,10 +278,10 @@ export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: 
 export type LifecycleState = 'Provisioned' | 'Active' | 'Dormant' | 'Disabled';
 
 export const LIFECYCLE_STATE_DISPLAY: Record<LifecycleState, { label: string; color: string; tooltip: string }> = {
-  Provisioned: { label: 'Provisioned', color: 'text-blue-500',  tooltip: 'Identity exists but has no observed activity' },
+  Provisioned: { label: 'Provisioned', color: 'text-blue-500',  tooltip: 'Identity has been provisioned and granted access but has no observed authentication or activity since creation' },
   Active:      { label: 'Active',      color: 'text-green-500', tooltip: 'Identity has recent sign-in or usage activity' },
-  Dormant:     { label: 'Dormant',     color: 'text-amber-500', tooltip: 'Identity has been stale or never used' },
-  Disabled:    { label: 'Disabled',    color: 'text-gray-400',  tooltip: 'Identity is disabled in the directory' },
+  Dormant:     { label: 'Dormant',     color: 'text-amber-500', tooltip: 'No observed authentication or activity in the past 90 days (default \u2014 configurable) while retaining active access' },
+  Disabled:    { label: 'Disabled',    color: 'text-gray-400',  tooltip: 'Identity is disabled or deprovisioned in the identity provider \u2014 classified as Ghost if access remains' },
 };
 
 export type GovernanceState = 'Governed' | 'Ungoverned' | 'Orphaned' | 'Policy Violation';
@@ -306,11 +308,11 @@ export const EFFECTIVE_SCOPE_ORDER: Record<EffectiveScope, number> = {
 };
 
 export const EFFECTIVE_SCOPE_CONFIG: Record<EffectiveScope, { label: string; color: string; icon: string }> = {
-  tenant:         { label: 'Tenant',      color: 'bg-red-100 text-red-700',      icon: 'T' },
-  directory:      { label: 'Directory',   color: 'bg-purple-100 text-purple-700', icon: 'D' },
+  tenant:         { label: 'Tenant',      color: 'bg-orange-100 text-orange-700', icon: 'T' },
+  directory:      { label: 'Directory',   color: 'bg-orange-100 text-orange-700', icon: 'D' },
   subscription:   { label: 'Subscription', color: 'bg-orange-100 text-orange-700', icon: 'S' },
-  resource_group: { label: 'RG',          color: 'bg-yellow-100 text-yellow-700', icon: 'R' },
-  resource:       { label: 'Resource',    color: 'bg-blue-100 text-blue-700',    icon: 'r' },
+  resource_group: { label: 'RG',          color: 'bg-orange-100 text-orange-700', icon: 'R' },
+  resource:       { label: 'Resource',    color: 'bg-orange-100 text-orange-700', icon: 'r' },
   none:           { label: 'None',        color: 'bg-gray-100 text-gray-500',    icon: '-' },
 };
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/apiClient';
-import { formatCentsExact } from '../constants/pricing';
+import { formatCentsExact, TIER_LIMITS } from '../constants/pricing';
 import { generateInvoicePdf, type Invoice } from '../utils/invoicePdfGenerator';
 
 interface LineItem {
@@ -18,6 +19,7 @@ interface BillingPreview {
   platform_fee_cents: number;
   platform_fee_waiver_cents: number;
   trial_active: boolean;
+  trial_expires_at: string | null;
   subscription_total_cents: number;
   discount_pct: number;
   subtotal_cents: number;
@@ -92,7 +94,14 @@ function getDisplayLineItems(preview: BillingPreview): LineItem[] {
   return preview.line_items.filter(li => li.type !== 'trial_waiver');
 }
 
+function daysUntil(iso: string): number {
+  const now = new Date();
+  const target = new Date(iso);
+  return Math.ceil((target.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+}
+
 const ClientBilling: React.FC = () => {
+  const navigate = useNavigate();
   const [preview, setPreview] = useState<BillingPreview | null>(null);
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
   const [subStats, setSubStats] = useState<SubStats>({ total: 0, active: 0 });
@@ -194,26 +203,56 @@ const ClientBilling: React.FC = () => {
 
           {/* ─── FREE PLAN ─── */}
           {isFree && (
-            <div className="text-center py-4">
-              <p className="text-2xl font-bold text-gray-900 dark:text-white">$0</p>
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Limited to 1 subscription and 50 identities
+            <div className="py-4">
+              <p className="text-2xl font-bold text-gray-900 dark:text-white text-center">$0</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 text-center">
+                Free Plan &middot; {TIER_LIMITS.free.max_identities} identities &middot; {TIER_LIMITS.free.max_subscriptions} subscriptions
               </p>
+              <div className="flex gap-3 mt-4 justify-center">
+                <button
+                  onClick={() => navigate('/billing')}
+                  className="px-4 py-2 rounded-lg border border-gray-300 dark:border-slate-600 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-700 transition-colors"
+                >
+                  Upgrade to Trial
+                </button>
+                <button
+                  onClick={() => navigate('/billing')}
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
+                >
+                  Upgrade to Pro
+                </button>
+              </div>
             </div>
           )}
 
           {/* ─── TRIAL PLAN ─── */}
           {isTrial && (
             <>
-              {/* Trial info banner */}
+              {/* Trial info banner with expiry */}
               <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded-lg px-4 py-3 mb-4">
-                <div className="flex items-center gap-2">
-                  <svg className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <p className="text-xs text-amber-800 dark:text-amber-300">
-                    Your trial includes full platform access. No charges during the trial period.
-                  </p>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <svg className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div>
+                      <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                        Trial Plan
+                        {preview?.trial_expires_at && (
+                          <> &middot; Expires {formatDate(preview.trial_expires_at)} &middot; {daysUntil(preview.trial_expires_at)} days remaining</>
+                        )}
+                      </p>
+                      <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">
+                        Full platform access. No charges during the trial period.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => navigate('/billing')}
+                    className="ml-3 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition-colors flex-shrink-0"
+                  >
+                    Upgrade Now
+                  </button>
                 </div>
               </div>
 
@@ -239,21 +278,24 @@ const ClientBilling: React.FC = () => {
                   ))}
 
                   <div className="flex justify-between pt-3 mt-2 border-t border-gray-200 dark:border-slate-700">
-                    <span className="text-sm font-semibold text-gray-900 dark:text-white">Projected Monthly Cost</span>
+                    <span className="text-sm font-semibold text-gray-900 dark:text-white">After trial</span>
                     <div className="text-right">
                       <span className="text-sm font-bold text-gray-900 dark:text-white">
-                        {formatCentsExact(preview.subscription_total_cents)}
+                        {formatCentsExact(preview.platform_fee_cents + preview.subscription_total_cents)}
                       </span>
-                      <span className="text-[10px] text-gray-500 dark:text-gray-400 ml-1">after trial</span>
+                      <span className="text-[10px] text-gray-500 dark:text-gray-400 ml-1">/month</span>
                     </div>
                   </div>
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-1 text-right">
+                    {formatCentsExact(preview.platform_fee_cents)} platform + {formatCentsExact(preview.subscription_total_cents)} subscriptions
+                  </p>
                 </>
               )}
 
               {preview.active_subscriptions === 0 && (
                 <div className="text-center py-3">
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Activate subscriptions to see projected costs after your trial ends.
+                    After trial: {formatCentsExact(50000)}/month + $69/subscription
                   </p>
                 </div>
               )}

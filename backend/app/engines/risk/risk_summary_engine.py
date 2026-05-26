@@ -23,6 +23,7 @@ ORPHANED definition (canonical — do not change without updating all consumers)
 import logging
 import json
 from datetime import datetime, timezone
+from psycopg2 import sql as psycopg2_sql
 
 from app.constants.roles import (
     T0_ENTRA_ROLES_LOWER, T1_ENTRA_ROLES_LOWER, T2_RBAC_ROLES_LOWER,
@@ -271,8 +272,9 @@ class RiskSummaryEngine:
                 try:
                     cursor.execute("SAVEPOINT rse_%s" % key)
                     cursor.execute(
-                        f"SELECT COUNT(*) FROM {table} WHERE discovery_run_id = ANY(%s)",
-                        (self.run_ids,)
+                        psycopg2_sql.SQL("SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)")
+                        .format(tbl=psycopg2_sql.Identifier(table)),
+                        (self.run_ids,),
                     )
                     summary[key] = cursor.fetchone()[0] or 0
                     cursor.execute("RELEASE SAVEPOINT rse_%s" % key)

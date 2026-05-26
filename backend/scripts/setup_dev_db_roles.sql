@@ -2,13 +2,13 @@
 -- AuditGraph DEV Database — Role Setup Script
 -- =============================================================================
 -- Target: cus-ag-nonprod-pg.postgres.database.azure.com
--- Database: auditgraph_dev_eastus2
+-- Database: auditgraph_dev  (created by Terraform; supersedes legacy auditgraph_dev_eastus2)
 --
 -- Run this ONCE as the server admin (auditgraph_dev_eastus2) before deploying
 -- the container. The app will NOT start without both roles.
 --
--- Connection:
---   psql "postgresql://auditgraph_dev_eastus2:Aud1tgr%40phAdm1n@cus-ag-nonprod-pg.postgres.database.azure.com:5432/auditgraph_dev_eastus2?sslmode=require"
+-- Connection (substitute <SERVER_ADMIN_PWD> at run time, do not commit):
+--   psql "postgresql://auditgraph_dev_eastus2:<SERVER_ADMIN_PWD>@cus-ag-nonprod-pg.postgres.database.azure.com:5432/auditgraph_dev?sslmode=require"
 -- =============================================================================
 
 -- ─── Step 1: Create Admin Role (BYPASSRLS) ──────────────────────────────────
@@ -27,7 +27,7 @@ BEGIN
 END
 $$;
 
-GRANT ALL PRIVILEGES ON DATABASE auditgraph_dev_eastus2
+GRANT ALL PRIVILEGES ON DATABASE auditgraph_dev
   TO auditgraph_dev_admin;
 
 GRANT ALL ON SCHEMA public
@@ -61,6 +61,27 @@ GRANT USAGE ON SCHEMA public TO auditgraph_dev_app;
 -- automatically by the app at startup Step 11 (Bulk GRANT).
 -- Do NOT manually grant table permissions here.
 
+-- ─── Step 2b: Legacy role aliases ───────────────────────────────────────────
+-- Backend code has hardcoded "auditgraph_app" / "auditgraph_admin" in some
+-- GRANT statements (e.g. database.py:11210 entitlements). Create them as
+-- NOLOGIN group roles and grant membership so the real users inherit privs.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'auditgraph_app') THEN
+    CREATE ROLE auditgraph_app NOLOGIN;
+    RAISE NOTICE 'Created legacy alias role: auditgraph_app (NOLOGIN)';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'auditgraph_admin') THEN
+    CREATE ROLE auditgraph_admin NOLOGIN;
+    RAISE NOTICE 'Created legacy alias role: auditgraph_admin (NOLOGIN)';
+  END IF;
+END
+$$;
+
+GRANT auditgraph_app   TO auditgraph_dev_app;
+GRANT auditgraph_admin TO auditgraph_dev_admin;
+
 -- ─── Step 3: Verify ─────────────────────────────────────────────────────────
 -- Both roles must show correct BYPASSRLS flags.
 
@@ -73,7 +94,7 @@ WHERE rolname LIKE 'auditgraph_dev_%';
 -- --------------------------+--------------
 --  auditgraph_dev_admin     | t
 --  auditgraph_dev_app       | f
---  auditgraph_dev_eastus2   | (server admin, may show t or f)
+-- (server admin auditgraph_dev_eastus2 is filtered out by the LIKE pattern)
 
 -- ─── Done ────────────────────────────────────────────────────────────────────
 -- After verifying both roles, deploy the container.

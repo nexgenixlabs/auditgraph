@@ -366,6 +366,8 @@ class DriftDetector:
         changes = []
 
         for identity_id in set(current.keys()) & set(previous.keys()):
+            if current[identity_id].get('is_microsoft_system'):
+                continue
             curr_roles = set(self._role_signature(r) for r in current[identity_id]['roles'])
             prev_roles = set(self._role_signature(r) for r in previous[identity_id]['roles'])
 
@@ -430,12 +432,20 @@ class DriftDetector:
 
     def _detect_risk_changes(self, current: Dict, previous: Dict,
                               events: list = None) -> List[Dict]:
-        """Detect risk level changes with before/after scores and reasons."""
+        """Detect risk level changes with before/after scores and reasons.
+        Microsoft system identities are excluded from scored risk changes
+        per NIST SP 800-207 §2.1 — system-managed accounts operating within
+        designed scope are not governance risks."""
         changes = []
 
         for identity_id in set(current.keys()) & set(previous.keys()):
             curr_data = current[identity_id]
             prev_data = previous[identity_id]
+
+            # Skip Microsoft first-party identities from scored risk changes
+            if curr_data.get('is_microsoft_system'):
+                continue
+
             curr_risk = curr_data['risk_level']
             prev_risk = prev_data['risk_level']
 
@@ -507,6 +517,10 @@ class DriftDetector:
         for identity_id in set(current.keys()) & set(previous.keys()):
             curr_data = current[identity_id]
             prev_data = previous[identity_id]
+
+            if curr_data.get('is_microsoft_system'):
+                continue
+
             curr_status = curr_data['credential_status']
             prev_status = prev_data['credential_status']
 

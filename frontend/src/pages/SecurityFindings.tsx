@@ -68,6 +68,18 @@ function getCategoryLabel(ruleType: string, ruleName: string): string {
   return CATEGORY_LABELS[ruleType] || ruleName || ruleType || 'Security Finding';
 }
 
+/* ── Exposure type tabs (merged from Identity Exposures) ──────────── */
+
+const EXPOSURE_TABS: Array<{ key: string; label: string; ruleTypes?: string[] }> = [
+  { key: '', label: 'All' },
+  { key: 'dormant', label: 'Dormant', ruleTypes: ['dormant_privileged_identity'] },
+  { key: 'credentials', label: 'Credentials', ruleTypes: ['user_without_mfa', 'expired_credential', 'credential_risk'] },
+  { key: 'external', label: 'External', ruleTypes: ['guest_admin', 'external_privileged'] },
+  { key: 'unowned', label: 'Unowned', ruleTypes: ['spn_without_owner'] },
+  { key: 'orphaned', label: 'Orphaned', ruleTypes: ['disabled_account_active_role'] },
+  { key: 'unused', label: 'Unused', ruleTypes: ['unused_service_principal'] },
+];
+
 const SecurityFindings: React.FC = () => {
   const [searchParams] = useSearchParams();
   const { withConnection, selectedConnectionId } = useConnection();
@@ -79,6 +91,7 @@ const SecurityFindings: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('');
   const [groupByRule, setGroupByRule] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [exposureTab, setExposureTab] = useState('');
 
   const fetchFindings = useCallback(async () => {
     setLoading(true);
@@ -112,9 +125,28 @@ const SecurityFindings: React.FC = () => {
     }
   }, [findings]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Filter findings by selected exposure tab
+  const filteredFindings = useMemo(() => {
+    if (!exposureTab) return findings;
+    const tab = EXPOSURE_TABS.find(t => t.key === exposureTab);
+    if (!tab || !tab.ruleTypes) return findings;
+    return findings.filter(f => tab.ruleTypes!.includes(f.rule_type));
+  }, [findings, exposureTab]);
+
+  // Compute counts per exposure tab
+  const exposureTabCounts = useMemo(() => {
+    const counts: Record<string, number> = { '': findings.length };
+    for (const tab of EXPOSURE_TABS) {
+      if (tab.key && tab.ruleTypes) {
+        counts[tab.key] = findings.filter(f => tab.ruleTypes!.includes(f.rule_type)).length;
+      }
+    }
+    return counts;
+  }, [findings]);
+
   const grouped = useMemo((): FindingGroup[] => {
     const map: Record<string, FindingGroup> = {};
-    for (const f of findings) {
+    for (const f of filteredFindings) {
       const key = f.rule_type || f.rule_name;
       if (!map[key]) {
         map[key] = {
@@ -302,11 +334,35 @@ const SecurityFindings: React.FC = () => {
         </button>
       </div>
 
+      {/* Exposure Type Tabs */}
+      <div className="flex gap-1.5 flex-wrap">
+        {EXPOSURE_TABS.map(tab => {
+          const count = exposureTabCounts[tab.key] ?? 0;
+          const isActive = exposureTab === tab.key;
+          return (
+            <button
+              key={tab.key}
+              onClick={() => setExposureTab(tab.key)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                isActive
+                  ? 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+                  : 'bg-slate-800/50 text-slate-400 border-slate-700/50 hover:bg-slate-700/50 hover:text-slate-300'
+              }`}
+            >
+              {tab.label}
+              <span className={`ml-1.5 font-mono ${isActive ? 'text-blue-400' : 'text-slate-500'}`}>
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* Content */}
       <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-slate-400">Loading...</div>
-        ) : findings.length === 0 ? (
+        ) : filteredFindings.length === 0 ? (
           <div className="p-8 text-center text-slate-400">No findings match the current filters</div>
         ) : groupByRule ? (
           /* Grouped view */
@@ -364,7 +420,7 @@ const SecurityFindings: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700/50">
-              {findings.map(renderFindingRow)}
+              {filteredFindings.map(renderFindingRow)}
             </tbody>
           </table>
         )}

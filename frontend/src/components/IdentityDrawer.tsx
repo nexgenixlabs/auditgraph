@@ -235,7 +235,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
         setEnrichedRoles(detailData.roles || []);
         // Canonical role_usage from build_identity_state() — may be {} for
         // identities with no role assignments or no inference yet.
-        const ru = (detailData as any)?.role_usage;
+        const ru = (detailData as any)?.identity?.role_usage || (detailData as any)?.role_usage;
         if (ru && typeof ru === 'object' && Object.keys(ru).length > 0) {
           setDrawerRoleUsage(ru as Record<string, RoleUsageEntry>);
         }
@@ -645,8 +645,8 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail, 
     removableRoles.forEach((role, i) => {
       const usageEntry = roleUsage?.[normalizeRoleKey(role.role_name)];
       const usageNote = usageEntry
-        ? (usageEntry.used ? `used (${usageEntry.confidence})` : 'no evidence')
-        : 'unused';
+        ? (usageEntry.used ? `used (${usageEntry.confidence})` : 'no activity signal')
+        : 'no data';
       lines.push(`# --- Role ${i + 1}: ${role.role_name} (${usageNote}) ---`);
       if (role.scope) {
         lines.push(`Remove-AzRoleAssignment \``);
@@ -669,8 +669,8 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail, 
     const objId = detail.principal_id || detail.identity_id;
     const usageEntry = roleUsage?.[normalizeRoleKey(er.role_name)];
     const usageNote = usageEntry
-      ? (usageEntry.used ? `used (${usageEntry.confidence})` : 'no evidence')
-      : 'unknown';
+      ? (usageEntry.used ? `used (${usageEntry.confidence})` : 'no activity signal')
+      : 'no data';
     const script = er.scope
       ? [
           `# Remove ${er.role_name} from ${detail.display_name}`,
@@ -698,7 +698,7 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail, 
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
               </svg>
               <span className="text-xs font-semibold text-orange-800">
-                {unusedCount} role{unusedCount > 1 ? 's' : ''} with no usage evidence
+                {unusedCount} role{unusedCount > 1 ? 's' : ''} with no observable activity signal
               </span>
             </div>
             <div className="text-[10px] text-orange-600 mt-0.5 ml-5.5">
@@ -1081,14 +1081,14 @@ function UsageTab({ detail, dormantStatus, roles, roleUsage }: { detail: Identit
             </div>
             <div className={`flex-1 rounded-lg p-2 text-center ${neverUsedCount > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
               <div className={`text-lg font-bold ${neverUsedCount > 0 ? 'text-red-700' : 'text-gray-400'}`}>{neverUsedCount}</div>
-              <div className={`text-[10px] ${neverUsedCount > 0 ? 'text-red-500' : 'text-gray-400'}`}>Never Used</div>
+              <div className={`text-[10px] ${neverUsedCount > 0 ? 'text-red-500' : 'text-gray-400'}`} title="No ARM management plane activity observed in the last 90 days. AuditGraph cannot confirm these roles were unused — only that no activity was detectable.">No Activity</div>
             </div>
           </div>
           {/* Progress bar */}
           <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
             <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${totalRoles > 0 ? (usedRoles / totalRoles) * 100 : 0}%` }} />
           </div>
-          <div className="text-[10px] text-gray-400 mt-1">{totalRoles > 0 ? Math.round((usedRoles / totalRoles) * 100) : 0}% of granted roles have usage evidence</div>
+          <div className="text-[10px] text-gray-400 mt-1">{totalRoles > 0 ? Math.round((usedRoles / totalRoles) * 100) : 0}% of granted roles show activity signals</div>
 
           {/* Never-used list */}
           {neverUsedRoles.length > 0 && (

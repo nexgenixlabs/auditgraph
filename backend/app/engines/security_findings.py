@@ -44,6 +44,9 @@ _ADMIN_ENTRA_ROLES = {
 # Broad RBAC roles flagged for subscription-scope overprivilege
 _BROAD_RBAC_ROLES = {'Owner', 'Contributor', 'User Access Administrator'}
 
+# Roles that warrant Critical severity at subscription scope (full control or RBAC mgmt)
+_CRITICAL_SUB_ROLES = {'Owner', 'User Access Administrator'}
+
 
 class SecurityFindingsEngine:
     """Evaluate snapshot state against 15 security detection rules."""
@@ -176,12 +179,27 @@ class SecurityFindingsEngine:
         return findings
 
     def _detect_dormant_privileged(self, run_id: int) -> List[Dict]:
-        """Rule 1: Dormant identity with privileged roles (RBAC or Entra)."""
+        """Rule 1: Dormant identity with privileged roles (RBAC or Entra).
+
+        Escalates to critical when the dormant identity holds Owner/UAA at
+        subscription scope or a Global Administrator Entra role.
+        """
         cursor = self.db.conn.cursor()
         try:
             cursor.execute("""
                 SELECT DISTINCT i.identity_id, i.display_name, i.activity_status,
-                       i.identity_category, i.last_sign_in
+                       i.identity_category, i.last_sign_in,
+                       EXISTS (
+                           SELECT 1 FROM role_assignments ra
+                           WHERE ra.identity_db_id = i.id
+                             AND ra.role_name IN ('Owner', 'User Access Administrator')
+                             AND ra.scope_type = 'subscription'
+                       ) AS has_critical_rbac,
+                       EXISTS (
+                           SELECT 1 FROM entra_role_assignments era
+                           WHERE era.identity_db_id = i.id
+                             AND era.role_name = 'Global Administrator'
+                       ) AS has_global_admin
                 FROM identities i
                 WHERE i.discovery_run_id = %s
                   AND i.is_microsoft_system = FALSE
@@ -204,13 +222,16 @@ class SecurityFindingsEngine:
 
         findings = []
         for row in rows:
-            identity_id, display_name, activity_status, category, last_sign_in = row
+            identity_id, display_name, activity_status, category, last_sign_in, has_critical_rbac, has_global_admin = row
+            is_critical = has_critical_rbac or has_global_admin
+            sev = 'critical' if is_critical else 'high'
+            score = 95 if is_critical else 80
             findings.append(self._build_finding(
                 finding_type='dormant_privileged_identity',
                 entity_type='identity',
                 entity_id=identity_id,
-                severity='high',
-                risk_score=80,
+                severity=sev,
+                risk_score=score,
                 title=f'Dormant privileged identity: {display_name}',
                 description=(
                     f'{display_name} ({category}) is {activity_status} but holds '
@@ -516,8 +537,8 @@ class SecurityFindingsEngine:
                 finding_type='subscription_owner',
                 entity_type='role_assignment',
                 entity_id=identity_id,
-                severity='high',
-                risk_score=80,
+                severity='critical',
+                risk_score=95,
                 title=f'Subscription Owner: {display_name}',
                 description=(
                     f'{display_name} ({category}) has Owner role at subscription scope '
@@ -639,12 +660,15 @@ class SecurityFindingsEngine:
         findings = []
         for row in rows:
             identity_id, display_name, category, role_name, scope = row
+            # Owner/UAA at subscription scope = critical; Contributor = high
+            sev = 'critical' if role_name in _CRITICAL_SUB_ROLES else 'high'
+            score = 95 if sev == 'critical' else 75
             findings.append(self._build_finding(
                 finding_type='overly_broad_rbac',
                 entity_type='role_assignment',
                 entity_id=identity_id,
-                severity='high',
-                risk_score=75,
+                severity=sev,
+                risk_score=score,
                 title=f'Broad subscription-level {role_name}: {display_name}',
                 description=(
                     f'{display_name} ({category}) has {role_name} at subscription scope '

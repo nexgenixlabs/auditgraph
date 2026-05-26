@@ -35,6 +35,20 @@ STATUS_SQL = {
 # It maps to the union of these DB-level activity_status values.
 DORMANT_STRICT_STATUSES = ('stale', 'never_used')
 
+# ── Microsoft first-party identification ──────────────────────────
+# Used to exclude Microsoft-managed SPNs from orphan classification.
+# These identities have no owner by design — they are owned by Microsoft.
+
+MICROSOFT_TENANT_ID = "f8cdef31-a31e-4b4a-93e4-5f571e91255a"
+MICROSOFT_CORP_TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
+
+MICROSOFT_FIRST_PARTY_OWNER_IDS = frozenset({
+    MICROSOFT_TENANT_ID,
+    MICROSOFT_CORP_TENANT_ID,
+})
+
+MICROSOFT_FIRST_PARTY_NAME_PREFIXES = ("Microsoft ", "Agent (", "Windows ")
+
 # ── Display labels (for API responses / frontend) ────────────────
 
 STATUS_DISPLAY = {

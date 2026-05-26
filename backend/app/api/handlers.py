@@ -5,6 +5,7 @@ This module contains all HTTP endpoint handler functions for the AuditGraph API.
 """
 
 import os
+import re
 import time
 import bcrypt
 import secrets
@@ -16,7 +17,16 @@ import json
 
 logger = logging.getLogger(__name__)
 
+_BCRYPT_ROUNDS = int(os.environ.get('BCRYPT_ROUNDS', '12'))  # AG-112
 MAX_LIMIT = 1000  # Global safety cap for all paginated endpoints
+
+# AG-76: Email validation with proper TLD check
+_EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
+
+
+def _is_valid_email(email: str) -> bool:
+    """Return True if email has valid format with a real TLD (2+ chars)."""
+    return bool(_EMAIL_REGEX.match(email.strip().lower()))
 
 
 # ── Platform Standard: Safe DB Query Helper ─────────────────────────
@@ -95,7 +105,9 @@ def _safe_query_int(param: str, default: int, max_val: int = None) -> int:
     return v
 
 
+from psycopg2 import sql as psycopg2_sql
 from psycopg2.extras import RealDictCursor
+from app.security.sql_identifiers import safe_table as _safe_tbl, safe_column as _safe_col, safe_columns as _safe_cols, SqlIdentifierError
 from app.constants import CredentialRiskSQL, MAX_QUERY_ROWS
 from app.constants.activity import ActivitySource, ACTIVITY_SOURCE_LABELS
 from app.utils import rows_as_dicts
@@ -549,7 +561,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
         # Case 1: Single connection — latest run for this connection
         cursor.execute("""
             SELECT MAX(id) AS id FROM discovery_runs
-            WHERE status = 'completed' AND organization_id = %s AND cloud_connection_id = %s
+            WHERE status IN ('completed', 'partial') AND organization_id = %s AND cloud_connection_id = %s
         """, (organization_id, connection_id))
         row = cursor.fetchone()
         run_id = _extract_id(row) if row else None
@@ -564,7 +576,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
                 dr.id
             FROM discovery_runs dr
             JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
-            WHERE dr.status = 'completed' AND dr.organization_id = %s
+            WHERE dr.status IN ('completed', 'partial') AND dr.organization_id = %s
               AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
               AND cc.status = 'connected'
             ORDER BY dr.cloud_connection_id, dr.id DESC
@@ -581,7 +593,7 @@ def _latest_run_ids(cursor, organization_id=None, connection_id=None):
             dr.id
         FROM discovery_runs dr
         JOIN cloud_connections cc ON cc.id = dr.cloud_connection_id
-        WHERE dr.status = 'completed'
+        WHERE dr.status IN ('completed', 'partial')
           AND dr.cloud_connection_id IS NOT NULL AND dr.cloud_connection_id > 0
           AND cc.status = 'connected'
         ORDER BY dr.cloud_connection_id, dr.id DESC
@@ -981,6 +993,7 @@ def get_identities():
     activity_filter = request.args.get("activity_status")
     privilege_tier_filter = request.args.get("privilege_tier")
     agirs_factor = request.args.get("agirs_factor")
+    tab_filter = request.args.get("tab")  # Identity Explorer tab scope
     # CISO drawer flyout params (passed through from RISK_TYPE_ROUTES)
     workload_filter = request.args.get("workload")
     owner_param = request.args.get("owner")
@@ -1029,19 +1042,38 @@ def get_identities():
                 params.extend(risk_vals)
 
         if category_filter:
+            from app.constants.identity_types import normalize_identity_category
             where_clauses += " AND COALESCE(i.identity_category, '') = %s"
-            params.append(category_filter)
+            params.append(normalize_identity_category(category_filter))
         elif type_filter:
-            where_clauses += " AND i.identity_type = %s"
-            params.append(type_filter)
+            from app.constants.identity_types import normalize_identity_category
+            where_clauses += " AND LOWER(i.identity_type) = %s"
+            params.append(normalize_identity_category(type_filter))
+
+        # Identity Explorer tab scope — reuses taxonomy constants (AG-157)
+        if tab_filter and not category_filter and not type_filter:
+            from app.constants.identity_types import TAB_CATEGORIES
+            _tab_cats = TAB_CATEGORIES.get(tab_filter.lower())
+            if _tab_cats:
+                _ph = ','.join(['%s'] * len(_tab_cats))
+                where_clauses += f" AND COALESCE(i.identity_category, '') IN ({_ph})"
+                params.extend(sorted(_tab_cats))
 
         if cloud_filter:
             where_clauses += " AND COALESCE(i.cloud, 'azure') = %s"
             params.append(cloud_filter.lower())
 
         if search:
-            where_clauses += " AND LOWER(i.display_name) LIKE %s"
-            params.append(f"%{search.lower()}%")
+            _s = search.strip()
+            if _s:
+                _s_lower = f"%{_s.lower()}%"
+                where_clauses += """ AND (
+                    LOWER(i.display_name) LIKE %s
+                    OR LOWER(COALESCE(i.upn, '')) LIKE %s
+                    OR LOWER(COALESCE(i.app_id, '')) LIKE %s
+                    OR LOWER(COALESCE(i.identity_id, '')) LIKE %s
+                )"""
+                params.extend([_s_lower, _s_lower, _s_lower, _s_lower])
 
         # AGIRS-aligned filters — exact SQL matches agirs_engine.py counting
         if agirs_factor:
@@ -1119,7 +1151,8 @@ def get_identities():
                 where_clauses += " AND COALESCE(i.owner_count, 0) > 0"
 
         # FIX1B: Direct canonical metric filter — uses same WHERE as dashboard count
-        metric_filter = request.args.get("metric")
+        # Accepts both ?metric=X and ?filter=X (IdentityRiskCardV31 uses filter=)
+        metric_filter = request.args.get("metric") or request.args.get("filter")
         if metric_filter:
             from app.api.metric_queries import get_metric_where, METRIC_REGISTRY
             if metric_filter in METRIC_REGISTRY:
@@ -1134,6 +1167,11 @@ def get_identities():
                 placeholders = ','.join(['%s'] * len(vals))
                 where_clauses += f" AND COALESCE(i.recommended_action, 'UNKNOWN') IN ({placeholders})"
                 params.extend(vals)
+
+        access_tier_filter = request.args.get("access_tier")
+        if access_tier_filter and access_tier_filter in ('control_plane', 'data_plane'):
+            where_clauses += " AND COALESCE(i.access_tier, 'control_plane') = %s"
+            params.append(access_tier_filter)
 
         subscription_filter = request.args.get("subscription_id")
         if subscription_filter:
@@ -1175,7 +1213,7 @@ def get_identities():
         identities = [_map_identity_row(row) for row in rows]
 
         # Compute governance summary counts from mapped identities
-        gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0}
+        gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0, 'data_plane': 0}
         for ident in identities:
             gs = ident.get('governance_state') or 'Governed'
             pl = ident.get('privilege_level') or 'Standard'
@@ -1189,6 +1227,8 @@ def get_identities():
                 gov_counts['privileged'] += 1
             if gs in ('Orphaned', 'Ungoverned', 'Policy Violation') and pl in ('Privileged', 'Highly Privileged'):
                 gov_counts['combo'] += 1
+            if ident.get('access_tier') == 'data_plane':
+                gov_counts['data_plane'] += 1
 
         result = {"count": len(identities), "total": total_count, "identities": identities,
                   "governance_summary": gov_counts}
@@ -1201,6 +1241,358 @@ def get_identities():
     finally:
         cursor.close()
         db.close()
+
+
+# ── Privilege Optimization — Per-Identity Computation ─────────────────
+
+# Privileged role sets — reused from privilege_tier computation.
+# Roles in T0/T1 are considered "privileged" for optimization purposes.
+_PRIV_ENTRA = frozenset({
+    'global administrator', 'privileged role administrator',
+    'privileged authentication administrator', 'security operator',
+    'application administrator', 'cloud application administrator',
+    'hybrid identity administrator', 'domain name administrator',
+    'external identity provider administrator',
+    'user administrator', 'exchange administrator',
+    'sharepoint administrator', 'teams administrator',
+    'intune administrator', 'conditional access administrator',
+    'authentication administrator', 'groups administrator',
+    'license administrator', 'password administrator',
+    'security administrator', 'compliance administrator',
+    'billing administrator', 'helpdesk administrator',
+})
+_PRIV_ARM = frozenset({
+    'owner', 'contributor', 'user access administrator',
+})
+
+# System-exempt role names that should never be flagged for removal.
+_SYSTEM_EXEMPT_ROLES = frozenset({
+    'managed identity operator',
+    'managed identity contributor',
+})
+
+
+def _is_privileged_role(role):
+    """Check if a role is considered privileged (T0 or T1)."""
+    rn = (role.get('role_name') or '').lower()
+    rt = (role.get('role_type') or '').lower()
+    if rt == 'entra':
+        return rn in _PRIV_ENTRA
+    if rt == 'azure':
+        return rn in _PRIV_ARM
+    return False
+
+
+def _compute_identity_optimization(roles, identity, observation_window_days):
+    """Compute privilege optimization candidates for a single identity.
+
+    Uses the canonical role_usage_classification set by the enrichment loop.
+    Returns an optimization dict to embed on the identity detail response.
+
+    Classification:
+      candidate_remove:       Privileged + no_observed_usage + coverage not blind
+      candidate_review:       Privileged + unknown (identity active but no role evidence)
+      insufficient_evidence:  Telemetry blind or insufficient coverage
+      scope_narrowing:        Broad scope with narrower observed usage
+    """
+    is_system = bool(identity.get('is_microsoft_system'))
+    is_connector = bool(identity.get('is_discovery_connector'))
+
+    candidates = []
+    scope_narrowing = []
+    total_privileged = 0
+
+    for role in roles:
+        rn = (role.get('role_name') or '').lower()
+        cls = role.get('role_usage_classification', '')
+        is_priv = _is_privileged_role(role)
+        if is_priv:
+            total_privileged += 1
+
+        # Skip system-exempt
+        if is_system or is_connector or rn in _SYSTEM_EXEMPT_ROLES:
+            continue
+
+        # ── Build evidence summary for this role ──
+        _tel_cov_val = (identity.get('telemetry_coverage') or '')
+        _evidence = {
+            'role_usage_classification': cls,
+            'observation_window_days': observation_window_days,
+            'telemetry_coverage': _tel_cov_val or 'not set',
+            'last_used_at': role.get('last_used_at'),
+            'last_used_display': role.get('last_used_display'),
+            'last_used_source': role.get('last_used_source'),
+            'last_used_operation': role.get('last_used_operation'),
+            'days_since_last_used': role.get('days_since_last_used') or role.get('days_since_used'),
+            'identity_active': bool(identity.get('auth_activity', {}).get('any_activity_observed')),
+            'identity_last_seen': identity.get('last_seen_display') or identity.get('effective_last_used'),
+            'scope_type': role.get('scope_type'),
+            'is_privileged': is_priv,
+        }
+
+        # ── Removal / review candidates ──
+        if is_priv and cls == 'no_observed_usage':
+            candidates.append({
+                'role_name': role.get('role_name'),
+                'role_type': role.get('role_type', 'azure'),
+                'scope': role.get('scope') or '/',
+                'scope_type': role.get('scope_type'),
+                'classification': 'candidate_remove',
+                'reason': (
+                    'Privileged role with no observed usage within '
+                    f'{observation_window_days}-day observation window. '
+                    f'Telemetry coverage: {_tel_cov_val or "available"}.'
+                ),
+                'advisory': (
+                    'Consider removing this assignment after confirming with the '
+                    'identity owner. Absence of evidence is not proof of non-use '
+                    'if break-glass or infrequent access patterns apply.'
+                ),
+                'evidence_summary': _evidence,
+            })
+        elif is_priv and cls == 'unknown':
+            candidates.append({
+                'role_name': role.get('role_name'),
+                'role_type': role.get('role_type', 'azure'),
+                'scope': role.get('scope') or '/',
+                'scope_type': role.get('scope_type'),
+                'classification': 'candidate_review',
+                'reason': (
+                    'Identity is active but no role-specific activity was detected '
+                    'for this privileged role. Role may be exercised through '
+                    'non-instrumented paths.'
+                ),
+                'advisory': (
+                    'Review with the identity owner whether this role is needed. '
+                    'Activity was observed at the identity level but could not be '
+                    'attributed to this specific role.'
+                ),
+                'evidence_summary': _evidence,
+            })
+        elif is_priv and cls in ('telemetry_blind', 'insufficient_coverage'):
+            candidates.append({
+                'role_name': role.get('role_name'),
+                'role_type': role.get('role_type', 'azure'),
+                'scope': role.get('scope') or '/',
+                'scope_type': role.get('scope_type'),
+                'classification': 'insufficient_evidence',
+                'reason': (
+                    'Telemetry coverage is insufficient to determine whether '
+                    'this privileged role is actively used.'
+                ),
+                'advisory': (
+                    'Enable telemetry connectors to gain visibility before '
+                    'making optimization decisions.'
+                ),
+                'evidence_summary': _evidence,
+            })
+
+        # ── Scope narrowing candidates ──
+        # A role assigned at subscription or RG scope but with observed
+        # activity (P1) limited to narrower scopes suggests over-scoping.
+        if role.get('role_type', '').lower() == 'azure' and cls in ('proven', 'likely'):
+            role_scope = (role.get('scope') or '').lower()
+            scope_type = (role.get('scope_type') or '').lower()
+            last_op = role.get('last_used_operation') or ''
+
+            # Only flag broad scopes (subscription or resource_group level)
+            if scope_type in ('subscription', 'resource_group', ''):
+                # Check if last_used_operation indicates narrower resource access
+                if last_op and '/' in last_op:
+                    # Operation targets a specific resource type — narrower than
+                    # the full subscription/RG scope of the assignment.
+                    scope_narrowing.append({
+                        'role_name': role.get('role_name'),
+                        'role_type': 'azure',
+                        'assigned_scope': role.get('scope') or '/',
+                        'assigned_scope_type': scope_type or 'unknown',
+                        'scope': role.get('scope') or '/',
+                        'scope_type': scope_type or 'unknown',
+                        'observed_operation': last_op,
+                        'classification': 'potential_scope_narrowing',
+                        'reason': (
+                            f'Role is assigned at {scope_type or "broad"} scope but '
+                            f'observed activity targets specific resource operations. '
+                            'A narrower scope may be sufficient.'
+                        ),
+                        'advisory': (
+                            'Consider narrowing the role assignment scope to the '
+                            'specific resource group or resource where activity was '
+                            'observed. Validate with the identity owner first.'
+                        ),
+                        'evidence_summary': {
+                            'role_usage_classification': cls,
+                            'observation_window_days': observation_window_days,
+                            'assigned_scope': role.get('scope') or '/',
+                            'assigned_scope_type': scope_type or 'unknown',
+                            'last_used_operation': last_op,
+                            'last_used_at': role.get('last_used_at'),
+                            'last_used_display': role.get('last_used_display'),
+                        },
+                    })
+
+    return {
+        'total_assigned_roles': len(roles),
+        'total_privileged_roles': total_privileged,
+        'roles_proven_used': identity.get('role_usage_summary', {}).get('roles_proven', 0),
+        'roles_likely_used': identity.get('role_usage_summary', {}).get('roles_likely', 0),
+        'roles_unknown': identity.get('role_usage_summary', {}).get('roles_unknown', 0),
+        'roles_no_observed_usage': identity.get('role_usage_summary', {}).get('roles_no_observed_usage', 0),
+        'candidate_remove': [c for c in candidates if c['classification'] == 'candidate_remove'],
+        'candidate_review': [c for c in candidates if c['classification'] == 'candidate_review'],
+        'insufficient_evidence': [c for c in candidates if c['classification'] == 'insufficient_evidence'],
+        'scope_narrowing': scope_narrowing,
+        'observation_window_days': observation_window_days,
+        'system_exempt': is_system or is_connector,
+    }
+
+
+# ── Activity Explainability — Evidence Chain Builder ──────────────────
+
+def _build_evidence_chain(cursor, identity_db_id, identity_data):
+    """Assemble top activity evidence items for an identity.
+
+    Queries only raw/directly-observed telemetry sources:
+    - ARM Activity Log events (observed operations)
+    - P2 sign-in events (observed authentications)
+
+    Derived/summary fields (e.g. role_assignments.last_used_at) are
+    intentionally excluded — explainability must be based on raw
+    telemetry only.
+
+    Returns:
+        dict with:
+            evidence_chain: list of up to 3 evidence items (highest confidence/recency first)
+            best_evidence_summary: narrative of strongest evidence (or fallback)
+            activity_confidence: 'high' | 'none'
+            activity_basis: what the confidence classification is based on
+    """
+    evidence_items = []
+
+    # Source 1: ARM Activity Log events (observed, high confidence)
+    try:
+        cursor.execute("SAVEPOINT _ev_arm")
+        cursor.execute("""
+            SELECT event_timestamp, caller_ip_address, operation_name,
+                   resource_id, status
+            FROM identity_arm_connections
+            WHERE identity_db_id = %s
+            ORDER BY event_timestamp DESC LIMIT 3
+        """, (identity_db_id,))
+        for row in cursor.fetchall():
+            ts = row[0]
+            ip = row[1]
+            op = row[2] or ''
+            rid = row[3] or ''
+            op_short = '/'.join(op.split('/')[-2:]) if '/' in op else op
+            res_name = rid.strip('/').split('/')[-1] if rid else None
+            narrative = f"Performed {op_short}"
+            if res_name:
+                narrative += f" on {res_name}"
+            if ip:
+                narrative += f" from IP {ip}"
+            if ts:
+                narrative += f" at {ts.strftime('%Y-%m-%d %H:%M UTC') if hasattr(ts, 'strftime') else str(ts)}"
+            evidence_items.append({
+                'evidence_type': 'observed',
+                'evidence_source': 'arm_activity_log',
+                'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) if ts else None,
+                'operation': op_short,
+                'resource': res_name,
+                'source_ip': ip,
+                'confidence': 'high',
+                'narrative': narrative,
+            })
+        cursor.execute("RELEASE SAVEPOINT _ev_arm")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _ev_arm")
+        except Exception:
+            pass
+
+    # Source 2: P2 sign-in events (observed, high confidence)
+    try:
+        cursor.execute("SAVEPOINT _ev_signin")
+        cursor.execute("""
+            SELECT created_datetime, ip_address, resource_display_name,
+                   location_city, location_country, status
+            FROM workload_signin_events
+            WHERE identity_db_id = %s AND status = 'success'
+            ORDER BY created_datetime DESC LIMIT 3
+        """, (identity_db_id,))
+        for row in cursor.fetchall():
+            ts = row[0]
+            ip = row[1]
+            resource = row[2]
+            city = row[3]
+            country = row[4]
+            narrative = "Authenticated"
+            if resource:
+                narrative += f" to {resource}"
+            if ip:
+                narrative += f" from IP {ip}"
+            loc_parts = [p for p in [city, country] if p]
+            if loc_parts:
+                narrative += f" ({', '.join(loc_parts)})"
+            if ts:
+                narrative += f" at {ts.strftime('%Y-%m-%d %H:%M UTC') if hasattr(ts, 'strftime') else str(ts)}"
+            evidence_items.append({
+                'evidence_type': 'observed',
+                'evidence_source': 'entra_signin_log',
+                'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) if ts else None,
+                'operation': 'sign_in',
+                'resource': resource,
+                'source_ip': ip,
+                'confidence': 'high',
+                'narrative': narrative,
+            })
+        cursor.execute("RELEASE SAVEPOINT _ev_signin")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _ev_signin")
+        except Exception:
+            pass
+
+    # NOTE: role_assignments.last_used_at is intentionally NOT included.
+    # It is a derived/summary field populated from ARM events. Including
+    # it here would double-count the same evidence. Explainability must
+    # reference raw telemetry only.
+
+    # Rank by recency (all items are high confidence observed telemetry)
+    evidence_items.sort(
+        key=lambda e: e.get('timestamp') or '', reverse=True)
+
+    # Take top 3
+    top_evidence = evidence_items[:3]
+
+    # Determine overall activity confidence and basis
+    if top_evidence:
+        activity_confidence = 'high'
+        sources = list({e['evidence_source'] for e in top_evidence})
+        activity_basis = f"Based on {', '.join(s.replace('_', ' ') for s in sources)}"
+    elif identity_data.get('telemetry_coverage') == 'blind':
+        activity_confidence = 'none'
+        activity_basis = 'No telemetry sources available for this identity type'
+    else:
+        activity_confidence = 'none'
+        activity_basis = 'No observed activity evidence'
+
+    # Build best_evidence_summary
+    if top_evidence:
+        best_evidence_summary = top_evidence[0]['narrative']
+    elif identity_data.get('telemetry_coverage') == 'blind':
+        best_evidence_summary = 'Telemetry blind — no activity signals available for this identity type'
+    elif identity_data.get('telemetry_coverage') == 'partial':
+        best_evidence_summary = 'Partial coverage — no activity evidence observed in available telemetry'
+    else:
+        best_evidence_summary = 'No observed activity'
+
+    return {
+        'evidence_chain': top_evidence,
+        'best_evidence_summary': best_evidence_summary,
+        'activity_confidence': activity_confidence,
+        'activity_basis': activity_basis,
+    }
 
 
 def get_identity_details(identity_id: str):
@@ -1263,7 +1655,12 @@ def get_identity_details(identity_id: str):
                        (SELECT COUNT(*) FROM attack_paths ap
                         WHERE ap.source_entity_id = i.identity_id
                           AND ap.organization_id = i.organization_id)
-                   ) as attack_path_count
+                   ) as attack_path_count,
+                   i.last_activity_date,
+                   i.last_activity_source,
+                   i.telemetry_coverage,
+                   COALESCE(i.has_federated_credentials, FALSE) as has_federated_credentials,
+                   i.organization_id
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
@@ -1342,6 +1739,11 @@ def get_identity_details(identity_id: str):
             "owner_status": row[40] if len(row) > 40 else None,
             "blast_radius_score": float(row[41]) if len(row) > 41 and row[41] is not None else 0,
             "attack_path_count": int(row[42]) if len(row) > 42 and row[42] is not None else 0,
+            "last_activity_date": row[43].isoformat() if len(row) > 43 and row[43] and hasattr(row[43], 'isoformat') else None,
+            "last_activity_source": row[44] if len(row) > 44 else None,
+            "telemetry_coverage": row[45] if len(row) > 45 else None,
+            "has_federated_credentials": bool(row[46]) if len(row) > 46 else False,
+            "organization_id": row[47] if len(row) > 47 else None,
         }
 
         # Compute effective_last_used = MAX(observed, Azure sign-in)
@@ -1412,6 +1814,41 @@ def get_identity_details(identity_id: str):
         identity["last_signin_ip"] = last_signin_ip
         identity["auth_source"] = auth_source
 
+        # ── ARM connections (last 3 activity events — no P2 required) ──
+        arm_connections = []
+        try:
+            arm_connections = db.get_identity_arm_connections(identity_db_id, limit=3)
+            for c in arm_connections:
+                if c.get('event_timestamp') and hasattr(c['event_timestamp'], 'isoformat'):
+                    c['event_timestamp'] = c['event_timestamp'].isoformat()
+                op = c.get('operation_name', '')
+                if '/' in op:
+                    parts = op.split('/')
+                    c['operation_short'] = '/'.join(parts[-2:]) if len(parts) >= 2 else op
+                else:
+                    c['operation_short'] = op
+                rid = c.get('resource_id', '')
+                if rid:
+                    segments = rid.strip('/').split('/')
+                    c['resource_name'] = segments[-1] if segments else rid
+                else:
+                    c['resource_name'] = None
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+        identity["arm_connections"] = arm_connections
+
+        # ── ARM scan completed flag (has any ARM data been collected for this org?) ──
+        arm_scan_completed = False
+        try:
+            # Use identity's own organization_id — _org_id() is unreliable in this context
+            _check_org = identity.get('organization_id') or _org_id()
+            arm_scan_completed = db.check_arm_scan_completed(_check_org)
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+        identity["arm_scan_completed"] = arm_scan_completed
+
         # ── Rule 2: override misleading activity_status for federated identities ──
         if fed_wt_raw and identity.get("activity_status") in ('never_used', 'unknown', 'stale', None):
             if eff_src == 'inferred_federated':
@@ -1447,6 +1884,82 @@ def get_identity_details(identity_id: str):
             "detail": f"Snapshot #{_run_id}" if _run_id else "Available",
         })
         identity["activity_sources"] = activity_sources
+
+        # ── Lineage summary (matches list endpoint format for UI consistency) ──
+        try:
+            from datetime import timezone as _tz_detail
+
+            # Compute lineage datetime: eff_last (P1/P2), then P3 fallback
+            _lineage_dt_d = eff_last
+            _lineage_src_d = eff_src
+            if _lineage_dt_d is None:
+                _p3_d = _try_parse_dt(identity.get('last_activity_date') or row[43] if len(row) > 43 else None)
+                if _p3_d:
+                    _lineage_dt_d = _p3_d
+                    _lineage_src_d = 'identity_activity_record'
+
+            # Compute display label
+            if _lineage_dt_d is not None:
+                if _lineage_dt_d.tzinfo is None:
+                    _lineage_dt_d = _lineage_dt_d.replace(tzinfo=_tz_detail.utc)
+                _now_d = _dt.now(_tz_detail.utc)
+                _delta_d = (_now_d - _lineage_dt_d).days
+                if _delta_d == 0:
+                    _lin_display_d = "Today"
+                elif _delta_d == 1:
+                    _lin_display_d = "1d ago"
+                elif _delta_d < 365:
+                    _lin_display_d = f"{_delta_d}d ago"
+                else:
+                    _lin_display_d = f"{_delta_d // 365}y+ ago"
+            else:
+                _lin_display_d = "Log-independent" if fed_wt_raw else "No Observed Activity"
+
+            _SRC_LABELS_D = {
+                'auditgraph': 'ARM activity observation',
+                'azure_signin': 'Graph API sign-in log',
+                'inferred_federated': 'Inferred from federation config',
+                'identity_activity_record': 'Identity-level activity record',
+                'static_analysis_only': 'Static analysis only (no telemetry)',
+            }
+
+            # Verdict based on category
+            if normalized_category in ('human_user', 'guest'):
+                _lin_verdict_d = 'NOT_APPLICABLE'
+                _lin_conf_d = 'n/a'
+                _lin_origin_d = 'Human Identity'
+                _lin_origin_src_d = 'identity_category'
+            else:
+                # Will be enriched by NHI lineage section later
+                _lin_verdict_d = 'PENDING'
+                _lin_conf_d = 'pending'
+                _lin_origin_d = None
+                _lin_origin_src_d = None
+
+            identity["lineage"] = {
+                "verdict": _lin_verdict_d,
+                "confidence": _lin_conf_d,
+                "origin": _lin_origin_d,
+                "originSource": _lin_origin_src_d,
+                "lastActivity": _lin_display_d,
+                "activityDate": _lineage_dt_d.isoformat() if _lineage_dt_d else None,
+                "sourceLabel": _SRC_LABELS_D.get(_lineage_src_d, _lineage_src_d) if _lineage_src_d else 'No telemetry available',
+            }
+        except Exception:
+            identity["lineage"] = {
+                "verdict": "UNKNOWN", "confidence": "error",
+                "origin": None, "originSource": None,
+                "lastActivity": "Unknown", "activityDate": None,
+                "sourceLabel": "Lineage calculation error",
+            }
+
+        # Activity explainability metadata
+        identity["last_activity_confidence"] = (
+            'high' if eff_src in ('auditgraph', 'azure_signin') else
+            'medium' if eff_src == 'identity_activity_record' else
+            'low' if eff_src == 'inferred_federated' else
+            'none'
+        )
 
         # ── Rule 6: Active access hints for federated identities ──
         if fed_wt_raw and eff_src == 'inferred_federated':
@@ -1556,49 +2069,225 @@ def get_identity_details(identity_id: str):
 
         roles = db.get_identity_roles_enriched(identity_db_id)
 
-        # Enrich each role with derived usage fields
+        # Enrich each role with derived usage fields via priority waterfall:
+        #   P1: ra.last_used_at (role-level activity record)
+        #   P1b: ral.last_activity_date (role_activity_log)
+        #   P3: i.last_activity_date (identity-level, approximate)
+        #   P4: NULL → "Never used"
         from datetime import datetime, timezone
         _now = datetime.now(timezone.utc)
-        identity_has_effective_activity = bool(eff_last)
+        # Consider both sign-in data (eff_last) and discovery-level activity date
+        _identity_activity_dt = identity.get("last_activity_date")
+        if _identity_activity_dt and isinstance(_identity_activity_dt, str):
+            _identity_activity_dt = _try_parse_dt(_identity_activity_dt)
+        identity_has_effective_activity = bool(eff_last or _identity_activity_dt)
         removable_count = 0
-        for role in roles:
+        _OBSERVATION_WINDOW_DAYS = 90
+        # Role usage classification counters (4-tier: proven/likely/unknown/no_observed_usage)
+        _roles_proven = 0
+        _roles_likely = 0
+        _roles_unknown = 0
+        _roles_no_observed_usage = 0
+        _roles_telemetry_blind = 0
+        _roles_insufficient_coverage = 0
+        _tel_cov = (identity.get("telemetry_coverage") or '').lower()
+
+        # ── Overlap detection ──
+        # Precompute best role-level evidence (P1 or P1b) per role BEFORE the
+        # enrichment loop mutates datetime fields to strings.
+        _role_p1_cache = {}  # role_index → days_delta (int) or None
+        for _ri, _r in enumerate(roles):
+            _rp1 = _r.get("last_used_at")
+            _best = None
+            if _rp1 and hasattr(_rp1, 'date'):
+                _best = (_now - _rp1).days
+            # P1b fallback: role_activity_log.last_activity_date
+            if _best is None:
+                _rp1b = _r.get("last_activity_date")
+                if _rp1b and hasattr(_rp1b, 'date'):
+                    _best = (_now - _rp1b).days
+            _role_p1_cache[_ri] = _best
+
+        # Build scope → role-index map for overlap detection.
+        _scope_role_map = {}  # scope_lower → list of role_index
+        for _ri, _r in enumerate(roles):
+            _scope = (_r.get("scope") or '/').lower().rstrip('/')
+            if not _scope:
+                _scope = '/'
+            _scope_role_map.setdefault(_scope, []).append(_ri)
+
+        def _count_p1_peers_at_scope(role_scope, role_index):
+            """Count other roles with P1 evidence whose scope overlaps this role's scope."""
+            scope = (role_scope or '/').lower().rstrip('/') or '/'
+            count = 0
+            for s, role_indices in _scope_role_map.items():
+                # Check if scopes overlap (one is prefix of other, or same).
+                # Root scope '/' overlaps everything — special-case to avoid
+                # the '//' bug from concatenating '/' + '/'.
+                if s == scope:
+                    scopes_overlap = True
+                elif s == '/' or scope == '/':
+                    # Root scope overlaps all child scopes
+                    scopes_overlap = True
+                else:
+                    scopes_overlap = (scope.startswith(s + '/') or s.startswith(scope + '/'))
+                if not scopes_overlap:
+                    continue
+                for ri in role_indices:
+                    if ri == role_index:
+                        continue
+                    peer_delta = _role_p1_cache.get(ri)
+                    if peer_delta is not None and peer_delta <= _OBSERVATION_WINDOW_DAYS:
+                        count += 1
+            return count
+
+        for _role_idx, role in enumerate(roles):
+            # ── Priority waterfall for resolved_last_used ──
+            resolved_dt = None
+            resolved_source = None
+
+            # P1: role_assignments.last_used_at
+            p1 = role.get("last_used_at")
+            if p1 and hasattr(p1, 'date'):
+                resolved_dt = p1
+                resolved_source = "Role-level activity record"
+
+            # P1b: role_activity_log.last_activity_date
+            if resolved_dt is None:
+                p1b = role.get("last_activity_date")
+                if p1b and hasattr(p1b, 'date'):
+                    resolved_dt = p1b
+                    resolved_source = "Role-level activity record"
+
+            # P3: identities.last_activity_date (approximate)
+            if resolved_dt is None:
+                p3 = role.get("identity_last_activity_date")
+                if p3 and hasattr(p3, 'date'):
+                    resolved_dt = p3
+                    resolved_source = "Identity-level activity (approximate)"
+
+            # Compute days_since_last_used from resolved timestamp
+            if resolved_dt is not None:
+                delta = (_now - resolved_dt).days
+            else:
+                delta = None
+
+            # ── Build display fields ──
+            role["days_since_last_used"] = delta
+
+            if resolved_dt is not None:
+                if delta == 0:
+                    role["last_used_display"] = "Today"
+                elif delta == 1:
+                    role["last_used_display"] = "Yesterday"
+                elif delta < 30:
+                    role["last_used_display"] = f"{delta} days ago"
+                elif delta < 365:
+                    months = delta // 30
+                    role["last_used_display"] = f"{months} month{'s' if months > 1 else ''} ago"
+                else:
+                    role["last_used_display"] = f"{delta // 365}+ years ago"
+                role["last_used_source"] = resolved_source
+                role["last_used_date_iso"] = resolved_dt.strftime("%Y-%m-%d")
+            elif identity_has_effective_activity:
+                # Identity authenticated but no signal reached any role
+                role["last_used_display"] = "Log-independent mode"
+                role["last_used_source"] = "Log-independent mode \u2014 no usage signal"
+            else:
+                # P4: no data at any level
+                role["last_used_display"] = "Never used"
+                role["last_used_source"] = "Log-independent mode \u2014 no usage signal"
+
+            # is_stale_candidate: >90 days or never used
+            role["is_stale_candidate"] = (
+                delta is None or delta > 90
+            )
+
+            # Preserve existing fields for backward compat
             lu = role.get("last_used_at")
             if lu:
                 role["last_used_at"] = lu.isoformat() if hasattr(lu, 'isoformat') else lu
-                delta = (_now - lu).days if hasattr(lu, 'date') else None
-                role["days_since_used"] = delta
-                if delta is not None:
-                    if delta == 0:
-                        role["last_used_display"] = "Today"
-                    elif delta == 1:
-                        role["last_used_display"] = "Yesterday"
-                    elif delta < 30:
-                        role["last_used_display"] = f"{delta} days ago"
-                    elif delta < 365:
-                        months = delta // 30
-                        role["last_used_display"] = f"{months} month{'s' if months > 1 else ''} ago"
-                    else:
-                        role["last_used_display"] = f"{delta // 365}+ years ago"
-                else:
-                    role["last_used_display"] = "Unknown"
-                role["last_used_source"] = "identity sign-in (proxy)"
             else:
                 role["last_used_at"] = None
-                role["days_since_used"] = None
-                # When the identity authenticated but this role has no
-                # role-scoped activity, say so explicitly instead of the
-                # misleading "Never used" (which implies the identity
-                # itself was never used).
-                if identity_has_effective_activity:
-                    role["last_used_display"] = "No activity on record"
-                else:
-                    role["last_used_display"] = "Never used"
-                role["last_used_source"] = "static analysis"
-            # Determine if role is removable
-            us = role.get("usage_status", "unknown")
-            role["is_removable"] = us in ("stale", "dormant", "never_used")
+            role["days_since_used"] = delta
+
+            # Determine if role is removable — driven by classification, not
+            # discovery-time usage_status.  A role is removable when we have
+            # positive evidence it is unused, or discovery flagged it dormant.
+            _cls = role.get("role_usage_classification", "")
+            _us = role.get("usage_status", "unknown")
+            role["is_removable"] = (
+                _cls in ("no_observed_usage",)
+                or _us in ("stale", "dormant", "never_used",
+                           "definitely_unused", "likely_unused")
+            )
             if role["is_removable"]:
                 removable_count += 1
+
+            # ── Role usage classification (4-tier confidence model) ──
+            # Uses role-level P1 (last_used_at) and P1b (role_activity_log)
+            # for "proven"/"likely". Overlap detection downgrades "proven" →
+            # "likely" when multiple roles at the same scope have evidence.
+            # Identity-level activity (P3) → "unknown" (not proof of role use).
+            _p1_raw = p1  # P1 value captured earlier in waterfall
+            _p1_delta = (_now - _p1_raw).days if _p1_raw and hasattr(_p1_raw, 'date') else None
+
+            # P1b: role_activity_log.last_activity_date — role-level evidence
+            _p1b_raw = role.get("last_activity_date")
+            _p1b_delta = None
+            if _p1b_raw and hasattr(_p1b_raw, 'date'):
+                _p1b_delta = (_now - _p1b_raw).days
+            elif _p1b_raw and isinstance(_p1b_raw, str):
+                # Already serialized from earlier iteration — skip
+                _p1b_delta = None
+
+            # Best role-level evidence: prefer P1, fall back to P1b
+            _best_role_delta = None
+            if _p1_delta is not None:
+                _best_role_delta = _p1_delta
+            elif _p1b_delta is not None:
+                _best_role_delta = _p1b_delta
+
+            # Effective telemetry coverage — treat null/empty as 'partial'
+            # when identity has any activity (prevents false insufficient_coverage)
+            _eff_tel_cov = _tel_cov
+            if not _eff_tel_cov and identity_has_effective_activity:
+                _eff_tel_cov = 'partial'
+
+            if _best_role_delta is not None and _best_role_delta <= _OBSERVATION_WINDOW_DAYS:
+                # Role-level evidence within window — check for scope overlap
+                _overlap_count = _count_p1_peers_at_scope(role.get("scope"), _role_idx)
+                if _overlap_count == 0:
+                    role["role_usage_classification"] = "proven"
+                    role["role_usage_confidence"] = "proven"
+                    _roles_proven += 1
+                else:
+                    role["role_usage_classification"] = "likely"
+                    role["role_usage_confidence"] = "likely"
+                    role["overlap_count"] = _overlap_count
+                    _roles_likely += 1
+            elif identity_has_effective_activity and _eff_tel_cov in ('full', 'partial'):
+                # Identity active, but no role-level evidence — cannot attribute
+                role["role_usage_classification"] = "unknown"
+                role["role_usage_confidence"] = "unknown"
+                _roles_unknown += 1
+            elif _eff_tel_cov == 'blind':
+                role["role_usage_classification"] = "telemetry_blind"
+                role["role_usage_confidence"] = "telemetry_blind"
+                _roles_telemetry_blind += 1
+            elif _eff_tel_cov in ('full', 'partial'):
+                # No identity activity AND no role-level evidence
+                role["role_usage_classification"] = "no_observed_usage"
+                role["role_usage_confidence"] = "no_observed_usage"
+                _roles_no_observed_usage += 1
+            else:
+                role["role_usage_classification"] = "insufficient_coverage"
+                role["role_usage_confidence"] = "insufficient_coverage"
+                _roles_insufficient_coverage += 1
+
+            # Backward compat: map new tiers to old "used" boolean
+            role["role_usage_used"] = role["role_usage_classification"] in ("proven", "likely")
+
             # Serialize created_on
             co = role.get("created_on")
             if co and hasattr(co, 'isoformat'):
@@ -1607,8 +2296,65 @@ def get_identity_details(identity_id: str):
             lad = role.get("last_activity_date")
             if lad and hasattr(lad, 'isoformat'):
                 role["last_activity_date"] = lad.isoformat()
+            # Serialize identity_last_activity_date (used internally, expose for transparency)
+            ilad = role.get("identity_last_activity_date")
+            if ilad and hasattr(ilad, 'isoformat'):
+                role["identity_last_activity_date"] = ilad.isoformat()
+            elif "identity_last_activity_date" not in role:
+                role["identity_last_activity_date"] = None
 
         identity["removable_role_count"] = removable_count
+
+        # ── Build role_usage dict for frontend RolesTab ──
+        # Maps normalizeRoleKey(role_name) → {used, confidence, evidence}
+        # Must match frontend roleUtils.ts normalizeRoleKey(): name.trim().toLowerCase()
+        _confidence_rank = {"high": 3, "medium": 2, "low": 1, "none": 0}
+        _cls_to_confidence = {
+            "proven": "high",
+            "likely": "medium",
+            "unknown": "low",           # identity active but no role-specific proof
+            "no_observed_usage": "none",
+            "telemetry_blind": "none",
+            "insufficient_coverage": "none",
+        }
+        role_usage = {}
+        for _ru_role in roles:
+            _ru_key = (_ru_role.get("role_name") or "").strip().lower()
+            if not _ru_key:
+                continue
+            _ru_cls = _ru_role.get("role_usage_classification", "insufficient_coverage")
+            _ru_used = _ru_role.get("role_usage_used", False)
+            # unknown classification: identity is active → role is possibly in use
+            if _ru_cls == "unknown":
+                _ru_used = True
+            _ru_conf = _cls_to_confidence.get(_ru_cls, "none")
+            _ru_evidence_parts = []
+            if _ru_role.get("last_used_display"):
+                _ru_evidence_parts.append(_ru_role["last_used_display"])
+            if _ru_role.get("last_used_source"):
+                _ru_evidence_parts.append(_ru_role["last_used_source"])
+            _ru_evidence = " — ".join(_ru_evidence_parts) if _ru_evidence_parts else ""
+            # Keep best evidence per normalized key (multiple scopes for same role)
+            _existing = role_usage.get(_ru_key)
+            if _existing:
+                if _confidence_rank.get(_ru_conf, 0) > _confidence_rank.get(_existing.get("confidence"), 0):
+                    role_usage[_ru_key] = {"used": _ru_used, "confidence": _ru_conf, "evidence": _ru_evidence}
+            else:
+                role_usage[_ru_key] = {"used": _ru_used, "confidence": _ru_conf, "evidence": _ru_evidence}
+
+        # ── Role usage summary (Phase 7 — 4-tier confidence) ──
+        identity["role_usage_summary"] = {
+            "total_roles": len(roles),
+            "roles_proven": _roles_proven,
+            "roles_likely": _roles_likely,
+            "roles_unknown": _roles_unknown,
+            "roles_no_observed_usage": _roles_no_observed_usage,
+            "roles_telemetry_blind": _roles_telemetry_blind,
+            "roles_insufficient_coverage": _roles_insufficient_coverage,
+            "observation_window_days": _OBSERVATION_WINDOW_DAYS,
+            # Backward compat
+            "roles_used": _roles_proven + _roles_likely,
+        }
 
         # ── Contradiction guard: identity authenticated but all roles
         # show no role-scoped activity ──
@@ -1670,11 +2416,23 @@ def get_identity_details(identity_id: str):
                     'highest_scope': pg[3] or 'none',
                 })
             identity['privileged_groups'] = priv_groups
+
+            # Count groups with active rbac_roles (for ghost access warning)
+            cursor.execute("""
+                SELECT COUNT(DISTINCT egm.group_db_id)
+                FROM entra_group_memberships egm
+                JOIN entra_groups eg ON eg.id = egm.group_db_id
+                WHERE egm.member_object_id = %s
+                  AND eg.discovery_run_id = ANY(%s)
+                  AND eg.rbac_roles != '[]'::jsonb
+            """, (row[1], run_ids))
+            identity['groups_with_roles_count'] = _scalar(cursor, 0)
         except Exception:
             try: db.conn.rollback()
             except Exception: pass
             identity['group_count'] = 0
             identity['privileged_groups'] = []
+            identity['groups_with_roles_count'] = 0
 
         # Resource context for SAMIs (associated resource info)
         try:
@@ -1802,10 +2560,152 @@ def get_identity_details(identity_id: str):
         except Exception as e:
             logger.warning("build_identity_state failed: %s", e)
 
+        # ── NHI lineage data (from identities table + lineage_verdicts) ──
+        lineage = None
+        _nhi_cats = ('service_principal', 'managed_identity_system',
+                     'managed_identity_user', 'workload_identity')
+        if (identity.get('identity_category') or identity.get('identity_type', '')).lower() in _nhi_cats:
+            try:
+                _lid = identity.get('_db_id') or identity_db_id
+                cursor.execute("""
+                    SELECT i.lineage_narrative, i.workload_origin, i.workload_origin_source,
+                           i.audit_created_by, i.audit_creation_method,
+                           lv.verdict, lv.confidence_score, lv.contributing_factors,
+                           lv.verdict_source
+                    FROM identities i
+                    LEFT JOIN LATERAL (
+                        SELECT verdict, confidence_score, contributing_factors, verdict_source
+                        FROM lineage_verdicts
+                        WHERE identity_id = i.id
+                        ORDER BY scored_at DESC
+                        LIMIT 1
+                    ) lv ON true
+                    WHERE i.id = %s
+                    LIMIT 1
+                """, (_lid,))
+                _row = cursor.fetchone()
+
+                lineage = {
+                    "narrative": (_row[0] if _row else None) or None,
+                    "workload_origin": (_row[1] if _row else None) or None,
+                    "workload_origin_source": (_row[2] if _row else None) or None,
+                    "provisioned_by": (_row[3] if _row else None) or None,
+                    "creation_method": (_row[4] if _row else None) or None,
+                    "verdict": (_row[5] if _row else None) or None,
+                    "confidence": float(_row[6]) if _row and _row[6] is not None else None,
+                    "contributing_factors": (_row[7] if _row else None) or None,
+                    "verdict_source": (_row[8] if _row else None) or None,
+                }
+                # Enrich identity["lineage"] summary with NHI verdict
+                if _row and identity.get("lineage"):
+                    _nhi_verdict = _row[5] or 'NO_ATTRIBUTION'
+                    _nhi_conf = str(round(float(_row[6]), 2)) if _row[6] is not None else 'none'
+                    _nhi_origin = _row[1]  # workload_origin
+                    _nhi_origin_src = _row[2]  # workload_origin_source
+                    identity["lineage"]["verdict"] = _nhi_verdict
+                    identity["lineage"]["confidence"] = _nhi_conf
+                    identity["lineage"]["origin"] = _nhi_origin
+                    identity["lineage"]["originSource"] = _nhi_origin_src
+                elif identity.get("lineage") and identity["lineage"].get("verdict") == 'PENDING':
+                    identity["lineage"]["verdict"] = 'NO_ATTRIBUTION'
+                    identity["lineage"]["confidence"] = 'none'
+            except Exception as e:
+                try: db.conn.rollback()
+                except Exception: pass
+                logger.warning("Lineage fetch failed: %s", e)
+        elif identity.get("lineage") and identity["lineage"].get("verdict") == 'PENDING':
+            # NHI category but lineage_verdicts query was skipped — mark as unattributed
+            identity["lineage"]["verdict"] = 'NO_ATTRIBUTION'
+            identity["lineage"]["confidence"] = 'none'
+
+        # ── Activity Explainability — evidence chain ──
+        explainability = _build_evidence_chain(cursor, identity_db_id, identity)
+        identity["evidence_chain"] = explainability["evidence_chain"]
+        identity["best_evidence_summary"] = explainability["best_evidence_summary"]
+        identity["activity_confidence"] = explainability["activity_confidence"]
+        identity["activity_basis"] = explainability["activity_basis"]
+
+        # ── Privilege Optimization — per-identity candidates ──
+        identity["optimization"] = _compute_identity_optimization(
+            roles, identity, _OBSERVATION_WINDOW_DAYS,
+        )
+
+        # Optimization recommendations are materialized by the post-discovery
+        # pipeline (_run_optimization_materialization in scheduler.py), NOT here.
+        # Read endpoints must be side-effect free.
+
+        # ── Parent workload attribution ──
+        workload_attribution = None
+        try:
+            _wa_list = db.get_identity_workload_attributions(_org_id(), identity_db_id)
+            if _wa_list:
+                _primary = _wa_list[0]
+                for _wa in _wa_list:
+                    for _k in ('created_at', 'updated_at'):
+                        _v = _wa.get(_k)
+                        if _v and hasattr(_v, 'isoformat'):
+                            _wa[_k] = _v.isoformat()
+                workload_attribution = {
+                    'primary': _primary,
+                    'all': _wa_list,
+                    'count': len(_wa_list),
+                }
+                # Enrich identity with workload context for explainability
+                if _primary.get('workload_name'):
+                    identity['parent_workload'] = _primary.get('workload_name')
+                    identity['parent_workload_type'] = _primary.get('workload_type')
+                if _primary.get('is_ai_workload'):
+                    identity['is_ai_workload'] = True
+        except Exception as e:
+            logger.warning("Workload attribution fetch failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        # ── Identity reachability ──
+        reachability = None
+        try:
+            reachability = db.get_identity_reachability(identity_db_id)
+        except Exception as e:
+            logger.warning("Identity reachability fetch failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+        # ── Privilege drift — recent changes for this identity ──
+        privilege_drift = None
+        try:
+            _drift_events = db.get_identity_drift_events(
+                _org_id(), identity.get('identity_id'), limit=10,
+            )
+            if _drift_events:
+                for _de in _drift_events:
+                    _ca = _de.get('created_at')
+                    if _ca and hasattr(_ca, 'isoformat'):
+                        _de['created_at'] = _ca.isoformat()
+                _drift_summary = {}
+                for _de in _drift_events:
+                    _dt = _de.get('drift_type', '')
+                    _drift_summary[_dt] = _drift_summary.get(_dt, 0) + 1
+                privilege_drift = {
+                    'recent_events': _drift_events,
+                    'summary': _drift_summary,
+                    'total_events': len(_drift_events),
+                }
+        except Exception as e:
+            logger.warning("Identity drift fetch failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
         return jsonify(
             {
                 "identity": identity,
                 "roles": roles,
+                "role_usage": role_usage,
                 "graph_permissions": graph_permissions,
                 "app_roles": app_roles,
                 "owners": owners,
@@ -1813,7 +2713,11 @@ def get_identity_details(identity_id: str):
                 "database_admin_context": database_admin_context,
                 "analytics_context": analytics_context,
                 "devops_context": devops_context,
+                "lineage": lineage,
                 "trend": trend,
+                "privilege_drift": privilege_drift,
+                "workload_attribution": workload_attribution,
+                "reachability": reachability,
                 "evidence": {
                     "run_id": identity.get("discovery_run_id"),
                     "collected_at": run_completed_at,
@@ -1889,7 +2793,7 @@ def get_discovery_runs():
     try:
         cursor.execute(
             """
-            SELECT id, status, started_at, completed_at, total_identities, critical_count, high_count, medium_count
+            SELECT id, status, started_at, completed_at, total_identities, critical_count, high_count, medium_count, metadata
             FROM discovery_runs
             WHERE organization_id = %s
             ORDER BY id DESC
@@ -1901,6 +2805,7 @@ def get_discovery_runs():
 
         runs = []
         for r in rows:
+            meta = r[8] if r[8] else {}
             runs.append(
                 {
                     "id": r[0],
@@ -1911,6 +2816,7 @@ def get_discovery_runs():
                     "critical_count": r[5] or 0,
                     "high_count": r[6] or 0,
                     "medium_count": r[7] or 0,
+                    "component_status": meta.get("component_status"),
                 }
             )
         return jsonify({"count": len(runs), "runs": runs})
@@ -2335,11 +3241,28 @@ def get_drift_report(run_id: int):
             })
             return jsonify(report)
 
-        # Fall back to live computation: find the previous run (org-scoped)
+        # Validate that the requested run is completed with identities
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT status, COALESCE(total_identities, 0) FROM discovery_runs
+            WHERE id = %s AND organization_id = %s
+        """, (run_id, _org_id()))
+        run_row = cursor.fetchone()
+        cursor.close()
+
+        if not run_row:
+            return jsonify({"error": "Discovery run not found"}), 404
+        if run_row[0] != 'completed':
+            return jsonify({"error": f"Cannot compute drift for run in '{run_row[0]}' status — only completed runs are supported"}), 400
+        if run_row[1] == 0:
+            return jsonify({"error": "Cannot compute drift — run has 0 discovered identities"}), 400
+
+        # Fall back to live computation: find the previous COMPLETED run (org-scoped)
         cursor = db.conn.cursor()
         cursor.execute("""
             SELECT id FROM discovery_runs
             WHERE status = 'completed' AND id < %s AND organization_id = %s
+              AND completed_at IS NOT NULL AND COALESCE(total_identities, 0) > 0
             ORDER BY id DESC
             LIMIT 1
         """, (run_id, _org_id()))
@@ -2414,6 +3337,22 @@ def get_drift_history():
     try:
         limit = min(request.args.get('limit', 20, type=int), MAX_LIMIT)
         conn_id = _connection_id()
+
+        # Auto-generate drift reports if none exist yet
+        org_id = _org_id()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM drift_reports WHERE organization_id = %s", (org_id,))
+            drift_count = cursor.fetchone()[0]
+            cursor.close()
+            if drift_count == 0:
+                _backfill_drift_reports(db, org_id)
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
         reports = db.get_drift_history(limit=limit, connection_id=conn_id)
 
         for r in reports:
@@ -2421,6 +3360,54 @@ def get_drift_history():
             r['run_completed_at'] = r['run_completed_at'].isoformat() if r.get('run_completed_at') else None
 
         return jsonify({"count": len(reports), "reports": reports})
+    finally:
+        db.close()
+
+
+def _backfill_drift_reports(db, org_id):
+    """Generate drift reports for all consecutive completed run pairs."""
+    from app.engines.drift_detector import DriftDetector
+    cursor = db.conn.cursor()
+    cursor.execute("""
+        SELECT id FROM discovery_runs
+        WHERE organization_id = %s AND status = 'completed'
+          AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+          AND completed_at IS NOT NULL
+          AND COALESCE(total_identities, 0) > 0
+        ORDER BY id ASC
+    """, (org_id,))
+    run_ids = [r[0] for r in cursor.fetchall()]
+    cursor.close()
+
+    if len(run_ids) < 2:
+        return
+
+    detector = DriftDetector(db)
+    for i in range(1, len(run_ids)):
+        prev_id, curr_id = run_ids[i - 1], run_ids[i]
+        try:
+            result = detector.compare_runs_v2(curr_id, prev_id)
+            db.save_drift_report(curr_id, prev_id, result['legacy'], events=result['events'])
+        except Exception as e:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+
+def generate_drift_reports():
+    """POST /api/drift/generate — manually trigger drift report generation."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        _backfill_drift_reports(db, org_id)
+
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM drift_reports WHERE organization_id = %s", (org_id,))
+        count = cursor.fetchone()[0]
+        cursor.close()
+
+        return jsonify({"status": "ok", "reports_generated": count})
     finally:
         db.close()
 
@@ -2761,6 +3748,31 @@ def get_app_settings():
         next_run = get_next_run_time()
         next_report = get_next_report_time()
 
+        # Last report delivery from activity log
+        last_report = None
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT created_at FROM activity_log
+                WHERE action = 'report_emailed' AND organization_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (_org_id(),))
+            row = cursor.fetchone()
+            if row and row[0]:
+                last_report = row[0].isoformat()
+            cursor.close()
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        # Check scheduled_reports entitlement for current org
+        report_schedule_allowed = True
+        try:
+            allowed, _ = check_feature_gate('scheduled_reports')
+            report_schedule_allowed = allowed
+        except Exception:
+            pass
+
         return jsonify({
             "settings": settings,
             "status": {
@@ -2769,6 +3781,8 @@ def get_app_settings():
                 "scheduler_running": _sched is not None,
                 "next_run": next_run.isoformat() if next_run else None,
                 "next_report": next_report.isoformat() if next_report else None,
+                "last_report": last_report,
+                "report_schedule_allowed": report_schedule_allowed,
             }
         })
     finally:
@@ -2843,7 +3857,7 @@ def save_app_settings():
                 continue
 
         if key in ('email_to', 'report_email_to') and value:
-            if '@' not in value:
+            if not _is_valid_email(value):
                 errors.append(f"{key} must be a valid email address")
                 continue
 
@@ -2952,7 +3966,7 @@ def trigger_discovery():
     if conn_id:
         admin_db = Database(_admin_reason='trigger_discovery: check active job')
         try:
-            active = admin_db.get_active_snapshot_job(conn_id)
+            active = admin_db.get_active_snapshot_job(conn_id, org_id=_org_id())
             if active:
                 return jsonify({
                     'error': 'Discovery already running for this connection',
@@ -2962,22 +3976,14 @@ def trigger_discovery():
             admin_db.close()
 
     # Phase 13: Plan limit enforcement
+    # Free plan: scanning allowed (identity cap enforced at save time).
+    # Trial expired: scan blocked (data preserved, must upgrade).
     admin_db = Database(_admin_reason='trigger_discovery: plan limits')
     try:
-        limits = admin_db.check_plan_limits(tid)
-        plan = limits.get('plan', 'free')
-        if plan == 'free':
-            return jsonify({
-                'error': 'Discovery is not available on the free plan. Upgrade to trial or pro.',
-                'plan': plan,
-            }), 403
-        if not limits.get('within_limits'):
-            return jsonify({
-                'error': f'Plan limit reached ({limits["identities"]}/{limits["max_identities"]} identities). '
-                         f'Upgrade your plan to continue.',
-                'plan': plan,
-                'limits': limits,
-            }), 403
+        # Trial expiry check — blocks new scans but preserves existing data
+        ok, err = _check_tier_limits(admin_db, tid)
+        if not ok:
+            return jsonify(err), 403
     finally:
         admin_db.close()
 
@@ -3052,7 +4058,8 @@ def get_identity_remediations(identity_id: str):
             SELECT i.id, i.identity_id, i.display_name, i.risk_level,
                    i.risk_reasons, i.activity_status, i.credential_status,
                    i.credential_risk, COALESCE(i.owner_count, 0) as owner_count,
-                   i.ca_coverage_status, COALESCE(i.is_microsoft_system, FALSE) as is_microsoft_system
+                   i.ca_coverage_status, COALESCE(i.is_microsoft_system, FALSE) as is_microsoft_system,
+                   COALESCE(i.has_federated_credentials, FALSE) as has_federated_credentials
             FROM identities i
             WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
             LIMIT 1
@@ -3095,10 +4102,33 @@ def get_identity_remediations(identity_id: str):
 
         result = db.get_identity_remediations(identity_db_id, identity_data)
 
+        # AG-148: Federated credential guard — suppress delete/disable remediations
+        has_fed_creds = row[11]  # has_federated_credentials
+        if has_fed_creds and result.get('remediations'):
+            _BLOCKED_CATEGORIES = {'lifecycle', 'access_removal'}
+            _BLOCKED_KEYWORDS = {'delete', 'disable', 'remove', 'revoke'}
+            filtered = []
+            for rem in result['remediations']:
+                title_lower = (rem.get('title') or '').lower()
+                cat = (rem.get('category') or '').lower()
+                if cat in _BLOCKED_CATEGORIES or any(kw in title_lower for kw in _BLOCKED_KEYWORDS):
+                    # Replace with federated dependency warning
+                    rem['blocked'] = True
+                    rem['blocked_reason'] = 'federated_credentials_present'
+                    rem['original_title'] = rem['title']
+                    rem['title'] = 'Review Federated Dependencies First'
+                    rem['description'] = (
+                        'External pipeline dependency detected via federated credentials. '
+                        'Review and verify no active pipelines depend on this identity before any action.'
+                    )
+                filtered.append(rem)
+            result['remediations'] = filtered
+
         return jsonify({
             "identity_id": identity_id,
             "display_name": row[2],
             "risk_level": row[3],
+            "has_federated_credentials": has_fed_creds,
             **result,
         })
 
@@ -3117,7 +4147,8 @@ def get_report_data():
         cursor = db.conn.cursor()
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         cursor.close()
-        data = db.get_report_data(run_ids=run_ids if run_ids else None)
+        org_id = _org_id()
+        data = db.get_report_data(run_ids=run_ids if run_ids else None, org_id=org_id)
         if data is None:
             return jsonify({"error": "No completed discovery runs found"}), 404
         _log(db,'report_generated', 'Security report data generated', {
@@ -3549,6 +4580,7 @@ QUERY_FIELD_MAP = {
     'ca_coverage_status':    "i.ca_coverage_status",
     'ca_mfa_enforced':       "COALESCE(i.ca_mfa_enforced, false)",
     'permission_plane':      "COALESCE(i.permission_plane, 'entra_id')",
+    'access_tier':           "COALESCE(i.access_tier, 'control_plane')",
 }
 
 # Computed fields that require subqueries
@@ -3856,6 +4888,7 @@ def _identity_list_select():
             END as effective_scope,
             COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
             COALESCE(i.permission_plane, 'entra_id') as permission_plane,
+            COALESCE(i.access_tier, 'control_plane') as access_tier,
             i.deleted_at,
             GREATEST(
                 (SELECT COUNT(*) FROM graph_attack_findings gaf
@@ -3903,8 +4936,25 @@ def _identity_list_select():
             i.verdict_risk_summary,
             i.federated_workload_type,
             i.federated_workload_name,
+            COALESCE(i.has_federated_credentials, FALSE) as has_federated_credentials,
+            i.federated_issuer_types,
+            -- NHI enrichment (AG-159)
+            i.secret_expiry_earliest,
+            i.secret_expiry_status,
+            COALESCE(i.federated_cred_count, 0) as federated_cred_count,
+            i.owner_resolved,
+            -- Humans enrichment (AG-160)
+            i.mfa_status,
+            i.mfa_methods,
+            i.department,
+            i.manager_id,
+            i.job_title,
+            i.upn,
             i.dependency_impact,
             i.observed_last_used,
+            i.last_activity_date,
+            i.last_activity_source,
+            i.last_activity_confidence,
 
             COALESCE(
                 (SELECT wse.created_datetime
@@ -4046,6 +5096,7 @@ def _map_identity_row(row):
         "effective_scope": row.get('effective_scope') or "none",
         "is_microsoft_system": bool(row.get('is_microsoft_system', False)),
         "permission_plane": row.get('permission_plane') or "entra_id",
+        "access_tier": row.get('access_tier') or "control_plane",
         "privileged_level": "privileged" if privilege_tier == 0 else "elevated" if privilege_tier == 1 else "standard",
         "privilege_level": _derive_privilege_level(privilege_tier),
         "governance_state": _derive_governance_state_from_row(row, privilege_tier),
@@ -4090,6 +5141,20 @@ def _map_identity_row(row):
         "verdict_risk_summary": row.get('verdict_risk_summary') or [],
         "federated_workload_type": row.get('federated_workload_type'),
         "federated_workload_name": row.get('federated_workload_name'),
+        "has_federated_credentials": row.get('has_federated_credentials', False),
+        "federated_issuer_types": row.get('federated_issuer_types') or [],
+        # NHI enrichment (AG-159)
+        "secret_expiry_earliest": _isoformat_safe(row.get('secret_expiry_earliest')),
+        "secret_expiry_status": row.get('secret_expiry_status'),
+        "federated_cred_count": int(row.get('federated_cred_count') or 0),
+        "owner_resolved": row.get('owner_resolved'),
+        # Humans enrichment (AG-160)
+        "mfa_status": row.get('mfa_status'),
+        "mfa_methods": row.get('mfa_methods') or [],
+        "department": row.get('department'),
+        "manager_id": row.get('manager_id'),
+        "job_title": row.get('job_title'),
+        "upn": row.get('upn'),
         "dependency_impact": row.get('dependency_impact'),
         "observed_last_used": _isoformat_safe(row.get('observed_last_used')),
         "last_signin_at": _isoformat_safe(row.get('last_signin_at')),
@@ -4142,6 +5207,107 @@ def _map_identity_row(row):
         elif eff_last:
             # Has real sign-in data — trust the timestamp-based status
             pass
+
+    # ── Lineage sub-object (activity waterfall) ──────────────────────
+    # Reuse eff_last/eff_src from above as P1/P2 (sign-in + ARM obs),
+    # then fall back to P3 (last_activity_date) and P4 (NULL).
+    try:
+        from datetime import timezone as _tz_lin
+
+        lineage_dt = eff_last
+        lineage_source = eff_src
+
+        # P3: identities.last_activity_date (generic fallback)
+        if lineage_dt is None:
+            p3_val = _parse_dt_map(row.get('last_activity_date'))
+            if p3_val:
+                lineage_dt = p3_val
+                lineage_source = 'identity_activity_record'
+
+        if lineage_dt is not None:
+            # Normalize to tz-aware UTC (observed_last_used can be naive)
+            if lineage_dt.tzinfo is None:
+                lineage_dt = lineage_dt.replace(tzinfo=_tz_lin.utc)
+            _now_lin = _dt_map.now(_tz_lin.utc)
+            _delta_lin = (_now_lin - lineage_dt).days
+            if _delta_lin == 0:
+                lineage_display = "Today"
+            elif _delta_lin == 1:
+                lineage_display = "1d ago"
+            elif _delta_lin < 365:
+                lineage_display = f"{_delta_lin}d ago"
+            else:
+                lineage_display = f"{_delta_lin // 365}y+ ago"
+        else:
+            lineage_display = "Log-independent" if fed_wt else "No Observed Activity"
+
+        _LINEAGE_SRC_LABELS = {
+            'auditgraph': 'ARM activity observation',
+            'azure_signin': 'Graph API sign-in log',
+            'inferred_federated': 'Inferred from federation config',
+            'identity_activity_record': 'Identity-level activity record',
+            'static_analysis_only': 'Static analysis only (no telemetry)',
+        }
+
+        # ── Determine lineage verdict/origin based on identity category ──
+        # Human users and guests don't have workload lineage — provide explicit state.
+        _category = normalized_category
+        _raw_verdict = row.get('recommended_action')
+        _raw_origin = row.get('workload_origin')
+        _raw_confidence = row.get('verdict_confidence')
+
+        if _category in ('human_user', 'guest'):
+            # Humans don't have workload attribution — this is expected
+            _lineage_verdict = 'NOT_APPLICABLE'
+            _lineage_confidence = 'n/a'
+            _lineage_origin = 'Human Identity'
+            _lineage_origin_source = 'identity_category'
+        elif _raw_verdict:
+            # Machine identity with populated lineage
+            _lineage_verdict = _raw_verdict
+            _lineage_confidence = _raw_confidence or 'unknown'
+            _lineage_origin = _raw_origin
+            _lineage_origin_source = row.get('workload_origin_source') or ('lineage_engine' if _raw_origin else 'unknown')
+        else:
+            # Machine identity without lineage — flag as unattributed
+            _lineage_verdict = 'NO_ATTRIBUTION'
+            _lineage_confidence = 'none'
+            _lineage_origin = None
+            _lineage_origin_source = None
+
+        # ── Activity state label (never blank) ──
+        _activity_state_label = lineage_display
+        if not lineage_source and not lineage_dt:
+            _raw_activity_src = row.get('last_activity_source')
+            if _raw_activity_src:
+                lineage_source = _raw_activity_src
+
+        result["lineage"] = {
+            "verdict": _lineage_verdict,
+            "confidence": _lineage_confidence,
+            "origin": _lineage_origin,
+            "originSource": _lineage_origin_source,
+            "lastActivity": _activity_state_label,
+            "activityDate": lineage_dt.isoformat() if lineage_dt else None,
+            "sourceLabel": _LINEAGE_SRC_LABELS.get(lineage_source, lineage_source) if lineage_source else 'No telemetry available',
+        }
+    except Exception:
+        result["lineage"] = {
+            "verdict": "UNKNOWN", "confidence": "error",
+            "origin": None, "originSource": None,
+            "lastActivity": "Unknown", "activityDate": None,
+            "sourceLabel": "Lineage calculation error",
+        }
+
+    # ── Activity explainability metadata ──
+    result["last_activity_date"] = _isoformat_safe(row.get('last_activity_date'))
+    result["last_activity_source"] = row.get('last_activity_source') or eff_src or 'static_analysis_only'
+    result["last_activity_confidence"] = row.get('last_activity_confidence') or (
+        'high' if eff_src in ('auditgraph', 'azure_signin') else
+        'medium' if eff_src == 'identity_activity_record' else
+        'low' if eff_src == 'inferred_federated' else
+        'none'
+    )
 
     return result
 
@@ -5609,19 +6775,23 @@ def get_exposure_summary():
         sa_count = kv_count = 0
         for table, var_name in [("azure_storage_accounts", "sa"), ("azure_key_vaults", "kv")]:
             try:
-                cursor.execute(f"SAVEPOINT exp_{var_name}")
-                cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE discovery_run_id = ANY(%s)", (run_ids,))
+                cursor.execute("SAVEPOINT exp_resource")
+                cursor.execute(
+                    psycopg2_sql.SQL("SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)")
+                    .format(tbl=_safe_tbl(table, cursor.connection)),
+                    (run_ids,),
+                )
                 val = _scalar(cursor, 0)
                 if var_name == "sa":
                     sa_count = val
                 else:
                     kv_count = val
-                cursor.execute(f"RELEASE SAVEPOINT exp_{var_name}")
+                cursor.execute("RELEASE SAVEPOINT exp_resource")
             except Exception:
                 try: cursor.connection.rollback()
                 except Exception: pass
                 try:
-                    cursor.execute(f"ROLLBACK TO SAVEPOINT exp_{var_name}")
+                    cursor.execute("ROLLBACK TO SAVEPOINT exp_resource")
                 except Exception:
                     try: cursor.connection.rollback()
                     except Exception: pass
@@ -6098,7 +7268,7 @@ def _compute_compliance_evidence(cursor, run_ids, needed_metrics):
             AND i.activity_status IN ('stale', 'never_used')
             ORDER BY i.risk_score DESC LIMIT 50
         """, (run_ids,))
-        evidence['stale_accounts'] = _rows("Stale or never-used account")
+        evidence['stale_accounts'] = _rows("Stale or no-activity-observed account")
 
     if 'no_credential_rotation' in needed_metrics:
         cursor.execute(f"""
@@ -6837,21 +8007,28 @@ def get_dashboard_posture():
 
         # Posture score: % of identities at low/info risk
         total = current_run["total_identities"] or 0
-        high_risk = (current_run["critical_count"] + current_run["high_count"]
-                     + current_run["medium_count"])
+        high_risk = ((current_run["critical_count"] or 0) + (current_run["high_count"] or 0)
+                     + (current_run["medium_count"] or 0))
         posture_score = round(((total - high_risk) / total) * 100, 1) if total > 0 else 0.0
 
         previous_posture_score = None
         if previous_run:
             prev_total = previous_run["total_identities"] or 0
-            prev_high_risk = (previous_run["critical_count"] + previous_run["high_count"]
-                              + previous_run["medium_count"])
+            prev_high_risk = ((previous_run["critical_count"] or 0) + (previous_run["high_count"] or 0)
+                              + (previous_run["medium_count"] or 0))
             previous_posture_score = round(((prev_total - prev_high_risk) / prev_total) * 100, 1) if prev_total > 0 else 0.0
 
         # ── v3.1 fields required by usePostureDashboard ──
         org_id = _org_id()
 
-        posture_status = "good" if posture_score >= 90 else ("fair" if posture_score >= 70 else "at_risk")
+        if posture_score >= 90:
+            posture_status = "STRONG"
+        elif posture_score >= 70:
+            posture_status = "MODERATE"
+        elif posture_score >= 50:
+            posture_status = "ELEVATED_RISK"
+        else:
+            posture_status = "WEAK"
 
         cursor.execute(
             "SELECT COUNT(*) FROM cloud_subscriptions WHERE organization_id = %s AND monitored = true AND deleted = false",
@@ -6880,13 +8057,28 @@ def get_dashboard_posture():
         }
 
         cursor.execute(
-            "SELECT status, completed_at FROM discovery_runs WHERE organization_id = %s ORDER BY id DESC LIMIT 1",
+            "SELECT completed_at, status FROM discovery_runs WHERE organization_id = %s AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
             (org_id,),
         )
         dr_row = cursor.fetchone()
+        _last_scan_ts = dr_row[0] if dr_row and dr_row[0] else None
+        _last_scan_ago = None
+        if _last_scan_ts:
+            from datetime import datetime, timezone
+            _now = datetime.now(timezone.utc)
+            _diff = _now - _last_scan_ts
+            _mins = int(_diff.total_seconds() / 60)
+            if _mins < 60:
+                _last_scan_ago = f"{_mins}m ago"
+            elif _mins < 1440:
+                _last_scan_ago = f"{_mins // 60}h ago"
+            else:
+                _last_scan_ago = f"{_mins // 1440}d ago"
         scan_metadata = {
-            "last_scan": dr_row[1].isoformat() if dr_row and dr_row[1] else None,
-            "status": dr_row[0] if dr_row else "unknown",
+            "last_scan": _last_scan_ts.isoformat() if _last_scan_ts else None,
+            "last_scan_at": _last_scan_ts.isoformat() if _last_scan_ts else None,
+            "last_scan_ago": _last_scan_ago,
+            "status": dr_row[1] if dr_row else "unknown",
         }
 
         # v3.1 identity_risk: dormant / ghost / unowned_nhi / machine_pct
@@ -6894,6 +8086,33 @@ def get_dashboard_posture():
         ghost_count = _scalar(cursor, 0)
         cursor.execute(get_metric_count_sql('dormant_privileged'), _mparams)
         dormant_priv_count = _scalar(cursor, 0)
+
+        # B3: Provisioned unowned — never authenticated, no owner assigned
+        # Excludes disabled accounts (those are Ghost Identities, not Provisioned Never Used)
+        cursor.execute(f"""
+            SELECT COUNT(*)
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%(run_ids)s)
+              AND i.activity_status = 'never_used'
+              AND COALESCE(i.owner_count, 0) = 0
+              AND i.enabled IS NOT FALSE
+              AND i.deleted_at IS NULL
+              {HIDE_MICROSOFT_SQL}
+        """, _mparams)
+        provisioned_unowned_count = _scalar(cursor, 0)
+
+        # A4: Excess privilege — T0/T1 with critical/high risk (excludes Ghost)
+        cursor.execute(f"""
+            SELECT COUNT(*)
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%(run_ids)s)
+              AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+              AND i.risk_level IN ('critical', 'high')
+              AND i.enabled IS NOT FALSE
+              AND i.deleted_at IS NULL
+              {HIDE_MICROSOFT_SQL}
+        """, _mparams)
+        excess_privilege_count = _scalar(cursor, 0)
 
         cursor.execute(f"""
             SELECT COUNT(*) FILTER (
@@ -6915,6 +8134,8 @@ def get_dashboard_posture():
             "ghost": ghost_count,
             "unowned_nhi": no_owner_count,
             "machine_pct": machine_pct,
+            "dormant_privileged": dormant_priv_count,
+            "provisioned_unowned": provisioned_unowned_count,
         }
 
         # v3.1 blast_radius: single highest-risk identity object
@@ -6987,8 +8208,107 @@ def get_dashboard_posture():
                     "scope_string": _scope,
                     "role_tier": _tier,
                     "exploitation_text": _exploitation,
-                    "impact_label": "Critical" if _br_level == 'critical' else "High",
+                    "impact_label": _derive_blast_impact(_roles_lower, _br_subs, _tier),
                 }
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # v3.1 blast_radius_count: total critical/high identities for "+N more" badge
+        try:
+            cursor.execute(f"""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND i.risk_level IN ('critical', 'high')
+                  {HIDE_MICROSOFT_SQL}
+            """, _mparams)
+            _br_total = _scalar(cursor, 0)
+            if blast_radius and _br_total > 1:
+                blast_radius['more_count'] = _br_total - 1
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # A3: Microsoft system anomalies — unexpected privilege (MITRE T1078.004)
+        microsoft_anomalies = []
+        try:
+            cursor.execute("""
+                SELECT i.display_name, i.risk_level, ra.role_name, ra.scope
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND COALESCE(i.is_microsoft_system, false) = true
+                  AND i.risk_level IN ('critical', 'high')
+                  AND ra.role_name IN ('Owner', 'User Access Administrator', 'Contributor')
+                  AND ra.scope ~ '^/subscriptions/[^/]+$'
+                ORDER BY i.display_name
+            """, {'run_ids': run_ids})
+            for ma_row in cursor.fetchall():
+                microsoft_anomalies.append({
+                    "display_name": ma_row[0],
+                    "risk_level": ma_row[1],
+                    "anomaly_type": "unexpected_privilege",
+                    "role": ma_row[2],
+                    "scope": ma_row[3],
+                    "mitre_technique": "T1078.004",
+                })
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # v3.1 attack_paths: top paths for Privilege Exposure tile
+        _attack_paths_list = []
+        _attack_path_total = 0
+        _attack_path_source_count = 0
+        try:
+            cursor.execute("""
+                SELECT ap.id, ap.source_entity_id, ap.source_entity_name,
+                       ap.source_entity_type, ap.path_type, ap.severity,
+                       ap.risk_score, ap.description, ap.narrative,
+                       ap.affected_resource_count
+                FROM attack_paths ap
+                WHERE ap.organization_id = %(org_id)s
+                  AND ap.discovery_run_id = ANY(%(run_ids)s)
+                ORDER BY
+                    CASE ap.severity
+                        WHEN 'critical' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3
+                        ELSE 4
+                    END,
+                    ap.risk_score DESC
+                LIMIT 5
+            """, {'org_id': org_id, 'run_ids': run_ids})
+            for ap_row in cursor.fetchall():
+                _attack_paths_list.append({
+                    "id": ap_row[0],
+                    "identity_string_id": ap_row[1],
+                    "identity_name": ap_row[2] or 'Unknown',
+                    "actor": ap_row[3] or 'Identity',
+                    "path_type": ap_row[4],
+                    "severity": ap_row[5],
+                    "risk_score": ap_row[6] or 0,
+                    "description": ap_row[7] or '',
+                    "narrative": ap_row[8],
+                    "affected_resource_count": ap_row[9] or 0,
+                })
+            # Total count and distinct source count
+            cursor.execute("""
+                SELECT COUNT(*), COUNT(DISTINCT source_entity_id)
+                FROM attack_paths
+                WHERE organization_id = %(org_id)s
+                  AND discovery_run_id = ANY(%(run_ids)s)
+            """, {'org_id': org_id, 'run_ids': run_ids})
+            _ap_counts = cursor.fetchone()
+            _attack_path_total = _ap_counts[0] or 0
+            _attack_path_source_count = _ap_counts[1] or 0
         except Exception:
             try:
                 cursor.connection.rollback()
@@ -7028,7 +8348,29 @@ def get_dashboard_posture():
             except Exception:
                 pass
 
-        # ── v3.1 priority_actions: top 3 remediations by risk_reduction ──
+        # ── v3.1 priority_actions: top 3 remediations computed live ──
+        # Computed directly from risk tables (identities, role_assignments,
+        # attack_paths) so the CISO dashboard never depends on the
+        # Remediation Center having been visited first.
+
+        # Guard: ensure cursor is in a clean transaction state before running
+        # priority_actions queries.  Upstream try/except blocks (blast_radius,
+        # microsoft_anomalies, recent_fixes) may have called
+        # cursor.connection.rollback() which leaves the connection usable but
+        # could clear transaction-local state.  A quick SELECT 1 validates it.
+        try:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+        logger.debug(
+            "priority_actions: org=%s run_ids=%s total_identities=%s",
+            org_id, run_ids, total,
+        )
+
         _VERB_MAP = {
             'reduce_privilege': 'REVOKE',
             'break_attack_path': 'MITIGATE',
@@ -7042,59 +8384,224 @@ def get_dashboard_posture():
             'break_attack_path': ['CIS 6.1', 'NIST'],
             'remove_identity': ['CIS 5.3', 'NIST'],
             'disable_identity': ['CIS 5.3', 'CIS 5.1'],
+            'scope_reduction': ['CIS 5.3', 'NIST'],
+            'assign_owner': ['CIS 5.1', 'NIST'],
         }
         _ROUTE_MAP = {
             'reduce_privilege': '/identities?risk=critical,high',
             'break_attack_path': '/attack-paths',
             'remove_identity': '/identities?filter=unowned_nhi',
             'disable_identity': '/identities?activity_status=dormant_strict',
+            'scope_reduction': '/identities?activity_status=never_used',
+            'assign_owner': '/identities?risk=critical,high&filter=unowned',
+        }
+        _DESC_MAP = {
+            'reduce_privilege': 'with excessive privileges',
+            'break_attack_path': 'with active lateral-movement paths',
+            'remove_identity': 'ownerless service principal(s) — unattested risk',
+            'disable_identity': 'dormant privileged account(s) — standing risk',
+            'scope_reduction': 'provisioned with no observed activity — review for removal',
+            'assign_owner': 'high-risk identities without an assigned owner',
         }
         priority_actions = []
+        _pa_candidates = []
         try:
+            # 1. Excessive privileges (reduce_privilege) — excludes Ghost
             cursor.execute("""
-                SELECT gr.action_type,
-                       MAX(gr.title) AS title,
-                       MAX(COALESCE(gr.risk_reduction, 0)) AS risk_reduction,
-                       MIN(gr.priority) AS priority,
-                       MAX(gr.blast_radius) AS blast_radius,
-                       COUNT(DISTINCT gr.identity_id) AS identity_count
-                FROM generated_remediations gr
-                WHERE gr.organization_id = %s
-                  AND gr.status IN ('new', 'pending')
-                GROUP BY gr.action_type
-                ORDER BY risk_reduction DESC, priority ASC
-                LIMIT 3
-            """, (org_id,))
-            for idx, pa_row in enumerate(cursor.fetchall(), 1):
-                _at = pa_row[0] or ''
-                _verb = _VERB_MAP.get(_at, _at.split('_')[0].upper())
-                _title = pa_row[1] or ''
-                _rr = int(pa_row[2]) if pa_row[2] else 0
-                _pri = pa_row[3] or 'medium'
-                _bl = pa_row[4] or ''
-                _ic = int(pa_row[5]) if pa_row[5] else 0
-                _desc = (
-                    f"{_ic} identit{'ies' if _ic != 1 else 'y'} with excessive "
-                    f"privileges \u2014 {_rr}% risk reduction"
-                )
-                priority_actions.append({
-                    "rank": idx,
-                    "action": f"{_verb} {_title}" if _title else _verb,
-                    "title": _title,
-                    "description": _desc,
-                    "risk_reduction_pct": _rr,
-                    "affected_count": _ic,
-                    "compliance_tags": _COMPLIANCE_MAP.get(_at, []),
-                    "impact_level": "HIGH" if _pri == 'critical' or _bl == 'high' else "MEDIUM",
-                    "is_quick_win": _ic <= 3 and _rr >= 50,
-                    "action_type": _at,
-                    "route": _ROUTE_MAP.get(_at, '/identities'),
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
+                  AND ra.role_name IN %(priv_roles)s
+            """, {'run_ids': run_ids, 'priv_roles': PRIVILEGED_ROLES})
+            _priv_count = cursor.fetchone()[0] or 0
+            if _priv_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'reduce_privilege',
+                    'title': 'Downgrade Excessive Privileges',
+                    'risk_reduction': 90,
+                    'priority': 'critical',
+                    'blast_radius': 'high',
+                    'identity_count': _priv_count,
                 })
-        except Exception:
+        except Exception as _e1:
+            logger.warning("priority_actions query 1 (reduce_privilege) failed: %s", _e1)
             try:
                 cursor.connection.rollback()
             except Exception:
                 pass
+
+        try:
+            # 2. Attack paths (break_attack_path)
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM attack_paths
+                WHERE organization_id = %(org_id)s
+                  AND discovery_run_id = ANY(%(run_ids)s)
+                  AND severity IN ('critical', 'high')
+            """, {'org_id': org_id, 'run_ids': run_ids})
+            _ap_count = cursor.fetchone()[0] or 0
+            if _ap_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'break_attack_path',
+                    'title': 'Lateral Movement',
+                    'risk_reduction': 70,
+                    'priority': 'critical',
+                    'blast_radius': 'high',
+                    'identity_count': _ap_count,
+                })
+        except Exception as _e2:
+            logger.warning("priority_actions query 2 (attack_paths) failed: %s", _e2)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 3. Unowned NHIs (remove_identity) — broadened to all non-human types
+            # Excludes Ghost (disabled/deleted) — Ghost is its own category
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND i.identity_category IN ('service_principal', 'managed_identity_system', 'managed_identity_user')
+                  AND COALESCE(i.owner_count, 0) = 0
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+            """, {'run_ids': run_ids})
+            _orphan_count = cursor.fetchone()[0] or 0
+            if _orphan_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'remove_identity',
+                    'title': 'Orphaned Service Principal',
+                    'risk_reduction': 65,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _orphan_count,
+                })
+        except Exception as _e3:
+            logger.warning("priority_actions query 3 (unowned NHIs) failed: %s", _e3)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 4. Stale privileged accounts (disable_identity) — excludes Ghost
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id)
+                FROM identities i
+                JOIN role_assignments ra ON ra.identity_db_id = i.id
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.activity_status IN ('stale', 'inactive', 'never_used')
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
+                  AND ra.role_name IN %(priv_roles)s
+            """, {'run_ids': run_ids, 'priv_roles': PRIVILEGED_ROLES})
+            _stale_count = cursor.fetchone()[0] or 0
+            if _stale_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'disable_identity',
+                    'title': 'Dormant Privileged Access',
+                    'risk_reduction': 60,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _stale_count,
+                })
+        except Exception as _e4:
+            logger.warning("priority_actions query 4 (stale privileged) failed: %s", _e4)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 5. Never-used identities with elevated risk (scope_reduction) — excludes Ghost
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.activity_status = 'never_used'
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
+                  AND i.risk_level IN ('critical', 'high', 'medium')
+            """, {'run_ids': run_ids})
+            _never_count = cursor.fetchone()[0] or 0
+            if _never_count > 0:
+                _pa_candidates.append({
+                    'action_type': 'scope_reduction',
+                    'title': 'Never-Used Identities',
+                    'risk_reduction': 55,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _never_count,
+                })
+        except Exception as _e5:
+            logger.warning("priority_actions query 5 (never-used) failed: %s", _e5)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        try:
+            # 6. High/Critical risk identities needing owner assignment (assign_owner) — excludes Ghost
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM identities i
+                WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                  AND NOT COALESCE(i.is_microsoft_system, FALSE)
+                  AND i.risk_level IN ('critical', 'high')
+                  AND COALESCE(i.owner_count, 0) = 0
+                  AND i.enabled IS NOT FALSE
+                  AND i.deleted_at IS NULL
+            """, {'run_ids': run_ids})
+            _unowned_risky = cursor.fetchone()[0] or 0
+            if _unowned_risky > 0:
+                _pa_candidates.append({
+                    'action_type': 'assign_owner',
+                    'title': 'Unowned High-Risk Identities',
+                    'risk_reduction': 50,
+                    'priority': 'high',
+                    'blast_radius': 'medium',
+                    'identity_count': _unowned_risky,
+                })
+        except Exception as _e6:
+            logger.warning("priority_actions query 6 (unowned risky) failed: %s", _e6)
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # Sort by risk_reduction desc, take top 3
+        _pa_candidates.sort(key=lambda c: -c['risk_reduction'])
+        for idx, _c in enumerate(_pa_candidates[:3], 1):
+            _at = _c['action_type']
+            _verb = _VERB_MAP.get(_at, _at.split('_')[0].upper())
+            _ic = _c['identity_count']
+            _rr = _c['risk_reduction']
+            _desc = (
+                f"{_ic} identit{'ies' if _ic != 1 else 'y'} "
+                f"{_DESC_MAP.get(_at, '')} \u2014 {_rr}% risk reduction"
+            )
+            priority_actions.append({
+                "rank": idx,
+                "action": f"{_verb} {_c['title']}",
+                "title": _c['title'],
+                "description": _desc,
+                "risk_reduction_pct": _rr,
+                "affected_count": _ic,
+                "compliance_tags": _COMPLIANCE_MAP.get(_at, []),
+                "impact_level": "HIGH" if _c['priority'] == 'critical' or _c['blast_radius'] == 'high' else "MEDIUM",
+                "is_quick_win": _ic <= 3 and _rr >= 50,
+                "action_type": _at,
+                "route": _ROUTE_MAP.get(_at, '/identities'),
+            })
 
         # ── v3.1 immediate_risks: reuse already-computed metric counts ──
         _risk_items = [
@@ -7117,6 +8624,22 @@ def get_dashboard_posture():
                 "severity": "high",
             },
         ]
+        # B4: Provisioned — Never Used card
+        if provisioned_unowned_count > 0:
+            _prov_pct = round((provisioned_unowned_count / total) * 100, 1) if total > 0 else 0
+            _prov_noun = 'identity' if provisioned_unowned_count == 1 else 'identities'
+            _risk_items.append({
+                "type": "provisioned_unowned",
+                "label": "Provisioned \u2014 Never Used",
+                "count": provisioned_unowned_count,
+                "severity": "high",
+                "narrative": (
+                    f"{provisioned_unowned_count} {_prov_noun} ({_prov_pct}%) "
+                    f"exist with roles assigned but have never signed in \u2014 "
+                    f"access was provisioned but never justified"
+                ),
+                "pct": _prov_pct,
+            })
         immediate_risks = [r for r in _risk_items if r["count"] > 0]
         immediate_risks.sort(key=lambda r: r["count"], reverse=True)
 
@@ -7136,6 +8659,10 @@ def get_dashboard_posture():
                 f"{c} service principal{'s' if c != 1 else ''} ({p}%) operate without "
                 f"an owner \u2014 creates blind spots for attackers"
             ),
+            "provisioned_unowned": lambda c, p: (
+                f"{c} {'identity' if c == 1 else 'identities'} ({p}%) exist with roles "
+                f"assigned but have never signed in \u2014 access was provisioned but never justified"
+            ),
         }
         top_risk_narrative = None
         if highest_risk_type:
@@ -7147,6 +8674,119 @@ def get_dashboard_posture():
 
         # Check for overlapping identities across risk categories
         has_overlapping = (dormant_priv_count + ghost_count + no_owner_count) > if_unaddressed_count if if_unaddressed_count > 0 else False
+
+        # ── v3.1 drift: mini-widget data from latest drift report ──
+        posture_anomalies = []
+        drift = None
+        try:
+            cursor.execute("""
+                SELECT events, total_changes, created_at
+                FROM drift_reports
+                WHERE organization_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (org_id,))
+            dr_drift = cursor.fetchone()
+            if dr_drift and dr_drift[0]:
+                _drift_events = dr_drift[0] if isinstance(dr_drift[0], list) else []
+                _total = dr_drift[1] or len(_drift_events)
+                # Map backend event_types → frontend widget categories
+                _DRIFT_TYPE_MAP = {
+                    'role_assigned': 'ROLE_ADDED',
+                    'role_removed': 'ROLE_REMOVED',
+                    'privilege_escalated': 'PRIVILEGE_CHANGE',
+                    'privilege_deescalated': 'PRIVILEGE_CHANGE',
+                    'risk_escalated': 'PRIVILEGE_CHANGE',
+                    'risk_deescalated': 'PRIVILEGE_CHANGE',
+                    'identity_added': 'NEW_IDENTITY',
+                    'identity_removed': 'STATE_CHANGE',
+                    'identity_disabled': 'STATE_CHANGE',
+                    'identity_reactivated': 'STATE_CHANGE',
+                    'identity_resurrection': 'STATE_CHANGE',
+                    'spn_credential_expired': 'CREDENTIAL_CHANGE',
+                    'spn_credential_added': 'CREDENTIAL_CHANGE',
+                    'mfa_disabled': 'CREDENTIAL_CHANGE',
+                    'owner_changed': 'STATE_CHANGE',
+                    'microsoft_spn_modified': 'STATE_CHANGE',
+                    'classification_added': 'STATE_CHANGE',
+                    'classification_removed': 'STATE_CHANGE',
+                    'classification_changed': 'STATE_CHANGE',
+                    'attack_path_created': 'PRIVILEGE_CHANGE',
+                }
+                from collections import Counter
+                _type_counts = Counter()
+                for ev in _drift_events:
+                    _et = ev.get('event_type') or ev.get('type', '')
+                    _mapped = _DRIFT_TYPE_MAP.get(_et, 'STATE_CHANGE')
+                    _type_counts[_mapped] += 1
+                drift = {
+                    "has_drift": _total > 0,
+                    "total_changes": _total,
+                    "changes": [
+                        {"type": t, "count": c}
+                        for t, c in _type_counts.most_common()
+                    ],
+                    "report_date": dr_drift[2].isoformat() if dr_drift[2] else None,
+                }
+                # FIX F: Build anomalies from drift events for Anomalies tile
+                _ANOMALY_EVENT_MAP = {
+                    'risk_escalated': 'risk_score_spike',
+                    'privilege_escalated': 'permission_escalation',
+                    'identity_resurrection': 'dormant_reactivation',
+                    'identity_reactivated': 'dormant_reactivation',
+                    'spn_credential_expired': 'credential_surge',
+                    'spn_credential_added': 'credential_surge',
+                    'mfa_disabled': 'credential_surge',
+                    'attack_path_created': 'permission_escalation',
+                }
+                _HIGH_EVENTS = {'risk_escalated', 'privilege_escalated', 'mfa_disabled', 'attack_path_created'}
+                _anom_id = 0
+                for ev in _drift_events:
+                    _et = ev.get('event_type') or ev.get('type', '')
+                    _anom_type = _ANOMALY_EVENT_MAP.get(_et)
+                    if _anom_type:
+                        _anom_id += 1
+                        posture_anomalies.append({
+                            "id": _anom_id,
+                            "type": _anom_type,
+                            "severity": 'high' if _et in _HIGH_EVENTS else 'medium',
+                            "identity_name": ev.get('identity_name') or ev.get('display_name', 'Unknown'),
+                            "identity_id": ev.get('identity_id'),
+                            "created_at": dr_drift[2].isoformat() if dr_drift[2] else None,
+                        })
+            elif dr_drift:
+                # Drift report exists but no events → stable
+                drift = {"has_drift": False, "total_changes": 0, "changes": []}
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
+        # A3: Score trend delta
+        score_trend = None
+        if previous_posture_score and previous_posture_score > 0:
+            _delta = round(posture_score - previous_posture_score, 1)
+            if _delta > 0:
+                _direction = "up"
+            elif _delta < 0:
+                _direction = "down"
+            else:
+                _direction = "stable"
+            score_trend = {
+                "current": posture_score,
+                "previous": previous_posture_score,
+                "delta": _delta,
+                "direction": _direction,
+                "delta_pct": round(abs(_delta / previous_posture_score * 100), 1),
+            }
+
+        # A4: Business impact findings
+        # v3.1 business_impact: object with named count fields
+        # (BusinessImpactWidgetV31 reads .inactive_admin_count, .disabled_live_rbac_count)
+        business_impact = {
+            "inactive_admin_count": dormant_priv_count,
+            "disabled_live_rbac_count": ghost_count,
+        }
 
         return jsonify({
             "current_run": current_run,
@@ -7170,6 +8810,21 @@ def get_dashboard_posture():
             "highest_risk_type": highest_risk_type,
             "if_unaddressed_count": if_unaddressed_count,
             "has_overlapping_identities": has_overlapping,
+            "score_trend": score_trend,
+            "business_impact": business_impact,
+            "has_business_risk": (business_impact["inactive_admin_count"] + business_impact["disabled_live_rbac_count"]) > 0,
+            "microsoft_anomalies": microsoft_anomalies,
+            "attack_paths": _attack_paths_list,
+            "attack_path_total": _attack_path_total,
+            "attack_path_source_count": _attack_path_source_count,
+            "anomalies": posture_anomalies,
+            "drift": drift,
+            "p2_enabled": db.get_setting('p2_telemetry_enabled', 'false', organization_id=org_id) == 'true',
+            # AG-43/44: flat aliases for frontend trend rendering
+            "score_delta": score_trend["delta"] if score_trend else None,
+            "previous_score": previous_posture_score,
+            "score_direction": score_trend["direction"] if score_trend else None,
+            "posture_change_pct": score_trend["delta_pct"] if score_trend else None,
         })
 
     finally:
@@ -7775,9 +9430,22 @@ def get_identity_graph_data(identity_id):
 
         roles = db.get_identity_roles_enriched(db_id)
         credentials = db.get_identity_credentials(db_id)
+        # Live aggregate: credential_count from actual credential rows
+        ident["credential_count"] = len(credentials)
         owners = db.get_ownership(db_id)
         graph_perms = db.get_graph_permissions(db_id)
         app_roles = db.get_app_roles(db_id)
+
+        # Fetch group memberships for human_user/guest identities
+        identity_groups = []
+        if ident["identity_category"] in ("human_user", "guest"):
+            try:
+                identity_groups = db.get_identity_entra_groups(
+                    ident["identity_id"], run_ids
+                )
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
 
         is_dormant = ident["activity_status"] in ("stale", "never_used")
         has_priv_roles = any(r.get("risk_level") in ("critical", "high") for r in roles)
@@ -7863,6 +9531,7 @@ def get_identity_graph_data(identity_id):
                 lud = "Unknown"
             else:
                 lud = "Never used"
+            _rcls = r.get("role_usage_classification", "")
             role_edges.append({
                 "role_name": r.get("role_name"),
                 "role_type": r.get("role_type", "azure"),
@@ -7871,7 +9540,11 @@ def get_identity_graph_data(identity_id):
                 "risk_level": r.get("risk_level") or "low",
                 "usage_status": us,
                 "last_used_display": lud,
-                "is_removable": us in ("stale", "dormant", "never_used"),
+                "is_removable": (
+                    _rcls in ("no_observed_usage",)
+                    or us in ("stale", "dormant", "never_used",
+                              "definitely_unused", "likely_unused")
+                ),
             })
 
         trust = {
@@ -7953,6 +9626,7 @@ def get_identity_graph_data(identity_id):
                 e_lud = "Unknown"
             else:
                 e_lud = "Never used"
+            _ecls = r.get("role_usage_classification", "")
             entra_scopes.append({
                 "role_name": r.get("role_name"),
                 "directory_scope": ds,
@@ -7960,7 +9634,11 @@ def get_identity_graph_data(identity_id):
                 "risk_level": r.get("risk_level") or "low",
                 "usage_status": us,
                 "last_used_display": e_lud,
-                "is_removable": us in ("stale", "dormant", "never_used"),
+                "is_removable": (
+                    _ecls in ("no_observed_usage",)
+                    or us in ("stale", "dormant", "never_used",
+                              "definitely_unused", "likely_unused")
+                ),
             })
 
         sub_count = len(subs)
@@ -8210,9 +9888,56 @@ def get_identity_graph_data(identity_id):
                 "label": "directory roles", "style": {"stroke": "#6366f1"}})
             right_y += entra_height + 20
 
+        # ── Security group membership branch (human_user/guest only) ──
+        # Shows: Identity → [member of] → Security Group → [has role] → Sub
+        # Only groups with RBAC roles get rendered (access-relevant groups).
+        group_sub_links = {}  # group_nid → list of subscription_ids
+        if identity_groups:
+            grp_y = max(right_y, 40)
+            grp_count = 0
+            for gi, grp in enumerate(identity_groups):
+                rbac_roles_data = grp.get('rbac_roles') or []
+                if isinstance(rbac_roles_data, str):
+                    import json as _json2
+                    try: rbac_roles_data = _json2.loads(rbac_roles_data)
+                    except Exception: rbac_roles_data = []
+                if not rbac_roles_data:
+                    continue  # skip groups with no RBAC roles
+                grp_nid = f"grp-{gi}"
+                member_count = grp.get('member_count', 0)
+                is_nested = grp.get('is_nested', False)
+                grp_roles_display = [
+                    {"name": r.get("role_name", ""), "risk_level": role_risk_map.get(r.get("role_name", ""), "low")}
+                    for r in rbac_roles_data
+                ]
+                grp_height = 55 + len(grp_roles_display) * 24
+                tech_nodes.append({"id": grp_nid, "type": "security_group",
+                    "position": {"x": cx - 100, "y": grp_y},
+                    "data": {"label": grp.get('display_name', 'Security Group'),
+                             "member_count": member_count,
+                             "is_nested": is_nested,
+                             "is_privileged": grp.get('is_privileged', False),
+                             "roles": grp_roles_display}})
+                edge_label = "nested member" if is_nested else "member of"
+                tech_edges.append({"id": f"e-id-{grp_nid}", "source": "identity",
+                    "target": grp_nid, "label": edge_label,
+                    "style": {"stroke": "#8b5cf6", "strokeDasharray": "5 3"}})
+                # Track which subscriptions this group grants access to
+                for r in rbac_roles_data:
+                    scope = r.get('scope', '')
+                    if '/subscriptions/' in scope:
+                        sub_id = scope.split('/subscriptions/')[1].split('/')[0]
+                        group_sub_links.setdefault(grp_nid, set()).add(sub_id)
+                grp_y += grp_height + 15
+                grp_count += 1
+            if grp_count > 0:
+                right_y = max(right_y, grp_y)
+
         # ── ARM hierarchy tree (roles embedded inside each node) ──
         arm_y = max(right_y, 40)
 
+        # Index subscription node IDs for group→sub linking
+        sub_node_index = {}  # subscription_id → node_id
         for si, sub_entry in enumerate(scope_hierarchy):
             sub_nid = f"sub-{si}"
             sub_label = sub_entry["subscription_id"][:12] + "..."
@@ -8225,6 +9950,7 @@ def get_identity_graph_data(identity_id):
                          "roles": sub_roles_data}})
             tech_edges.append({"id": f"e-id-{sub_nid}", "source": "identity", "target": sub_nid,
                 "label": "", "style": {"stroke": "#3b82f6"}})
+            sub_node_index[sub_entry["subscription_id"]] = sub_nid
             arm_y += sub_height + 10
 
             # Resource groups under this subscription
@@ -8256,6 +9982,18 @@ def get_identity_graph_data(identity_id):
                 arm_y += 10  # spacing between RGs
 
             arm_y += 15  # spacing between subscriptions
+
+        # ── Group → Subscription edges (inherited access paths) ──
+        for grp_nid, sub_ids in group_sub_links.items():
+            for sub_id in sub_ids:
+                sub_nid = sub_node_index.get(sub_id)
+                if sub_nid:
+                    tech_edges.append({
+                        "id": f"e-{grp_nid}-{sub_nid}",
+                        "source": grp_nid, "target": sub_nid,
+                        "label": "has role",
+                        "style": {"stroke": "#8b5cf6", "strokeDasharray": "5 3"},
+                    })
 
         # ── Permissions (Graph API + App Roles) ──
         perm_y = arm_y + 20
@@ -8613,11 +10351,140 @@ def post_bulk_remediation():
         db.close()
 
 
+def post_bulk_create_ticket():
+    """POST /api/bulk/create-ticket — stub: log ticket creation intent per identity."""
+    import time
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    identity_ids = data.get('identity_ids', [])
+    ticket_type = data.get('ticket_type', '')
+    title = data.get('title', '')
+
+    if not identity_ids or not isinstance(identity_ids, list):
+        return jsonify({'error': 'identity_ids must be a non-empty array'}), 400
+    if len(identity_ids) > 100:
+        return jsonify({'error': 'Maximum 100 identities per ticket batch'}), 400
+    if ticket_type not in ('jira', 'servicenow'):
+        return jsonify({'error': 'ticket_type must be jira or servicenow'}), 400
+    if not title or not title.strip():
+        return jsonify({'error': 'title is required'}), 400
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        user = getattr(g, 'current_user', {})
+        # Validate identity_ids belong to caller's org
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery runs for this organization'}), 404
+
+        placeholders = ','.join(['%s'] * len(identity_ids))
+        cursor.execute(f"""
+            SELECT identity_id FROM identities
+            WHERE identity_id IN ({placeholders})
+              AND discovery_run_id = ANY(%s)
+        """, identity_ids + [run_ids])
+        valid_ids = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+
+        ticket_ref = f"STUB-{int(time.time())}"
+        description = data.get('description', '')
+
+        # Log audit entry per identity
+        for iid in valid_ids:
+            _log(db, 'ticket_created', f'Ticket queued: {title}', {
+                'identity_id': iid,
+                'ticket_type': ticket_type,
+                'ticket_ref': ticket_ref,
+                'title': title,
+                'description': description,
+            })
+
+        return jsonify({
+            'queued': len(valid_ids),
+            'ticket_ref': ticket_ref,
+            'ticket_type': ticket_type,
+        })
+    finally:
+        db.close()
+
+
+def post_bulk_disable():
+    """POST /api/bulk/disable — disable identities with audit trail."""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    identity_ids = data.get('identity_ids', [])
+    reason = data.get('reason', '')
+
+    if not identity_ids or not isinstance(identity_ids, list):
+        return jsonify({'error': 'identity_ids must be a non-empty array'}), 400
+    if len(identity_ids) > 50:
+        return jsonify({'error': 'Maximum 50 identities per bulk disable'}), 400
+    if not reason or not reason.strip():
+        return jsonify({'error': 'reason is required'}), 400
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        user = getattr(g, 'current_user', {})
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery runs for this organization'}), 404
+
+        placeholders = ','.join(['%s'] * len(identity_ids))
+        cursor.execute(f"""
+            SELECT identity_id FROM identities
+            WHERE identity_id IN ({placeholders})
+              AND discovery_run_id = ANY(%s)
+        """, identity_ids + [run_ids])
+        valid_ids = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+
+        disabled_count = 0
+        failed = []
+        for iid in valid_ids:
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    UPDATE identities SET enabled = FALSE, status = 'disabled'
+                    WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+                """, (iid, run_ids))
+                disabled_count += cursor.rowcount
+                cursor.close()
+                db.conn.commit()
+                _log(db, 'bulk_disabled', f'Identity disabled: {iid}', {
+                    'identity_id': iid,
+                    'reason': reason.strip(),
+                    'actor': user.get('username', 'unknown'),
+                })
+            except Exception as e:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+                failed.append({'identity_id': iid, 'error': str(e)})
+
+        return jsonify({
+            'disabled': disabled_count,
+            'failed': failed,
+        })
+    finally:
+        db.close()
+
+
 def get_role_usage_stats():
     """Get role usage_status and risk_level distribution for dashboard chart."""
     db = _db()
     try:
-        return jsonify(db.get_role_usage_stats())
+        return jsonify(db.get_role_usage_stats(org_id=_org_id()))
     finally:
         db.close()
 
@@ -8752,22 +10619,18 @@ def execute_remediation(identity_id: str):
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         conn_id = _connection_id()
         run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
-        if run_ids:
-            cursor.execute("""
-                SELECT identity_id, display_name, identity_category, risk_level,
-                       app_id, activity_status
-                FROM identities
-                WHERE identity_id = %s AND discovery_run_id = ANY(%s)
-                ORDER BY discovery_run_id DESC LIMIT 1
-            """, (identity_id, run_ids))
-        else:
-            cursor.execute("""
-                SELECT identity_id, display_name, identity_category, risk_level,
-                       app_id, activity_status
-                FROM identities
-                WHERE identity_id = %s
-                ORDER BY discovery_run_id DESC LIMIT 1
-            """, (identity_id,))
+        if not run_ids:
+            # AG-129: No fallback to unscoped query. If no runs exist for
+            # this org, identity cannot be resolved — return 404.
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+        cursor.execute("""
+            SELECT identity_id, display_name, identity_category, risk_level,
+                   app_id, activity_status
+            FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
         identity = cursor.fetchone()
         cursor.close()
 
@@ -9452,11 +11315,16 @@ def update_generated_remediation_handler(remediation_id):
     try:
         data = request.get_json(silent=True) or {}
         new_status = data.get('status', '').strip()
-        if new_status not in ('new', 'acknowledged', 'in_progress', 'resolved'):
-            return jsonify({'error': 'Invalid status. Use: new, acknowledged, in_progress, resolved'}), 400
+        reason = data.get('reason', '').strip() or None
+        if new_status not in ('new', 'acknowledged', 'in_progress', 'resolved',
+                              'accepted_risk', 'dismissed'):
+            return jsonify({'error': 'Invalid status. Use: new, acknowledged, in_progress, resolved, accepted_risk, dismissed'}), 400
+        # accepted_risk and dismissed both require a reason for audit trail
+        if new_status in ('accepted_risk', 'dismissed') and not reason:
+            return jsonify({'error': f'{new_status.replace("_", " ").title()} requires a reason'}), 400
         user_id = _current_user_id()
         success = db.update_generated_remediation_status(
-            int(remediation_id), new_status, resolved_by=user_id
+            int(remediation_id), new_status, resolved_by=user_id, reason=reason
         )
         if not success:
             return jsonify({'error': 'Remediation not found'}), 404
@@ -9537,11 +11405,16 @@ if ($existing{i}) {{
 }}""")
 
         ps = f"""# ============================================
-# AuditGraph Trust AI — Remove RBAC Role(s)
+# AuditGraph Remediation Prescription
+# Action:    Remove RBAC Role(s)
 # Identity:  {identity}
 # Roles:     {role_display}  ({role_count} role(s))
 # Scope:     {scope}
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 # Connect to Azure (skip if already connected)
@@ -9583,9 +11456,14 @@ az role assignment list --assignee "{obj_id}" \\
 
     elif action in ('disable_identity', 'disable_account'):
         ps = f"""# ============================================
-# AuditGraph Trust AI — Disable Identity
+# AuditGraph Remediation Prescription
+# Action:    Disable Identity
 # Identity:  {identity} ({obj_id})
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-MgGraph -Scopes "User.ReadWrite.All"
@@ -9609,9 +11487,14 @@ az ad user show --id "{obj_id}" --query accountEnabled"""
 
     elif action == 'remove_identity':
         ps = f"""# ============================================
-# AuditGraph Trust AI — Remove Orphaned SPN
+# AuditGraph Remediation Prescription
+# Action:    Remove Orphaned SPN
 # Identity:  {identity} ({obj_id})
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-AzAccount
@@ -9646,9 +11529,14 @@ az ad sp delete --id "{obj_id}" """
 
     elif action == 'rotate_credential':
         ps = f"""# ============================================
-# AuditGraph Trust AI — Rotate Credential
+# AuditGraph Remediation Prescription
+# Action:    Rotate Credential
 # Identity:  {identity} ({obj_id})
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-MgGraph -Scopes "Application.ReadWrite.All"
@@ -9694,10 +11582,15 @@ az ad app credential reset --id "$APP_ID" --years 1"""
 
     elif action == 'access_review':
         ps = f"""# ============================================
-# AuditGraph Trust AI — Access Review
+# AuditGraph Remediation Prescription
+# Action:    Access Review
 # Identity:  {identity} ({obj_id})
 # Role:      {role}
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-MgGraph -Scopes "AccessReview.ReadWrite.All"
@@ -9777,11 +11670,16 @@ az role assignment list --assignee "{obj_id}" -o table
         _tf_scope = '#   scope                = "{}"'.format(scope) if scope else '#   scope                = "<find in Azure Portal>"'
 
         ps = f"""# ============================================
-# AuditGraph Trust AI — Break Attack Path
+# AuditGraph Remediation Prescription
+# Action:    Break Attack Path
 # Identity:  {identity} ({obj_id})
 # Role:      {role}
 # Scope:     {scope if scope else 'See Step 1'}
 # Audit ID:  {audit_id}
+# ────────────────────────────────────────────
+# Governance: AI-prescribed → Human-approved
+# AuditGraph prescribes. Your team decides.
+# Execution requires authorized operator approval.
 # ============================================
 
 Connect-AzAccount
@@ -10123,16 +12021,19 @@ def auth_signup():
     email = str(data.get('email', '')).strip().lower()
     password = str(data.get('password', ''))
     org_name = str(data.get('organization_name', '')).strip()
+    plan = str(data.get('plan', 'trial')).strip().lower()
 
     # Validation
-    if not email or '@' not in email or '.' not in email.split('@')[-1]:
-        return jsonify({'error': 'Valid email is required'}), 400
+    if not email or not _is_valid_email(email):
+        return jsonify({'error': 'Invalid email address'}), 400
     if len(password) < 8:
         return jsonify({'error': 'Password must be at least 8 characters'}), 400
     if not org_name or len(org_name) < 2:
         return jsonify({'error': 'Organization name is required (min 2 characters)'}), 400
     if len(org_name) > 100:
         return jsonify({'error': 'Organization name too long (max 100 characters)'}), 400
+    if plan not in ('free', 'trial'):
+        return jsonify({'error': 'Plan must be "free" or "trial"'}), 400
 
     db = Database(_admin_reason='auth_signup: create org + user')
     try:
@@ -10142,10 +12043,10 @@ def auth_signup():
             return jsonify({'error': 'An account with this email already exists'}), 409
 
         # Hash password
-        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
 
         # Create org + user atomically
-        result = db.signup_create_org_and_user(email, password_hash, org_name)
+        result = db.signup_create_org_and_user(email, password_hash, org_name, plan=plan)
         org = result['organization']
         user = result['user']
 
@@ -10156,8 +12057,8 @@ def auth_signup():
         # Log signup event
         try:
             db.log_activity(
-                'signup', f'New signup: {email} / {org_name}',
-                {'email': email, 'org_name': org_name, 'plan': 'trial',
+                'signup', f'New signup: {email} / {org_name} ({plan})',
+                {'email': email, 'org_name': org_name, 'plan': plan,
                  'ip': request.remote_addr},
                 user_id=user['id'], organization_id=org['id'],
             )
@@ -10218,7 +12119,7 @@ def auth_signup():
             'id': org['id'],
             'name': org['name'],
             'slug': org['slug'],
-            'plan': 'trial',
+            'plan': org.get('plan', plan),
             'trial_expires_at': org.get('trial_expires_at'),
         },
     }), 201)
@@ -10434,7 +12335,7 @@ def change_password():
         if not bcrypt.checkpw(current_password.encode('utf-8'), full_user['password_hash'].encode('utf-8')):
             return jsonify({'error': 'Current password is incorrect'}), 401
 
-        new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
         db.update_user(user['id'], password_hash=new_hash)
         # Phase 78: Clear force_password_change after successful password change
         db.set_force_password_change(user['id'], False)
@@ -10554,7 +12455,7 @@ def reset_password_handler():
         if not user:
             return jsonify({'error': 'Invalid or expired reset token'}), 400
 
-        new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
         db.update_user(user['id'], password_hash=new_hash)
         db.clear_password_reset_token(user['id'])
         db.reset_failed_login(user['id'])
@@ -10588,7 +12489,7 @@ def admin_reset_user_password(user_id):
 
         # Generate temporary password
         temp_password = secrets.token_urlsafe(16)
-        new_hash = bcrypt.hashpw(temp_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        new_hash = bcrypt.hashpw(temp_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
 
         db.update_user(user_id, password_hash=new_hash)
         db.set_force_password_change(user_id, True)
@@ -10683,7 +12584,7 @@ def create_user_handler():
         if existing:
             return jsonify({'error': f'Username "{username}" already exists'}), 409
 
-        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
         current_user = getattr(g, 'current_user', None)
         created_by = current_user['id'] if current_user else None
         # Phase 70: superadmins can set portal_role and is_superadmin on creation
@@ -10770,7 +12671,7 @@ def update_user_handler(user_id):
             if not valid:
                 errors.append(err)
             else:
-                updates['password_hash'] = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                updates['password_hash'] = bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
 
         # Phase 46: organization_id + is_superadmin (superadmin only)
         current_user = getattr(g, 'current_user', None)
@@ -10955,8 +12856,329 @@ def export_data(export_type):
         return _export_evidence_json()
 
 
+def _normalize_risk_score(raw_score):
+    """Normalize additive risk score to 0-10 scale.
+
+    Matches frontend normalizeScore(raw, 10) in identityRiskScore.ts:
+        clamp(raw / 10)  →  min(10, max(0, raw / 10))
+    """
+    if not raw_score:
+        return 0.0
+    return round(min(max(float(raw_score) / 10.0, 0.0), 10.0), 1)
+
+
 def _export_identities():
-    """Export all identities (no pagination) with optional filters."""
+    """Stream identities as CSV with chunked pagination.
+
+    Supports all list-endpoint filters (risk_level, identity_category, search,
+    cloud, status, activity_status, identity_type).  Streams in chunks sized by
+    EXPORT_CHUNK_SIZE env var (default 1000) to avoid memory spikes at scale.
+
+    CSV columns (25):
+        display_name, identity_id, identity_type, identity_category,
+        subscription_name, subscription_id, cloud, permission_plane,
+        risk_level, risk_score, privilege_tier, entra_role_count,
+        rbac_role_count, api_permission_count, credential_count,
+        credential_status, credential_expiration, created_datetime,
+        last_seen_auth, activity_status, owner_display_name,
+        ca_coverage_status, ca_mfa_enforced, enabled, risk_reasons
+    """
+    import csv
+    import io
+    import os
+    from flask import stream_with_context
+
+    _logger = logging.getLogger(__name__)
+    chunk_size = int(os.environ.get('EXPORT_CHUNK_SIZE', '1000'))
+    org_id = _org_id()
+    export_format = request.args.get('format', 'csv')
+
+    # If JSON format requested, fall through to legacy JSON export
+    if export_format == 'json':
+        return _export_identities_json()
+
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids, date_range = _resolve_export_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+
+        # ── Build WHERE clause (same filters as get_identities) ──────────
+        where_clauses = "WHERE i.discovery_run_id = ANY(%s)"
+        where_clauses += HIDE_MICROSOFT_SQL
+        params: list = [run_ids]
+
+        # identity_ids filter: export only specific identities (for bulk export selected)
+        # When filtering by identity_ids, restrict to latest single run to avoid
+        # duplicates when _latest_run_ids returns multiple runs.
+        identity_ids_param = request.args.get('identity_ids')
+        if identity_ids_param:
+            id_list = [x.strip() for x in identity_ids_param.split(',') if x.strip()]
+            if id_list:
+                placeholders = ','.join(['%s'] * len(id_list))
+                where_clauses += f" AND i.identity_id IN ({placeholders})"
+                params.extend(id_list)
+                # Deduplicate: keep only the most recent run
+                if len(run_ids) > 1:
+                    run_ids = [max(run_ids)]
+                    params[0] = run_ids
+
+        risk_filter = request.args.get('risk_level')
+        category_filter = request.args.get('identity_category')
+        cloud_filter = request.args.get('cloud')
+        search = request.args.get('search')
+        status_filter = request.args.get('status')
+        activity_filter = request.args.get('activity_status')
+        type_filter = request.args.get('identity_type')
+
+        if risk_filter:
+            where_clauses += " AND i.risk_level = %s"
+            params.append(risk_filter)
+        if category_filter:
+            where_clauses += " AND COALESCE(i.identity_category, '') = %s"
+            params.append(category_filter)
+        if cloud_filter:
+            where_clauses += " AND COALESCE(i.cloud, 'azure') = %s"
+            params.append(cloud_filter.lower())
+        if search:
+            _s = search.strip()
+            if _s:
+                _s_lower = f"%{_s.lower()}%"
+                where_clauses += """ AND (
+                    LOWER(i.display_name) LIKE %s
+                    OR LOWER(COALESCE(i.upn, '')) LIKE %s
+                    OR LOWER(COALESCE(i.app_id, '')) LIKE %s
+                    OR LOWER(COALESCE(i.identity_id, '')) LIKE %s
+                )"""
+                params.extend([_s_lower, _s_lower, _s_lower, _s_lower])
+        if status_filter:
+            _sf = status_filter.lower()
+            if _sf == 'disabled':
+                where_clauses += " AND (i.enabled = FALSE OR i.status IN ('disabled', 'deleted'))"
+            elif _sf == 'active':
+                where_clauses += " AND COALESCE(i.enabled, TRUE) = TRUE AND COALESCE(i.status, 'active') NOT IN ('disabled', 'deleted')"
+        if activity_filter:
+            allowed = {'stale', 'never_used', 'inactive', 'active', 'recently_created', 'unknown'}
+            vals = [v.strip() for v in activity_filter.split(',') if v.strip() in allowed]
+            if vals:
+                placeholders = ','.join(['%s'] * len(vals))
+                where_clauses += f" AND COALESCE(i.activity_status, 'unknown') IN ({placeholders})"
+                params.extend(vals)
+        if type_filter:
+            where_clauses += " AND i.identity_type = %s"
+            params.append(type_filter)
+
+        # ── Get total count ──────────────────────────────────────────────
+        count_sql = f"""SELECT COUNT(*) FROM identities i
+            LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
+            {where_clauses}"""
+        cursor.execute(count_sql, params)
+        total_count = cursor.fetchone()[0]
+
+        # ── Data query (no LIMIT — paginated via OFFSET in generator) ────
+        data_sql = f"""
+            SELECT
+                i.display_name,
+                i.identity_id,
+                i.identity_type,
+                COALESCE(i.identity_category, '') as identity_category,
+                dr_sub.subscription_name,
+                dr_sub.subscription_id,
+                COALESCE(i.cloud, 'azure') as cloud,
+                COALESCE(i.permission_plane, 'entra_id') as permission_plane,
+                i.risk_level,
+                COALESCE(i.risk_score, 0) as risk_score,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'global administrator', 'privileged role administrator',
+                            'privileged authentication administrator',
+                            'application administrator', 'cloud application administrator',
+                            'hybrid identity administrator'
+                        )
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner', 'user access administrator')
+                        AND (ra.scope IS NULL OR ra.scope = '/' OR ra.scope LIKE '/subscriptions/%%'
+                             AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%')
+                    ) THEN 0
+                    WHEN EXISTS (
+                        SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id
+                        AND LOWER(era.role_name) IN (
+                            'user administrator', 'exchange administrator',
+                            'sharepoint administrator', 'teams administrator',
+                            'security administrator', 'compliance administrator',
+                            'conditional access administrator', 'helpdesk administrator'
+                        )
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id
+                        AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator')
+                    ) THEN 1
+                    WHEN EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id) THEN 2
+                    WHEN EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id) THEN 2
+                    ELSE 3
+                END as privilege_tier,
+                (SELECT COUNT(*) FROM entra_role_assignments era WHERE era.identity_db_id = i.id) as entra_role_count,
+                (SELECT COUNT(*) FROM role_assignments ra WHERE ra.identity_db_id = i.id) as rbac_role_count,
+                COALESCE(i.api_permission_count, 0) as api_permission_count,
+                i.credential_count,
+                i.credential_status,
+                i.credential_expiration,
+                i.created_datetime,
+                i.last_seen_auth,
+                i.activity_status,
+                i.owner_display_name,
+                i.ca_coverage_status,
+                COALESCE(i.ca_mfa_enforced, false) as ca_mfa_enforced,
+                i.enabled,
+                i.risk_reasons
+            FROM identities i
+            LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
+            {where_clauses}
+            ORDER BY
+                CASE i.risk_level
+                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5
+                END, i.display_name
+        """
+
+        _logger.info("Export started: org_id=%s, total_count=%d, chunk_size=%d, filters=%s",
+                     org_id, total_count, chunk_size,
+                     {k: v for k, v in {'risk_level': risk_filter, 'category': category_filter,
+                      'cloud': cloud_filter, 'search': search, 'status': status_filter,
+                      'activity': activity_filter, 'type': type_filter}.items() if v})
+
+        # ── CSV column headers ───────────────────────────────────────────
+        csv_headers = [
+            'Display Name', 'Identity ID', 'Type', 'Category',
+            'Subscription Name', 'Subscription ID', 'Cloud', 'Permission Plane',
+            'Risk Level', 'Risk Score (0-10)', 'Privilege Tier', 'Entra Roles',
+            'RBAC Roles', 'Graph API Perms', 'Credentials',
+            'Credential Status', 'Credential Expiry', 'Created',
+            'Last Active', 'Activity Status', 'Owner',
+            'CA Coverage', 'CA MFA Enforced', 'Enabled', 'Risk Reasons',
+        ]
+
+        # ── Streaming generator ──────────────────────────────────────────
+        def generate():
+            chunk_count = 0
+            row_count = 0
+            export_cursor = db.conn.cursor()
+            try:
+                # Yield CSV header row
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(csv_headers)
+                yield buf.getvalue()
+
+                offset = 0
+                while True:
+                    chunk_sql = data_sql + " LIMIT %s OFFSET %s"
+                    chunk_params = params + [chunk_size, offset]
+                    export_cursor.execute(chunk_sql, chunk_params)
+                    rows = export_cursor.fetchall()
+
+                    if not rows:
+                        break
+
+                    chunk_count += 1
+                    buf = io.StringIO()
+                    writer = csv.writer(buf)
+
+                    for row in rows:
+                        row_count += 1
+                        privilege_tier = f'T{row[10]}' if row[10] is not None else 'T3'
+                        cred_expiry = row[16].isoformat() if row[16] else ''
+                        created = row[17].isoformat() if row[17] else ''
+                        last_active = row[18].isoformat() if row[18] else ''
+                        ca_mfa = 'Yes' if row[22] else 'No'
+                        enabled = 'Yes' if (row[23] if row[23] is not None else True) else 'No'
+                        risk_reasons = '; '.join(row[24]) if row[24] else ''
+
+                        writer.writerow([
+                            row[0] or '',           # display_name
+                            row[1] or '',           # identity_id
+                            row[2] or '',           # identity_type
+                            _normalize_category_key(row[3] or ''),  # identity_category
+                            row[4] or '',           # subscription_name
+                            row[5] or '',           # subscription_id
+                            row[6] or 'azure',      # cloud
+                            row[7] or 'entra_id',   # permission_plane
+                            row[8] or 'info',       # risk_level
+                            _normalize_risk_score(row[9]),  # risk_score (0-10)
+                            privilege_tier,          # privilege_tier
+                            int(row[11] or 0),      # entra_role_count
+                            int(row[12] or 0),      # rbac_role_count
+                            int(row[13] or 0),      # api_permission_count
+                            int(row[14] or 0),      # credential_count
+                            row[15] or 'unknown',   # credential_status
+                            cred_expiry,            # credential_expiration
+                            created,                # created_datetime
+                            last_active,            # last_seen_auth
+                            row[19] or 'unknown',   # activity_status
+                            row[20] or '',          # owner_display_name
+                            row[21] or '',          # ca_coverage_status
+                            ca_mfa,                 # ca_mfa_enforced
+                            enabled,                # enabled
+                            risk_reasons,           # risk_reasons
+                        ])
+
+                    yield buf.getvalue()
+                    offset += chunk_size
+
+                    if len(rows) < chunk_size:
+                        break
+
+                _logger.info("Export completed: org_id=%s, rows=%d, chunks=%d",
+                             org_id, row_count, chunk_count)
+            except Exception as e:
+                _logger.error("Export stream error at chunk %d: %s", chunk_count, e)
+            finally:
+                export_cursor.close()
+                db.close()
+
+        # Log export initiation
+        try:
+            log_db = _db()
+            _log(log_db, 'export', f'Identities CSV export started ({total_count} records)',
+                 {'export_type': 'identities_csv', 'total_count': total_count,
+                  'chunk_size': chunk_size, 'org_id': org_id})
+            log_db.close()
+        except Exception:
+            pass
+
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        filename = f"identities_{org_id}_{timestamp}.csv"
+
+        return Response(
+            stream_with_context(generate()),
+            status=200,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'X-Export-Total-Count': str(total_count),
+                'Transfer-Encoding': 'chunked',
+                'Cache-Control': 'no-cache',
+                'X-Export-Chunk-Size': str(chunk_size),
+            }
+        )
+
+    except Exception as e:
+        _logger.error("Export init failed for org_id=%s: %s", org_id, e)
+        try:
+            cursor.close()
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': 'Export failed', 'detail': str(e)}), 500
+
+
+def _export_identities_json():
+    """Legacy JSON export (format=json) — retained for backward compat."""
     db = _db()
     cursor = db.conn.cursor()
     try:
@@ -11074,8 +13296,8 @@ def _export_identities():
             })
 
         try:
-            _log(db,'export', f'Identities export generated ({len(identities)} records)',
-                            {'export_type': 'identities', 'count': len(identities)})
+            _log(db, 'export', f'Identities export generated ({len(identities)} records)',
+                 {'export_type': 'identities', 'count': len(identities)})
         except Exception:
             pass
 
@@ -11291,7 +13513,7 @@ def _export_risk_summary():
     """Export executive risk summary for SIEM/GRC integration."""
     db = _db()
     try:
-        data = db.get_report_data()
+        data = db.get_report_data(org_id=_org_id())
         if data is None:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
@@ -11332,7 +13554,7 @@ def _export_evidence_package():
     """Export comprehensive HIPAA-aligned evidence package bundling all audit data."""
     db = _db()
     try:
-        data = db.get_report_data()
+        data = db.get_report_data(org_id=_org_id())
         if data is None:
             return jsonify({'error': 'No completed discovery runs found'}), 404
 
@@ -12485,7 +14707,7 @@ def create_access_review():
                                       campaign_type=campaign_type, scope_clouds=scope_clouds,
                                       scope_description=scope_description, risk_focus=risk_focus,
                                       organization_id=organization_id)
-        review_count = db.populate_campaign_reviews(campaign['id'], scope, user['id'], deadline=deadline)
+        review_count = db.populate_campaign_reviews(campaign['id'], scope, user['id'], deadline=deadline, org_id=_org_id())
 
         # Audit log
         db.log_campaign_audit(campaign['id'], None, 'campaign_created', user['id'],
@@ -12756,6 +14978,39 @@ def get_groups_list():
                           {where_clause} {HIDE_MICROSOFT_SQL}
                     """, [run_ids] + where_params)
                     grp['member_count'] = _scalar(cursor, 0)
+
+            # Append Entra security groups from latest discovery run
+            try:
+                db._ensure_entra_group_tables()
+                cursor.execute("""
+                    SELECT id, display_name, member_count, is_privileged,
+                           is_role_assignable, group_id as azure_object_id
+                    FROM entra_groups
+                    WHERE discovery_run_id = ANY(%s)
+                      AND rbac_roles IS NOT NULL
+                      AND rbac_roles != '[]'::jsonb
+                    ORDER BY display_name ASC
+                """, (run_ids,))
+                for row in cursor.fetchall():
+                    groups.append({
+                        'id': f"entra-{row[5]}",
+                        'name': row[1],
+                        'display_name': row[1],
+                        'member_count': row[2] or 0,
+                        'group_type': 'entra',
+                        'source': 'entra',
+                        'color': '#7C3AED',
+                        'is_privileged': row[3],
+                        'is_role_assignable': row[4],
+                        'azure_object_id': row[5],
+                    })
+            except Exception as e:
+                logger.warning("Failed to load Entra groups for filter: %s", e)
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+
         cursor.close()
 
         return jsonify({'groups': groups})
@@ -12789,14 +15044,84 @@ def create_group_handler():
 
 
 def get_group_detail(group_id):
+    """Get group detail — handles both custom integer IDs and 'entra-{uuid}' string IDs."""
     db = _db()
     try:
-        group = db.get_group(group_id)
+        group_id_str = str(group_id)
+        # Entra groups use 'entra-{azure_object_id}' prefix
+        if group_id_str.startswith('entra-'):
+            azure_object_id = group_id_str[6:]  # strip 'entra-' prefix
+            return _get_entra_group_detail(db, azure_object_id)
+
+        # Custom / auto groups use integer IDs
+        try:
+            int_id = int(group_id_str)
+        except ValueError:
+            return jsonify({'error': 'Invalid group ID'}), 400
+
+        group = db.get_group(int_id)
         if not group:
             return jsonify({'error': 'Group not found'}), 404
         return jsonify(group)
     finally:
         db.close()
+
+
+def _get_entra_group_detail(db, azure_object_id: str):
+    """Return Entra group detail with members in the same format as identity_groups."""
+    db._ensure_entra_group_tables()
+    organization_id = _org_id()
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No completed discovery runs'}), 404
+
+        cursor.execute("""
+            SELECT id, group_id, display_name, description, member_count,
+                   is_privileged, is_role_assignable, membership_type,
+                   discovery_run_id
+            FROM entra_groups
+            WHERE group_id = %s AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (azure_object_id, run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Entra group not found'}), 404
+        row = dict(row)
+        entra_group_db_id = row['id']
+        run_id = row['discovery_run_id']
+
+        # Fetch members via entra_group_memberships → identities
+        cursor.execute("""
+            SELECT DISTINCT i.identity_id, i.display_name,
+                   COALESCE(i.identity_category, '') as identity_category,
+                   COALESCE(i.cloud, 'azure') as cloud,
+                   i.risk_level, COALESCE(i.risk_score, 0) as risk_score,
+                   i.activity_status
+            FROM entra_group_memberships egm
+            JOIN identities i ON i.object_id = egm.member_object_id
+                             AND i.discovery_run_id = egm.discovery_run_id
+            WHERE egm.group_db_id = %s
+              AND egm.discovery_run_id = %s
+            ORDER BY i.display_name ASC
+        """, (entra_group_db_id, run_id))
+        members = [dict(r) for r in cursor.fetchall()]
+
+        return jsonify({
+            'id': f"entra-{azure_object_id}",
+            'name': row['display_name'],
+            'display_name': row['display_name'],
+            'description': row.get('description'),
+            'group_type': 'entra',
+            'source': 'entra',
+            'member_count': row['member_count'] or len(members),
+            'is_privileged': row['is_privileged'],
+            'is_role_assignable': row['is_role_assignable'],
+            'members': members,
+        })
+    finally:
+        cursor.close()
 
 
 def update_group_handler(group_id):
@@ -13062,7 +15387,12 @@ def get_query_fields():
 # ================================================================
 
 def get_anomalies_list():
-    """GET /api/anomalies — list anomalies with optional filters."""
+    """GET /api/anomalies — list anomalies with optional filters.
+
+    Anomalies persist until resolved, so the default view shows all
+    unresolved anomalies for the org (not scoped to latest run).
+    Callers can still filter by run_id explicitly.
+    """
     db = _db()
     try:
         limit = _safe_query_int('limit', 50, 200)
@@ -13076,17 +15406,10 @@ def get_anomalies_list():
         if resolved_param is not None:
             resolved = resolved_param.lower() == 'true'
 
-        # Connection-scoped: filter anomalies to runs belonging to the selected connection
-        run_ids = None
-        if not run_id:
-            cursor = db.conn.cursor()
-            run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
-            cursor.close()
-
         anomalies = db.get_anomalies(
             limit=limit, offset=offset, anomaly_type=anomaly_type,
             severity=severity, identity_id=identity_id, resolved=resolved,
-            run_id=run_id, run_ids=run_ids,
+            run_id=run_id, run_ids=None,
         )
         return jsonify({'anomalies': anomalies, 'count': len(anomalies)})
     finally:
@@ -13094,13 +15417,15 @@ def get_anomalies_list():
 
 
 def get_anomaly_stats_handler():
-    """GET /api/anomalies/stats — anomaly summary stats."""
+    """GET /api/anomalies/stats — anomaly summary stats.
+
+    Returns all unresolved anomalies for the organization, not scoped to
+    the latest discovery run.  Anomalies persist until explicitly resolved
+    regardless of which run detected them.
+    """
     db = _db()
     try:
-        cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
-        cursor.close()
-        stats = db.get_anomaly_stats(run_ids=run_ids)
+        stats = db.get_anomaly_stats(run_ids=None)
         return jsonify(stats)
     finally:
         db.close()
@@ -13697,11 +16022,15 @@ def get_organizations_list():
 
 
 def create_organization_handler():
-    """POST /api/organizations — create a new organization (superadmin only)."""
+    """POST /api/organizations — create a new organization (admin portal).
+
+    Admin portal enrollment defaults to 'pro' plan (no identity limits,
+    no trial expiry). Self-signup via /api/auth/signup uses 'trial'.
+    """
     data = request.get_json(silent=True) or {}
     name = str(data.get('name', '')).strip()
     slug = str(data.get('slug', '')).strip().lower()
-    plan = str(data.get('plan', 'free')).strip().lower()
+    plan = str(data.get('plan', 'pro')).strip().lower()  # admin portal default = pro
 
     if not name:
         return jsonify({'error': 'name is required'}), 400
@@ -13713,8 +16042,8 @@ def create_organization_handler():
         return jsonify({'error': 'slug must be alphanumeric (hyphens and underscores allowed)'}), 400
     if len(slug) > 100:
         return jsonify({'error': 'slug must be 100 characters or less'}), 400
-    if plan not in ('free', 'trial', 'pro'):
-        return jsonify({'error': 'plan must be free, trial, or pro'}), 400
+    if plan not in ('free', 'trial', 'pro', 'enterprise'):
+        return jsonify({'error': 'plan must be free, trial, pro, or enterprise'}), 400
 
     # Phase 85: Optional onboarding fields
     primary_cloud = str(data.get('primary_cloud', '')).strip().lower() or None
@@ -13770,7 +16099,7 @@ def create_organization_handler():
             if existing_user:
                 return jsonify({'error': f'Username "{root_username}" already exists'}), 409
 
-            hashed = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            hashed = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
             current_user = getattr(g, 'current_user', None)
             created_by = current_user['id'] if current_user else None
 
@@ -14542,10 +16871,11 @@ def get_onboarding_status():
     try:
         tid = _org_id()
         settings = db.get_settings(organization_id=tid)
-        completed = settings.get('onboarding_completed', 'false') == 'true'
+        completed_flag = settings.get('onboarding_completed', 'false') == 'true'
 
         # Check cloud_connections table for verified connections (not stale settings keys)
         azure_configured = False
+        cloud_connections_count = 0
         try:
             cursor = db.conn.cursor()
             cursor.execute("""
@@ -14553,17 +16883,25 @@ def get_onboarding_status():
                 WHERE organization_id = %s AND status = 'connected'
             """, (tid,))
             row = cursor.fetchone()
-            azure_configured = row and row[0] > 0
+            cloud_connections_count = (row[0] if row else 0)
+            azure_configured = cloud_connections_count > 0
             cursor.close()
         except Exception:
             try: db.conn.rollback()
             except Exception: pass
-            # Fallback to settings keys if cloud_connections table doesn't exist
-            azure_configured = all([
-                settings.get('azure_directory_id'),
-                settings.get('azure_client_id'),
-                settings.get('azure_client_secret'),
-            ])
+
+        # FIX: Never report onboarding as complete if no cloud connection
+        # actually exists. The settings flag alone is not sufficient — the
+        # user must have successfully tested a connection during the wizard.
+        completed = completed_flag and (azure_configured or cloud_connections_count > 0)
+
+        # Pre-fetch org name (needed for checklist + response)
+        org_name = ''
+        try:
+            org = db.get_organization_by_id(tid)
+            org_name = (org or {}).get('name', '') or ''
+        except Exception:
+            pass
 
         # Check for active subscriptions
         subs_activated = False
@@ -14583,11 +16921,14 @@ def get_onboarding_status():
             pass
 
         # Build onboarding checklist
+        # org_name: check both settings key and organization name
+        # (signup sets org name on the organizations table, not settings)
+        has_org_name = bool(settings.get('org_name') or org_name)
         checklist = [
             {
                 'key': 'org_name',
                 'label': 'Set organization name',
-                'done': bool(settings.get('org_name')),
+                'done': has_org_name,
             },
             {
                 'key': 'cloud_connected',
@@ -14645,11 +16986,13 @@ def get_onboarding_status():
         return jsonify({
             'onboarding_completed': completed,
             'azure_configured': azure_configured,
+            'cloud_connections_count': cloud_connections_count,
             'snapshot_completed': snapshot_completed,
             'has_settings': bool(settings),
             'checklist': checklist,
             'checklist_progress': done_count,
             'checklist_total': len(checklist),
+            'org_name': org_name,
         })
     finally:
         db.close()
@@ -14661,9 +17004,9 @@ def test_azure_connection():
     if not data:
         return jsonify({'error': 'Expected JSON body'}), 400
 
-    azure_directory_id = (data.get('azure_directory_id') or '').strip()
-    azure_client_id = (data.get('azure_client_id') or '').strip()
-    azure_client_secret = (data.get('azure_client_secret') or '').strip()
+    azure_directory_id = (data.get('azure_directory_id') or data.get('tenant_id') or '').strip()
+    azure_client_id = (data.get('azure_client_id') or data.get('client_id') or '').strip()
+    azure_client_secret = (data.get('azure_client_secret') or data.get('client_secret') or '').strip()
 
     if not all([azure_directory_id, azure_client_id, azure_client_secret]):
         return jsonify({'error': 'All three Azure credential fields are required'}), 400
@@ -14703,14 +17046,65 @@ def test_azure_connection():
             admin_db = Database(_admin_reason='test_azure: advance stage + insert subs')
             try:
                 admin_db.update_organization(tid, onboarding_stage='active')
-                admin_db._ensure_cloud_subscriptions_table()
+
+                # Ensure a cloud_connection exists for this directory (needed as FK for subscriptions)
+                # Always persist encrypted credentials so discovery can use them later
+                from app.encryption import encrypt_field
+                encrypted_meta = json.dumps({'client_secret': encrypt_field(azure_client_secret)})
                 cursor = admin_db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM cloud_connections
+                    WHERE organization_id = %s AND cloud = 'azure'
+                      AND azure_directory_id = %s
+                    ORDER BY id LIMIT 1
+                """, (tid, azure_directory_id))
+                row = cursor.fetchone()
+                if row:
+                    conn_id = row[0]
+                    # Update credentials + status on existing connection
+                    cursor.execute("""
+                        UPDATE cloud_connections
+                        SET metadata = %s, client_id = %s, status = 'connected',
+                            credential_last_rotated = NOW(), updated_at = NOW()
+                        WHERE id = %s
+                    """, (encrypted_meta, azure_client_id, conn_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO cloud_connections
+                            (organization_id, cloud, connection_type, label,
+                             azure_directory_id, client_id, status, metadata,
+                             credential_last_rotated)
+                        VALUES (%s, 'azure', 'entra', 'Primary',
+                                %s, %s, 'connected', %s, NOW())
+                        RETURNING id
+                    """, (tid, azure_directory_id, azure_client_id, encrypted_meta))
+                    conn_id = cursor.fetchone()[0]
+
+                admin_db._ensure_cloud_subscriptions_table()
                 for s in subs:
                     cursor.execute("""
-                        INSERT INTO cloud_subscriptions (organization_id, cloud, account_id, account_name, status)
-                        VALUES (%s, 'azure', %s, %s, 'discovered')
-                        ON CONFLICT (organization_id, cloud, account_id) DO NOTHING
-                    """, (tid, s['id'], s['name']))
+                        INSERT INTO cloud_subscriptions
+                            (organization_id, cloud, account_id, account_name,
+                             status, cloud_connection_id)
+                        VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                        ON CONFLICT (organization_id, cloud, account_id)
+                        DO UPDATE SET cloud_connection_id = EXCLUDED.cloud_connection_id,
+                                      account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
+                    """, (tid, s['id'], s['name'], conn_id))
+                # Auto-enable P2 telemetry if connection already has P2 license
+                cursor.execute(
+                    "SELECT has_p2_license FROM cloud_connections WHERE id = %s",
+                    (conn_id,)
+                )
+                p2_row = cursor.fetchone()
+                if p2_row and p2_row[0]:
+                    cursor.execute("""
+                        INSERT INTO settings (key, value, organization_id, updated_at)
+                        VALUES ('p2_telemetry_enabled', 'true', %s, NOW())
+                        ON CONFLICT (organization_id, key) DO UPDATE SET value = 'true', updated_at = NOW()
+                    """, (tid,))
+                    logger.info("P2 auto-enabled for org %s at connection time", tid)
+
                 admin_db._commit()
                 cursor.close()
                 # Seed auto identity groups for this org
@@ -14729,13 +17123,20 @@ def test_azure_connection():
             'message': msg,
         })
     except Exception as e:
-        try: db.conn.rollback()
-        except Exception: pass
         logger.error(f"Azure connection test failed: {e}", exc_info=True)
+        err_str = str(e)
+        if 'AADSTS7000215' in err_str:
+            hint = 'Invalid client secret. Ensure you are using the secret Value (not the Secret ID).'
+        elif 'AADSTS700016' in err_str:
+            hint = 'Application not found. Verify the Client ID matches your App Registration.'
+        elif 'AADSTS90002' in err_str:
+            hint = 'Tenant not found. Verify the Directory (Tenant) ID.'
+        else:
+            hint = 'Failed to connect. Check your credentials and network access.'
         return jsonify({
             'status': 'error',
             'error': 'Connection test failed',
-            'message': 'Failed to connect. Check your credentials.',
+            'message': hint,
         }), 400
 
 
@@ -14842,9 +17243,9 @@ def create_client_connection():
 
     cloud = (data.get('cloud') or 'azure').strip().lower()
     label = (data.get('label') or '').strip()
-    azure_directory_id = (data.get('azure_directory_id') or data.get('azure_directory_id') or '').strip()
+    azure_directory_id = (data.get('azure_directory_id') or data.get('tenant_id') or '').strip()
     client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
-    client_secret = (data.get('client_secret') or '').strip()
+    client_secret = (data.get('client_secret') or data.get('azure_client_secret') or '').strip()
     connection_type = (data.get('connection_type') or 'entra').strip()
     status = (data.get('status') or 'pending').strip()
 
@@ -14930,10 +17331,10 @@ def create_client_connection():
                         tid, cloud, foreign_conn['id'], group_list)
                     discovered_count += len(group_list)
                     discovered_subs.extend(group_list)
-            except Exception:
+            except Exception as e:
                 try: db.conn.rollback()
                 except Exception: pass
-                pass  # Non-fatal — connection is still saved
+                logger.warning("Azure subscription re-discovery failed for connection %s: %s", conn['id'], e)
         elif cloud == 'aws' and status == 'connected':
             access_key_id = metadata.get('access_key_id') or client_id
             secret_access_key = metadata.get('secret_access_key') or client_secret
@@ -14960,6 +17361,18 @@ def create_client_connection():
                     except Exception: pass
                     pass  # Non-fatal
 
+        # Fallback: if re-discovery yielded nothing, count subs already linked
+        # (e.g. inserted during the test-connection step)
+        if discovered_count == 0:
+            try:
+                existing = db.get_cloud_subscriptions(tid, cloud=cloud, connection_id=conn['id'])
+                if existing:
+                    discovered_count = len(existing)
+                    discovered_subs = [{'id': s.get('account_id', ''), 'name': s.get('account_name', '')} for s in existing]
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+
         _log(db, 'connection_created', f'Created {cloud} connection: {label}',
              {'connection_id': conn['id'], 'cloud': cloud, 'discovered_subs': discovered_count})
 
@@ -14967,9 +17380,8 @@ def create_client_connection():
         from app.entitlements.service import track_usage
         track_usage(db, tid, 'connection', str(conn['id']), 'added', {'cloud': cloud})
 
-        # Auto-trigger initial discovery scan for verified connections
+        # Advance org stage to 'active' for verified connections (no auto-discovery)
         if status == 'connected':
-            # Advance org stage to 'active' so UI unlocks immediately
             try:
                 adm = Database(_admin_reason='create_connection: advance onboarding stage')
                 try:
@@ -14980,23 +17392,6 @@ def create_client_connection():
                     adm.close()
             except Exception:
                 pass
-
-            import threading
-            from app.scheduler import trigger_manual_discovery
-            _conn_id = conn['id']
-            _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
-            def _run_initial_discovery():
-                try:
-                    trigger_manual_discovery(
-                        scan_mode='deep',
-                        db_org_id=tid,
-                        org_name=_org_name,
-                        connection_id=_conn_id,
-                    )
-                except Exception as e:
-                    logging.getLogger(__name__).error(f"Initial discovery after connection save failed: {e}")
-            thread = threading.Thread(target=_run_initial_discovery, daemon=True)
-            thread.start()
 
         # Security event: connector created
         from app.security_events import SecurityEventLogger
@@ -15263,6 +17658,1009 @@ def check_connector_credential_expiry_handler():
         db.close()
 
 
+def get_connector_permissions_handler():
+    """GET /api/connectors/permissions — return permission check results for all connectors."""
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    connection_id = request.args.get('connection_id', type=int)
+    db = _db()
+    try:
+        rows = db.get_connector_permissions(tid, connection_id=connection_id)
+        if connection_id:
+            # Single connection: rows = [(permission_name, status, tested_at, error_detail, impact)]
+            permissions = []
+            for row in rows:
+                permissions.append({
+                    'permission_name': row[0],
+                    'status': row[1],
+                    'tested_at': row[2].isoformat() if row[2] else None,
+                    'error_detail': row[3],
+                    'impact_description': row[4],
+                })
+            return jsonify({'permissions': permissions})
+        else:
+            # All connections: rows = [(connection_id, permission_name, status, tested_at, error, impact)]
+            by_connection = {}
+            for row in rows:
+                conn_id = row[0]
+                if conn_id not in by_connection:
+                    by_connection[conn_id] = []
+                by_connection[conn_id].append({
+                    'permission_name': row[1],
+                    'status': row[2],
+                    'tested_at': row[3].isoformat() if row[3] else None,
+                    'error_detail': row[4],
+                    'impact_description': row[5],
+                })
+            return jsonify({'connections': by_connection})
+    finally:
+        db.close()
+
+
+def get_telemetry_coverage_handler():
+    """GET /api/telemetry/coverage — return per-identity telemetry coverage summary.
+
+    Returns org-wide coverage breakdown (full/partial/blind counts),
+    per-category breakdown, and connector permission impact mapping.
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Get latest completed run for this org
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (tid,))
+        run_row = cursor.fetchone()
+        if not run_row:
+            cursor.close()
+            return jsonify({
+                'summary': {'full': 0, 'partial': 0, 'blind': 0, 'total': 0},
+                'by_category': {},
+                'permission_impact': [],
+            })
+
+        run_id = run_row[0]
+
+        # Org-wide coverage summary
+        cursor.execute("""
+            SELECT
+                COALESCE(telemetry_coverage, 'blind') AS coverage,
+                COUNT(*) AS cnt
+            FROM identities
+            WHERE discovery_run_id = %s
+              AND NOT COALESCE(is_microsoft_system, false)
+            GROUP BY COALESCE(telemetry_coverage, 'blind')
+        """, (run_id,))
+        summary = {'full': 0, 'partial': 0, 'blind': 0}
+        for row in cursor.fetchall():
+            cov = row[0] if row[0] in ('full', 'partial', 'blind') else 'blind'
+            summary[cov] += row[1]
+        summary['total'] = summary['full'] + summary['partial'] + summary['blind']
+
+        # Per-category breakdown
+        cursor.execute("""
+            SELECT
+                COALESCE(identity_category, 'unknown') AS category,
+                COALESCE(telemetry_coverage, 'blind') AS coverage,
+                COUNT(*) AS cnt
+            FROM identities
+            WHERE discovery_run_id = %s
+              AND NOT COALESCE(is_microsoft_system, false)
+            GROUP BY identity_category, COALESCE(telemetry_coverage, 'blind')
+            ORDER BY identity_category
+        """, (run_id,))
+        by_category = {}
+        for row in cursor.fetchall():
+            cat = row[0]
+            cov = row[1] if row[1] in ('full', 'partial', 'blind') else 'blind'
+            if cat not in by_category:
+                by_category[cat] = {'full': 0, 'partial': 0, 'blind': 0}
+            by_category[cat][cov] += row[2]
+
+        cursor.close()
+
+        # Permission impact mapping from connector_permissions
+        permission_impact = []
+        try:
+            perm_rows = db.get_connector_permissions(tid)
+            for row in perm_rows:
+                # All connections: (connection_id, permission_name, status, tested_at, error, impact)
+                permission_impact.append({
+                    'connection_id': row[0],
+                    'permission_name': row[1],
+                    'status': row[2],
+                    'tested_at': row[3].isoformat() if row[3] else None,
+                    'impact_description': row[5],
+                })
+        except Exception:
+            pass
+
+        return jsonify({
+            'summary': summary,
+            'by_category': by_category,
+            'permission_impact': permission_impact,
+            'run_id': run_id,
+        })
+    finally:
+        db.close()
+
+
+def get_role_usage_summary_handler():
+    """GET /api/role-usage/summary — org-wide role usage classification summary.
+
+    Returns total role assignments classified as used / no_observed_usage /
+    telemetry_blind, plus top identities by no_observed_usage count.
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    observation_window = request.args.get('window_days', 90, type=int)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Get latest completed run
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (tid,))
+        run_row = cursor.fetchone()
+        if not run_row:
+            cursor.close()
+            return jsonify({
+                'summary': {
+                    'total_roles': 0, 'used': 0,
+                    'no_observed_usage': 0, 'telemetry_blind': 0,
+                    'insufficient_coverage': 0,
+                },
+                'observation_window_days': observation_window,
+                'top_identities': [],
+            })
+        run_id = run_row[0]
+
+        # Classify every role assignment (RBAC + Entra) for identities in
+        # this run.  Uses UNION ALL to include both tables with consistent
+        # classification logic and multi-source activity check.
+        #
+        # Activity check uses GREATEST(last_activity_date, last_sign_in,
+        # last_noninteractive_signin) to match per-identity multi-source
+        # resolution and avoid false "no_observed_usage" when sign-in data
+        # exists but last_activity_date is stale.
+        #
+        # Telemetry coverage: NULL/empty treated as 'partial' when identity
+        # has any activity signal (prevents false insufficient_coverage).
+        _classification_sql = """
+            SELECT classification, SUM(cnt) AS cnt FROM (
+                SELECT
+                    CASE
+                        WHEN ra.last_used_at IS NOT NULL
+                             AND ra.last_used_at >= NOW() - make_interval(days => %(window)s)
+                            THEN 'used'
+                        WHEN COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                ELSE NULL END) = 'blind'
+                            THEN 'telemetry_blind'
+                        WHEN COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                ELSE NULL END) IN ('full', 'partial')
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) IS NOT NULL
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) >= NOW() - make_interval(days => %(window)s)
+                            THEN 'unknown'
+                        WHEN COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                ELSE NULL END) IN ('full', 'partial')
+                            THEN 'no_observed_usage'
+                        ELSE 'insufficient_coverage'
+                    END AS classification,
+                    COUNT(*) AS cnt
+                FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE i.discovery_run_id = %(run_id)s
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                GROUP BY classification
+
+                UNION ALL
+
+                SELECT
+                    CASE
+                        WHEN era.last_used_at IS NOT NULL
+                             AND era.last_used_at >= NOW() - make_interval(days => %(window)s)
+                            THEN 'used'
+                        WHEN COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                ELSE NULL END) = 'blind'
+                            THEN 'telemetry_blind'
+                        WHEN COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                ELSE NULL END) IN ('full', 'partial')
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) IS NOT NULL
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) >= NOW() - make_interval(days => %(window)s)
+                            THEN 'unknown'
+                        WHEN COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                ELSE NULL END) IN ('full', 'partial')
+                            THEN 'no_observed_usage'
+                        ELSE 'insufficient_coverage'
+                    END AS classification,
+                    COUNT(*) AS cnt
+                FROM entra_role_assignments era
+                JOIN identities i ON i.id = era.identity_db_id
+                WHERE i.discovery_run_id = %(run_id)s
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                GROUP BY classification
+            ) combined
+            GROUP BY classification
+        """
+        cursor.execute(_classification_sql, {
+            'window': observation_window,
+            'run_id': run_id,
+        })
+
+        summary = {
+            'total_roles': 0, 'used': 0, 'unknown': 0,
+            'no_observed_usage': 0, 'telemetry_blind': 0,
+            'insufficient_coverage': 0,
+        }
+        for row in cursor.fetchall():
+            cls = row[0]
+            cnt = row[1]
+            if cls in summary:
+                summary[cls] = cnt
+            summary['total_roles'] += cnt
+
+        # Top identities by no_observed_usage count (RBAC + Entra combined)
+        cursor.execute("""
+            SELECT
+                i.identity_id,
+                i.display_name,
+                i.identity_category,
+                no_obs.no_observed_count,
+                no_obs.total_roles
+            FROM (
+                SELECT
+                    combined.identity_db_id,
+                    COUNT(*) FILTER (
+                        WHERE combined.has_p1 = false
+                          AND combined.has_coverage = true
+                    ) AS no_observed_count,
+                    COUNT(*) AS total_roles
+                FROM (
+                    SELECT ra.identity_db_id,
+                           (ra.last_used_at IS NOT NULL) AS has_p1,
+                           COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                               WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                               ELSE NULL END) IN ('full', 'partial') AS has_coverage
+                    FROM role_assignments ra
+                    JOIN identities i ON i.id = ra.identity_db_id
+                    WHERE i.discovery_run_id = %s
+                      AND NOT COALESCE(i.is_microsoft_system, false)
+                    UNION ALL
+                    SELECT era.identity_db_id,
+                           (era.last_used_at IS NOT NULL) AS has_p1,
+                           COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                               WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                               ELSE NULL END) IN ('full', 'partial') AS has_coverage
+                    FROM entra_role_assignments era
+                    JOIN identities i ON i.id = era.identity_db_id
+                    WHERE i.discovery_run_id = %s
+                      AND NOT COALESCE(i.is_microsoft_system, false)
+                ) combined
+                GROUP BY combined.identity_db_id
+                HAVING COUNT(*) FILTER (
+                    WHERE combined.has_p1 = false AND combined.has_coverage = true
+                ) > 0
+            ) no_obs
+            JOIN identities i ON i.id = no_obs.identity_db_id
+            ORDER BY no_obs.no_observed_count DESC
+            LIMIT 10
+        """, (run_id, run_id))
+        top_identities = []
+        for row in cursor.fetchall():
+            top_identities.append({
+                'identity_id': row[0],
+                'display_name': row[1],
+                'identity_category': row[2],
+                'no_observed_usage_count': row[3],
+                'total_roles': row[4],
+            })
+
+        cursor.close()
+        return jsonify({
+            'summary': summary,
+            'observation_window_days': observation_window,
+            'top_identities': top_identities,
+            'run_id': run_id,
+        })
+    finally:
+        db.close()
+
+
+def get_optimization_recommendations_handler():
+    """GET /api/optimization/recommendations — list persisted optimization recommendations.
+
+    Query params:
+        identity_id:    filter by identity
+        classification: candidate_remove | candidate_review | insufficient_evidence | potential_scope_narrowing
+        review_status:  open | accepted | dismissed | deferred
+        include_dismissed: true/false (default false)
+        limit:          max rows (default 100)
+        offset:         pagination offset
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    identity_id = request.args.get('identity_id')
+    classification = request.args.get('classification')
+    review_status = request.args.get('review_status')
+    include_dismissed = request.args.get('include_dismissed', 'false').lower() == 'true'
+    limit = request.args.get('limit', 100, type=int)
+    offset = request.args.get('offset', 0, type=int)
+
+    db = _db()
+    try:
+        recs = db.get_optimization_recommendations(
+            tid,
+            include_dismissed=include_dismissed,
+            identity_id=identity_id,
+            classification=classification,
+            review_status=review_status,
+            limit=min(limit, 500),
+            offset=offset,
+        )
+
+        # Serialize datetimes
+        for r in recs:
+            for k in ('created_at', 'updated_at', 'reviewed_at', 'generated_at'):
+                v = r.get(k)
+                if v and hasattr(v, 'isoformat'):
+                    r[k] = v.isoformat()
+
+        counts = db.get_optimization_summary_counts(tid, include_dismissed=include_dismissed)
+
+        return jsonify({
+            'recommendations': recs,
+            'total_by_classification': counts,
+            'filters': {
+                'identity_id': identity_id,
+                'classification': classification,
+                'review_status': review_status,
+                'include_dismissed': include_dismissed,
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_optimization_recommendation_detail_handler(rec_id):
+    """GET /api/optimization/recommendations/<id> — single recommendation detail."""
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = _db()
+    try:
+        rec = db.get_optimization_recommendation_by_id(tid, rec_id)
+        if not rec:
+            return jsonify({'error': 'Recommendation not found'}), 404
+
+        # Serialize datetimes
+        for k in ('created_at', 'updated_at', 'reviewed_at', 'generated_at'):
+            v = rec.get(k)
+            if v and hasattr(v, 'isoformat'):
+                rec[k] = v.isoformat()
+
+        return jsonify({'recommendation': rec})
+    finally:
+        db.close()
+
+
+def patch_optimization_recommendation_handler(rec_id):
+    """PATCH /api/optimization/recommendations/<id> — update review state.
+
+    Body:
+        review_status: open | accepted | dismissed | deferred (required)
+        review_note:   optional reviewer comment
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Expected JSON body'}), 400
+
+    new_status = (data.get('review_status') or '').strip().lower()
+    if new_status not in ('open', 'accepted', 'dismissed', 'deferred'):
+        return jsonify({'error': 'review_status must be one of: open, accepted, dismissed, deferred'}), 400
+
+    review_note = data.get('review_note')
+
+    # Reviewer from JWT context
+    reviewer = None
+    try:
+        reviewer = g.current_user.get('email') or g.current_user.get('username') or str(g.current_user.get('id', ''))
+    except Exception:
+        pass
+
+    db = _db()
+    try:
+        updated = db.update_optimization_review(tid, rec_id, new_status, reviewer, review_note)
+        if not updated:
+            return jsonify({'error': 'Recommendation not found'}), 404
+
+        # Log the review action
+        try:
+            _log(db, 'optimization_review',
+                 f'Optimization recommendation {rec_id} marked as {new_status}',
+                 {'recommendation_id': rec_id, 'review_status': new_status, 'review_note': review_note})
+        except Exception:
+            pass
+
+        return jsonify({'id': updated, 'review_status': new_status, 'reviewer': reviewer})
+    finally:
+        db.close()
+
+
+# ── Parent Workload / Runtime Attribution ──────────────────────────────
+
+
+def get_workload_attribution_summary_handler():
+    """GET /api/workload-attributions/summary — org-wide workload attribution summary.
+
+    Query params:
+        run_id: scope to specific discovery run (optional)
+
+    Returns:
+        by_workload_type: [{workload_type, identity_count, binding_count, avg_confidence, ai_count}]
+        top_workloads:    [{workload_name, workload_type, identity_count}]
+        coverage:         {total_nhi_identities, attributed, unattributed, coverage_pct}
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    run_id = request.args.get('run_id', type=int)
+
+    db = _db()
+    try:
+        summary = db.get_workload_attribution_summary(tid, run_id=run_id)
+
+        # Serialize avg_confidence to 1 decimal
+        for row in summary.get('by_workload_type', []):
+            if row.get('avg_confidence') is not None:
+                row['avg_confidence'] = round(float(row['avg_confidence']), 1)
+        for row in summary.get('top_workloads', []):
+            if row.get('avg_confidence') is not None:
+                row['avg_confidence'] = round(float(row['avg_confidence']), 1)
+
+        return jsonify(summary)
+    finally:
+        db.close()
+
+
+def get_identity_workload_handler(identity_id):
+    """GET /api/identities/<id>/workload — workload attributions for an identity.
+
+    Returns:
+        attributions:   list of workload attributions, highest confidence first
+        primary:        the highest-confidence attribution (or null)
+        explainability: human-readable summary of workload context
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    db = _db()
+    try:
+        # Resolve identity_db_id
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, tid, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'attributions': [], 'primary': None, 'explainability': None})
+
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+            LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+
+        if not row:
+            return jsonify({'attributions': [], 'primary': None, 'explainability': None})
+
+        identity_db_id = row[0]
+        attrs = db.get_identity_workload_attributions(tid, identity_db_id)
+
+        # Serialize datetimes
+        for a in attrs:
+            for k in ('created_at', 'updated_at'):
+                v = a.get(k)
+                if v and hasattr(v, 'isoformat'):
+                    a[k] = v.isoformat()
+
+        primary = attrs[0] if attrs else None
+
+        # Build explainability narrative
+        explainability = None
+        if primary:
+            wtype = primary.get('workload_type', 'unknown')
+            wname = primary.get('workload_name')
+            basis = primary.get('attribution_basis', '')
+            conf = primary.get('attribution_confidence', 0)
+
+            basis_labels = {
+                'managed_identity_system': 'system-assigned managed identity binding',
+                'managed_identity_user': 'user-assigned managed identity binding',
+                'arm_resource_binding': 'ARM resource association',
+                'federated_credential': 'federated credential configuration',
+                'workload_type_inference': 'role topology inference',
+                'display_name_pattern': 'display name pattern',
+                'ai_classification': 'AI agent classification',
+            }
+            basis_label = basis_labels.get(basis, basis)
+
+            if wname:
+                narrative = (
+                    f"Activity likely originates from {wtype.replace('_', ' ')} "
+                    f"'{wname}', attributed via {basis_label} "
+                    f"(confidence: {conf}%)."
+                )
+            else:
+                narrative = (
+                    f"Identity is associated with a {wtype.replace('_', ' ')} workload, "
+                    f"attributed via {basis_label} "
+                    f"(confidence: {conf}%)."
+                )
+
+            if primary.get('is_ai_workload'):
+                narrative += " This workload is classified as AI/ML-related."
+
+            explainability = {
+                'narrative': narrative,
+                'confidence': conf,
+                'basis': basis,
+                'is_ai_workload': primary.get('is_ai_workload', False),
+            }
+
+        return jsonify({
+            'identity_id': identity_id,
+            'attributions': attrs,
+            'primary': primary,
+            'explainability': explainability,
+        })
+    finally:
+        db.close()
+
+
+# ── Privilege Drift / Delta Engine ─────────────────────────────────────
+
+
+def get_privilege_drift_summary_handler():
+    """GET /api/drift/summary — org-wide privilege drift summary.
+
+    Query params:
+        run_id:      scope to specific discovery run (optional)
+        limit_runs:  how many recent runs to aggregate (default 5)
+
+    Returns:
+        counts_by_type:      {drift_type: {total, privileged}}
+        top_expansions:      top 10 risky privilege additions
+        net_privilege_delta: added - removed
+        run_history:         per-run drift summaries for trend
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    run_id = request.args.get('run_id', type=int)
+    limit_runs = request.args.get('limit_runs', 5, type=int)
+
+    db = _db()
+    try:
+        summary = db.get_privilege_drift_summary(
+            tid, run_id=run_id, limit_runs=min(limit_runs, 20),
+        )
+
+        # Serialize datetimes in top_expansions
+        for exp in summary.get('top_expansions', []):
+            for k in ('created_at',):
+                v = exp.get(k)
+                if v and hasattr(v, 'isoformat'):
+                    exp[k] = v.isoformat()
+
+        # Include per-run history for trend display
+        run_history = db.get_privilege_drift_run_history(tid, limit=min(limit_runs, 20))
+        for rh in run_history:
+            for k in ('run_timestamp',):
+                v = rh.get(k)
+                if v and hasattr(v, 'isoformat'):
+                    rh[k] = v.isoformat()
+
+        summary['run_history'] = run_history
+
+        return jsonify(summary)
+    finally:
+        db.close()
+
+
+def get_identity_drift_handler(identity_id):
+    """GET /api/identities/<id>/drift — privilege drift events for an identity.
+
+    Query params:
+        limit:  max events (default 20)
+        offset: pagination offset
+
+    Returns:
+        events:         list of classified drift events
+        summary:        {added, removed, scope_expanded, scope_reduced,
+                         risk_increased, risk_reduced, total}
+        prior_vs_current: privilege count comparison from latest event pair
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    limit = request.args.get('limit', 20, type=int)
+    offset = request.args.get('offset', 0, type=int)
+
+    db = _db()
+    try:
+        events = db.get_identity_drift_events(
+            tid, identity_id, limit=min(limit, 100), offset=offset,
+        )
+
+        # Serialize datetimes
+        for ev in events:
+            for k in ('created_at',):
+                v = ev.get(k)
+                if v and hasattr(v, 'isoformat'):
+                    ev[k] = v.isoformat()
+
+        # Compute summary counts
+        summary = {
+            'privilege_added': 0,
+            'privilege_removed': 0,
+            'scope_expanded': 0,
+            'scope_reduced': 0,
+            'risk_increased': 0,
+            'risk_reduced': 0,
+        }
+        for ev in events:
+            dt = ev.get('drift_type', '')
+            if dt in summary:
+                summary[dt] += 1
+        summary['total'] = sum(summary.values())
+
+        # Prior vs current privilege counts from most recent run pair
+        prior_vs_current = None
+        if events:
+            latest = events[0]
+            latest_run = latest.get('discovery_run_id')
+            latest_prev = latest.get('previous_run_id')
+            if latest_run and latest_prev:
+                added_in_run = sum(
+                    1 for e in events
+                    if e.get('discovery_run_id') == latest_run
+                    and e.get('drift_type') == 'privilege_added'
+                )
+                removed_in_run = sum(
+                    1 for e in events
+                    if e.get('discovery_run_id') == latest_run
+                    and e.get('drift_type') == 'privilege_removed'
+                )
+                prior_vs_current = {
+                    'discovery_run_id': latest_run,
+                    'previous_run_id': latest_prev,
+                    'roles_added': added_in_run,
+                    'roles_removed': removed_in_run,
+                    'net_change': added_in_run - removed_in_run,
+                }
+
+        return jsonify({
+            'identity_id': identity_id,
+            'events': events,
+            'summary': summary,
+            'prior_vs_current': prior_vs_current,
+        })
+    finally:
+        db.close()
+
+
+def get_optimization_summary_handler():
+    """GET /api/optimization/summary — org-wide privilege optimization summary.
+
+    Identifies roles that are optimization candidates across all identities
+    in the latest completed run. Uses the canonical classification model:
+      candidate_remove:       Privileged + no_observed_usage + coverage not blind
+      candidate_review:       Privileged + unknown classification
+      potential_scope_narrowing: Broad scope with narrower observed activity
+
+    Advisory only — never implies certainty or safety of removal.
+    """
+    tid = _org_id()
+    if not tid or tid == -1:
+        return jsonify({'error': 'Tenant context required'}), 403
+
+    observation_window = request.args.get('window_days', 90, type=int)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Latest completed run
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (tid,))
+        run_row = cursor.fetchone()
+        if not run_row:
+            cursor.close()
+            return jsonify({
+                'candidate_remove': {'count': 0, 'roles': []},
+                'candidate_review': {'count': 0, 'roles': []},
+                'potential_scope_narrowing': {'count': 0, 'roles': []},
+                'observation_window_days': observation_window,
+                'total_privileged_roles': 0,
+                'total_identities_scanned': 0,
+                'top_identities': [],
+            })
+        run_id = run_row[0]
+
+        # ── Candidate removal: privileged + no_observed_usage ──
+        # Privileged = role_name in T0/T1 sets.
+        # No observed usage = last_used_at NULL within window + coverage not blind.
+        _priv_arm_list = list(_PRIV_ARM)
+        _priv_entra_list = list(_PRIV_ENTRA)
+
+        # RBAC + Entra privileged roles with no observed usage.
+        # Uses wrapping subquery to filter on computed classification.
+        _opt_sql = """
+            SELECT identity_id, display_name, identity_category,
+                   role_name, role_type, scope, scope_type, opt_classification
+            FROM (
+                SELECT
+                    i.identity_id,
+                    i.display_name,
+                    i.identity_category,
+                    ra.role_name,
+                    'azure' AS role_type,
+                    ra.scope,
+                    ra.scope_type,
+                    CASE
+                        WHEN (ra.last_used_at IS NULL
+                              OR ra.last_used_at < NOW() - make_interval(days => %(window)s))
+                             AND COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                 WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                 ELSE NULL END) IN ('full', 'partial')
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) IS NULL
+                            THEN 'candidate_remove'
+                        WHEN (ra.last_used_at IS NULL
+                              OR ra.last_used_at < NOW() - make_interval(days => %(window)s))
+                             AND COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                 WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                 ELSE NULL END) IN ('full', 'partial')
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) >= NOW() - make_interval(days => %(window)s)
+                            THEN 'candidate_review'
+                        ELSE 'other'
+                    END AS opt_classification
+                FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE i.discovery_run_id = %(run_id)s
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND NOT COALESCE(i.is_discovery_connector, false)
+                  AND LOWER(ra.role_name) = ANY(%(priv_arm)s)
+
+                UNION ALL
+
+                SELECT
+                    i.identity_id,
+                    i.display_name,
+                    i.identity_category,
+                    era.role_name,
+                    'entra' AS role_type,
+                    era.directory_scope AS scope,
+                    'directory' AS scope_type,
+                    CASE
+                        WHEN (era.last_used_at IS NULL
+                              OR era.last_used_at < NOW() - make_interval(days => %(window)s))
+                             AND COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                 WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                 ELSE NULL END) IN ('full', 'partial')
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) IS NULL
+                            THEN 'candidate_remove'
+                        WHEN (era.last_used_at IS NULL
+                              OR era.last_used_at < NOW() - make_interval(days => %(window)s))
+                             AND COALESCE(NULLIF(i.telemetry_coverage, ''), CASE
+                                 WHEN GREATEST(i.last_activity_date, i.last_sign_in) IS NOT NULL THEN 'partial'
+                                 ELSE NULL END) IN ('full', 'partial')
+                             AND GREATEST(i.last_activity_date, i.last_sign_in,
+                                          i.last_noninteractive_signin) >= NOW() - make_interval(days => %(window)s)
+                            THEN 'candidate_review'
+                        ELSE 'other'
+                    END AS opt_classification
+                FROM entra_role_assignments era
+                JOIN identities i ON i.id = era.identity_db_id
+                WHERE i.discovery_run_id = %(run_id)s
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND NOT COALESCE(i.is_discovery_connector, false)
+                  AND LOWER(era.role_name) = ANY(%(priv_entra)s)
+            ) candidates
+            WHERE opt_classification != 'other'
+        """
+        cursor.execute(_opt_sql, {
+            'window': observation_window,
+            'run_id': run_id,
+            'priv_arm': _priv_arm_list,
+            'priv_entra': _priv_entra_list,
+        })
+        all_candidates = cursor.fetchall()
+
+        # Classify results
+        remove_roles = []
+        review_roles = []
+        for row in all_candidates:
+            entry = {
+                'identity_id': row[0],
+                'display_name': row[1],
+                'identity_category': row[2],
+                'role_name': row[3],
+                'role_type': row[4],
+                'scope': row[5] or '/',
+                'scope_type': row[6],
+            }
+            if row[7] == 'candidate_remove':
+                remove_roles.append(entry)
+            elif row[7] == 'candidate_review':
+                review_roles.append(entry)
+
+        # ── Scope narrowing: broad scope with activity at narrower scope ──
+        cursor.execute("""
+            SELECT
+                i.identity_id,
+                i.display_name,
+                ra.role_name,
+                ra.scope,
+                ra.scope_type,
+                ra.last_used_operation
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND ra.last_used_at IS NOT NULL
+              AND ra.last_used_at >= NOW() - make_interval(days => %s)
+              AND COALESCE(ra.scope_type, '') IN ('subscription', 'resource_group', '')
+              AND ra.last_used_operation IS NOT NULL
+              AND ra.last_used_operation != ''
+            LIMIT 100
+        """, (run_id, observation_window))
+        narrowing_rows = cursor.fetchall()
+        narrowing_candidates = []
+        for row in narrowing_rows:
+            narrowing_candidates.append({
+                'identity_id': row[0],
+                'display_name': row[1],
+                'role_name': row[2],
+                'assigned_scope': row[3] or '/',
+                'assigned_scope_type': row[4] or 'unknown',
+                'observed_operation': row[5],
+            })
+
+        # ── Summary counts ──
+        cursor.execute("""
+            SELECT COUNT(DISTINCT i.id)
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+        """, (run_id,))
+        total_identities = cursor.fetchone()[0] or 0
+
+        # Total privileged roles
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            WHERE i.discovery_run_id = %(run_id)s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND LOWER(ra.role_name) = ANY(%(priv_arm)s)
+        """, {'run_id': run_id, 'priv_arm': _priv_arm_list})
+        priv_rbac = cursor.fetchone()[0] or 0
+
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM entra_role_assignments era
+            JOIN identities i ON i.id = era.identity_db_id
+            WHERE i.discovery_run_id = %(run_id)s
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND LOWER(era.role_name) = ANY(%(priv_entra)s)
+        """, {'run_id': run_id, 'priv_entra': _priv_entra_list})
+        priv_entra = cursor.fetchone()[0] or 0
+
+        # Top identities by candidate count
+        _identity_scores = {}
+        for entry in remove_roles:
+            iid = entry['identity_id']
+            if iid not in _identity_scores:
+                _identity_scores[iid] = {
+                    'identity_id': iid,
+                    'display_name': entry['display_name'],
+                    'identity_category': entry['identity_category'],
+                    'candidate_remove_count': 0,
+                    'candidate_review_count': 0,
+                }
+            _identity_scores[iid]['candidate_remove_count'] += 1
+        for entry in review_roles:
+            iid = entry['identity_id']
+            if iid not in _identity_scores:
+                _identity_scores[iid] = {
+                    'identity_id': iid,
+                    'display_name': entry['display_name'],
+                    'identity_category': entry['identity_category'],
+                    'candidate_remove_count': 0,
+                    'candidate_review_count': 0,
+                }
+            _identity_scores[iid]['candidate_review_count'] += 1
+
+        top_identities = sorted(
+            _identity_scores.values(),
+            key=lambda x: (x['candidate_remove_count'] + x['candidate_review_count']),
+            reverse=True,
+        )[:10]
+
+        cursor.close()
+
+        # Include persisted review state counts
+        try:
+            review_counts = db.get_optimization_summary_counts(tid)
+        except Exception:
+            review_counts = {}
+
+        return jsonify({
+            'candidate_remove': {
+                'count': len(remove_roles),
+                'roles': remove_roles[:50],
+            },
+            'candidate_review': {
+                'count': len(review_roles),
+                'roles': review_roles[:50],
+            },
+            'potential_scope_narrowing': {
+                'count': len(narrowing_candidates),
+                'roles': narrowing_candidates[:50],
+            },
+            'observation_window_days': observation_window,
+            'total_privileged_roles': priv_rbac + priv_entra,
+            'total_identities_scanned': total_identities,
+            'top_identities': top_identities,
+            'review_state': review_counts,
+            'run_id': run_id,
+        })
+    finally:
+        db.close()
+
+
 def test_client_connection():
     """Test cloud connection credentials without saving."""
     tid = _org_id()
@@ -15276,7 +18674,7 @@ def test_client_connection():
     cloud = (data.get('cloud') or 'azure').strip().lower()
 
     if cloud == 'azure':
-        azure_directory_id = (data.get('azure_directory_id') or data.get('azure_directory_id') or '').strip()
+        azure_directory_id = (data.get('azure_directory_id') or data.get('tenant_id') or '').strip()
         azure_client_id = (data.get('client_id') or data.get('azure_client_id') or '').strip()
         azure_client_secret = (data.get('client_secret') or data.get('azure_client_secret') or '').strip()
 
@@ -15683,20 +19081,16 @@ def simulate_risk(identity_id):
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         conn_id = _connection_id()
         run_ids = _latest_run_ids(cursor, _org_id(), conn_id)
-        if run_ids:
-            cursor.execute("""
-                SELECT id, identity_id, identity_category, risk_score, risk_level, risk_reasons,
-                       credential_status
-                FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s)
-                ORDER BY discovery_run_id DESC LIMIT 1
-            """, (identity_id, run_ids))
-        else:
-            cursor.execute("""
-                SELECT id, identity_id, identity_category, risk_score, risk_level, risk_reasons,
-                       credential_status
-                FROM identities WHERE identity_id = %s
-                ORDER BY discovery_run_id DESC LIMIT 1
-            """, (identity_id,))
+        if not run_ids:
+            # AG-129: No fallback to unscoped query. Return 404 if no runs.
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+        cursor.execute("""
+            SELECT id, identity_id, identity_category, risk_score, risk_level, risk_reasons,
+                   credential_status
+            FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
         row = cursor.fetchone()
         if not row:
             cursor.close()
@@ -16147,7 +19541,7 @@ def provision_organization_handler(organization_id):
         if existing:
             return jsonify({'error': f'Username "{admin_username}" already exists'}), 409
 
-        hashed = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        hashed = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
         current_user = getattr(g, 'current_user', None)
         created_by = current_user['id'] if current_user else None
 
@@ -16217,7 +19611,7 @@ def reset_client_root_user(organization_id):
 
         # Generate temp password
         temp_password = secrets.token_urlsafe(16)
-        new_hash = bcrypt.hashpw(temp_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        new_hash = bcrypt.hashpw(temp_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
 
         update_kwargs = {'password_hash': new_hash}
         if new_username and new_username != old_username:
@@ -16368,8 +19762,26 @@ def saml_login():
         sso_config = get_sso_config_for_org(db, org['id'])
         if not sso_config:
             return jsonify({'error': 'SSO is not configured for this organization'}), 400
-        auth = get_saml_auth(sso_config, request, _get_base_url())
-        sso_url = auth.login(return_to=slug)  # RelayState = org slug
+
+        # AG-95-v2: Load per-org encryption override settings
+        from app.security.sso_security import SSO_ENCRYPTION_OVERRIDE_KEYS
+        org_settings = {}
+        for _okey in SSO_ENCRYPTION_OVERRIDE_KEYS:
+            org_settings[_okey] = db.get_setting(_okey, 'false', organization_id=org['id'])
+
+        auth = get_saml_auth(sso_config, request, _get_base_url(), org_settings=org_settings)
+
+        # AG-95: InResponseTo binding — embed nonce in RelayState
+        from app.security.sso_security import make_relay_state, get_authn_request_cache
+        relay_state = make_relay_state(slug)
+        sso_url = auth.login(return_to=relay_state)
+
+        # Store AuthnRequest ID keyed by nonce for ACS validation
+        authn_request_id = auth.get_last_request_id()
+        if authn_request_id:
+            _, nonce = relay_state.split(':', 1)
+            get_authn_request_cache().store(nonce, authn_request_id)
+
         from flask import redirect
         return redirect(sso_url)
     finally:
@@ -16383,10 +19795,14 @@ def saml_acs():
     )
     from flask import redirect
 
-    # RelayState carries the org slug
-    slug = request.form.get('RelayState', '').strip()
-    if not slug:
+    # RelayState carries the org slug (and optional nonce for InResponseTo)
+    raw_relay_state = request.form.get('RelayState', '').strip()
+    if not raw_relay_state:
         return jsonify({'error': 'Missing RelayState (org slug)'}), 400
+
+    # AG-95: Parse slug and nonce from RelayState
+    from app.security.sso_security import parse_relay_state, get_authn_request_cache
+    slug, relay_nonce = parse_relay_state(raw_relay_state)
 
     db = Database(_admin_reason='SAML ACS callback — no auth context')
     try:
@@ -16398,14 +19814,44 @@ def saml_acs():
         if not sso_config:
             return jsonify({'error': 'SSO not configured'}), 400
 
-        auth = get_saml_auth(sso_config, request, _get_base_url())
-        auth.process_response()
+        # AG-95-v2: Load per-org encryption override settings
+        from app.security.sso_security import SSO_ENCRYPTION_OVERRIDE_KEYS
+        org_settings = {}
+        for _okey in SSO_ENCRYPTION_OVERRIDE_KEYS:
+            org_settings[_okey] = db.get_setting(_okey, 'false', organization_id=org['id'])
+
+        # AG-95: Recover AuthnRequest ID for InResponseTo validation
+        expected_request_id = None
+        if relay_nonce:
+            expected_request_id = get_authn_request_cache().consume(relay_nonce)
+
+        auth = get_saml_auth(sso_config, request, _get_base_url(), org_settings=org_settings)
+        auth.process_response(request_id=expected_request_id)
         errors = auth.get_errors()
         if errors:
-            return jsonify({'error': 'SAML validation failed', 'details': errors}), 401
+            logger.warning("SAML validation failed: %s", errors)
+            return jsonify({'error': 'SAML authentication failed'}), 401
 
         if not auth.is_authenticated():
             return jsonify({'error': 'SAML authentication failed'}), 401
+
+        # AG-95: Assertion replay protection — consume assertion ID
+        try:
+            from app.security.sso_security import get_replay_cache
+            assertion_id = auth.get_last_assertion_id()
+            if assertion_id:
+                not_on_or_after = auth.get_last_assertion_not_on_or_after()
+                get_replay_cache().consume(
+                    assertion_id,
+                    not_on_or_after=not_on_or_after,
+                )
+        except Exception as replay_err:
+            from app.security.sso_security import AssertionReplayError
+            if isinstance(replay_err, AssertionReplayError):
+                logger.warning("SAML assertion replay detected: %s", replay_err)
+                return jsonify({'error': 'SAML authentication failed'}), 401
+            # Non-replay errors (e.g., missing assertion_id) — log but don't block
+            logger.warning("SAML replay cache error (non-fatal): %s", replay_err)
 
         # Extract user attributes
         attrs = extract_saml_attributes(auth)
@@ -16468,7 +19914,22 @@ def saml_acs():
 
 
 def saml_token_exchange():
-    """POST /api/auth/saml/token — Exchange one-time SSO code for JWT tokens."""
+    """POST /api/auth/saml/token — Exchange one-time SSO code for JWT tokens.
+
+    AG-95: Rate-limited (5 attempts per IP per 5 min), constant-time
+    code verification via HMAC-SHA256, structured failure logging.
+    """
+    # AG-95: Rate limit by IP
+    from app.security.sso_security import check_sso_rate_limit, _log_sso_code_event
+    client_ip = request.remote_addr or 'unknown'
+    rate_key = f"sso_exchange:{client_ip}"
+    if not check_sso_rate_limit(rate_key, max_attempts=5, window_sec=300):
+        _log_sso_code_event("sso_rate_limited", source_ip=client_ip)
+        resp = jsonify({'error': 'Too many attempts. Please try again later.'})
+        resp.status_code = 429
+        resp.headers['Retry-After'] = '300'
+        return resp
+
     data = request.get_json(silent=True) or {}
     code = str(data.get('code', '')).strip()
     if not code:
@@ -16478,6 +19939,7 @@ def saml_token_exchange():
     try:
         result = db.consume_sso_auth_code(code)
         if not result:
+            _log_sso_code_event("sso_code_exchange_failed", source_ip=client_ip)
             return jsonify({'error': 'Invalid or expired SSO code'}), 401
 
         user = db.get_user_by_id(result['user_id'])
@@ -16580,14 +20042,43 @@ def get_sso_settings():
 def save_sso_settings():
     """POST /api/settings/sso — Save SSO config."""
     from app.api.saml import SSO_SETTING_KEYS
+    from app.security.sso_security import SSO_ENCRYPTION_OVERRIDE_KEYS
     data = request.get_json(silent=True) or {}
     tid = _org_id()
+    user = getattr(g, 'current_user', {})
 
-    # Filter to valid SSO keys only
+    # Filter to valid SSO keys + encryption override keys
+    valid_keys = set(SSO_SETTING_KEYS) | set(SSO_ENCRYPTION_OVERRIDE_KEYS)
     updates = {}
-    for key in SSO_SETTING_KEYS:
+    for key in valid_keys:
         if key in data:
             updates[key] = str(data[key])
+
+    # AG-95-v2: Encryption override keys require superadmin + audit log
+    encryption_overrides = {k: v for k, v in updates.items()
+                           if k in SSO_ENCRYPTION_OVERRIDE_KEYS and v == 'true'}
+    if encryption_overrides:
+        if not user.get('is_superadmin'):
+            return jsonify({
+                'error': 'Disabling SAML encryption requires superadmin privileges'
+            }), 403
+        # Require reason field
+        reason = str(data.get('encryption_override_reason', '')).strip()
+        if not reason:
+            return jsonify({
+                'error': 'encryption_override_reason is required when disabling encryption'
+            }), 400
+        # Audit log each override
+        db = _db()
+        try:
+            for key in encryption_overrides:
+                _log(db, 'saml_encryption_disabled',
+                     f"SAML encryption override: {key}=true for org {tid}",
+                     {'key': key, 'reason': reason, 'org_id': tid,
+                      'actor_user_id': user.get('id'),
+                      'source_ip': request.remote_addr})
+        finally:
+            db.close()
 
     # Validate required fields when enabling SSO
     if updates.get('sso_enabled') == 'true':
@@ -17072,9 +20563,9 @@ def get_governance_identities():
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
     tid = _org_id()
-    db._ensure_governance_decisions_table()
 
     try:
+        db._ensure_governance_decisions_table()
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -17565,9 +21056,9 @@ def get_governance_stats():
     from app.database import _compute_governance_risk, _compute_gov_recommended_action
     db = _db()
     tid = _org_id()
-    db._ensure_governance_decisions_table()
 
     try:
+        db._ensure_governance_decisions_table()
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
@@ -18018,6 +21509,31 @@ _DANGEROUS_ROLES_ORDERED = [
 ]
 
 
+def _derive_blast_impact(roles_lower, sub_count, tier):
+    """Derive a one-line business consequence from roles and scope."""
+    if 'owner' in roles_lower:
+        if sub_count > 1:
+            return f"Full control of IAM, resources, and billing across {sub_count} subscriptions"
+        return "Full control of IAM, resources, and billing \u2014 complete subscription takeover"
+    if 'user access administrator' in roles_lower:
+        return "Can grant any role to any identity \u2014 privilege escalation to full control"
+    if 'global administrator' in roles_lower or 'privileged role' in roles_lower:
+        return "Tenant-wide administrative control over all directory objects and subscriptions"
+    if 'contributor' in roles_lower:
+        if sub_count > 1:
+            return f"Can deploy, modify, or destroy all resources across {sub_count} subscriptions"
+        return "Can deploy, modify, or destroy all resources in the subscription"
+    if 'key vault' in roles_lower:
+        return "Can extract encryption keys, certificates, and stored secrets"
+    if 'security admin' in roles_lower:
+        return "Can modify security policies and access security configurations"
+    if tier == 'T0':
+        return "Highest privilege tier \u2014 full administrative control"
+    if tier == 'T1':
+        return "Can modify and deploy resources in production environments"
+    return "Elevated access to cloud resources"
+
+
 def _compute_blast_radius(roles):
     """Compute blast radius: high / medium / low based on role scope."""
     high_roles = {'owner', 'user access administrator', 'contributor'}
@@ -18104,7 +21620,7 @@ def _generate_risk_summary(identity, roles, credentials, entra_roles):
     if activity in ('stale', 'inactive'):
         points.append(f"Activity status is '{activity}' — may be unused")
     elif activity == 'never_used':
-        points.append("Has never been used (candidate for removal)")
+        points.append("No activity observed — review before removal")
     elif activity == 'unknown':
         points.append("Usage telemetry unavailable — access risk still exists")
 
@@ -19174,19 +22690,39 @@ def get_identity_lineage(identity_id):
                 pass
 
         # ── Federated credentials ─────────────────────────────────────
+        # AG-148: Prefer federated_credentials table (richer data from Graph API).
+        # Fall back to credentials table (legacy).
         federated_credentials = []
         try:
             cursor.execute("SAVEPOINT lin_fed")
             cursor.execute("""
-                SELECT key_id, display_name, issuer, subject
-                FROM credentials
-                WHERE identity_db_id = %s AND credential_type = 'federated'
-                ORDER BY display_name
+                SELECT credential_id, name, issuer, subject, audiences, issuer_type, description
+                FROM federated_credentials
+                WHERE identity_db_id = %s
+                ORDER BY name
             """, (db_id,))
             for row in cursor.fetchall():
-                federated_credentials.append(
-                    _build_federated_mapping(row)
-                )
+                federated_credentials.append({
+                    'credential_id': row['credential_id'],
+                    'name': row['name'],
+                    'issuer': row['issuer'],
+                    'subject': row['subject'],
+                    'audiences': row['audiences'] if isinstance(row['audiences'], list) else [],
+                    'issuer_type': row['issuer_type'],
+                    'description': row['description'],
+                })
+            # Fall back to legacy credentials table if no results
+            if not federated_credentials:
+                cursor.execute("""
+                    SELECT key_id, display_name, issuer, subject
+                    FROM credentials
+                    WHERE identity_db_id = %s AND credential_type = 'federated'
+                    ORDER BY display_name
+                """, (db_id,))
+                for row in cursor.fetchall():
+                    federated_credentials.append(
+                        _build_federated_mapping(row)
+                    )
             cursor.execute("RELEASE SAVEPOINT lin_fed")
         except Exception:
             try: cursor.connection.rollback()
@@ -20083,9 +23619,10 @@ def get_scan_modes():
 # ============================================================
 
 TIER_LIMITS = {
-    'free': {'max_identities': 50, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso']},
-    'trial': {'max_identities': 500, 'trial_days': 14, 'blocked_features': []},
-    'pro': {'max_identities': None, 'blocked_features': []},
+    'free': {'max_identities': 500, 'max_subscriptions': 2, 'expires_days': None, 'can_upgrade': True, 'blocked_features': ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso']},
+    'trial': {'max_identities': None, 'max_subscriptions': None, 'expires_days': 30, 'can_upgrade': True, 'blocked_features': []},
+    'pro': {'max_identities': None, 'max_subscriptions': None, 'expires_days': None, 'can_upgrade': False, 'blocked_features': []},
+    'enterprise': {'max_identities': None, 'max_subscriptions': None, 'expires_days': None, 'can_upgrade': False, 'blocked_features': []},
 }
 
 
@@ -20117,17 +23654,24 @@ def _check_tier_limits(db, organization_id):
                 'current_plan': plan,
             }
 
-    # Check trial expiry
-    if plan == 'trial' and org.get('license_activated_at'):
-        activated = org['license_activated_at']
-        if isinstance(activated, str):
-            activated = datetime.fromisoformat(activated.replace('Z', '+00:00'))
-        if datetime.now(activated.tzinfo if activated.tzinfo else None) > activated + timedelta(days=14):
-            return False, {
-                'error': 'Trial period has expired. Please upgrade to continue.',
-                'upgrade_required': True,
-                'current_plan': plan,
-            }
+    # Check trial expiry using trial_expires_at (set at signup: NOW() + 30 days)
+    if plan == 'trial':
+        trial_expires = org.get('trial_expires_at')
+        if trial_expires:
+            if isinstance(trial_expires, str):
+                try:
+                    trial_expires = datetime.fromisoformat(trial_expires.replace('Z', '+00:00'))
+                except (ValueError, TypeError):
+                    trial_expires = None
+            if trial_expires:
+                now = datetime.now(trial_expires.tzinfo if trial_expires.tzinfo else timezone.utc)
+                if now > trial_expires:
+                    return False, {
+                        'error': 'Your 30-day trial has ended. Upgrade to Pro to continue.',
+                        'upgrade_required': True,
+                        'current_plan': plan,
+                        'upgrade_url': '/subscriptions',
+                    }
 
     return True, None
 
@@ -20176,7 +23720,7 @@ def copilot_chat():
         message = gateway.truncate_prompt(message)
 
         try:
-            response_text = service.ask(message, messages_history, db)
+            response_text = service.ask(message, messages_history, db, org_id=org_id)
         except Exception as e:
             try: db.conn.rollback()
             except Exception: pass
@@ -20200,7 +23744,7 @@ def copilot_chat():
             conv = db.create_copilot_conversation(user_id, org_id, title, messages_history)
             conversation_id = conv['id']
 
-        suggestions = service.get_suggestions(db)
+        suggestions = service.get_suggestions(db, org_id=org_id)
         gateway.log_usage(db, org_id, user_id, 'chat')
         _log_ai_audit(db, 'chat',
                       {'message': message},
@@ -20237,9 +23781,10 @@ def copilot_suggestions():
     if not service:
         return jsonify({'suggestions': [], 'configured': False})
 
+    org_id = _org_id()
     db = _db()
     try:
-        suggestions = service.get_suggestions(db)
+        suggestions = service.get_suggestions(db, org_id=org_id)
         return jsonify({'suggestions': suggestions, 'configured': True})
     finally:
         db.close()
@@ -20479,6 +24024,178 @@ def get_identity_usage(identity_id):
         cursor.close()
 
 
+# ── Authentication History (P2 Sign-In Events) ───────────────
+
+def get_identity_connections(identity_id):
+    """GET /api/identities/<id>/connections — last 3 ARM activity events for this identity."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({"connections": []}), 200
+
+        cursor.execute(
+            "SELECT id FROM identities WHERE identity_id = %s AND discovery_run_id = ANY(%s) ORDER BY discovery_run_id DESC LIMIT 1",
+            (identity_id, run_ids)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"connections": []}), 200
+
+        identity_db_id = row[0]
+        connections = db.get_identity_arm_connections(identity_db_id, limit=3)
+
+        # Serialize timestamps
+        for c in connections:
+            if c.get('event_timestamp') and hasattr(c['event_timestamp'], 'isoformat'):
+                c['event_timestamp'] = c['event_timestamp'].isoformat()
+            # Shorten operation name for display
+            op = c.get('operation_name', '')
+            if '/' in op:
+                parts = op.split('/')
+                c['operation_short'] = '/'.join(parts[-2:]) if len(parts) >= 2 else op
+            else:
+                c['operation_short'] = op
+            # Extract resource name from resource_id
+            rid = c.get('resource_id', '')
+            if rid:
+                segments = rid.strip('/').split('/')
+                c['resource_name'] = segments[-1] if segments else rid
+            else:
+                c['resource_name'] = None
+
+        cursor.close()
+        return jsonify({"connections": connections}), 200
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_identity_connections error: %s", e)
+        return jsonify({"connections": []}), 200
+
+
+def get_identity_signin_events(identity_id):
+    """GET /api/identities/<id>/signin-events — paginated sign-in event history."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Resolve identity DB id
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        se_sql = """
+            SELECT i.id FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+        """
+        se_params = [identity_id, run_ids]
+        se_sql, se_params = _apply_sub_filter(se_sql, se_params, cursor, _org_id(), _connection_id())
+        se_sql += " ORDER BY i.discovery_run_id DESC LIMIT 1"
+        cursor.execute(se_sql, tuple(se_params))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return jsonify({'events': [], 'summary': {}, 'total': 0})
+        db_id = row[0]
+
+        limit = min(request.args.get('limit', 50, type=int), 200)
+        offset = request.args.get('offset', 0, type=int)
+        status_filter = request.args.get('status')
+        risk_filter = request.args.get('risk_level')
+
+        # Build summary from all events for this identity
+        try:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total_events,
+                    COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+                    COUNT(*) FILTER (WHERE status = 'failure') AS failure_count,
+                    COUNT(*) FILTER (WHERE is_interactive = true) AS interactive_count,
+                    COUNT(*) FILTER (WHERE is_interactive = false) AS non_interactive_count,
+                    COUNT(DISTINCT ip_address) AS unique_ips,
+                    COUNT(DISTINCT location_country) AS unique_locations,
+                    COUNT(*) FILTER (WHERE risk_level NOT IN ('none', '')) AS risky_count,
+                    MIN(created_datetime) AS earliest,
+                    MAX(created_datetime) AS latest
+                FROM workload_signin_events
+                WHERE identity_db_id = %s
+            """, (db_id,))
+            srow = cursor.fetchone()
+            summary = {
+                'total_events': srow[0] or 0,
+                'success_count': srow[1] or 0,
+                'failure_count': srow[2] or 0,
+                'interactive_count': srow[3] or 0,
+                'non_interactive_count': srow[4] or 0,
+                'unique_ips': srow[5] or 0,
+                'unique_locations': srow[6] or 0,
+                'risky_count': srow[7] or 0,
+                'earliest': srow[8].isoformat() if srow[8] else None,
+                'latest': srow[9].isoformat() if srow[9] else None,
+            }
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+            summary = {}
+
+        # Fetch paginated events
+        where_clauses = ["identity_db_id = %s"]
+        params = [db_id]
+
+        if status_filter and status_filter in ('success', 'failure'):
+            where_clauses.append("status = %s")
+            params.append(status_filter)
+        if risk_filter and risk_filter != 'none':
+            where_clauses.append("risk_level NOT IN ('none', '')")
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Count
+        cursor.execute(f"SELECT COUNT(*) FROM workload_signin_events WHERE {where_sql}", tuple(params))
+        total = cursor.fetchone()[0] or 0
+
+        # Events
+        cursor.execute(f"""
+            SELECT sign_in_id, created_datetime, status, error_code, failure_reason,
+                   resource_display_name, resource_id, ip_address, location_city,
+                   location_country, app_display_name, client_app_type,
+                   is_interactive, risk_level, risk_detail, conditional_access_status
+            FROM workload_signin_events
+            WHERE {where_sql}
+            ORDER BY created_datetime DESC
+            LIMIT %s OFFSET %s
+        """, tuple(params) + (limit, offset))
+
+        events = []
+        for r in cursor.fetchall():
+            events.append({
+                'sign_in_id': r[0],
+                'timestamp': r[1].isoformat() if r[1] else None,
+                'status': r[2],
+                'error_code': r[3],
+                'failure_reason': r[4],
+                'resource': r[5],
+                'resource_id': r[6],
+                'ip_address': r[7],
+                'location_city': r[8],
+                'location_country': r[9],
+                'app': r[10],
+                'client_app': r[11],
+                'is_interactive': r[12],
+                'risk_level': r[13],
+                'risk_detail': r[14],
+                'ca_status': r[15],
+            })
+
+        cursor.close()
+        return jsonify({'events': events, 'summary': summary, 'total': total})
+
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': str(e)}), 500
+
+
 # ── Phase 80: Identity Timeline / Forensic View ───────────────
 
 def get_identity_timeline(identity_id):
@@ -20517,7 +24234,7 @@ def get_identity_timeline(identity_id):
         if not event_types or 'anomaly' in event_types:
             try:
                 cursor.execute("""
-                    SELECT created_at, severity, title, description, type, details
+                    SELECT created_at, severity, title, description, anomaly_type, details
                     FROM anomalies WHERE identity_id = %s ORDER BY created_at DESC LIMIT 50
                 """, (identity_id,))
                 for r in cursor.fetchall():
@@ -20536,8 +24253,8 @@ def get_identity_timeline(identity_id):
         if not event_types or 'risk_change' in event_types:
             try:
                 cursor.execute("""
-                    SELECT recorded_at, risk_score, risk_level
-                    FROM risk_scores WHERE identity_id = %s ORDER BY recorded_at DESC LIMIT 50
+                    SELECT computed_at, risk_score, 'info'
+                    FROM identity_risk_scores WHERE identity_id = %s ORDER BY computed_at DESC LIMIT 50
                 """, (identity_id,))
                 for r in cursor.fetchall():
                     events.append({
@@ -20608,6 +24325,27 @@ def get_identity_timeline(identity_id):
             except Exception:
                 db._rollback()
 
+        # 6. Security findings
+        if not event_types or 'security_finding' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT created_at, severity, title, description, finding_type, metadata
+                    FROM security_findings
+                    WHERE identity_id = %s
+                    ORDER BY created_at DESC LIMIT 50
+                """, (identity_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'security_finding',
+                        'severity': r[1] or 'info',
+                        'title': r[2],
+                        'description': r[3],
+                        'metadata': {'finding_type': r[4], 'details': r[5]},
+                    })
+            except Exception:
+                db._rollback()
+
         cursor.close()
 
         # Apply date filters
@@ -20639,6 +24377,125 @@ DANGEROUS_ROLES = {
     'Application Administrator', 'Cloud Application Administrator',
     'User Administrator', 'Exchange Administrator',
 }
+
+# Per-role escalation framing (impact + narrative + target node copy). Role
+# facts (description, can_do, cannot_do, docs_url) come from the central
+# registry in app/constants/role_metadata.py — do NOT duplicate them here.
+# Keys must match strings in DANGEROUS_ROLES.
+ROLE_ESCALATION_DETAILS = {
+    'Global Administrator': {
+        'impact': 'Global Administrator grants unrestricted control of the entire Entra tenant',
+        'narrative': (
+            'Global Administrator is the highest-privilege directory role: it can read and '
+            'modify every object (users, groups, apps, roles, policies), assign any other role '
+            'to any principal, and — if the "Access management for Azure resources" toggle is '
+            'enabled — elevate to root of every Azure subscription. Compromise of this identity '
+            'is equivalent to full tenant takeover.'
+        ),
+        'target_label': 'Tenant-Wide Control',
+        'target_desc': 'Unrestricted control of every directory object',
+    },
+    'Privileged Role Administrator': {
+        'impact': 'Privileged Role Administrator can grant any directory role, including Global Administrator',
+        'narrative': (
+            'Privileged Role Administrator can assign ANY Entra directory role to any principal, '
+            'including Global Administrator. It does not directly modify users, apps, or data, '
+            'but a compromised identity with this role can promote itself (or any attacker-'
+            'controlled identity) to Global Admin in a single step, achieving full tenant '
+            'takeover.'
+        ),
+        'target_label': 'Global Admin Promotion',
+        'target_desc': 'Self-elevate to Global Administrator',
+    },
+    'Application Administrator': {
+        'impact': 'Application Administrator can hijack any app/service principal in the tenant',
+        'narrative': (
+            'Application Administrator has full management over every app registration and '
+            'enterprise application, including the ability to add credentials (secrets/certs) '
+            'to ANY service principal. By adding a credential to a high-privilege app (e.g. one '
+            'holding RoleManagement.ReadWrite.All or Application.ReadWrite.All), the holder can '
+            'authenticate as that app and escalate to tenant-wide control. This role does NOT '
+            'directly manage users, groups, or directory roles.'
+        ),
+        'target_label': 'Tenant Takeover via App Hijack',
+        'target_desc': 'Add credential to a privileged SPN → impersonate the app → escalate',
+    },
+    'Cloud Application Administrator': {
+        'impact': 'Cloud Application Administrator can hijack any cloud app/service principal',
+        'narrative': (
+            'Cloud Application Administrator has the same privileges as Application Administrator '
+            '(full mgmt of app registrations and enterprise apps, including adding credentials to '
+            'any SPN) EXCEPT it cannot manage the on-prem Application Proxy. The escalation path '
+            'is identical: add a credential to a high-privilege SPN, authenticate as the app, '
+            'escalate. Does NOT manage users, groups, or directory roles.'
+        ),
+        'target_label': 'Tenant Takeover via App Hijack',
+        'target_desc': 'Add credential to a privileged SPN → impersonate the app → escalate',
+    },
+    'User Administrator': {
+        'impact': 'User Administrator can create/delete non-admin users and reset passwords for non-protected accounts',
+        'narrative': (
+            'User Administrator can create, update, and delete users who do NOT hold privileged '
+            'directory roles, manage groups, and reset passwords for non-admin users plus a small '
+            'set of helpdesk-tier admin roles (e.g. Helpdesk Administrator, Directory Readers). '
+            'It CANNOT reset passwords or delete accounts that hold protected roles such as '
+            'Global Administrator or Privileged Role Administrator, and it CANNOT grant directory '
+            'roles. Escalation typically pivots via hijacking a non-protected admin/helpdesk '
+            'account — not via direct directory takeover.'
+        ),
+        'target_label': 'Non-Admin User Takeover',
+        'target_desc': 'Reset passwords / hijack non-protected user accounts',
+    },
+    'Exchange Administrator': {
+        'impact': 'Exchange Administrator can read, modify, and exfiltrate all mailboxes in the tenant',
+        'narrative': (
+            'Exchange Administrator has full control over Exchange Online: mailboxes, transport '
+            'rules, journaling, mailbox permissions, and mail flow. A compromised identity with '
+            'this role can read every mailbox, set up silent forwarding/journaling, exfiltrate '
+            'mail, and create persistence via mailbox rules. It does NOT manage directory users, '
+            'apps, or roles — the impact is data exposure and persistence, not directory takeover.'
+        ),
+        'target_label': 'Tenant Mail Compromise',
+        'target_desc': 'Full mailbox read/modify + persistence via mail flow rules',
+    },
+}
+
+_DEFAULT_ESCALATION = {
+    'impact': '{role} confers elevated privileges',
+    'narrative': (
+        'The {role} role grants elevated privileges. Review its definition for the exact actions '
+        'it permits before reasoning about blast radius.'
+    ),
+    'target_label': 'Elevated Access',
+    'target_desc': 'Elevated privileges — see role definition',
+}
+
+
+def _role_escalation_detail(role_name: str) -> dict:
+    """Build the attack-path framing for a role: escalation copy (impact /
+    narrative / target_*) + central role metadata (description, can_do,
+    cannot_do, docs_url, provider, tier). Falls back to non-claiming defaults
+    for unknown roles."""
+    from app.constants.role_metadata import get_role_metadata_auto
+    esc = ROLE_ESCALATION_DETAILS.get(role_name)
+    if esc:
+        out = dict(esc)
+    else:
+        out = {
+            'impact':       _DEFAULT_ESCALATION['impact'].format(role=role_name),
+            'narrative':    _DEFAULT_ESCALATION['narrative'].format(role=role_name),
+            'target_label': _DEFAULT_ESCALATION['target_label'],
+            'target_desc':  _DEFAULT_ESCALATION['target_desc'],
+        }
+    meta = get_role_metadata_auto(role_name)
+    out['role_description'] = meta['description']
+    out['role_can_do']      = list(meta['can_do'])
+    out['role_cannot_do']   = list(meta['cannot_do'])
+    out['role_docs_url']    = meta['docs_url']
+    out['role_provider']    = meta['provider']
+    out['role_tier']        = meta['tier']
+    return out
+
 
 def get_identity_attack_paths(identity_id):
     """GET /api/identities/<id>/attack-paths — compute privilege escalation chains."""
@@ -20698,16 +24555,26 @@ def get_identity_attack_paths(identity_id):
             """, (db_id, list(DANGEROUS_ROLES)))
             dangerous_roles = cursor.fetchall()
             for r in dangerous_roles:
+                detail = _role_escalation_detail(r[0])
                 paths.append({
                     'type': 'direct_escalation',
                     'risk_level': 'critical',
                     'steps': [
                         {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
-                        {'node_type': 'role', 'node_id': r[0], 'node_label': r[0], 'description': f'Entra directory role at scope: {r[1] or "/"}'},
-                        {'node_type': 'target', 'node_id': 'directory', 'node_label': 'Full Directory Control', 'description': 'Administrative control over all directory objects'},
+                        {'node_type': 'role',     'node_id': r[0],         'node_label': r[0],          'description': f'Entra directory role at scope: {r[1] or "/"}'},
+                        {'node_type': 'target',   'node_id': 'directory',  'node_label': detail['target_label'], 'description': detail['target_desc']},
                     ],
-                    'impact': f'{r[0]} grants full directory control',
-                    'narrative': f'The {r[0]} role provides administrative authority over the entire Entra ID directory. A compromised identity with this role can create, modify, or delete any directory object.',
+                    'impact': detail['impact'],
+                    'narrative': detail['narrative'],
+                    'role_meta': {
+                        'name':        r[0],
+                        'provider':    detail['role_provider'],
+                        'tier':        detail['role_tier'],
+                        'description': detail['role_description'],
+                        'can_do':      detail['role_can_do'],
+                        'cannot_do':   detail['role_cannot_do'],
+                        'docs_url':    detail['role_docs_url'],
+                    },
                 })
         except Exception:
             db._rollback()
@@ -20753,16 +24620,30 @@ def get_identity_attack_paths(identity_id):
             """, (db_id, list(DANGEROUS_ROLES)))
             pim_roles = cursor.fetchall()
             for pr in pim_roles:
+                detail = _role_escalation_detail(pr[0])
                 paths.append({
                     'type': 'pim_abuse',
                     'risk_level': 'high',
                     'steps': [
-                        {'node_type': 'identity', 'node_id': identity_id, 'node_label': display_name, 'description': 'Starting identity'},
-                        {'node_type': 'pim', 'node_id': pr[0], 'node_label': f'PIM: {pr[0]}', 'description': 'Eligible for privileged role via PIM'},
-                        {'node_type': 'target', 'node_id': 'activated_role', 'node_label': pr[0], 'description': 'Activated role grants administrative control'},
+                        {'node_type': 'identity', 'node_id': identity_id,    'node_label': display_name,       'description': 'Starting identity'},
+                        {'node_type': 'pim',      'node_id': pr[0],          'node_label': f'PIM: {pr[0]}',    'description': 'Eligible for privileged role via PIM (requires activation)'},
+                        {'node_type': 'target',   'node_id': 'activated_role','node_label': detail['target_label'], 'description': detail['target_desc']},
                     ],
-                    'impact': f'Can activate {pr[0]} via PIM',
-                    'narrative': f'This identity is eligible to activate {pr[0]} through Privileged Identity Management. While PIM requires justification, a compromised identity could activate this role and gain administrative control.',
+                    'impact': f'Can activate {pr[0]} via PIM — {detail["impact"]}',
+                    'narrative': (
+                        f'This identity is eligible to activate {pr[0]} through Privileged Identity '
+                        f'Management. PIM requires activation (often with justification/MFA), but a '
+                        f'compromised identity could complete activation and then: {detail["narrative"]}'
+                    ),
+                    'role_meta': {
+                        'name':        pr[0],
+                        'provider':    detail['role_provider'],
+                        'tier':        detail['role_tier'],
+                        'description': detail['role_description'],
+                        'can_do':      detail['role_can_do'],
+                        'cannot_do':   detail['role_cannot_do'],
+                        'docs_url':    detail['role_docs_url'],
+                    },
                 })
         except Exception:
             db._rollback()
@@ -21014,23 +24895,28 @@ def get_identity_effective_access(identity_id: str):
         db_id = id_row[0]
         display_name = id_row[1]
 
-        # Fetch Azure RBAC assignments (role_assignments has no discovery_run_id — scoped via identity_db_id)
+        # P3 fallback: identity-level last_activity_date
+        cursor.execute(
+            "SELECT last_activity_date FROM identities WHERE id = %s",
+            (db_id,))
+        _ila_row = cursor.fetchone()
+        identity_last_activity = _ila_row[0] if _ila_row else None
+
+        # Fetch Azure RBAC assignments with last_used_at for usage waterfall
         cursor.execute("""
             SELECT role_name, scope, scope_type, resource_type, resource_name,
-                   role_type, risk_level, created_on, usage_status, why_critical
+                   role_type, risk_level, created_on, usage_status, why_critical,
+                   last_used_at
             FROM role_assignments
             WHERE identity_db_id = %s
-            ORDER BY CASE WHEN risk_level = 'critical' THEN 0 WHEN risk_level = 'high' THEN 1
-                          WHEN risk_level = 'medium' THEN 2 ELSE 3 END
         """, (db_id,))
         rbac_rows = cursor.fetchall()
 
         cursor.execute("""
-            SELECT role_name, directory_scope, role_type, risk_level, assigned_on, usage_status, why_critical
+            SELECT role_name, directory_scope, role_type, risk_level, assigned_on,
+                   usage_status, why_critical, last_used_at
             FROM entra_role_assignments
             WHERE identity_db_id = %s
-            ORDER BY CASE WHEN risk_level = 'critical' THEN 0 WHEN risk_level = 'high' THEN 1
-                          WHEN risk_level = 'medium' THEN 2 ELSE 3 END
         """, (db_id,))
         entra_rows = cursor.fetchall()
 
@@ -21085,6 +24971,7 @@ def get_identity_effective_access(identity_id: str):
                 'usage_status': r[8] or 'unknown',
                 'permissions': perms,
                 'why_critical': r[9] or None,
+                '_last_used_at': r[10],  # raw timestamp for waterfall
             })
 
         for r in entra_rows:
@@ -21119,9 +25006,51 @@ def get_identity_effective_access(identity_id: str):
                 'usage_status': r[5] or 'unknown',
                 'permissions': perms,
                 'why_critical': r[6] or None,
+                '_last_used_at': r[7],  # raw timestamp for waterfall
             })
 
         cursor.close()
+
+        # ── Usage waterfall: P1 → P3 → P4 ──
+        from datetime import datetime, timezone
+        _now = datetime.now(timezone.utc)
+        _RISK_SORT = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}
+        _ACCESS_SORT = {'Admin': 0, 'Write': 1, 'Read': 2}
+
+        for row in effective_access:
+            resolved_dt = None
+
+            # P1: role-level last_used_at
+            p1 = row.pop('_last_used_at', None)
+            if p1 and hasattr(p1, 'date'):
+                resolved_dt = p1
+
+            # P3: identity-level last_activity_date
+            if resolved_dt is None and identity_last_activity and hasattr(identity_last_activity, 'date'):
+                resolved_dt = identity_last_activity
+
+            # Compute delta and display
+            if resolved_dt is not None:
+                delta = (_now - resolved_dt).days
+                if delta == 0:
+                    row['usage_display'] = 'Today'
+                elif delta == 1:
+                    row['usage_display'] = '1d ago'
+                elif delta < 365:
+                    row['usage_display'] = f'{delta}d ago'
+                else:
+                    row['usage_display'] = f'{delta // 365}y+ ago'
+                row['is_stale'] = delta > 90
+            else:
+                # P4: no signal at any level
+                row['usage_display'] = 'No data'
+                row['is_stale'] = True
+
+        # Sort: risk_level DESC (critical first), then access_level DESC (Admin first)
+        effective_access.sort(key=lambda r: (
+            _RISK_SORT.get(r.get('risk_level', 'info'), 4),
+            _ACCESS_SORT.get(r.get('access_level', 'Read'), 2),
+        ))
 
         return jsonify({
             'identity_id': identity_id,
@@ -21672,25 +25601,6 @@ def activate_client_subscription(subscription_id):
         except Exception:
             pass
 
-        # Trigger discovery in background
-        import threading
-        from app.scheduler import trigger_manual_discovery
-        _org_name = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
-        _conn_id = result.get('cloud_connection_id')
-
-        def _run_discovery():
-            try:
-                trigger_manual_discovery(
-                    scan_mode='deep',
-                    db_org_id=tid,
-                    org_name=_org_name,
-                    connection_id=_conn_id,
-                )
-            except Exception as e:
-                logging.getLogger(__name__).error(f"Discovery after activation failed: {e}")
-
-        threading.Thread(target=_run_discovery, daemon=True).start()
-
         return jsonify({'activated': True})
     finally:
         db.close()
@@ -21758,7 +25668,7 @@ def get_snapshot_job_status(connection_id):
     """GET /api/discovery/jobs/<connection_id> — poll active job for a connection."""
     admin_db = Database(_admin_reason='snapshot_job_status')
     try:
-        job = admin_db.get_active_snapshot_job(connection_id)
+        job = admin_db.get_active_snapshot_job(connection_id, org_id=_org_id())
         return jsonify({'active_job': job})
     finally:
         admin_db.close()
@@ -22222,6 +26132,87 @@ def get_admin_action_log():
 
         cursor.close()
         return jsonify({'events': rows, 'limit': limit, 'offset': offset})
+    finally:
+        db.close()
+
+
+def get_group_waste_stats():
+    """GET /api/group-waste — measure group expansion waste for current org.
+
+    Returns counts of groups with/without Azure RBAC or Entra roles,
+    showing how many groups are expanded unnecessarily during scans.
+    Org scoped via JWT — no hardcoding.
+    """
+    org_id = _org_id()
+    if not org_id or org_id == -1:
+        return jsonify({'error': 'No organization context'}), 403
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get latest completed run for this org
+        run_ids = _latest_run_ids(cursor, org_id)
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No completed discovery runs found'}), 404
+        run_id = run_ids[0]
+
+        cursor.execute("""
+            WITH role_bearing AS (
+                SELECT DISTINCT group_id FROM entra_groups
+                WHERE organization_id = %(org)s AND discovery_run_id = ANY(%(runs)s)
+                  AND rbac_roles IS NOT NULL AND rbac_roles != '[]'::jsonb
+            ),
+            entra_role_bearing AS (
+                SELECT DISTINCT i.object_id AS group_id
+                FROM entra_role_assignments era
+                JOIN identities i ON i.id = era.identity_db_id
+                WHERE era.organization_id = %(org)s
+                  AND i.object_id IN (
+                      SELECT group_id FROM entra_groups
+                      WHERE organization_id = %(org)s AND discovery_run_id = ANY(%(runs)s)
+                  )
+            ),
+            all_role_groups AS (
+                SELECT group_id FROM role_bearing
+                UNION
+                SELECT group_id FROM entra_role_bearing
+            ),
+            totals AS (
+                SELECT COUNT(*) AS total FROM entra_groups
+                WHERE organization_id = %(org)s AND discovery_run_id = ANY(%(runs)s)
+            )
+            SELECT
+                (SELECT total FROM totals) AS total_groups,
+                (SELECT COUNT(*) FROM all_role_groups) AS groups_with_roles,
+                (SELECT total FROM totals) - (SELECT COUNT(*) FROM all_role_groups) AS groups_without_roles,
+                CASE WHEN (SELECT total FROM totals) > 0 THEN
+                    ROUND(
+                        ((SELECT total FROM totals) - (SELECT COUNT(*) FROM all_role_groups))
+                        * 100.0 / (SELECT total FROM totals), 1
+                    )
+                ELSE 0 END AS waste_percentage
+        """, {'org': org_id, 'runs': run_ids})
+
+        row = cursor.fetchone()
+        cursor.close()
+
+        return jsonify({
+            'organization_id': org_id,
+            'discovery_run_ids': run_ids,
+            'total_groups': row['total_groups'],
+            'groups_with_roles': row['groups_with_roles'],
+            'groups_without_roles': row['groups_without_roles'],
+            'waste_percentage': float(row['waste_percentage']),
+        })
+    except Exception as e:
+        logger.error("Group waste stats error: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 500
     finally:
         db.close()
 
@@ -22802,6 +26793,13 @@ def get_client_billing_preview():
             cloud = s.get('cloud', 'azure')
             by_cloud[cloud] = by_cloud.get(cloud, 0) + 1
 
+        # Serialize trial expiry for frontend display
+        trial_expires = org.get('trial_expires_at')
+        if trial_expires and hasattr(trial_expires, 'isoformat'):
+            trial_expires = trial_expires.isoformat()
+        elif trial_expires:
+            trial_expires = str(trial_expires)
+
         return jsonify({
             'period_start': period_start,
             'period_end': period_end,
@@ -22811,6 +26809,7 @@ def get_client_billing_preview():
             'platform_fee_cents': invoice_data.get('platform_fee_cents', 0),
             'platform_fee_waiver_cents': invoice_data.get('platform_fee_waiver_cents', 0),
             'trial_active': invoice_data.get('trial_active', False),
+            'trial_expires_at': trial_expires,
             'subscription_total_cents': invoice_data.get('subscription_total_cents', 0),
             'discount_pct': invoice_data.get('discount_pct', 0),
             'subtotal_cents': invoice_data.get('subtotal_cents', 0),
@@ -25327,7 +29326,7 @@ def create_pilot_organization():
         organization_id = cursor.fetchone()['id']
 
         # Create root user
-        pw_hash = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        pw_hash = bcrypt.hashpw(root_password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
         cursor.execute("""
             INSERT INTO users (username, display_name, password_hash, role,
                                organization_id, enabled, created_at)
@@ -27700,17 +31699,18 @@ def get_security_overview_handler():
                 db.conn.rollback()
 
         # ── 5. Attack paths ────────────────────────────────────────────────
+        # Use organization_id (not discovery_run_id) — attack_paths may not
+        # be regenerated every run.  Matches get_attack_path_count() canonical source.
         attack_path_identities = 0
-        if run_ids:
-            try:
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT source_entity_id) AS cnt
-                    FROM attack_paths WHERE discovery_run_id = ANY(%s)
-                """, (run_ids,))
-                attack_path_identities = (cursor.fetchone() or {}).get('cnt', 0)
-            except Exception as e:
-                logger.warning("security_overview: attack_paths failed: %s", e)
-                db.conn.rollback()
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT source_entity_id) AS cnt
+                FROM attack_paths WHERE organization_id = %s
+            """, (org_id,))
+            attack_path_identities = (cursor.fetchone() or {}).get('cnt', 0)
+        except Exception as e:
+            logger.warning("security_overview: attack_paths failed: %s", e)
+            db.conn.rollback()
 
         # ── 6. Credential inventory ────────────────────────────────────────
         cred = {'total': 0, 'expired': 0, 'expiring_soon': 0}
@@ -27770,9 +31770,9 @@ def get_security_overview_handler():
                     FROM attack_paths ap
                     JOIN identities i ON i.identity_id = ap.source_entity_id
                         AND i.discovery_run_id = ANY(%s)
-                    WHERE ap.discovery_run_id = ANY(%s)
+                    WHERE ap.organization_id = %s
                     GROUP BY COALESCE(i.source, 'unknown')
-                """, (run_ids, run_ids))
+                """, (run_ids, org_id))
                 for r in cursor.fetchall():
                     _get_provider(_normalize_cloud(r['cloud_provider']))['attack_paths'] += r['cnt']
 
@@ -28057,21 +32057,26 @@ def get_attack_paths_list():
         limit (int, default 50, max 100)
         severity (critical|high|medium|low)
         path_type (PRIVILEGE_ESCALATION|KEYVAULT_SECRET_ACCESS|...)
+        connection_id (int, optional — filter to specific cloud connection)
     """
-    db = _db()
+    db = None
     try:
+        db = _db()
         from psycopg2.extras import RealDictCursor
         limit = min(request.args.get('limit', 50, type=int), 100)
         severity = request.args.get('severity', '')
         path_type = request.args.get('path_type', '')
+        conn_id = _connection_id()
 
         org_id = _org_id()
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
 
-        # Attack paths persist across runs — scope by organization_id only
         conditions = ["ap.organization_id = %s"]
         params: list = [org_id]
 
+        if conn_id:
+            conditions.append("ap.connection_id = %s")
+            params.append(conn_id)
         if severity:
             conditions.append("ap.severity = %s")
             params.append(severity.lower())
@@ -28088,10 +32093,21 @@ def get_attack_paths_list():
                    ap.impact, ap.path_length, ap.affected_resource_count,
                    ap.first_detected_at, ap.last_detected_at,
                    ap.occurrence_count, ap.target_resource_id,
-                   ap.target_resource_type
+                   ap.target_resource_type,
+                   ap.highest_role, ap.has_keyvault_access,
+                   ap.has_subscription_scope, ap.has_no_owner,
+                   ap.path_nodes
             FROM attack_paths ap
             {where}
-            ORDER BY ap.risk_score DESC
+            ORDER BY
+                CASE ap.severity
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4
+                    ELSE 5
+                END,
+                ap.risk_score DESC
             LIMIT %s
         """, tuple(params + [limit]))
         paths = []
@@ -28108,8 +32124,17 @@ def get_attack_paths_list():
 
         cursor.close()
         return jsonify({'paths': paths, 'count': len(paths), 'total': total})
+    except Exception as exc:
+        logger.warning("attack-paths list failed: %s", exc)
+        if db:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        return jsonify({'paths': [], 'count': 0, 'total': 0})
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def get_attack_path_detail(path_id):
@@ -28445,6 +32470,649 @@ def get_identity_blast_radius(identity_id):
                 'risk_score': 0,
             })
         return jsonify(result)
+    finally:
+        db.close()
+
+
+# ================================================================
+# Identity Reachability Handlers
+# ================================================================
+
+def get_reachability_summary_handler():
+    """GET /api/reachability/summary — org-wide reachability metrics + risk flags."""
+    db = _db()
+    try:
+        org_id = _tenant_id()
+        run_id = request.args.get('run_id', type=int)
+        summary = db.get_reachability_summary(org_id, run_id=run_id)
+        return jsonify(summary)
+    finally:
+        db.close()
+
+
+def get_identity_reachability_handler(identity_id):
+    """GET /api/identities/<id>/reachability — reachability for identity detail page."""
+    db = _db()
+    try:
+        try:
+            idb_id = int(identity_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid identity_id'}), 400
+
+        result = db.get_identity_reachability(idb_id)
+        if not result:
+            return jsonify({
+                'identity_db_id': idb_id,
+                'reachable_resource_count': 0,
+                'reachable_privileged_resource_count': 0,
+                'subscriptions_reachable': 0,
+                'resource_groups_reachable': 0,
+                'high_value_targets_reachable': 0,
+                'has_privileged_roles': False,
+                'privileged_role_names': [],
+                'highest_scope_type': None,
+                'flag_broad_blast_radius': False,
+                'flag_privileged_wide_reach': False,
+                'flag_ai_excessive_blast': False,
+                'flag_dormant_high_blast': False,
+                'risk_flag_count': 0,
+                'risk_flag_details': [],
+                'blast_radius_risk_score': 0,
+                'blast_radius_exposure_level': 'LOW',
+            })
+        return jsonify(result)
+    finally:
+        db.close()
+
+
+def get_blast_radius_details_handler(identity_id):
+    """GET /api/identities/<id>/blast-radius/details — full explainability drill-down.
+
+    Computes live from role assignments and resources. Returns:
+    - contributing_roles: every RBAC + Entra role with scope and privilege tier
+    - expanded_scopes: scope inheritance chain
+    - reachable_resources_sample: sampled list of reachable resources
+    - reachable_resource_summary_by_type: breakdown by resource type
+    - privileged_targets: resources reachable via privileged roles
+    - high_value_targets: key vaults + classified data resources
+    - risk_flag_explanations: triggered flags with thresholds + rationale
+    - confidence: exposure confidence + model limitations
+    """
+    from psycopg2.extras import RealDictCursor
+    from app.constants.blast_radius_policy import (
+        get_thresholds, SCOPE_RANK, MODEL_LIMITATIONS,
+        DORMANT_ACTIVITY_STATUSES, AI_IDENTITY_TYPES,
+        DRILL_DOWN_RESOURCE_SAMPLE_LIMIT,
+    )
+    from app.constants.roles import PRIVILEGED_RBAC_ROLES, PRIVILEGED_ENTRA_ROLES
+
+    db = _db()
+    try:
+        try:
+            idb_id = int(identity_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid identity_id'}), 400
+
+        org_id = _tenant_id()
+        thresholds = get_thresholds(db, org_id)
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # ── Load identity ──
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   i.discovery_run_id,
+                   COALESCE(i.agent_identity_type, '') as agent_identity_type,
+                   COALESCE(i.activity_status, 'unknown') as activity_status
+            FROM identities i
+            WHERE i.id = %s
+        """, (idb_id,))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        run_id = ident['discovery_run_id']
+
+        # ── Load RBAC role assignments ──
+        cursor.execute("""
+            SELECT ra.role_name, ra.scope, ra.scope_type
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = %s
+        """, (idb_id,))
+        rbac_rows = [dict(r) for r in cursor.fetchall()]
+
+        # ── Load group-inherited RBAC ──
+        group_rbac = []
+        try:
+            cursor.execute("SAVEPOINT _dd_grp")
+            cursor.execute("""
+                SELECT eg.group_name, eg.rbac_roles
+                FROM entra_groups eg
+                WHERE eg.identity_db_id = %s
+                  AND eg.rbac_roles IS NOT NULL
+                  AND eg.rbac_roles != '[]'::jsonb
+            """, (idb_id,))
+            for gr in cursor.fetchall():
+                roles = gr['rbac_roles']
+                if isinstance(roles, str):
+                    import json as _j
+                    roles = _j.loads(roles)
+                if isinstance(roles, list):
+                    for role in roles:
+                        if isinstance(role, dict):
+                            role['source'] = 'group_inherited'
+                            role['group_name'] = gr.get('group_name')
+                            group_rbac.append(role)
+            cursor.execute("RELEASE SAVEPOINT _dd_grp")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _dd_grp")
+            except Exception:
+                pass
+
+        # ── Load Entra role assignments ──
+        entra_rows = []
+        try:
+            cursor.execute("SAVEPOINT _dd_entra")
+            cursor.execute("""
+                SELECT era.role_name
+                FROM entra_role_assignments era
+                WHERE era.identity_db_id = %s
+            """, (idb_id,))
+            entra_rows = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("RELEASE SAVEPOINT _dd_entra")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _dd_entra")
+            except Exception:
+                pass
+
+        # ── Load resources for this run (discovered_resources, fallback legacy) ──
+        resources = []
+        try:
+            cursor.execute("SAVEPOINT _dd_res")
+            cursor.execute("""
+                SELECT resource_id, subscription_id, resource_group,
+                       resource_type, data_classification, risk_level,
+                       resource_name as name, is_high_value,
+                       location, sku, kind, discovery_source
+                FROM discovered_resources
+                WHERE discovery_run_id = %s AND organization_id = %s
+            """, (run_id, org_id))
+            resources = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("RELEASE SAVEPOINT _dd_res")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _dd_res")
+            except Exception:
+                pass
+
+        # Fallback to legacy tables
+        if not resources:
+            try:
+                cursor.execute("SAVEPOINT _dd_res_legacy")
+                cursor.execute("""
+                    SELECT resource_id, subscription_id, resource_group,
+                           'storage_account' as resource_type, data_classification,
+                           risk_level, name
+                    FROM azure_storage_accounts
+                    WHERE discovery_run_id = %s
+                """, (run_id,))
+                resources.extend([dict(r) for r in cursor.fetchall()])
+                cursor.execute("""
+                    SELECT resource_id, subscription_id, resource_group,
+                           'key_vault' as resource_type, data_classification,
+                           risk_level, name
+                    FROM azure_key_vaults
+                    WHERE discovery_run_id = %s
+                """, (run_id,))
+                resources.extend([dict(r) for r in cursor.fetchall()])
+                cursor.execute("RELEASE SAVEPOINT _dd_res_legacy")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT _dd_res_legacy")
+                except Exception:
+                    pass
+
+        # ── Load pre-computed blast radius result ──
+        br_result = None
+        try:
+            cursor.execute("SAVEPOINT _dd_br")
+            cursor.execute("""
+                SELECT risk_score, identity_exposure_level, resource_breakdown,
+                       sensitive_resource_count, privilege_escalation_paths
+                FROM blast_radius_results
+                WHERE identity_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (idb_id,))
+            br_result = cursor.fetchone()
+            if br_result:
+                br_result = dict(br_result)
+            cursor.execute("RELEASE SAVEPOINT _dd_br")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _dd_br")
+            except Exception:
+                pass
+
+        cursor.close()
+
+        # ── Build contributing_roles ──
+        all_rbac = rbac_rows + group_rbac
+        contributing_roles = []
+        for ra in all_rbac:
+            role_name = ra.get('role_name', '')
+            is_priv = role_name in PRIVILEGED_RBAC_ROLES
+            contributing_roles.append({
+                'role_name': role_name,
+                'role_type': 'rbac',
+                'scope': ra.get('scope'),
+                'scope_type': ra.get('scope_type'),
+                'is_privileged': is_priv,
+                'source': ra.get('source', 'direct'),
+                'group_name': ra.get('group_name'),
+            })
+        for era in entra_rows:
+            role_name = era.get('role_name', '')
+            is_priv = role_name in PRIVILEGED_ENTRA_ROLES
+            contributing_roles.append({
+                'role_name': role_name,
+                'role_type': 'entra',
+                'scope': 'directory',
+                'scope_type': 'directory',
+                'is_privileged': is_priv,
+                'source': 'direct',
+                'group_name': None,
+            })
+
+        # ── Build expanded_scopes ──
+        scopes = {'subscription': set(), 'resource_group': set(), 'resource': set(), 'management_group': set()}
+        scope_chains = []
+        for ra in all_rbac:
+            st = ra.get('scope_type', '')
+            scope = (ra.get('scope') or '').lower()
+            if st in scopes and scope:
+                scopes[st].add(scope)
+                if st in ('subscription', 'management_group'):
+                    scopes['subscription'].add(scope)
+
+                expansion = {
+                    'role_name': ra.get('role_name'),
+                    'original_scope': ra.get('scope'),
+                    'original_scope_type': st,
+                    'expansion': 'none',
+                }
+                if st == 'subscription':
+                    expansion['expansion'] = 'subscription → all resource groups and resources'
+                elif st == 'management_group':
+                    expansion['expansion'] = 'management group → all subscriptions, resource groups, and resources'
+                elif st == 'resource_group':
+                    expansion['expansion'] = 'resource group → all resources within'
+
+                scope_chains.append(expansion)
+
+        # ── Enumerate reachable resources ──
+        reachable = []
+        for res in resources:
+            res_id = (res.get('resource_id') or '').lower()
+            res_sub = (res.get('subscription_id') or '').lower()
+            res_rg = (res.get('resource_group') or '').lower()
+
+            matched = False
+            match_via = None
+            for sub_scope in scopes.get('subscription', set()):
+                if res_sub and res_sub in sub_scope:
+                    matched = True
+                    match_via = 'subscription_scope'
+                    break
+            if not matched:
+                for mg_scope in scopes.get('management_group', set()):
+                    if res_sub and res_sub in mg_scope:
+                        matched = True
+                        match_via = 'management_group_scope'
+                        break
+            if not matched:
+                for rg_scope in scopes.get('resource_group', set()):
+                    if res_rg and res_rg.lower() in rg_scope:
+                        matched = True
+                        match_via = 'resource_group_scope'
+                        break
+            if not matched:
+                for r_scope in scopes.get('resource', set()):
+                    if res_id and res_id in r_scope:
+                        matched = True
+                        match_via = 'direct_resource_scope'
+                        break
+            if matched:
+                reachable.append({**res, '_match_via': match_via})
+
+        # ── Metrics ──
+        sub_ids = set()
+        rg_ids = set()
+        for r in reachable:
+            if r.get('subscription_id'):
+                sub_ids.add(r['subscription_id'])
+            if r.get('resource_group'):
+                rg_ids.add(r['resource_group'])
+
+        # ── Privileged targets ──
+        priv_scopes = {'subscription': set(), 'resource_group': set(), 'resource': set(), 'management_group': set()}
+        for ra in all_rbac:
+            if ra.get('role_name') in PRIVILEGED_RBAC_ROLES:
+                st = ra.get('scope_type', '')
+                scope = (ra.get('scope') or '').lower()
+                if st in priv_scopes and scope:
+                    priv_scopes[st].add(scope)
+                    if st in ('subscription', 'management_group'):
+                        priv_scopes['subscription'].add(scope)
+
+        privileged_targets = []
+        for res in reachable:
+            res_id = (res.get('resource_id') or '').lower()
+            res_sub = (res.get('subscription_id') or '').lower()
+            res_rg = (res.get('resource_group') or '').lower()
+            matched = False
+            for sub_scope in priv_scopes.get('subscription', set()):
+                if res_sub and res_sub in sub_scope:
+                    matched = True
+                    break
+            if not matched:
+                for rg_scope in priv_scopes.get('resource_group', set()):
+                    if res_rg and res_rg.lower() in rg_scope:
+                        matched = True
+                        break
+            if not matched:
+                for r_scope in priv_scopes.get('resource', set()):
+                    if res_id and res_id in r_scope:
+                        matched = True
+                        break
+            if matched:
+                privileged_targets.append({
+                    'resource_type': res.get('resource_type'),
+                    'name': res.get('name'),
+                    'resource_id': res.get('resource_id'),
+                    'risk_level': res.get('risk_level'),
+                })
+
+        # ── High-value targets ──
+        from app.engines.resource_scope_extractor import HIGH_VALUE_TYPES
+        high_value_targets = []
+        for r in reachable:
+            is_hvt = False
+            hvt_reason = None
+            if r.get('is_high_value'):
+                is_hvt = True
+                hvt_reason = HIGH_VALUE_TYPES.get(r.get('resource_type'), 'High-value resource')
+            elif r.get('resource_type') == 'key_vault':
+                is_hvt = True
+                hvt_reason = 'Key vault — stores secrets, keys, and certificates'
+            elif r.get('data_classification'):
+                is_hvt = True
+                hvt_reason = f'Contains classified data: {r["data_classification"]}'
+            if is_hvt:
+                high_value_targets.append({
+                    'resource_type': r.get('resource_type'),
+                    'name': r.get('name'),
+                    'resource_id': r.get('resource_id'),
+                    'risk_level': r.get('risk_level'),
+                    'hvt_reason': hvt_reason,
+                })
+
+        # ── Resource summary by type ──
+        by_type = {}
+        for r in reachable:
+            rt = r.get('resource_type', 'other')
+            by_type[rt] = by_type.get(rt, 0) + 1
+
+        # ── Risk flag explanations (with threshold transparency) ──
+        agent_type = ident.get('agent_identity_type', '') or ''
+        activity = ident.get('activity_status', 'unknown') or 'unknown'
+        priv_role_names = set()
+        for ra in all_rbac:
+            if ra.get('role_name') in PRIVILEGED_RBAC_ROLES:
+                priv_role_names.add(ra['role_name'])
+        for era in entra_rows:
+            if era.get('role_name') in PRIVILEGED_ENTRA_ROLES:
+                priv_role_names.add(era['role_name'])
+        has_privileged = bool(priv_role_names)
+
+        risk_flag_explanations = []
+        rc = len(reachable)
+
+        t_broad = thresholds['broad_blast_radius_threshold']
+        t_broad_crit = thresholds['broad_blast_radius_critical_threshold']
+        if rc >= t_broad:
+            risk_flag_explanations.append({
+                'flag_name': 'broad_blast_radius',
+                'flag_reason': f'Identity can reach {rc} resources across {len(sub_ids)} subscriptions',
+                'trigger_metric': rc,
+                'threshold_used': t_broad,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'high' if rc >= t_broad_crit else 'medium',
+            })
+
+        t_priv_sub = thresholds['privileged_wide_reach_subscription_threshold']
+        t_priv_crit = thresholds['privileged_wide_reach_critical_subscription_threshold']
+        if has_privileged and len(sub_ids) >= t_priv_sub:
+            risk_flag_explanations.append({
+                'flag_name': 'privileged_wide_reach',
+                'flag_reason': f'Privileged identity spans {len(sub_ids)} subscriptions '
+                               f'with roles: {", ".join(sorted(priv_role_names))}',
+                'trigger_metric': len(sub_ids),
+                'threshold_used': t_priv_sub,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'critical' if len(sub_ids) >= t_priv_crit else 'high',
+            })
+
+        t_ai = thresholds['ai_excessive_blast_threshold']
+        if agent_type in AI_IDENTITY_TYPES and rc >= t_ai:
+            risk_flag_explanations.append({
+                'flag_name': 'ai_excessive_blast',
+                'flag_reason': f'AI agent identity ({agent_type}) can reach {rc} resources',
+                'trigger_metric': rc,
+                'threshold_used': t_ai,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'high',
+            })
+
+        t_dormant = thresholds['dormant_high_blast_threshold']
+        t_dormant_sev = thresholds['dormant_high_blast_severe_threshold']
+        if activity in DORMANT_ACTIVITY_STATUSES and rc >= t_dormant:
+            risk_flag_explanations.append({
+                'flag_name': 'dormant_high_blast',
+                'flag_reason': f'{activity} identity can reach {rc} resources '
+                               f'including {len(high_value_targets)} high-value targets',
+                'trigger_metric': rc,
+                'threshold_used': t_dormant,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'high' if rc >= t_dormant_sev else 'medium',
+            })
+
+        # ── Confidence / caveat metadata ──
+        deterministic_count = len(reachable)
+        # Scope-based expansion is deterministic. Estimated paths = 0
+        # because we don't do speculative pathing.
+        estimated_count = 0
+
+        # Confidence: high if resources + roles present, lower if missing data
+        has_resources = len(resources) > 0
+        has_roles = len(all_rbac) > 0 or len(entra_rows) > 0
+        if has_resources and has_roles:
+            confidence = 'high'
+        elif has_roles:
+            confidence = 'medium'
+        else:
+            confidence = 'low'
+
+        # ── Resource sample (capped for response size) ──
+        resource_sample = []
+        for r in reachable[:DRILL_DOWN_RESOURCE_SAMPLE_LIMIT]:
+            resource_sample.append({
+                'resource_type': r.get('resource_type'),
+                'name': r.get('name'),
+                'resource_id': r.get('resource_id'),
+                'subscription_id': r.get('subscription_id'),
+                'resource_group': r.get('resource_group'),
+                'risk_level': r.get('risk_level'),
+                'data_classification': r.get('data_classification'),
+                'location': r.get('location'),
+                'sku': r.get('sku'),
+                'kind': r.get('kind'),
+                'discovery_source': r.get('discovery_source'),
+                'match_via': r.get('_match_via'),
+            })
+
+        return jsonify({
+            'identity': {
+                'identity_db_id': idb_id,
+                'display_name': ident['display_name'],
+                'identity_category': ident['identity_category'],
+                'agent_identity_type': agent_type or None,
+                'activity_status': activity,
+            },
+            'contributing_roles': contributing_roles,
+            'expanded_scopes': scope_chains,
+            'reachable_resources_sample': resource_sample,
+            'reachable_resource_summary_by_type': by_type,
+            'reachable_resource_count': len(reachable),
+            'reachable_resource_count_truncated': len(reachable) >= len(resources) and len(resources) > 0,
+            'privileged_targets': privileged_targets[:DRILL_DOWN_RESOURCE_SAMPLE_LIMIT],
+            'privileged_target_count': len(privileged_targets),
+            'high_value_targets': high_value_targets[:DRILL_DOWN_RESOURCE_SAMPLE_LIMIT],
+            'high_value_target_count': len(high_value_targets),
+            'subscriptions_reachable': len(sub_ids),
+            'resource_groups_reachable': len(rg_ids),
+            'risk_flag_explanations': risk_flag_explanations,
+            'thresholds_applied': thresholds,
+            'blast_radius_cross_reference': {
+                'risk_score': br_result.get('risk_score') if br_result else None,
+                'exposure_level': br_result.get('identity_exposure_level') if br_result else None,
+                'sensitive_resource_count': br_result.get('sensitive_resource_count') if br_result else None,
+                'escalation_paths': br_result.get('privilege_escalation_paths') if br_result else None,
+            },
+            'confidence': {
+                'exposure_confidence': confidence,
+                'deterministic_path_count': deterministic_count,
+                'estimated_path_count': estimated_count,
+                'model_limitations': MODEL_LIMITATIONS,
+                'data_completeness': {
+                    'has_rbac_roles': len(all_rbac) > 0,
+                    'has_entra_roles': len(entra_rows) > 0,
+                    'has_group_inherited_roles': len(group_rbac) > 0,
+                    'has_discovered_resources': has_resources,
+                    'resource_types_available': sorted(set(r.get('resource_type', '') for r in resources)),
+                    'total_tenant_resources': len(resources),
+                },
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_discovered_resources_handler():
+    """GET /api/discovered-resources — paginated enriched resource inventory.
+
+    Query params:
+        resource_type: filter by canonical type (e.g. 'sql_server')
+        subscription_id: filter by subscription
+        is_high_value: 'true' to show only HVTs
+        discovery_source: filter by source ('rbac_scope', 'resource_inventory', 'rbac_scope+inventory')
+        search: fuzzy name/id search
+        limit: page size (default 100, max 500)
+        offset: pagination offset
+    """
+    from psycopg2.extras import RealDictCursor
+
+    db = _db()
+    try:
+        org_id = _tenant_id()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get latest run_id for this org
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (org_id,))
+        run_row = cursor.fetchone()
+        if not run_row:
+            cursor.close()
+            return jsonify({'resources': [], 'total': 0, 'summary': {}})
+
+        run_id = run_row['id']
+
+        # Build filter query
+        conditions = ["organization_id = %s", "discovery_run_id = %s"]
+        params = [org_id, run_id]
+
+        resource_type = request.args.get('resource_type')
+        if resource_type:
+            conditions.append("resource_type = %s")
+            params.append(resource_type)
+
+        subscription_id = request.args.get('subscription_id')
+        if subscription_id:
+            conditions.append("subscription_id = %s")
+            params.append(subscription_id.lower())
+
+        is_high_value = request.args.get('is_high_value')
+        if is_high_value == 'true':
+            conditions.append("is_high_value = true")
+
+        discovery_source = request.args.get('discovery_source')
+        if discovery_source:
+            conditions.append("discovery_source = %s")
+            params.append(discovery_source)
+
+        search = request.args.get('search')
+        if search:
+            conditions.append("(resource_name ILIKE %s OR resource_id ILIKE %s)")
+            params.extend([f'%{search}%', f'%{search}%'])
+
+        where_clause = " AND ".join(conditions)
+
+        # Count
+        cursor.execute(f"SELECT COUNT(*) as cnt FROM discovered_resources WHERE {where_clause}", params)
+        total = cursor.fetchone()['cnt']
+
+        # Paginate
+        limit = min(int(request.args.get('limit', 100)), 500)
+        offset = int(request.args.get('offset', 0))
+
+        cursor.execute(f"""
+            SELECT resource_id, resource_name, resource_type, provider_type,
+                   subscription_id, resource_group, is_high_value, high_value_reason,
+                   data_classification, risk_level, identity_count, privileged_identity_count,
+                   location, sku, kind, managed_by, discovery_source, created_at, updated_at
+            FROM discovered_resources
+            WHERE {where_clause}
+            ORDER BY is_high_value DESC, identity_count DESC, resource_name
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        # Summary stats
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) as total_resources,
+                COUNT(*) FILTER (WHERE is_high_value = true) as high_value_count,
+                COUNT(DISTINCT subscription_id) as subscriptions,
+                COUNT(DISTINCT resource_group) as resource_groups,
+                COUNT(DISTINCT resource_type) as resource_types,
+                COUNT(*) FILTER (WHERE discovery_source LIKE '%%inventory%%') as inventory_sourced,
+                COUNT(*) FILTER (WHERE location IS NOT NULL) as with_location
+            FROM discovered_resources
+            WHERE organization_id = %s AND discovery_run_id = %s
+        """, (org_id, run_id))
+        summary = dict(cursor.fetchone())
+
+        cursor.close()
+        return jsonify({
+            'resources': rows,
+            'total': total,
+            'summary': summary,
+            'run_id': run_id,
+        })
     finally:
         db.close()
 
@@ -28983,6 +33651,140 @@ def get_platform_health_handler():
                 'active_jobs_count': active_jobs_count,
             },
         })
+    finally:
+        db.close()
+
+
+# ── Pipeline Health Monitoring ────────────────────────────────────────────
+
+def get_pipeline_health_handler():
+    """GET /api/platform/health/pipelines — pipeline stage health for recent runs.
+
+    Returns per-stage health metrics for the latest discovery runs,
+    highlighting degraded/failed stages with diagnostic context.
+
+    Query params:
+        org_id: Filter to specific organization (optional, admin only)
+        run_id: Filter to specific run (optional)
+        status: Filter by health_status (degraded, failed, healthy, skipped)
+        limit: Max runs to return (default 5)
+    """
+    from app.database import Database
+
+    db = Database(_admin_reason='pipeline_health')
+    try:
+        org_id = request.args.get('org_id', type=int)
+        run_id = request.args.get('run_id', type=int)
+        status_filter = request.args.get('status')
+        limit = min(request.args.get('limit', 5, type=int), 20)
+
+        cursor = db.conn.cursor()
+
+        # Get latest runs with pipeline health summary
+        run_sql = """
+            SELECT id, organization_id, status, started_at, completed_at,
+                   total_identities, pipeline_health_summary
+            FROM discovery_runs
+            WHERE status = 'completed'
+              AND pipeline_health_summary IS NOT NULL
+        """
+        params = []
+        if org_id:
+            run_sql += " AND organization_id = %s"
+            params.append(org_id)
+        if run_id:
+            run_sql += " AND id = %s"
+            params.append(run_id)
+        run_sql += " ORDER BY id DESC LIMIT %s"
+        params.append(limit)
+
+        cursor.execute(run_sql, tuple(params))
+        cols = [desc[0] for desc in cursor.description]
+        run_rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+        # Get per-stage metrics for these runs
+        run_ids = [r['id'] for r in run_rows]
+        stages = []
+        if run_ids:
+            stage_sql = """
+                SELECT discovery_run_id, stage_name, stage_order,
+                       records_fetched, records_matched, records_persisted,
+                       records_failed, records_skipped, failure_rate,
+                       duration_ms, health_status, degradation_reason,
+                       error_message, prior_run_persisted, delta_vs_prior,
+                       started_at, completed_at
+                FROM pipeline_stage_metrics
+                WHERE discovery_run_id = ANY(%s)
+            """
+            stage_params = [run_ids]
+            if status_filter:
+                stage_sql += " AND health_status = %s"
+                stage_params.append(status_filter)
+            stage_sql += " ORDER BY discovery_run_id DESC, stage_order ASC"
+
+            cursor.execute(stage_sql, tuple(stage_params))
+            stage_cols = [desc[0] for desc in cursor.description]
+            stages = [dict(zip(stage_cols, row)) for row in cursor.fetchall()]
+
+        cursor.close()
+
+        # Serialize datetime fields
+        for r in run_rows:
+            for k in ('started_at', 'completed_at'):
+                if r.get(k) and hasattr(r[k], 'isoformat'):
+                    r[k] = r[k].isoformat()
+        for s in stages:
+            for k in ('started_at', 'completed_at'):
+                if s.get(k) and hasattr(s[k], 'isoformat'):
+                    s[k] = s[k].isoformat()
+            # Convert Decimal to float
+            if s.get('failure_rate') is not None:
+                s['failure_rate'] = float(s['failure_rate'])
+            if s.get('delta_vs_prior') is not None:
+                s['delta_vs_prior'] = float(s['delta_vs_prior'])
+
+        # Overall summary
+        degraded_stages = [s for s in stages if s['health_status'] == 'degraded']
+        failed_stages = [s for s in stages if s['health_status'] == 'failed']
+
+        overall = 'healthy'
+        if failed_stages:
+            overall = 'failed'
+        elif degraded_stages:
+            overall = 'degraded'
+
+        return jsonify({
+            'overall_health': overall,
+            'runs': run_rows,
+            'stages': stages,
+            'summary': {
+                'total_stages_tracked': len(stages),
+                'healthy': sum(1 for s in stages if s['health_status'] == 'healthy'),
+                'degraded': len(degraded_stages),
+                'failed': len(failed_stages),
+                'skipped': sum(1 for s in stages if s['health_status'] == 'skipped'),
+            },
+            'alerts': [
+                {
+                    'stage': s['stage_name'],
+                    'run_id': s['discovery_run_id'],
+                    'status': s['health_status'],
+                    'reason': s['degradation_reason'],
+                    'failure_rate': s.get('failure_rate', 0),
+                    'fetched': s['records_fetched'],
+                    'persisted': s['records_persisted'],
+                    'failed': s['records_failed'],
+                }
+                for s in degraded_stages + failed_stages
+            ],
+        })
+    except Exception as e:
+        logger.error("Pipeline health endpoint error: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)[:200]}), 500
     finally:
         db.close()
 
@@ -29895,7 +34697,7 @@ def copilot_query_handler():
             })
 
         else:
-            context = gateway.build_tenant_context_prefix(org_id) + service.gather_context(db)
+            context = gateway.build_tenant_context_prefix(org_id) + service.gather_context(db, org_id=org_id)
             answer = service.contextual_query(question, context)
 
         duration_ms = int((time.time() - start) * 1000)
@@ -30095,7 +34897,7 @@ def copilot_graph_query_handler():
                     break
 
         # Gather context with tenant isolation prefix
-        context = gateway.build_tenant_context_prefix(org_id) + service.gather_context(db)
+        context = gateway.build_tenant_context_prefix(org_id) + service.gather_context(db, org_id=org_id)
         context += f"\n\nUser query: {query}"
         if translation.get('matched'):
             context += f"\nMatched API: {translation['api']}"
@@ -30836,8 +35638,8 @@ def create_invitation_handler():
     data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip().lower()
     role = data.get('role', 'reader').strip()
-    if not email or '@' not in email:
-        return jsonify({'error': 'Valid email is required'}), 400
+    if not email or not _is_valid_email(email):
+        return jsonify({'error': 'Invalid email address'}), 400
     if role not in VALID_ROLES:
         return jsonify({'error': f'Invalid role: {role}'}), 400
 
@@ -30937,7 +35739,7 @@ def accept_invitation_handler():
             return jsonify({'error': 'A user with this email already exists'}), 409
 
         # Create user
-        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode('utf-8')
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             INSERT INTO users (username, password_hash, display_name, role, organization_id, enabled)
@@ -32153,19 +36955,24 @@ def get_risk_summary_full():
             active_sub_ids, _, _ = _active_subscription_ids(exp_cursor, org_id, conn_id)
             for tbl, var in [("azure_storage_accounts", "sa"), ("azure_key_vaults", "kv")]:
                 try:
-                    exp_cursor.execute(f"SAVEPOINT full_{var}")
+                    exp_cursor.execute("SAVEPOINT full_resource")
+                    _tbl_id = _safe_tbl(tbl, exp_cursor.connection)
                     if active_sub_ids:
                         exp_cursor.execute(
-                            f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s) AND subscription_id = ANY(%s)",
+                            psycopg2_sql.SQL("SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s) AND subscription_id = ANY(%s)")
+                            .format(tbl=_tbl_id),
                             (run_ids, active_sub_ids))
                     else:
-                        exp_cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)", (run_ids,))
+                        exp_cursor.execute(
+                            psycopg2_sql.SQL("SELECT COUNT(*) FROM {tbl} WHERE discovery_run_id = ANY(%s)")
+                            .format(tbl=_tbl_id),
+                            (run_ids,))
                     val = _scalar(exp_cursor, 0)
                     if var == "sa":
                         sa_count = val
                     else:
                         kv_count = val
-                    exp_cursor.execute(f"RELEASE SAVEPOINT full_{var}")
+                    exp_cursor.execute("RELEASE SAVEPOINT full_resource")
                 except Exception:
                     try: cursor.connection.rollback()
                     except Exception: pass
@@ -32583,6 +37390,13 @@ def get_risk_summary_full():
                 "ghost_accounts": ghost, "orphaned_spns": orphaned,
                 "over_privileged": over_priv, "dormant_privileged": dormant,
                 "high_blast_radius": high_blast, "external_exposure": ext_exposure,
+                # AG-79: deltas vs prior scan (positive = worse)
+                "ghost_accounts_delta": ghost - (previous.get('ghost_accounts') or 0) if previous else None,
+                "orphaned_spns_delta": orphaned - (previous.get('orphaned_spns') or 0) if previous else None,
+                "over_privileged_delta": over_priv - (previous.get('over_privileged') or 0) if previous else None,
+                "dormant_privileged_delta": dormant - (previous.get('dormant_privileged') or 0) if previous else None,
+                "high_blast_radius_delta": high_blast - (previous.get('high_blast_radius') or 0) if previous else None,
+                "external_exposure_delta": ext_exposure - (previous.get('external_exposure') or 0) if previous else None,
             },
             "risk_level_distribution": risk_level_dist,
             "identity_counts": {
@@ -32728,10 +37542,10 @@ def get_agent_identities():
         order_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
         nulls = 'NULLS LAST' if order_dir == 'DESC' else 'NULLS FIRST'
 
-        # Build WHERE clause
+        # Build WHERE clause — include ai_privileged_human when include_possible
         type_filter = "ac.agent_identity_type = 'ai_agent'"
         if include_possible:
-            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')"
+            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')"
 
         platform_filter = ""
         params = []
@@ -32739,61 +37553,75 @@ def get_agent_identities():
             platform_filter = " AND ac.detected_platform = %s"
             params.append(platform)
 
-        # Count total
-        count_sql = f"""
-            SELECT COUNT(DISTINCT i.id)
-            FROM identities i
-            JOIN agent_classifications ac ON ac.identity_db_id = i.id
-            WHERE {type_filter}{platform_filter}
-              AND NOT COALESCE(i.is_microsoft_system, false)
-              AND i.deleted_at IS NULL
-        """
+        # Deduplicate: same identity_id appears across multiple discovery runs.
+        # Use DISTINCT ON (i.identity_id) keeping the row from the latest run
+        # (highest discovery_run_id), then join the latest classification.
         cursor = db.conn.cursor()
+
+        # Count total (unique identities only)
+        count_sql = f"""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) i.id
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+        """
         cursor.execute(count_sql, params)
         total = _scalar(cursor, 0)
 
-        # Fetch identities + classification metadata
+        # Fetch identities + classification metadata (deduplicated)
         offset = (page - 1) * per_page
         data_sql = f"""
-            SELECT
-                i.identity_id,
-                i.display_name,
-                i.identity_type,
-                COALESCE(i.identity_category, '') as identity_category,
-                i.risk_level,
-                i.risk_score,
-                i.credential_count,
-                i.credential_risk,
-                i.activity_status,
-                i.last_sign_in,
-                i.created_datetime,
-                i.cloud,
-                i.owner_display_name,
-                i.owner_count,
-                i.enabled,
-                COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
-                i.app_id,
-                i.object_id,
-                i.primary_subscription_id,
-                i.additional_subscription_count,
-                i.pim_eligible_count,
-                i.ca_coverage_status,
-                i.privilege_tier,
-                i.blast_radius_score,
-                -- classification fields (additive only)
-                ac.agent_identity_type,
-                ac.classification_confidence,
-                ac.classification_reason,
-                ac.detected_platform,
-                ac.classified_at,
-                ac.pattern_version,
-                ac.last_service_principal_sign_in
-            FROM identities i
-            JOIN agent_classifications ac ON ac.identity_db_id = i.id
-            WHERE {type_filter}{platform_filter}
-              AND NOT COALESCE(i.is_microsoft_system, false)
-              AND i.deleted_at IS NULL
-            ORDER BY {order_col} {order_dir} {nulls}
+            SELECT * FROM (
+                SELECT DISTINCT ON (i.identity_id)
+                    i.identity_id,
+                    i.display_name,
+                    i.identity_type,
+                    COALESCE(i.identity_category, '') as identity_category,
+                    i.risk_level,
+                    i.risk_score,
+                    i.credential_count,
+                    i.credential_risk,
+                    i.activity_status,
+                    i.last_sign_in,
+                    i.created_datetime,
+                    i.cloud,
+                    i.owner_display_name,
+                    i.owner_count,
+                    i.enabled,
+                    COALESCE(i.is_microsoft_system, false) as is_microsoft_system,
+                    i.app_id,
+                    i.object_id,
+                    i.primary_subscription_id,
+                    i.additional_subscription_count,
+                    i.pim_eligible_count,
+                    i.ca_coverage_status,
+                    i.privilege_tier,
+                    i.blast_radius_score,
+                    -- activity fields (canonical SSOT)
+                    i.last_activity_date,
+                    i.last_activity_source,
+                    i.last_activity_confidence,
+                    -- classification fields (additive only)
+                    ac.agent_identity_type,
+                    ac.classification_confidence,
+                    ac.classification_reason,
+                    ac.detected_platform,
+                    ac.classified_at,
+                    ac.pattern_version,
+                    ac.last_service_principal_sign_in
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            ORDER BY {order_col.replace('i.', '').replace('ac.', '')} {order_dir} {nulls}
             LIMIT %s OFFSET %s
         """
         cursor.execute(data_sql, params + [per_page, offset])
@@ -32801,13 +37629,53 @@ def get_agent_identities():
         rows = cursor.fetchall()
         cursor.close()
 
+        # Batch-fetch role activity summaries for all identities in result
+        identity_db_ids = [row[columns.index('identity_id')] for row in rows]  # identity_ids
+        # Build a map of identity_db_id -> row index from raw rows
+        # We need the integer DB id (i.id) — fetch from identities
+        id_col_idx = 0  # first column in data_sql is identity_id (string)
+        # Re-query for role summaries using a subquery approach
+        role_summaries = {}
+        if rows:
+            # Get identity DB ids from the fetched identity_ids
+            id_list_str = [row[0] for row in rows]  # identity_id strings
+            cursor2 = db.conn.cursor()
+            try:
+                cursor2.execute("SAVEPOINT _role_sum")
+                cursor2.execute("""
+                    SELECT i.identity_id,
+                           COUNT(ra.id) as total_roles,
+                           COUNT(CASE WHEN ra.last_used_at IS NULL THEN 1 END) as never_used,
+                           COUNT(CASE WHEN ra.last_used_at IS NOT NULL
+                                      AND ra.last_used_at < NOW() - INTERVAL '90 days' THEN 1 END) as stale_90d,
+                           MAX(ra.last_used_at) as last_role_active
+                    FROM identities i
+                    JOIN role_assignments ra ON ra.identity_db_id = i.id
+                    WHERE i.identity_id = ANY(%s)
+                    GROUP BY i.identity_id
+                """, (id_list_str,))
+                for r in cursor2.fetchall():
+                    role_summaries[r[0]] = {
+                        'total_roles': r[1],
+                        'never_used': r[2],
+                        'stale_90d': r[3],
+                        'last_role_active': r[4].isoformat() if r[4] else None,
+                    }
+                cursor2.execute("RELEASE SAVEPOINT _role_sum")
+            except Exception:
+                try:
+                    cursor2.execute("ROLLBACK TO SAVEPOINT _role_sum")
+                except Exception:
+                    pass
+            cursor2.close()
+
         items = []
         for row in rows:
             item = dict(zip(columns, row))
             # Normalize types for JSON serialization
             for dt_field in ('last_sign_in', 'created_datetime', 'classified_at',
-                             'last_service_principal_sign_in'):
-                if item.get(dt_field):
+                             'last_service_principal_sign_in', 'last_activity_date'):
+                if item.get(dt_field) and hasattr(item[dt_field], 'isoformat'):
                     item[dt_field] = item[dt_field].isoformat()
             item['credential_count'] = int(item.get('credential_count') or 0)
             item['risk_score'] = int(item.get('risk_score') or 0)
@@ -32828,22 +37696,61 @@ def get_agent_identities():
                 item['agent_penalty_reason'] = None
                 item['risk_score_display'] = item['risk_score']
 
-            # Phase 2 B2-7: Compute effective last active from dual sources
+            # Compute effective_last_active from canonical SSOT fields
+            # Priority: 1) last_activity_date 2) last_sign_in 3) last_service_principal_sign_in
+            last_act_date = item.get('last_activity_date')
+            last_act_src = item.get('last_activity_source')
+            last_act_conf = item.get('last_activity_confidence')
             interactive_sign_in = item.get('last_sign_in')
             sp_sign_in = item.get('last_service_principal_sign_in')
-            item['last_interactive_sign_in'] = interactive_sign_in
-            # Compute effective_last_active (both are already ISO strings or None)
-            if interactive_sign_in and sp_sign_in:
-                item['effective_last_active'] = max(interactive_sign_in, sp_sign_in)
+
+            # Normalize last_activity_date to ISO string
+            if last_act_date and hasattr(last_act_date, 'isoformat'):
+                last_act_date = last_act_date.isoformat()
+                item['last_activity_date'] = last_act_date
+
+            # Source label map
+            SOURCE_LABELS = {
+                'role_assignment': 'ARM activity',
+                'entra_noninteractive': 'P2 sign-in',
+                'entra_interactive': 'P2 sign-in',
+                'created_date': 'AuditGraph snapshot',
+                'arm_activity': 'ARM activity',
+                'sign_in_log': 'P2 sign-in',
+            }
+
+            if last_act_date:
+                item['effective_last_active'] = last_act_date
+                item['activity_detection_source'] = SOURCE_LABELS.get(last_act_src or '', last_act_src or 'AuditGraph snapshot')
+                item['last_activity_confidence'] = last_act_conf or 'medium'
+            elif interactive_sign_in:
+                item['effective_last_active'] = interactive_sign_in
+                item['activity_detection_source'] = 'P2 sign-in'
+                item['last_activity_confidence'] = 'high'
+            elif sp_sign_in:
+                item['effective_last_active'] = sp_sign_in
+                item['activity_detection_source'] = 'P2 sign-in'
+                item['last_activity_confidence'] = 'high'
             else:
-                item['effective_last_active'] = interactive_sign_in or sp_sign_in
-            # Determine detection source
-            if sp_sign_in and item['effective_last_active'] == sp_sign_in:
-                item['activity_detection_source'] = 'service_principal_sign_in'
-            elif interactive_sign_in and item['effective_last_active'] == interactive_sign_in:
-                item['activity_detection_source'] = 'interactive_sign_in'
+                item['effective_last_active'] = None
+                item['activity_detection_source'] = None
+                item['last_activity_confidence'] = None
+
+            # Dormancy status from activity_status
+            act_status = item.get('activity_status', '')
+            if act_status in ('active', 'recently_created', 'likely_active'):
+                item['dormancy_status'] = 'Active'
+            elif act_status in ('stale', 'never_used', 'inactive'):
+                item['dormancy_status'] = 'Dormant'
             else:
-                item['activity_detection_source'] = 'no_activity_recorded'
+                item['dormancy_status'] = 'Unknown'
+
+            # Role activity summary
+            rs = role_summaries.get(item['identity_id'])
+            if rs:
+                item['role_summary'] = rs
+            else:
+                item['role_summary'] = {'total_roles': 0, 'never_used': 0, 'stale_90d': 0, 'last_role_active': None}
 
             items.append(item)
 
@@ -32873,15 +37780,16 @@ def get_agent_identity_count():
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT
-                ac.agent_identity_type,
-                COUNT(DISTINCT i.id)
-            FROM agent_classifications ac
-            JOIN identities i ON i.id = ac.identity_db_id
-            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
-              AND NOT COALESCE(i.is_microsoft_system, false)
-              AND i.deleted_at IS NULL
-            GROUP BY ac.agent_identity_type
+            SELECT agent_identity_type, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) ac.agent_identity_type
+                FROM agent_classifications ac
+                JOIN identities i ON i.id = ac.identity_db_id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY agent_identity_type
         """)
         counts = {row[0]: row[1] for row in cursor.fetchall()}
         cursor.close()
@@ -33313,6 +38221,288 @@ def scan_orphan_agents():
         db.close()
 
 
+def get_agent_evidence(identity_id):
+    """GET /api/identities/<identity_id>/ai-evidence — classification proof panel.
+
+    Returns structured evidence explaining WHY this identity was classified as
+    an AI agent, including matched signals, AI resource connections, and risk context.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Resolve identity via org-scoped discovery runs
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.app_id, i.identity_type,
+                   i.identity_category, i.risk_score, i.risk_level,
+                   i.agent_identity_type
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id, display_name, app_id, identity_type, category, risk_score, risk_level, agent_type = ident
+
+        # Get classification record
+        cursor.execute("""
+            SELECT agent_identity_type, classification_confidence,
+                   classification_reason, detected_platform, pattern_version,
+                   classified_at
+            FROM agent_classifications
+            WHERE identity_db_id = %s
+            ORDER BY classified_at DESC LIMIT 1
+        """, (db_id,))
+        classification_row = cursor.fetchone()
+
+        if not classification_row:
+            cursor.close()
+            return jsonify({
+                'classified': False,
+                'agent_identity_type': agent_type or 'unknown',
+                'classification': None,
+                'evidence_signals': [],
+                'ai_connections': [],
+                'risk_context': None,
+            })
+
+        c_type, c_confidence, c_reason, c_platform, c_version, c_at = classification_row
+
+        # Only show evidence for actual AI classifications
+        if c_type not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
+            cursor.close()
+            return jsonify({
+                'classified': False,
+                'agent_identity_type': c_type or 'unknown',
+                'classification': None,
+                'evidence_signals': [],
+                'ai_connections': [],
+                'risk_context': None,
+            })
+
+        # Parse signal type from classification_reason (e.g. "app_id_match: openai")
+        signal_type = c_reason.split(':')[0].strip() if c_reason else 'unknown'
+
+        # Build evidence signals list
+        evidence_signals = []
+
+        # Signal 1: The primary classification signal
+        evidence_text = _build_evidence_text(signal_type, c_platform, display_name, app_id)
+        evidence_signals.append({
+            'signal_type': signal_type,
+            'confidence': c_confidence,
+            'platform': c_platform,
+            'evidence_text': evidence_text,
+            'is_primary': True,
+        })
+
+        # Signal 2: Check for corroborating role assignments on AI scopes
+        try:
+            cursor.execute("SAVEPOINT _ev_roles")
+            cursor.execute("""
+                SELECT role_name, scope, last_used_at FROM role_assignments
+                WHERE identity_db_id = %s
+            """, (db_id,))
+            roles = cursor.fetchall()
+            cursor.execute("RELEASE SAVEPOINT _ev_roles")
+        except Exception:
+            roles = []
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _ev_roles")
+            except Exception:
+                pass
+
+        ai_roles = []
+        from app.engines.discovery.agent_pattern_loader import match_roles
+        if roles:
+            role_dicts = [{'role_name': r[0], 'scope': r[1]} for r in roles]
+            role_platform, role_conf = match_roles(role_dicts)
+            if role_platform:
+                # Find which specific roles matched
+                from app.engines.discovery.agent_pattern_loader import _role_names_set, _scope_patterns_lower
+                for r in roles:
+                    rn = r[0] or ''
+                    scope = (r[1] or '').lower()
+                    last_used = r[2].isoformat() if r[2] else None
+                    if rn in _role_names_set:
+                        ai_roles.append({'role_name': rn, 'scope': r[1], 'match_type': 'role_name', 'last_used_at': last_used})
+                    else:
+                        for pat in _scope_patterns_lower:
+                            if pat in scope:
+                                ai_roles.append({'role_name': rn, 'scope': r[1], 'match_type': 'scope_pattern', 'matched_pattern': pat, 'last_used_at': last_used})
+                                break
+
+                if ai_roles and signal_type != 'role_scope_match':
+                    evidence_signals.append({
+                        'signal_type': 'role_scope_match',
+                        'confidence': role_conf,
+                        'platform': role_platform,
+                        'evidence_text': f"Has {len(ai_roles)} AI-related role assignment(s): {', '.join(r['role_name'] for r in ai_roles[:3])}",
+                        'is_primary': False,
+                    })
+
+        # Signal 3: Check for AI-related permissions
+        try:
+            cursor.execute("SAVEPOINT _ev_perms")
+            cursor.execute("""
+                SELECT permissions FROM identity_permissions
+                WHERE identity_db_id = %s ORDER BY id DESC LIMIT 1
+            """, (db_id,))
+            perm_row = cursor.fetchone()
+            cursor.execute("RELEASE SAVEPOINT _ev_perms")
+        except Exception:
+            perm_row = None
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _ev_perms")
+            except Exception:
+                pass
+
+        ai_permissions = []
+        if perm_row and perm_row[0]:
+            import json as _json
+            perms = perm_row[0]
+            if isinstance(perms, str):
+                perms = _json.loads(perms)
+            if isinstance(perms, list):
+                from app.engines.discovery.agent_pattern_loader import match_permissions
+                perm_strings = []
+                for p in perms:
+                    if isinstance(p, dict):
+                        perm_strings.append(p.get('permission', ''))
+                        perm_strings.append(p.get('resource', ''))
+                    else:
+                        perm_strings.append(str(p))
+                matches = match_permissions(perm_strings)
+                for pname, pconf, pplat in matches:
+                    ai_permissions.append({'permission': pname, 'confidence': pconf, 'platform': pplat})
+
+                if ai_permissions and signal_type != 'permission_match':
+                    evidence_signals.append({
+                        'signal_type': 'permission_match',
+                        'confidence': ai_permissions[0]['confidence'],
+                        'platform': ai_permissions[0]['platform'],
+                        'evidence_text': f"Has {len(ai_permissions)} AI-related API permission(s): {', '.join(p['permission'] for p in ai_permissions[:3])}",
+                        'is_primary': False,
+                    })
+
+        # Build AI connections (role assignments on AI resources)
+        ai_connections = []
+        for ar in ai_roles:
+            last_used = ar.get('last_used_at')
+            if last_used:
+                source = f"P2 sign-in log \u00b7 {last_used[:10]}"
+            else:
+                source = "ARM role assignment \u00b7 Static analysis"
+            ai_connections.append({
+                'type': 'rbac_role',
+                'role_name': ar['role_name'],
+                'scope': ar['scope'],
+                'match_type': ar['match_type'],
+                'last_used_at': last_used,
+                'source_of_evidence': source,
+            })
+        for ap in ai_permissions:
+            ai_connections.append({
+                'type': 'api_permission',
+                'permission': ap['permission'],
+                'platform': ap['platform'],
+                'last_used_at': None,
+                'source_of_evidence': "ARM role assignment \u00b7 Static analysis",
+            })
+
+        # Risk context
+        risk_context = {
+            'risk_score': risk_score,
+            'risk_level': risk_level,
+            'identity_type': identity_type,
+            'identity_category': category,
+            'has_owner': False,
+            'credential_count': 0,
+        }
+        # Fetch owner/cred info
+        try:
+            cursor.execute("SAVEPOINT _ev_ctx")
+            cursor.execute("""
+                SELECT owner_count, credential_count FROM identities WHERE id = %s
+            """, (db_id,))
+            ctx_row = cursor.fetchone()
+            cursor.execute("RELEASE SAVEPOINT _ev_ctx")
+            if ctx_row:
+                risk_context['has_owner'] = (ctx_row[0] or 0) > 0
+                risk_context['credential_count'] = ctx_row[0] or 0
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _ev_ctx")
+            except Exception:
+                pass
+
+        cursor.close()
+
+        return jsonify({
+            'classified': True,
+            'agent_identity_type': c_type,
+            'classification': {
+                'confidence': c_confidence,
+                'reason': c_reason,
+                'platform': c_platform,
+                'pattern_version': c_version,
+                'classified_at': c_at.isoformat() if c_at else None,
+            },
+            'evidence_signals': evidence_signals,
+            'ai_connections': ai_connections,
+            'risk_context': risk_context,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_agent_evidence failed for %s: %s", identity_id, e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def _build_evidence_text(signal_type, platform, display_name, app_id):
+    """Generate human-readable evidence explanation for classification signal."""
+    platform_labels = {
+        'copilot_studio': 'Microsoft Copilot Studio',
+        'power_virtual_agents': 'Power Virtual Agents',
+        'openai': 'OpenAI',
+        'anthropic': 'Anthropic Claude',
+        'azure_ai_studio': 'Azure AI Studio',
+        'azure_ml': 'Azure Machine Learning',
+        'azure_ai': 'Azure AI Services',
+        'azure_cognitive': 'Azure Cognitive Services',
+        'bot_framework': 'Microsoft Bot Framework',
+    }
+    label = platform_labels.get(platform, platform or 'Unknown Platform')
+
+    if signal_type == 'app_id_match':
+        return f"Application ID ({app_id}) is a registered {label} enterprise application"
+    elif signal_type == 'role_scope_match':
+        return f"Has RBAC role assignments on {label} resource scopes, confirming AI workload access"
+    elif signal_type == 'display_name_match':
+        return f"Display name \"{display_name}\" matches known {label} naming pattern"
+    elif signal_type == 'permission_match':
+        return f"Has API permissions granting access to {label} services"
+    else:
+        return f"Classified as {label} AI agent identity"
+
+
 # ============================================================
 # Phase 2A: Entra Group Scanner
 # ============================================================
@@ -33381,16 +38571,22 @@ def get_entra_group_stats():
 
 
 def get_identity_entra_groups(identity_id: str):
-    """GET /api/identities/<id>/entra-groups — groups the identity belongs to."""
+    """GET /api/identities/<id>/entra-groups — groups the identity belongs to.
+
+    Query params:
+      access_only  – 'true' (default) returns only groups with Azure RBAC roles.
+                     'false' returns all groups (for debugging).
+    """
     db = _db()
     try:
         db._ensure_entra_group_tables()
         organization_id = _org_id()
+        access_only = request.args.get('access_only', 'true').lower() != 'false'
         cursor = db.conn.cursor()
         run_ids = _latest_run_ids(cursor, organization_id, _connection_id())
         if not run_ids:
             cursor.close()
-            return jsonify({'groups': [], 'count': 0})
+            return jsonify({'groups': [], 'count': 0, 'total_groups': 0, 'with_azure_access': 0})
 
         # Look up the identity's object_id — the Graph object ID used as
         # member_object_id in entra_group_memberships. identity_id is app_id for
@@ -33403,13 +38599,27 @@ def get_identity_entra_groups(identity_id: str):
         row = cursor.fetchone()
         cursor.close()
         if not row or not row[0]:
-            return jsonify({'groups': [], 'count': 0})
+            return jsonify({'groups': [], 'count': 0, 'total_groups': 0, 'with_azure_access': 0})
 
         azure_object_id = row[0]
-        groups = db.get_identity_entra_groups(azure_object_id, run_ids)
+        all_groups = db.get_identity_entra_groups(azure_object_id, run_ids)
+        total_groups = len(all_groups)
+        with_azure_access = sum(
+            1 for g in all_groups
+            if g.get('rbac_roles') and len(g['rbac_roles']) > 0
+        )
+
+        if access_only:
+            groups = [g for g in all_groups
+                      if (g.get('rbac_roles') and len(g['rbac_roles']) > 0)]
+        else:
+            groups = all_groups
+
         return jsonify({
             'groups': groups,
             'count': len(groups),
+            'total_groups': total_groups,
+            'with_azure_access': with_azure_access,
         })
     finally:
         db.close()
@@ -33534,8 +38744,15 @@ def create_remediation_queue_item():
 
 def list_remediation_queue():
     """GET /api/remediation-queue — Paginated queue with optional status/severity filters."""
-    db = _db()
+    _EMPTY_SUMMARY = {
+        'total': 0,
+        'by_status': {'open': 0, 'in_progress': 0, 'resolved': 0, 'dismissed': 0},
+        'by_severity': {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
+        'avg_resolution_days': None,
+    }
+    db = None
     try:
+        db = _db()
         org_id = _org_id()
 
         status = request.args.get('status')
@@ -33554,8 +38771,17 @@ def list_remediation_queue():
         summary = _rq_summary(db, org_id)
 
         return jsonify({'items': items, 'total': total, 'summary': summary})
+    except Exception as exc:
+        logger.warning("remediation-queue list failed: %s", exc)
+        if db:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        return jsonify({'items': [], 'total': 0, 'summary': _EMPTY_SUMMARY})
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def get_remediation_queue_item_detail(item_id):
@@ -33606,13 +38832,28 @@ def patch_remediation_queue_item(item_id):
 
 def get_remediation_queue_summary():
     """GET /api/remediation-queue/summary — Aggregate counts for CISO dashboard tile."""
-    db = _db()
+    db = None
     try:
+        db = _db()
         org_id = _org_id()
         summary = _rq_summary(db, org_id)
         return jsonify(summary)
+    except Exception as exc:
+        logger.warning("remediation-queue summary failed: %s", exc)
+        if db:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+        return jsonify({
+            'total': 0,
+            'by_status': {'open': 0, 'in_progress': 0, 'resolved': 0, 'dismissed': 0},
+            'by_severity': {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
+            'avg_resolution_days': None,
+        })
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -33636,7 +38877,7 @@ _GAP_PRIORITY = [
 _SOURCE_CHECKS = {
     'risk': lambda d: bool(isinstance(d, dict) and d.get('latest', {}) and isinstance(d['latest'], dict) and d['latest'].get('total_identities')),
     'trends': lambda d: bool(isinstance(d, dict) and d.get('runs')),
-    'anomalies': lambda d: isinstance(d, dict) and (d.get('unresolved', 0) > 0 or bool(d.get('top_anomalies'))),
+    'anomalies': lambda d: isinstance(d, dict) and (d.get('unresolved', 0) > 0 or bool(d.get('top_anomalies')) or bool(d.get('items'))),
     'remediation': lambda d: isinstance(d, dict) and d.get('total', 0) > 0,
     'drift': lambda d: isinstance(d, dict) and d.get('total_changes', 0) > 0,
     'spn': lambda d: isinstance(d, dict) and d.get('total_custom', 0) > 0,
@@ -33681,16 +38922,24 @@ def _safe_collect(fn, label='', *args):
 
 # ── Pure data builders (no DB — operate on pre-collected sources dicts) ──
 
+_RISK_SUMMARY_DEFAULT = {
+    'identity_counts': {'total': 0, 'customer': 0, 'microsoft': 0, 'human': 0, 'nhi': 0, 'guest': 0},
+    'agirs': None,
+    'computed_at': None,
+    'risk_counts': {'dormant_privileged': 0, 'ghost_accounts': 0, 'orphaned_spns': 0, 'over_privileged': 0, 'external_exposure': 0},
+    'exposure': {'subscriptions': 0, 'active_subscriptions': 0},
+}
+
 def _build_risk_summary_data(sources: dict):
-    """Extract risk summary from sources dict. Returns None if unavailable."""
+    """Extract risk summary from sources dict. Returns default if unavailable."""
     if not isinstance(sources, dict):
-        return None
+        return dict(_RISK_SUMMARY_DEFAULT)
     risk = sources.get('risk')
     if not isinstance(risk, dict):
-        return None
+        return dict(_RISK_SUMMARY_DEFAULT)
     latest = risk.get('latest')
     if not isinstance(latest, dict) or not latest.get('total_identities'):
-        return None
+        return dict(_RISK_SUMMARY_DEFAULT)
     # Build standardised output
     agirs_data = None
     if latest.get('agirs_score') is not None:
@@ -33746,19 +38995,71 @@ def _build_trends_data(sources: dict) -> dict:
 
 
 def _build_anomaly_data(sources: dict) -> dict:
-    """Extract anomaly data from sources dict."""
+    """Extract anomaly data — reads from anomalies table, drift events, and attack paths."""
     if not isinstance(sources, dict):
-        return {'available': False}
-    anomalies = sources.get('anomalies')
-    if not isinstance(anomalies, dict):
-        return {'available': False}
-    if anomalies.get('unresolved', 0) == 0 and not anomalies.get('top_anomalies'):
-        return {'available': False}
+        return {'available': False, 'items': []}
+
+    items = []
+
+    # Source 1: anomalies table
+    anomalies = sources.get('anomalies', {})
+    if isinstance(anomalies, dict):
+        for a in anomalies.get('top_anomalies', []):
+            items.append({
+                'type': a.get('type', 'unknown'), 'severity': a.get('severity', 'medium'),
+                'identity': a.get('description', ''), 'description': a.get('description', ''),
+                'source': 'anomaly_engine',
+            })
+
+    # Source 2: drift events JSONB
+    drift = sources.get('drift', {})
+    events = drift.get('events', [])
+    if isinstance(events, str):
+        import json as _json
+        try: events = _json.loads(events)
+        except Exception: events = []
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            etype = event.get('event_type', '')
+            if etype == 'risk_escalated':
+                items.append({
+                    'type': 'risk_escalation', 'severity': event.get('severity', 'medium'),
+                    'identity': event.get('display_name', ''), 'description': event.get('description', ''),
+                    'source': 'drift_detection', 'mitre': 'T1078.004',
+                })
+            elif etype in ('credential_expired', 'credential_added'):
+                items.append({
+                    'type': 'credential_anomaly', 'severity': 'medium',
+                    'identity': event.get('display_name', ''), 'description': event.get('description', ''),
+                    'source': 'drift_detection', 'mitre': 'T1098',
+                })
+
+    # Source 3: attack paths
+    ap = sources.get('attack_paths', {})
+    if isinstance(ap, dict) and ap.get('total', 0) > 0:
+        sev = 'high' if ap.get('high_severity', 0) > 0 else 'medium'
+        items.append({
+            'type': 'attack_paths_detected', 'severity': sev,
+            'identity': 'Multiple identities',
+            'description': f"{ap.get('total', 0)} attack paths — {ap.get('direct_escalation', 0)} direct escalation, {ap.get('lateral_movement', 0)} lateral movement",
+            'source': 'attack_path_analysis', 'mitre': 'T1078',
+        })
+
+    if not items:
+        return {'available': False, 'items': []}
+
     return {
         'available': True,
-        'unresolved': anomalies.get('unresolved', 0),
-        'bySeverity': anomalies.get('by_severity', {}),
-        'topAnomalies': anomalies.get('top_anomalies', []),
+        'unresolved': len(items),
+        'bySeverity': {
+            'high': sum(1 for i in items if i.get('severity') == 'high'),
+            'medium': sum(1 for i in items if i.get('severity') == 'medium'),
+            'critical': sum(1 for i in items if i.get('severity') == 'critical'),
+        },
+        'topAnomalies': items[:5],
+        'items': items,
     }
 
 
@@ -33879,7 +39180,7 @@ def _ciso_empty_envelope() -> dict:
     """Return empty CISO envelope for no-data state."""
     unavailable = {'available': False}
     data = {
-        'riskSummary': None,
+        'riskSummary': dict(_RISK_SUMMARY_DEFAULT),
         'trends': dict(unavailable),
         'anomalies': dict(unavailable),
         'remediation': dict(unavailable),
@@ -33943,9 +39244,11 @@ def _collect_ciso_sources_from_db(db, org_id, run_ids):
     """
     raw = {}
 
-    # Risk
+    # Risk — try with run_ids first, fall back to org-wide latest
     try:
         summary = db.get_latest_risk_summary(org_id, run_ids=run_ids or None)
+        if not summary and run_ids:
+            summary = db.get_latest_risk_summary(org_id, run_ids=None)
         raw['risk'] = {'latest': summary} if summary else {}
     except Exception:
         try: db.conn.rollback()
@@ -34021,20 +39324,52 @@ def _collect_ciso_sources_from_db(db, org_id, run_ids):
     try:
         cursor = db.conn.cursor()
         cursor.execute("""
-            SELECT total_changes, permission_changes_count, risk_changes_count, credential_changes_count
+            SELECT total_changes, permission_changes_count, risk_changes_count, credential_changes_count,
+                   events, max_severity, privilege_escalation_count, attack_path_created_count
             FROM drift_reports WHERE organization_id = %s ORDER BY created_at DESC LIMIT 1
         """, (org_id,))
         row = cursor.fetchone()
         cursor.close()
         if row:
-            raw['drift'] = {'total_changes': row[0] or 0, 'permission_changes': row[1] or 0,
-                            'role_changes': row[2] or 0, 'credential_changes': row[3] or 0}
+            raw['drift'] = {
+                'total_changes': row[0] or 0, 'permission_changes': row[1] or 0,
+                'role_changes': row[2] or 0, 'credential_changes': row[3] or 0,
+                'events': row[4] or [], 'max_severity': row[5] or 'low',
+                'privilege_escalation_count': row[6] or 0, 'attack_path_created_count': row[7] or 0,
+            }
         else:
             raw['drift'] = {}
     except Exception:
         try: db.conn.rollback()
         except Exception: pass
         raw['drift'] = {}
+
+    # Attack paths
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE path_type = 'direct_escalation') AS direct_escalation,
+                   COUNT(*) FILTER (WHERE path_type = 'lateral_movement') AS lateral_movement,
+                   COUNT(*) FILTER (WHERE severity IN ('high', 'critical')) AS high_severity,
+                   COUNT(DISTINCT source_entity_id) AS source_count
+            FROM attack_paths WHERE organization_id = %s
+        """, (org_id,))
+        ap_row = cursor.fetchone()
+        cursor.close()
+        if ap_row and ap_row[0]:
+            raw['attack_paths'] = {
+                'total': ap_row[0] or 0, 'direct_escalation': ap_row[1] or 0,
+                'lateral_movement': ap_row[2] or 0, 'high_severity': ap_row[3] or 0,
+                'source_count': ap_row[4] or 0,
+            }
+        else:
+            raw['attack_paths'] = {'total': 0, 'direct_escalation': 0, 'lateral_movement': 0, 'high_severity': 0, 'source_count': 0}
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.warning("attack_paths collect: %s", e)
+        raw['attack_paths'] = {'total': 0, 'direct_escalation': 0, 'lateral_movement': 0, 'high_severity': 0, 'source_count': 0}
 
     # SPN
     try:
@@ -34098,6 +39433,7 @@ def get_ciso_summary():
         raw_sources = _collect_ciso_sources_from_db(db, org_id, run_ids)
 
         # Build transformed data using pure builders
+        _ap = raw_sources.get('attack_paths', {})
         data = {
             'riskSummary': _build_risk_summary_data(raw_sources),
             'trends': _build_trends_data(raw_sources),
@@ -34105,13 +39441,21 @@ def get_ciso_summary():
             'remediation': _build_remediation_data(raw_sources),
             'drift': _build_drift_data(raw_sources),
             'spn': _build_spn_data(raw_sources),
+            'attackPaths': {
+                'total': _ap.get('total', 0),
+                'directEscalation': _ap.get('direct_escalation', 0),
+                'lateralMovement': _ap.get('lateral_movement', 0),
+                'highSeverity': _ap.get('high_severity', 0),
+            },
         }
+        # Inject blast_radius_more_count into riskSummary
+        data['riskSummary']['blast_radius_more_count'] = max(0, _ap.get('source_count', 0) - 1)
 
         # Detect gaps
         gaps = []
         if not _SOURCE_CHECKS['risk'](raw_sources.get('risk', {})):
             gaps.append('RISK_SUMMARY_FAILED')
-        if not _SOURCE_CHECKS['anomalies'](raw_sources.get('anomalies', {})):
+        if not data['anomalies'].get('available'):
             gaps.append('ANOMALY_DISABLED')
         if not _SOURCE_CHECKS['drift'](raw_sources.get('drift', {})):
             gaps.append('DRIFT_NOT_ENABLED')
@@ -34385,4 +39729,253 @@ def get_inventory_summary():
         }), 500
     finally:
         cursor.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/posture/start-here-summary
+# ---------------------------------------------------------------------------
+
+def get_start_here_summary():
+    """Live risk counts for the Executive Posture 'Start Here' banner.
+
+    Uses the SAME canonical metric queries (metric_queries.py) and
+    discovery_run_id scoping as get_dashboard_posture() so counts
+    are identical to the Immediate Risks / Priority Actions panels.
+    """
+    from app.api.metric_queries import get_metric_count_sql
+
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org, _connection_id())
+        if not run_ids:
+            return jsonify({
+                'unowned_identities': 0, 'ghost_identities': 0,
+                'dormant_privileged': 0, 'risk_reduction_if_fixed': 0,
+                'total_identities': 0, 'open_remediations': 0,
+                'critical_remediations': 0,
+            })
+
+        _mparams = {'run_ids': run_ids}
+
+        def _metric(name):
+            return _safe_query(db, get_metric_count_sql(name), _mparams,
+                               default=0, fetch='scalar') or 0
+
+        # ── Canonical metric counts (same as get_dashboard_posture) ──
+        unowned = _metric('unowned_nhi')
+        ghost = _metric('ghost')
+
+        dormant_privileged = _metric('dormant_privileged')
+
+        # Total identities (excluding Microsoft system)
+        total = _safe_query(
+            db,
+            f"SELECT COUNT(*) FROM identities i "
+            f"WHERE i.discovery_run_id = ANY(%(run_ids)s) {HIDE_MICROSOFT_SQL}",
+            _mparams, default=0, fetch='scalar') or 0
+
+        # ── Risk reduction estimate (weighted formula) ──
+        if total > 0:
+            raw = (unowned * 0.15 + ghost * 0.25 + dormant_privileged * 0.20) / total * 100
+            risk_reduction = min(99, round(raw))
+        else:
+            risk_reduction = 0
+
+        # ── Remediation counts (org-scoped, not run-scoped) ──
+        open_remediations = (
+            (_safe_query(db,
+                "SELECT COUNT(*) FROM approval_requests "
+                "WHERE organization_id = %s "
+                "  AND status NOT IN ('executed','cancelled','dismissed','closed','resolved')",
+                (org,), default=0, fetch='scalar') or 0)
+            + (_safe_query(db,
+                "SELECT COUNT(*) FROM remediation_queue "
+                "WHERE organization_id = %s "
+                "  AND status NOT IN ('resolved','dismissed')",
+                (org,), default=0, fetch='scalar') or 0)
+        )
+
+        critical_remediations = (
+            (_safe_query(db,
+                "SELECT COUNT(*) FROM approval_requests "
+                "WHERE organization_id = %s AND priority = 1",
+                (org,), default=0, fetch='scalar') or 0)
+            + (_safe_query(db,
+                "SELECT COUNT(*) FROM remediation_queue "
+                "WHERE organization_id = %s AND severity = 'CRITICAL'",
+                (org,), default=0, fetch='scalar') or 0)
+        )
+
+        # ── Delta vs previous scan ──
+        unowned_delta = None
+        ghost_delta = None
+        dormant_delta = None
+        try:
+            prev_ids = _previous_run_ids(cursor, org, _connection_id())
+            if prev_ids:
+                _prev = {'run_ids': prev_ids}
+
+                def _prev_metric(name):
+                    return _safe_query(db, get_metric_count_sql(name), _prev,
+                                       default=0, fetch='scalar') or 0
+
+                unowned_delta = unowned - _prev_metric('unowned_nhi')
+                ghost_delta = ghost - _prev_metric('ghost')
+                dormant_delta = dormant_privileged - _prev_metric('dormant_privileged')
+        except Exception:
+            pass  # first scan or broken previous — deltas stay null
+
+        return jsonify({
+            'unowned_identities': unowned,
+            'ghost_identities': ghost,
+            'dormant_privileged': dormant_privileged,
+            'risk_reduction_if_fixed': risk_reduction,
+            'total_identities': total,
+            'open_remediations': open_remediations,
+            'critical_remediations': critical_remediations,
+            'unowned_delta': unowned_delta,
+            'ghost_delta': ghost_delta,
+            'dormant_delta': dormant_delta,
+        })
+    finally:
+        cursor.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/connections/p2-status
+# ---------------------------------------------------------------------------
+
+def get_p2_status():
+    """P2 telemetry status for the current org's connections.
+
+    Returns:
+        p2_capable: true if any connection has_p2_license=true
+        p2_enabled: true if p2_telemetry_enabled setting is 'true'
+    """
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE(bool_or(has_p2_license), false) FROM cloud_connections WHERE organization_id = %s",
+            (org,)
+        )
+        p2_capable = bool(cursor.fetchone()[0])
+        cursor.close()
+
+        p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=org) == 'true'
+
+        return jsonify({
+            'p2_capable': p2_capable,
+            'p2_enabled': p2_enabled,
+        })
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/connections/p2-enable
+# ---------------------------------------------------------------------------
+
+def enable_p2_telemetry():
+    """Enable P2 telemetry for the current org."""
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        db.save_settings({'p2_telemetry_enabled': 'true'}, organization_id=org)
+        _log(db, 'p2_telemetry_enabled', 'P2 behavioral intelligence enabled')
+        return jsonify({'status': 'ok', 'p2_enabled': True})
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/drift/baseline
+# ---------------------------------------------------------------------------
+
+def get_drift_baseline():
+    """Drift analysis page state: scan count + baseline summary.
+
+    Returns scan_count so the frontend can decide which state to render:
+      0 = setup prompt, 1 = baseline captured, 2+ = full drift view.
+    When scan_count == 1, includes baseline stats from the single run.
+    """
+    db = _db()
+    org = _org_id()
+    if not org or org == -1:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cursor = db.conn.cursor()
+    try:
+        conn_id = _connection_id()
+
+        # Count completed scans
+        if conn_id:
+            cursor.execute("""
+                SELECT COUNT(*) FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND cloud_connection_id = %s
+                  AND completed_at IS NOT NULL
+                  AND COALESCE(total_identities, 0) > 0
+            """, (org, conn_id))
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+                  AND completed_at IS NOT NULL
+                  AND COALESCE(total_identities, 0) > 0
+            """, (org,))
+        scan_count = cursor.fetchone()[0]
+
+        result: dict = {'scan_count': scan_count}
+
+        # For single-scan orgs, provide baseline stats
+        if scan_count == 1:
+            run_ids = _latest_run_ids(cursor, org, conn_id)
+            if run_ids:
+                _p = {'run_ids': run_ids}
+
+                cursor.execute("""
+                    SELECT completed_at FROM discovery_runs WHERE id = ANY(%s) ORDER BY completed_at DESC LIMIT 1
+                """, (run_ids,))
+                ts_row = cursor.fetchone()
+                result['baseline_date'] = ts_row[0].isoformat() if ts_row and ts_row[0] else None
+
+                cursor.execute(f"""
+                    SELECT COUNT(*) FROM identities i
+                    WHERE i.discovery_run_id = ANY(%(run_ids)s) {HIDE_MICROSOFT_SQL}
+                """, _p)
+                result['total_identities'] = cursor.fetchone()[0]
+
+                cursor.execute(f"""
+                    SELECT COUNT(*) FROM identities i
+                    WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                      AND COALESCE(i.privilege_tier, 'T3') IN ('T0', 'T1')
+                      {HIDE_MICROSOFT_SQL}
+                """, _p)
+                result['privileged_identities'] = cursor.fetchone()[0]
+
+                cursor.execute("""
+                    SELECT COUNT(*) FROM role_assignments ra
+                    JOIN identities i ON i.id = ra.identity_db_id
+                    WHERE i.discovery_run_id = ANY(%(run_ids)s)
+                """, _p)
+                result['role_assignments'] = cursor.fetchone()[0]
+
+        return jsonify(result)
+    finally:
+        cursor.close()
+        db.close()
 

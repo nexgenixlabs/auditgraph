@@ -124,7 +124,7 @@ class AttackSimulator:
         cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
 
         cursor.execute("""
-            SELECT id, node_type, node_id, display_name, metadata
+            SELECT id, node_type, external_id, display_name, metadata
             FROM graph_nodes
             WHERE cloud_connection_id = %s
         """, (connection_id,))
@@ -158,7 +158,7 @@ class AttackSimulator:
     def _find_identity_node(self, nodes, identity_id):
         """Find the graph node matching an identity_id."""
         for node_id, node in nodes.items():
-            if node['node_type'] == 'identity' and node['node_id'] == identity_id:
+            if node['node_type'] == 'identity' and node['external_id'] == identity_id:
                 return node_id
         return None
 
@@ -270,7 +270,7 @@ class AttackSimulator:
             paths.append({
                 'path_index': path_index,
                 'source_identity': source_identity,
-                'target_resource': node.get('node_id', ''),
+                'target_resource': node.get('external_id', ''),
                 'path_length': info['depth'],
                 'path_nodes': path_nodes,
                 'risk_level': risk_level,
@@ -288,7 +288,7 @@ class AttackSimulator:
         while current is not None:
             node = nodes.get(current)
             if node:
-                path.append(node.get('display_name') or node.get('node_id', current))
+                path.append(node.get('display_name') or node.get('external_id', current))
             else:
                 path.append(current)
             info = traversal.get(current)
@@ -310,7 +310,7 @@ class AttackSimulator:
             info = traversal[node_id]
             graph_nodes.append({
                 'id': node_id,
-                'label': node.get('display_name') or node.get('node_id', node_id),
+                'label': node.get('display_name') or node.get('external_id', node_id),
                 'type': node.get('node_type', 'unknown'),
                 'depth': info['depth'],
                 'is_start': node_id == start_node_id,

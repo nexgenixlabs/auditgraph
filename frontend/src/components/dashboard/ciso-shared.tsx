@@ -153,7 +153,7 @@ export function DN({ children, navigateTo, tooltip, prefill }: {
     <span
       onClick={(e) => {
         e.stopPropagation();
-        if (drawerCtx && navigateTo.startsWith('/identities')) {
+        if (drawerCtx && (navigateTo.startsWith('/identities') || navigateTo.startsWith('/identity-explorer'))) {
           // Direct identity link: /identities/123 or /identities/uuid → open detail view
           const idMatch = navigateTo.match(/^\/identities\/([^?/]+)$/);
           if (idMatch) {

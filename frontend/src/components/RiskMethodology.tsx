@@ -75,7 +75,7 @@ const RiskMethodology: React.FC = () => {
                     that are either:
                   </p>
                   <ul className="text-sm text-gray-700 ml-4 space-y-1">
-                    <li>• Never used since creation (orphaned/forgotten)</li>
+                    <li>• No activity observed since creation (orphaned/forgotten)</li>
                     <li>• Dormant for 90+ days</li>
                     <li>• Missing proper governance (no owner/justification)</li>
                   </ul>
@@ -151,7 +151,7 @@ const RiskMethodology: React.FC = () => {
                   <strong>Privilege Level:</strong> +40 points for Owner, +30 for Contributor
                 </div>
                 <div className="bg-white rounded p-2 border border-gray-200">
-                  <strong>Activity Status:</strong> +30 points if never used, +20 if dormant 90+ days
+                  <strong>Activity Status:</strong> +30 points if no activity observed, +20 if dormant 90+ days
                 </div>
                 <div className="bg-white rounded p-2 border border-gray-200">
                   <strong>Credential Health:</strong> +15 points if expired or expiring soon

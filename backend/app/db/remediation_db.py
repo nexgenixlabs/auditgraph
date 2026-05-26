@@ -24,8 +24,8 @@ _RQ_DDL = """
 CREATE TABLE IF NOT EXISTS remediation_queue (
     id              SERIAL PRIMARY KEY,
     organization_id INTEGER NOT NULL,
-    attack_path_id  INTEGER REFERENCES attack_paths(id) ON DELETE SET NULL,
-    identity_id     BIGINT  REFERENCES identities(id) ON DELETE SET NULL,
+    attack_path_id  INTEGER,
+    identity_id     BIGINT,
     title           TEXT NOT NULL,
     description     TEXT,
     severity        VARCHAR(20) NOT NULL CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW')),
@@ -57,7 +57,17 @@ def _ensure_table(conn):
         _rq_ensured = True
     except Exception:
         conn.rollback()
-        _rq_ensured = True  # table likely exists
+        # Check whether the table actually exists before silencing the error
+        try:
+            cursor2 = conn.cursor()
+            cursor2.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'remediation_queue'"
+            )
+            _rq_ensured = cursor2.fetchone() is not None
+            cursor2.close()
+        except Exception:
+            conn.rollback()
     finally:
         cursor.close()
 

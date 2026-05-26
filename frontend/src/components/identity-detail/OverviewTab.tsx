@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -6,6 +6,7 @@ import {
 } from 'recharts';
 import {
   type IdentityDetailsResponse,
+  type LineageData,
   type Owner,
   type RoleIntelligence,
   type PimData,
@@ -86,6 +87,382 @@ function ComputeFindings({ identityId }: { identityId: string }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ─── NHI Lineage Section ─────────────────────────────────────────
+const NHI_CATEGORIES = ['service_principal', 'managed_identity_system', 'managed_identity_user', 'workload_identity'];
+
+const ORIGIN_SOURCE_LABELS: Record<string, string> = {
+  heuristic_terraform: '(inferred from roles + naming)',
+  heuristic_naming: '(inferred from naming pattern)',
+  app_reg_name: '(from app registration)',
+  none: '(source unknown)',
+};
+
+const VERDICT_BADGES: Record<string, { bg: string; text: string }> = {
+  UNUSED:    { bg: 'bg-red-100', text: 'text-red-700' },
+  ORPHANED:  { bg: 'bg-red-100', text: 'text-red-700' },
+  GHOST_MSI: { bg: 'bg-red-100', text: 'text-red-700' },
+  HEALTHY:   { bg: 'bg-green-100', text: 'text-green-700' },
+  AT_RISK:   { bg: 'bg-amber-100', text: 'text-amber-700' },
+  STALE:     { bg: 'bg-amber-100', text: 'text-amber-700' },
+  NEEDS_REVIEW: { bg: 'bg-amber-100', text: 'text-amber-700' },
+};
+
+function LineageSection({ lineage, identityCategory }: { lineage?: LineageData | null; identityCategory?: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!lineage) return null;
+  if (!NHI_CATEGORIES.includes((identityCategory || '').toLowerCase())) return null;
+
+  // At least some lineage data should exist
+  const hasContent = lineage.narrative || lineage.workload_origin || lineage.verdict || lineage.contributing_factors;
+  if (!hasContent) return null;
+
+  const verdictStyle = VERDICT_BADGES[(lineage.verdict || '').toUpperCase()] || { bg: 'bg-gray-100', text: 'text-gray-600' };
+  const originSource = ORIGIN_SOURCE_LABELS[lineage.workload_origin_source || ''] || (lineage.workload_origin_source ? `(${lineage.workload_origin_source})` : '');
+  const factors = Array.isArray(lineage.contributing_factors) ? lineage.contributing_factors : [];
+  const confidence = lineage.confidence;
+
+  // Provisioned by display
+  const provisionedBy = lineage.provisioned_by;
+  const creationMethod = lineage.creation_method;
+
+  // Narrative truncation
+  const narrative = lineage.narrative || '';
+  const narrativeTruncated = narrative.length > 150 && !expanded;
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm p-5">
+      {/* Header with verdict badge */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-gray-900">Lineage</div>
+        {lineage.verdict && (
+          <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${verdictStyle.bg} ${verdictStyle.text}`}>
+            {lineage.verdict}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {/* Row 1: Origin */}
+        <div>
+          <div className="text-xs text-gray-500 font-medium">Origin</div>
+          {(!lineage.workload_origin || lineage.workload_origin === 'Unknown') ? (
+            <div className="text-sm text-gray-400 mt-0.5">No confirmed workload binding</div>
+          ) : (
+            <div className="mt-0.5">
+              <div className="text-sm text-gray-900">{lineage.workload_origin}</div>
+              {originSource && <div className="text-xs text-gray-400 mt-0.5">{originSource}</div>}
+            </div>
+          )}
+        </div>
+
+        {/* Row 2: Provisioned by */}
+        {provisionedBy && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium">Provisioned by</div>
+            <div className="text-sm text-gray-900 mt-0.5">
+              {provisionedBy}{creationMethod ? ` via ${creationMethod}` : ''}
+            </div>
+          </div>
+        )}
+
+        {/* Row 3: Analysis / Narrative */}
+        {narrative && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium">Analysis</div>
+            <div className="text-sm text-gray-500 italic mt-0.5 leading-relaxed">
+              {narrativeTruncated ? narrative.slice(0, 150) + '...' : narrative}
+              {narrativeTruncated && (
+                <button onClick={() => setExpanded(true)} className="text-blue-600 font-medium ml-1 not-italic text-xs">
+                  Show more
+                </button>
+              )}
+              {expanded && narrative.length > 150 && (
+                <button onClick={() => setExpanded(false)} className="text-blue-600 font-medium ml-1 not-italic text-xs">
+                  Show less
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Row 4: Evidence chips */}
+        {factors.length > 0 && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium mb-1.5">Evidence</div>
+            <div className="flex flex-wrap gap-1.5">
+              {factors.slice(0, 4).map((f, i) => {
+                const w = f.weight ?? 0;
+                const chipColor = w > 0 ? 'bg-teal-50 text-teal-700 border-teal-200' :
+                                  w < 0 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                                           'bg-gray-50 text-gray-600 border-gray-200';
+                const detail = (f.detail || '').length > 50 ? f.detail.slice(0, 50) + '...' : f.detail || '';
+                return (
+                  <span key={i} className={`inline-flex items-center px-2 py-0.5 rounded text-xs border ${chipColor}`} title={f.detail}>
+                    {detail}
+                  </span>
+                );
+              })}
+              {factors.length > 4 && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-50 text-gray-500 border border-gray-200">
+                  +{factors.length - 4} more
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Row 5: Confidence */}
+        {confidence != null && (
+          <div>
+            <div className="text-xs text-gray-500 font-medium">Lineage confidence</div>
+            <div className="flex items-center gap-2 mt-1">
+              <div className="flex-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{
+                  width: `${Math.round(confidence * 100)}%`,
+                  backgroundColor: confidence >= 0.8 ? '#10B981' : confidence >= 0.4 ? '#F59E0B' : '#EF4444',
+                }} />
+              </div>
+              <span className="text-xs text-gray-600 font-mono whitespace-nowrap">
+                {Math.round(confidence * 100)}% — {
+                  confidence >= 0.8 ? 'High confidence' :
+                  confidence >= 0.4 ? 'Low confidence' :
+                  confidence > 0 ? 'Unverified' : 'Unverified'
+                }
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Authentication History Section ───────────────────────────
+
+interface SignInEvent {
+  sign_in_id: string;
+  timestamp: string | null;
+  status: string;
+  error_code: number | null;
+  failure_reason: string | null;
+  resource: string | null;
+  resource_id: string | null;
+  ip_address: string | null;
+  location_city: string | null;
+  location_country: string | null;
+  app: string | null;
+  client_app: string | null;
+  is_interactive: boolean;
+  risk_level: string | null;
+  risk_detail: string | null;
+  ca_status: string | null;
+}
+
+interface SignInSummary {
+  total_events: number;
+  success_count: number;
+  failure_count: number;
+  interactive_count: number;
+  non_interactive_count: number;
+  unique_ips: number;
+  unique_locations: number;
+  risky_count: number;
+  earliest: string | null;
+  latest: string | null;
+}
+
+function AuthHistorySection({ identityId }: { identityId: string }) {
+  const [events, setEvents] = useState<SignInEvent[]>([]);
+  const [summary, setSummary] = useState<SignInSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [showAll, setShowAll] = useState(false);
+
+  const fetchEvents = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: '20' });
+      if (statusFilter) params.set('status', statusFilter);
+      const resp = await fetch(`/api/identities/${identityId}/signin-events?${params}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setEvents(data.events || []);
+        setSummary(data.summary || null);
+      }
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [identityId, statusFilter]);
+
+  useEffect(() => { fetchEvents(); }, [fetchEvents]);
+
+  if (loading) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="text-sm font-semibold text-gray-900 mb-2">Authentication History</div>
+        <div className="text-xs text-gray-400 animate-pulse">Loading sign-in events...</div>
+      </div>
+    );
+  }
+
+  if (!summary || summary.total_events === 0) return null;
+
+  const failRate = summary.total_events > 0
+    ? Math.round((summary.failure_count / summary.total_events) * 100)
+    : 0;
+
+  const displayEvents = showAll ? events : events.slice(0, 8);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-gray-900">Authentication History</div>
+        <div className="flex items-center gap-1.5">
+          {['', 'success', 'failure'].map(f => (
+            <button
+              key={f}
+              onClick={() => setStatusFilter(f)}
+              className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
+                statusFilter === f
+                  ? 'bg-gray-800 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {f === '' ? 'All' : f === 'success' ? 'Success' : 'Failed'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary strip */}
+      <div className="flex flex-wrap gap-4 mb-3 text-xs">
+        <div>
+          <span className="text-gray-500">Total</span>{' '}
+          <span className="font-semibold text-gray-800">{summary.total_events.toLocaleString()}</span>
+        </div>
+        <div>
+          <span className="text-gray-500">Success</span>{' '}
+          <span className="font-semibold text-green-600">{summary.success_count.toLocaleString()}</span>
+        </div>
+        <div>
+          <span className="text-gray-500">Failed</span>{' '}
+          <span className={`font-semibold ${summary.failure_count > 0 ? 'text-red-600' : 'text-gray-600'}`}>
+            {summary.failure_count.toLocaleString()}
+          </span>
+          {failRate > 10 && (
+            <span className="ml-1 px-1 py-0.5 bg-red-50 text-red-600 rounded text-[10px] font-medium">
+              {failRate}% fail rate
+            </span>
+          )}
+        </div>
+        <div>
+          <span className="text-gray-500">IPs</span>{' '}
+          <span className="font-semibold text-gray-800">{summary.unique_ips}</span>
+        </div>
+        <div>
+          <span className="text-gray-500">Locations</span>{' '}
+          <span className="font-semibold text-gray-800">{summary.unique_locations}</span>
+        </div>
+        {summary.risky_count > 0 && (
+          <div>
+            <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded text-[10px] font-medium border border-amber-200">
+              {summary.risky_count} risky sign-in{summary.risky_count !== 1 ? 's' : ''}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Events table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-gray-100">
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Time</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Status</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Application</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">Resource</th>
+              <th className="text-left py-1.5 pr-3 text-gray-500 font-medium">IP / Location</th>
+              <th className="text-left py-1.5 text-gray-500 font-medium">Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayEvents.map((evt, idx) => {
+              const isRisky = evt.risk_level && !['none', ''].includes(evt.risk_level);
+              return (
+                <tr key={evt.sign_in_id || idx} className={`border-b border-gray-50 ${isRisky ? 'bg-amber-50/40' : ''}`}>
+                  <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">
+                    {evt.timestamp ? new Date(evt.timestamp).toLocaleString(undefined, {
+                      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                    }) : '—'}
+                    {evt.is_interactive && (
+                      <span className="ml-1 text-[10px] text-blue-500" title="Interactive sign-in">INT</span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    {evt.status === 'success' ? (
+                      <span className="inline-flex items-center gap-0.5 text-green-600">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        OK
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-0.5 text-red-600" title={evt.failure_reason || ''}>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        {evt.error_code || 'Fail'}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-gray-700 max-w-[140px] truncate" title={evt.app || ''}>
+                    {evt.app || '—'}
+                  </td>
+                  <td className="py-1.5 pr-3 text-gray-700 max-w-[140px] truncate" title={evt.resource || ''}>
+                    {evt.resource || '—'}
+                  </td>
+                  <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">
+                    {evt.ip_address || '—'}
+                    {evt.location_country && (
+                      <span className="ml-1 text-gray-400">{evt.location_city ? `${evt.location_city}, ` : ''}{evt.location_country}</span>
+                    )}
+                  </td>
+                  <td className="py-1.5">
+                    {isRisky ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                        {evt.risk_level}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {events.length > 8 && !showAll && (
+        <button
+          onClick={() => setShowAll(true)}
+          className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
+        >
+          Show all {events.length} events
+        </button>
+      )}
+      {showAll && events.length > 8 && (
+        <button
+          onClick={() => setShowAll(false)}
+          className="mt-2 text-xs text-gray-500 hover:text-gray-700 font-medium"
+        >
+          Collapse
+        </button>
+      )}
     </div>
   );
 }
@@ -189,6 +566,27 @@ export default function OverviewTab({
         </div>
       )}
 
+      {/* Ghost Access Warning — disabled account with group-inherited access */}
+      {identity.enabled === false && ((identity as any).groups_with_roles_count > 0 || (identity as any).group_count > 0) && (
+        <div className="border border-amber-300 bg-amber-50 rounded-xl p-4">
+          <div className="flex items-start gap-2">
+            <span className="text-amber-600 text-sm mt-0.5">{'\u26A0'}</span>
+            <div>
+              <div className="text-sm font-semibold text-amber-800">Group Access Remains Active</div>
+              <div className="text-xs text-amber-700 mt-1">
+                This disabled account is still a member of {(identity as any).groups_with_roles_count || (identity as any).group_count} group{((identity as any).groups_with_roles_count || (identity as any).group_count) !== 1 ? 's' : ''} with role assignments. Group membership may grant inherited role access even though the account is disabled.
+              </div>
+              <button
+                onClick={() => onTabChange('entra_groups' as any)}
+                className="mt-2 text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+              >
+                View Groups {'\u2192'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Identity Security Posture — 4-quadrant view */}
       <div>
         <div className="text-sm font-semibold text-gray-900 mb-3">Identity Security Posture</div>
@@ -198,6 +596,26 @@ export default function OverviewTab({
             const isConnector = !!identity.is_discovery_connector;
             const authActivity = (identity as any).auth_activity;
             const hasCanonicalState = !!(identity as any).activity_label && !!authActivity;
+
+            // Priority 1: disabled accounts always show "Disabled" regardless of activity signals
+            if (identity.enabled === false && !isConnector) {
+              const activityDetail = (identity as any).activity_detail as string | undefined;
+              // Extract last-active date from detail text if available
+              let lastActiveNote = 'No prior activity recorded';
+              if (activityDetail) {
+                lastActiveNote = `Last active ${activityDetail.replace(/^Last active\s*/i, '').replace(/\s*via\s+.*$/i, '')} prior to disablement`;
+              }
+
+              return (
+                <div className="border rounded-xl p-4 relative group" title="Account is disabled">
+                  <div className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Activity</div>
+                  <span className="px-2 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">Disabled</span>
+                  <div className="text-[10px] text-gray-500 mt-2">
+                    {lastActiveNote}
+                  </div>
+                </div>
+              );
+            }
 
             // Use canonical state from backend when available
             if (hasCanonicalState && !isConnector) {
@@ -453,6 +871,140 @@ export default function OverviewTab({
           </div>
         </div>
       )}
+
+      {/* Last Sign-In — exact datetime from Graph signInActivity */}
+      {(() => {
+        const isHuman = identity.identity_category === 'human_user' || identity.identity_category === 'guest';
+        const lastSignin = (identity as any).last_signin_at || identity.last_sign_in;
+        const lastNI = (identity as any).last_noninteractive_signin;
+        if (!isHuman) return null;
+
+        const isDisabled = identity.enabled === false;
+
+        const fmtDate = (iso: string | null | undefined) => {
+          if (!iso) return null;
+          try {
+            const d = new Date(iso);
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+              + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+          } catch { return iso; }
+        };
+        const daysBadge = (iso: string | null | undefined) => {
+          if (!iso) return null;
+          // Disabled accounts: never show "Today" — it implies current active use
+          if (isDisabled) return null;
+          const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+          if (days === 0) return 'Today';
+          if (days === 1) return 'Yesterday';
+          return `${days} days ago`;
+        };
+
+        const badge = daysBadge(lastSignin);
+        const badgeColor = isDisabled ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600';
+
+        return (
+          <div className="border border-gray-200 rounded-xl p-4">
+            <div className="text-sm font-semibold text-gray-900 mb-2">Last Sign-In</div>
+            {lastSignin ? (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-800">{fmtDate(lastSignin)}</span>
+                  {badge && <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeColor}`}>{badge}</span>}
+                </div>
+                {isDisabled && (
+                  <div className="text-xs text-amber-600 mt-1">
+                    Account disabled after this sign-in. Current access revoked.
+                  </div>
+                )}
+                {lastNI && lastNI !== lastSignin && (
+                  <div className="text-xs text-gray-500">
+                    Non-interactive: {fmtDate(lastNI)}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-400">No sign-in recorded</div>
+            )}
+            <div className="mt-2 text-[10px] text-gray-400">
+              Source: Microsoft Graph {'\u2014'} no logs required
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Last 3 Connections — from ARM activity logs (no P2 required) */}
+      {(() => {
+        const connections = (identity as any).arm_connections as Array<{
+          event_timestamp: string;
+          caller_ip_address: string | null;
+          operation_short: string;
+          resource_name: string | null;
+          status: string;
+        }> | undefined;
+        const armScanCompleted = (identity as any).arm_scan_completed as boolean | undefined;
+
+        const formatRelativeTime = (iso: string): { relative: string; full: string } => {
+          const d = new Date(iso);
+          const now = new Date();
+          const diffMs = now.getTime() - d.getTime();
+          const diffMins = Math.floor(diffMs / 60000);
+          const diffHours = Math.floor(diffMs / 3600000);
+          const diffDays = Math.floor(diffMs / 86400000);
+          let relative: string;
+          if (diffMins < 1) relative = 'just now';
+          else if (diffMins < 60) relative = `${diffMins} min ago`;
+          else if (diffHours < 24) relative = `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+          else if (diffDays < 30) relative = `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+          else relative = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          return { relative, full: d.toISOString() };
+        };
+
+        return (
+          <div className="border border-gray-200 rounded-xl p-4">
+            <div className="text-sm font-semibold text-gray-900 mb-2">Last 3 Connections</div>
+            {connections && connections.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-gray-400 text-[10px] uppercase tracking-wider">
+                      <th className="pb-1.5 pr-3">Source IP</th>
+                      <th className="pb-1.5 pr-3">Target Service</th>
+                      <th className="pb-1.5">Timestamp</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {connections.map((c, i) => {
+                      const ts = c.event_timestamp ? formatRelativeTime(c.event_timestamp) : null;
+                      return (
+                        <tr key={i} className="border-t border-gray-100">
+                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]">{c.caller_ip_address || '\u2014'}</td>
+                          <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.resource_name || c.operation_short}</td>
+                          <td className="py-1.5 text-gray-600 whitespace-nowrap" title={ts?.full}>{ts?.relative || '\u2014'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : !armScanCompleted ? (
+              <>
+                <div className="text-xs text-gray-400">Discovery pending {'\u2014'} run a scan to collect ARM activity</div>
+                <div className="mt-1 text-[10px] text-gray-400">Source: Azure ARM activity logs {'\u2014'} available without sign-in logs</div>
+              </>
+            ) : (
+              <>
+                <div className="text-xs text-gray-400">No ARM operations in last 90 days</div>
+                <div className="mt-1 text-[10px] text-gray-400">This identity has not performed any Azure resource operations. This may indicate a login-only or inactive identity.</div>
+              </>
+            )}
+            {connections && connections.length > 0 && (
+              <div className="mt-2 text-[10px] text-gray-400">
+                Source: Azure ARM activity logs {'\u2014'} available without sign-in logs
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Activity source mismatch warning — identity authenticated but
           no role-scoped activity detected. Same visual style as the
@@ -809,6 +1361,12 @@ export default function OverviewTab({
           <div className="text-xs text-gray-500 mt-1">Owners</div>
         </button>
       </div>
+
+      {/* NHI Lineage section */}
+      <LineageSection lineage={(data as any)?.lineage} identityCategory={identity.identity_category as string} />
+
+      {/* Authentication History */}
+      <AuthHistorySection identityId={identity.identity_id as string} />
 
       {/* Risk reasons */}
       <div>

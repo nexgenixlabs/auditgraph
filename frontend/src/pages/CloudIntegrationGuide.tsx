@@ -100,7 +100,6 @@ export default function CloudIntegrationGuide() {
         {(Object.keys(CLOUD_CONFIGS) as CloudProvider[]).map(key => {
           const cfg = CLOUD_CONFIGS[key];
           const active = activeCloud === key;
-          const comingSoon = key !== 'azure';
           return (
             <button
               key={key}
@@ -112,7 +111,6 @@ export default function CloudIntegrationGuide() {
               }`}
             >
               {cfg.label}
-              {comingSoon && <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400 uppercase font-bold">Preview</span>}
             </button>
           );
         })}

@@ -60,11 +60,12 @@ const RISK_TYPE_BADGE_LABEL: Record<string, string> = {
 };
 
 const RISK_TYPE_ROUTES: Record<string, string> = {
-  over_privileged: '/identities?pillar=effective-privilege',
-  dormant_privileged: '/identities?activity_status=dormant_strict&privileged=true',
-  unowned_nhi: '/identities?workload=true&owner=none',
-  ghost_accounts: '/identities?status=Disabled&hasRoles=true',
-  credential_risk: '/identities?credential_status=expired',
+  over_privileged: '/identity-explorer?tab=all&metric=over_permissioned',
+  dormant_privileged: '/identity-explorer?tab=all&metric=dormant_privileged',
+  unowned_nhi: '/identity-explorer?tab=all&metric=unowned_nhi',
+  ghost_accounts: '/identity-explorer?tab=all&metric=ghost',
+  credential_risk: '/identity-explorer?tab=all&metric=credential_expired',
+  provisioned_unowned: '/identity-explorer?tab=all&metric=provisioned_unowned',
 };
 
 export function ImmediateRisksPanelV31({ data }: { data: PostureV31Response }) {

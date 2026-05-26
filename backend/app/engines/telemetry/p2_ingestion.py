@@ -1,6 +1,6 @@
 """
-P2 Telemetry Ingestion Service — ingests Entra ID P2 service principal sign-in logs
-from Microsoft Graph API and computes per-identity activity statistics.
+P2 Telemetry Ingestion Service — ingests Entra ID P2 sign-in logs (service principals
+AND human users) from Microsoft Graph API and computes per-identity activity statistics.
 
 Requires: AuditLog.Read.All permission on the registered app.
 """
@@ -140,6 +140,142 @@ class P2TelemetryService:
             url = data.get('@odata.nextLink')
 
         logger.info("Ingested %s P2 sign-in events", total_ingested)
+        return total_ingested
+
+    def ingest_user_signin_logs(self, run_id, organization_id, lookback_days=30):
+        """Fetch human user sign-in logs from MS Graph and bulk-insert.
+
+        Collects both interactive and non-interactive sign-ins for identities
+        with identity_category IN ('human_user', 'guest'). Uses the same
+        workload_signin_events table; deduplication is via UNIQUE sign_in_id.
+        """
+        logger.debug("ingest_user_signin_logs called: run_id=%s, org=%s", run_id, organization_id)
+        session = self._get_graph_client()
+        cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # Build object_id → db_id lookup for human users / guests only
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            "SELECT id, object_id FROM identities "
+            "WHERE discovery_run_id = %s AND identity_category IN ('human_user', 'guest')",
+            (run_id,)
+        )
+        id_map = {}
+        for row in cursor.fetchall():
+            if row[1]:
+                id_map[row[1]] = row[0]
+        cursor.close()
+
+        if not id_map:
+            logger.info("No human users found for run %s — skipping user sign-in ingestion", run_id)
+            return 0
+
+        total_ingested = 0
+
+        # Fetch both interactive and non-interactive user sign-ins
+        for event_type in ('interactiveUser', 'nonInteractiveUser'):
+            is_interactive = event_type == 'interactiveUser'
+            url = (
+                "https://graph.microsoft.com/beta/auditLogs/signIns"
+                f"?$filter=signInEventTypes/any(t:t eq '{event_type}') and createdDateTime ge {cutoff}"
+                "&$top=999"
+                "&$orderby=createdDateTime desc"
+            )
+
+            pages = 0
+            while url:
+                pages += 1
+                try:
+                    resp = session.get(url, timeout=120)
+                    if resp.status_code != 200:
+                        logger.warning("Graph user sign-in API error (%s): %s -- %s",
+                                       event_type, resp.status_code, resp.text[:200])
+                        break
+                    data = resp.json()
+                except Exception as e:
+                    logger.error("Graph user sign-in request failed (%s): %s", event_type, e)
+                    break
+
+                events = data.get('value', [])
+                if not events:
+                    break
+
+                rows = []
+                for evt in events:
+                    user_id = evt.get('userId') or ''
+                    identity_db_id = id_map.get(user_id)
+
+                    status_obj = evt.get('status', {})
+                    status = 'success' if status_obj.get('errorCode', 0) == 0 else 'failure'
+                    error_code = status_obj.get('errorCode')
+                    failure_reason = status_obj.get('failureReason')
+
+                    location = evt.get('location', {})
+                    risk_level = (evt.get('riskLevelDuringSignIn') or 'none').lower()
+                    if risk_level == 'hidden':
+                        risk_level = 'none'
+
+                    ca_status = 'notApplied'
+                    ca_policies = evt.get('appliedConditionalAccessPolicies', [])
+                    if ca_policies:
+                        results = [p.get('result', '') for p in ca_policies]
+                        if 'success' in results:
+                            ca_status = 'success'
+                        elif 'failure' in results:
+                            ca_status = 'failure'
+
+                    rows.append((
+                        organization_id,
+                        identity_db_id,
+                        user_id,
+                        evt.get('id'),
+                        evt.get('createdDateTime'),
+                        status,
+                        error_code,
+                        failure_reason,
+                        evt.get('resourceDisplayName'),
+                        evt.get('resourceId'),
+                        evt.get('ipAddress'),
+                        location.get('city'),
+                        location.get('countryOrRegion'),
+                        evt.get('appDisplayName'),
+                        evt.get('clientAppUsed'),
+                        is_interactive,
+                        risk_level,
+                        evt.get('riskDetail'),
+                        ca_status,
+                        run_id,
+                    ))
+
+                # Batch insert (100 at a time to manage memory)
+                if rows:
+                    cursor = self.db.conn.cursor()
+                    from psycopg2.extras import execute_values
+                    for i in range(0, len(rows), 100):
+                        batch = rows[i:i + 100]
+                        execute_values(cursor, """
+                            INSERT INTO workload_signin_events
+                            (organization_id, identity_db_id, identity_id, sign_in_id, created_datetime,
+                             status, error_code, failure_reason, resource_display_name, resource_id,
+                             ip_address, location_city, location_country, app_display_name,
+                             client_app_type, is_interactive, risk_level, risk_detail,
+                             conditional_access_status, discovery_run_id)
+                            VALUES %s
+                            ON CONFLICT DO NOTHING
+                        """, batch)
+                    self.db._commit()
+                    cursor.close()
+                    total_ingested += len(rows)
+
+                url = data.get('@odata.nextLink')
+                # Safety limit: 50 pages per event type
+                if pages >= 50:
+                    logger.warning("User sign-in pagination hit safety limit (50 pages, %s type)", event_type)
+                    break
+
+            logger.info("Ingested %s events for %s sign-ins", total_ingested, event_type)
+
+        logger.info("Total user sign-in events ingested: %s (run=%s)", total_ingested, run_id)
         return total_ingested
 
     def compute_activity_stats(self, run_id, organization_id, lookback_days=30):

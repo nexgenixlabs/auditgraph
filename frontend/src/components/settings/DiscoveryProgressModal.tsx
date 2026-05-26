@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react';
 
+interface StageTimingEntry {
+  started: number;
+  elapsed: number;
+}
+
 interface SnapshotJob {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -15,6 +20,8 @@ interface SnapshotJob {
   duration_seconds?: number;
   connection_label?: string;
   connection_cloud?: string;
+  stage_timings?: Record<string, StageTimingEntry>;
+  estimated_remaining_seconds?: number | null;
 }
 
 interface Props {
@@ -127,12 +134,13 @@ export function DiscoveryProgressModal({
     return () => clearInterval(t);
   }, [completed, failed]);
 
-  // Auto-close after completion (3s delay)
+  // Freeze elapsed time at completion
+  const [finalElapsed, setFinalElapsed] = useState<number | null>(null);
   useEffect(() => {
-    if (!completed) return;
-    const t = setTimeout(() => onComplete(), 3000);
-    return () => clearTimeout(t);
-  }, [completed, onComplete]);
+    if (completed && finalElapsed === null) {
+      setFinalElapsed(job?.duration_seconds || elapsed);
+    }
+  }, [completed, finalElapsed, job?.duration_seconds, elapsed]);
 
   const currentStage = resolveStage(job?.stage || null);
   const currentPhaseIdx = getPhaseIndex(currentStage);
@@ -143,6 +151,8 @@ export function DiscoveryProgressModal({
   const subscriptions = job?.subscriptions_discovered || 0;
   const label = job?.connection_label || connectionLabel;
   const cloud = job?.connection_cloud || connectionCloud;
+  const eta = job?.estimated_remaining_seconds;
+  const stageTimings = job?.stage_timings || {};
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -151,7 +161,7 @@ export function DiscoveryProgressModal({
         <div className="px-6 py-4 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between">
           <div>
             <h2 className="text-base font-semibold text-gray-900 dark:text-white">
-              {completed ? 'Snapshot Complete' : failed ? 'Snapshot Failed' : 'Capturing Snapshot'}
+              {completed ? 'Scan Complete' : failed ? 'Snapshot Failed' : 'Capturing Snapshot'}
             </h2>
             <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
               {label} · {cloud.toUpperCase()}
@@ -205,13 +215,19 @@ export function DiscoveryProgressModal({
                     <span className="w-3 h-3 rounded-full bg-gray-200 dark:bg-slate-600" />
                   )}
                 </span>
-                <span className={`text-sm ${
+                <span className={`text-sm flex-1 ${
                   isDone ? 'text-gray-500 dark:text-slate-400' :
                   isActive ? 'text-blue-700 dark:text-blue-400 font-medium' :
                   'text-gray-400 dark:text-slate-500'
                 }`}>
                   {phase.icon} {phase.label}
                 </span>
+                {/* Per-phase elapsed time */}
+                {(isDone || isActive) && stageTimings[phase.key] && (
+                  <span className="text-[10px] font-mono text-gray-400 dark:text-slate-500 tabular-nums">
+                    {formatDuration(Math.round(stageTimings[phase.key].elapsed))}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -241,6 +257,11 @@ export function DiscoveryProgressModal({
               )}
               <div className="flex items-center gap-1 ml-auto">
                 <span className="font-mono">{formatDuration(job?.duration_seconds || elapsed)}</span>
+                {!completed && !failed && eta != null && eta > 0 && (
+                  <span className="text-blue-500 dark:text-blue-400 font-mono ml-2">
+                    ~{formatDuration(eta)} left
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -264,13 +285,37 @@ export function DiscoveryProgressModal({
           </div>
         )}
 
+        {/* Completion summary */}
+        {completed && (
+          <div className="px-6 pb-3">
+            <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/40 rounded-lg px-4 py-3">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                <div>
+                  <p className="text-sm font-medium text-green-800 dark:text-green-300">
+                    Scan Complete — {identities.toLocaleString()} identit{identities !== 1 ? 'ies' : 'y'} discovered
+                  </p>
+                  <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
+                    Total scan time: {formatDuration(finalElapsed ?? elapsed)}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Footer */}
         <div className="px-6 py-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between">
           {completed ? (
             <>
-              <span className="text-xs text-green-600 dark:text-green-400 font-medium">
-                Snapshot captured successfully
-              </span>
+              <button
+                onClick={onClose}
+                className="px-4 py-1.5 text-gray-600 dark:text-slate-400 text-xs font-medium hover:text-gray-800 dark:hover:text-slate-200 transition-colors"
+              >
+                Close
+              </button>
               <button
                 onClick={onComplete}
                 className="px-4 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-md hover:bg-blue-700 transition-colors"

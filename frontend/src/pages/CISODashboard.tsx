@@ -38,7 +38,7 @@ import { PriorityActionsPanelV31 } from '../components/ciso/RemediationImpactSec
 import { ImmediateRisksPanelV31 } from '../components/ciso/ImmediateRisksSection';
 import { DataIntegrityFooter } from '../components/ciso/DataIntegrityFooter';
 import { IdentityLegend } from '../components/ciso/IdentityLegend';
-import { POSTURE_CONFIDENCE_COLOR } from '../constants/cisoColors';
+import { POSTURE_CONFIDENCE_COLOR, CONFIDENCE_DISPLAY_LABEL, CONFIDENCE_TOOLTIP } from '../constants/cisoColors';
 
 // ─── Backend status values (SSOT — no frontend derivation) ──
 
@@ -136,7 +136,7 @@ function SkeletonBlock() {
 function UnavailableBlock() {
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col items-center justify-center gap-1">
-      <span className="text-xs text-gray-400">Additional insights temporarily unavailable</span>
+      <span className="text-xs text-gray-400">No additional insights for this period</span>
       <span className="text-[10px] text-gray-500">Core posture data is up to date</span>
     </div>
   );
@@ -150,7 +150,7 @@ const GAP_ACTIONS: Record<string, string> = {
   DRIFT_NOT_ENABLED: 'Run a second scan to track configuration changes over time',
   DRIFT_NEEDS_SECOND_SCAN: 'Run a second scan to track configuration changes over time',
   REMEDIATION_UNAVAILABLE: 'Configure remediation playbooks to enable automated fixes',
-  SPN_UNAVAILABLE: 'Service principal data is not yet available',
+  SPN_UNAVAILABLE: 'Service principal data pending next discovery scan',
 };
 
 function PartialVisibilityBanner({ primaryGap, usableSources, totalSources }: {
@@ -185,33 +185,233 @@ function getTimezoneLabel(): string {
   }
 }
 
+// ─── P2 Pre-Scan Modal ────────────────────────────────────────
+
+function P2PreScanModal({ onEnableAndScan, onScanWithout, onClose }: {
+  onEnableAndScan: () => void; onScanWithout: () => void; onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-[#111827] border border-white/10 rounded-xl shadow-2xl w-[480px] max-w-[90vw] p-6"
+           onClick={e => e.stopPropagation()}>
+        <h3 className="text-sm font-semibold text-gray-100 mb-2">Enhanced Intelligence Available</h3>
+        <p className="text-xs text-gray-400 mb-4 leading-relaxed">
+          Your Azure connector supports activity log collection (Entra P2 detected).
+          Enabling behavioral intelligence adds:
+        </p>
+        <ul className="space-y-2 mb-5">
+          {[
+            'Confirms dormant account verdicts with real sign-in data',
+            'Detects active ghost identities missed by static analysis',
+            'Validates orphaned SPN inactivity',
+            'Surfaces behavioral anomalies and suspicious access patterns',
+          ].map((item, i) => (
+            <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
+              <span className="w-1 h-1 rounded-full bg-[#24A2A1] mt-1.5 flex-shrink-0" />
+              {item}
+            </li>
+          ))}
+        </ul>
+        <div className="flex items-center justify-end gap-3">
+          <button onClick={onScanWithout}
+            className="px-4 py-2 rounded-lg text-xs font-medium text-gray-400 bg-[#0d1117] border border-white/5 hover:border-white/10 transition cursor-pointer">
+            Scan without logs
+          </button>
+          <button onClick={onEnableAndScan}
+            className="px-4 py-2 rounded-lg text-xs font-medium text-white bg-[#24A2A1] hover:bg-[#1d8a89] transition cursor-pointer">
+            Enable &amp; Scan
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Page header (shared between v3.1 and error) ─────────────
 
 function PageHeader() {
+  const [showP2Modal, setShowP2Modal] = useState(false);
+  const { activeOrgId } = useAuth();
+  const navigate = React.useCallback((path: string) => {
+    // DN navigateTo doesn't return a function we can call programmatically,
+    // so we use window.location for the scan trigger
+    window.location.href = path;
+  }, []);
+
+  const handleRescanClick = async () => {
+    // Check if P2 prompt already shown for this org
+    const storageKey = `p2_prompt_shown_${activeOrgId}`;
+    const alreadyShown = localStorage.getItem(storageKey) === 'true';
+
+    if (alreadyShown) {
+      navigate('/settings');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/connections/p2-status');
+      if (!res.ok) { navigate('/settings'); return; }
+      const status = await res.json();
+
+      if (status.p2_capable && !status.p2_enabled) {
+        setShowP2Modal(true);
+        return;
+      }
+    } catch {
+      // On error, just navigate to settings
+    }
+    navigate('/settings');
+  };
+
+  const handleEnableAndScan = async () => {
+    try {
+      await fetch('/api/connections/p2-enable', { method: 'POST' });
+    } catch { /* best-effort */ }
+    const storageKey = `p2_prompt_shown_${activeOrgId}`;
+    localStorage.setItem(storageKey, 'true');
+    setShowP2Modal(false);
+    navigate('/settings');
+  };
+
+  const handleScanWithout = () => {
+    const storageKey = `p2_prompt_shown_${activeOrgId}`;
+    localStorage.setItem(storageKey, 'true');
+    setShowP2Modal(false);
+    navigate('/settings');
+  };
+
   return (
-    <header className="flex items-center justify-between p-3 flex-shrink-0">
-      <div className="flex items-baseline gap-3">
-        <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
-        <span className="text-xs text-gray-400">{getTimezoneLabel()}</span>
-      </div>
-      <div className="flex gap-3 flex-shrink-0">
-        <DN navigateTo="/reports/executive">
-          <button className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition cursor-pointer">
-            Export
-          </button>
-        </DN>
-        <DN navigateTo="/settings">
-          <button className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition cursor-pointer">
+    <>
+      <header className="flex items-center justify-between p-3 flex-shrink-0">
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
+          <span className="text-xs text-gray-400">{getTimezoneLabel()}</span>
+        </div>
+        <div className="flex gap-3 flex-shrink-0">
+          <DN navigateTo="/reports/executive">
+            <button className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition cursor-pointer">
+              Export
+            </button>
+          </DN>
+          <button onClick={handleRescanClick}
+            className="px-3 py-1.5 rounded text-xs font-medium text-gray-400 bg-[#111827] border border-white/5 hover:border-white/10 transition cursor-pointer">
             Rescan
           </button>
-        </DN>
-        <DN navigateTo="/remediation">
-          <button className="px-3 py-1.5 rounded text-xs font-medium text-white bg-[#24A2A1] border border-transparent cursor-pointer">
-            + Remediate
-          </button>
-        </DN>
+          <DN navigateTo="/remediation">
+            <button className="px-3 py-1.5 rounded text-xs font-medium text-white bg-[#24A2A1] border border-transparent cursor-pointer">
+              + Remediate
+            </button>
+          </DN>
+        </div>
+      </header>
+      {showP2Modal && (
+        <P2PreScanModal
+          onEnableAndScan={handleEnableAndScan}
+          onScanWithout={handleScanWithout}
+          onClose={() => setShowP2Modal(false)}
+        />
+      )}
+    </>
+  );
+}
+
+// ─── Start Here Banner ───────────────────────────────────────
+
+interface StartHereData {
+  unowned_identities: number;
+  ghost_identities: number;
+  dormant_privileged: number;
+  risk_reduction_if_fixed: number;
+  total_identities: number;
+  open_remediations: number;
+  critical_remediations: number;
+  unowned_delta: number | null;
+  ghost_delta: number | null;
+  dormant_delta: number | null;
+}
+
+function DeltaBadge({ delta }: { delta: number | null }) {
+  if (delta === null || delta === undefined) return null;
+  if (delta < 0) return <span className="text-[10px] font-semibold text-[#1D9E75] ml-1">&darr;{Math.abs(delta)}</span>;
+  if (delta > 0) return <span className="text-[10px] font-semibold text-[#E24B4A] ml-1">&uarr;{delta}</span>;
+  return <span className="text-[10px] text-gray-500 ml-1">&mdash;</span>;
+}
+
+function StartHereBanner() {
+  const [data, setData] = useState<StartHereData | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/posture/start-here-summary')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setData(d))
+      .catch(() => setError(true));
+  }, []);
+
+  // Hide while loading, or on error
+  if (!data || error) return null;
+
+  const { unowned_identities, ghost_identities, dormant_privileged,
+          risk_reduction_if_fixed, total_identities, open_remediations,
+          critical_remediations } = data;
+
+  const hasIssues = unowned_identities > 0 || ghost_identities > 0 || dormant_privileged > 0;
+
+  // Clean environment — green success banner
+  if (!hasIssues) {
+    return (
+      <div className="mx-3 mt-1 flex-shrink-0 rounded-lg border-l-[3px] px-4 py-3"
+           style={{ backgroundColor: '#111827', borderLeftColor: '#1D9E75', borderTopColor: '#1a2332', borderRightColor: '#1a2332', borderBottomColor: '#1a2332' }}>
+        <p className="text-[13px] font-semibold text-gray-200 leading-tight">Your identity environment is clean.</p>
+        <p className="text-xs text-gray-400 mt-0.5">No governance gaps, ghost accounts, or dormant privileged access detected.</p>
       </div>
-    </header>
+    );
+  }
+
+  // Issues found — teal action banner
+  return (
+    <div className="mx-3 mt-1 flex-shrink-0 rounded-lg border-l-[3px] px-4 py-3 flex items-center gap-5"
+         style={{ backgroundColor: '#111827', borderLeftColor: '#24A2A1', borderTopColor: '#1a2332', borderRightColor: '#1a2332', borderBottomColor: '#1a2332' }}>
+      {/* Left: Lines 1-3 */}
+      <div className="flex-1 min-w-0">
+        {/* Line 1 — Static executive headline */}
+        <p className="text-[13px] font-semibold text-gray-200 leading-tight">
+          Critical identity governance gaps detected across your environment.
+        </p>
+
+        {/* Line 2 — Metric pills */}
+        <div className="flex items-center gap-2 mt-1.5">
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.04] text-xs">
+            <span className="font-bold text-[#24A2A1] text-sm leading-none">{unowned_identities.toLocaleString()}</span>
+            <span className="text-gray-400">unowned identities</span>
+            <DeltaBadge delta={data.unowned_delta} />
+          </span>
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.04] text-xs">
+            <span className="font-bold text-[#24A2A1] text-sm leading-none">{ghost_identities.toLocaleString()}</span>
+            <span className="text-gray-400">ghost accounts</span>
+            <DeltaBadge delta={data.ghost_delta} />
+          </span>
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.04] text-xs">
+            <span className="font-bold text-[#24A2A1] text-sm leading-none">{dormant_privileged.toLocaleString()}</span>
+            <span className="text-gray-400">dormant privileged</span>
+            <DeltaBadge delta={data.dormant_delta} />
+          </span>
+        </div>
+
+        {/* Line 3 — Risk reduction */}
+        <p className="text-[11px] text-gray-500 mt-1">
+          Resolving these eliminates your top 3 identity attack vectors and reduces critical identity exposure by{' '}
+          <span className="font-bold text-[#24A2A1]">{risk_reduction_if_fixed}%</span>.
+        </p>
+      </div>
+
+      {/* Right: CTA */}
+      <DN navigateTo="/remediation">
+        <span className="inline-flex items-center px-4 py-1.5 rounded-md bg-[#24A2A1] text-white text-xs font-semibold cursor-pointer hover:brightness-110 transition flex-shrink-0 whitespace-nowrap">
+          Start Remediation &rarr;
+        </span>
+      </DN>
+    </div>
   );
 }
 
@@ -235,6 +435,7 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
   return (
     <>
       <PageHeader />
+      <StartHereBanner />
 
       {/* P2 Fix 5: Partial visibility banner — ONLY when coverage_pct < 50 */}
       {lowCoverage && (
@@ -278,8 +479,8 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
               {coverage.cloud_label} &middot; {coverage.sub_count} subscription{coverage.sub_count !== 1 ? 's' : ''}
             </p>
             {/* Line 3: Confidence + visibility qualifier */}
-            <p className="text-[10px] mt-0.5" style={{ color: confColor }}>
-              Confidence: {coverage.confidence_level.charAt(0).toUpperCase() + coverage.confidence_level.slice(1)}{' '}
+            <p className="text-[10px] mt-0.5" style={{ color: confColor }} title={CONFIDENCE_TOOLTIP}>
+              Confidence: {CONFIDENCE_DISPLAY_LABEL[coverage.confidence_level] || 'Improving'}{' '}
               ({coverage.coverage_pct >= 100 ? 'all sources active'
                 : coverage.coverage_pct >= 80 ? 'most sources active'
                 : coverage.coverage_pct >= 50 ? 'some sources inactive'

@@ -21,12 +21,12 @@
   color-scheme: dark;
 
   /* Surfaces — 6-level elevation (deepest → active) */
-  --bg-deep:      #06090f;       /* deepest — sidebar */
-  --bg-surface:   #0c1220;       /* base — page background */
-  --bg-raised:    #111a2e;       /* raised — cards, panels */
-  --bg-elevated:  #162038;       /* elevated — hover states, dropdowns */
-  --bg-hover:     #1a2744;       /* hover — interactive hover */
-  --bg-active:    #1f2f52;       /* active — pressed/selected */
+  --bg-deep:      #03060d;       /* deepest — sidebar */
+  --bg-surface:   #080f1c;       /* base — page background */
+  --bg-raised:    #0d1627;       /* raised — cards, panels */
+  --bg-elevated:  #101d33;       /* elevated — hover states, dropdowns */
+  --bg-hover:     #152440;       /* hover — interactive hover */
+  --bg-active:    #1a2b4d;       /* active — pressed/selected */
 
   /* Legacy aliases (backward compat with existing components) */
   --bg-sidebar:   var(--bg-deep);
@@ -35,7 +35,7 @@
 
   /* Text — WCAG AA+ contrast on #0c1220 */
   --text-primary:   #e8ecf4;     /* 13.2:1 — headings, values */
-  --text-secondary: #8b9dc3;     /* 5.8:1 — descriptions, labels */
+  --text-secondary: #9db3cc;     /* 5.8:1 — descriptions, labels */
   --text-tertiary:  #5a6f96;     /* 3.4:1 — captions, timestamps */
   --text-muted:     #3d5078;     /* 2.0:1 — disabled, decorative */
   --text-inverse:   #06090f;     /* dark text on light surfaces */
@@ -73,7 +73,7 @@
   --nav-group-label:    #5a6f96;
 
   /* Tabs */
-  --tab-bg:            #0c1220;
+  --tab-bg:            #080f1c;
   --tab-text:          #8b9dc3;
   --tab-active-text:   #e8ecf4;
   --tab-active-border: #2563eb;
@@ -100,17 +100,17 @@
   --tint-emerald-strong: rgba(16, 185, 129, 0.20);
 
   /* ── CISO Posture v3.1 Tokens ── */
-  --posture-navy:     #0c1220;
+  --posture-navy:     #080f1c;
   --posture-teal:     #24A2A1;
   --posture-orange:   #FF7216;
   --posture-red:      #e8465a;
   --posture-amber:    #f59e0b;
   --posture-green:    #22c55e;
-  --posture-surface1: #111827;
-  --posture-surface2: #162038;
-  --posture-surface3: #1a2744;
-  --posture-surface4: #1f2f52;
-  --posture-border:   rgba(255, 255, 255, 0.05);
+  --posture-surface1: #0d1627;
+  --posture-surface2: #101d33;
+  --posture-surface3: #152440;
+  --posture-surface4: #1a2b4d;
+  --posture-border:   rgba(36,162,161,0.15);
   --posture-text-primary:   #e8ecf4;
   --posture-text-secondary: #8b9dc3;
   --posture-text-muted:     #5a6f96;
@@ -145,14 +145,14 @@
   /* Hero (flat — no gradient) */
 
   /* Form elements */
-  --input-bg:           #0c1220;
+  --input-bg:           #080f1c;
   --input-border:       #2a3f66;
   --input-text:         #e8ecf4;
   --input-placeholder:  #5a6f96;
   --input-focus-border: #2563eb;
 
   /* Scrollbar */
-  --scrollbar-track:       #0c1220;
+  --scrollbar-track:       #080f1c;
   --scrollbar-thumb:       #2a3f66;
   --scrollbar-thumb-hover: #5a6f96;
 
@@ -164,12 +164,12 @@
   --glow-accent:   0 0 12px rgba(37, 99, 235, 0.12);
 
   /* CISO / Command Center surfaces */
-  --ciso-bg-page:          #0c1220;
-  --ciso-bg-card:          rgba(12, 18, 32, 0.7);
+  --ciso-bg-page:          #080f1c;
+  --ciso-bg-card:          rgba(8,15,28,0.75);
   --ciso-bg-card-muted:    rgba(12, 18, 32, 0.5);
-  --ciso-border-card:      rgba(255, 255, 255, 0.06);
-  --ciso-bg-hover:         rgba(255, 255, 255, 0.02);
-  --ciso-bg-subtle:        rgba(255, 255, 255, 0.03);
+  --ciso-border-card:      rgba(36,162,161,0.18);
+  --ciso-bg-hover:         rgba(255,255,255,0.03);
+  --ciso-bg-subtle:        rgba(255,255,255,0.04);
   --ciso-bg-active:        rgba(255, 255, 255, 0.05);
   --ciso-track:            rgba(255, 255, 255, 0.08);
   --ciso-divider:          rgba(255, 255, 255, 0.06);
@@ -182,7 +182,7 @@
   /* CISO text shades */
   --ciso-text-bright: #e8ecf4;
   --ciso-text-light:  #c4d0e4;
-  --ciso-text-sub:    #8b9dc3;
+  --ciso-text-sub:    #9db3cc;
   --ciso-text-muted:  #5a6f96;
   --ciso-text-dim:    #3d5078;
   --ciso-text-faint:  #2a3f66;
@@ -236,6 +236,28 @@
 [data-theme] .bg-emerald-50   { background-color: var(--tint-emerald); }
 [data-theme] .bg-emerald-100  { background-color: var(--tint-emerald-strong); }
 
+/* --- Stronger tint backgrounds (200 level) ----------------------- */
+[data-theme] .bg-red-200      { background-color: var(--tint-red-strong); }
+[data-theme] .bg-orange-200   { background-color: var(--tint-orange-strong); }
+[data-theme] .bg-yellow-200   { background-color: var(--tint-yellow-strong); }
+[data-theme] .bg-amber-200    { background-color: var(--tint-orange-strong); }
+[data-theme] .bg-green-200    { background-color: var(--tint-green-strong); }
+[data-theme] .bg-blue-200     { background-color: var(--tint-blue-strong); }
+[data-theme] .bg-purple-200   { background-color: var(--tint-purple-strong); }
+
+/* --- Opacity-modified tint backgrounds (bg-*-50/NN) -------------- */
+/* Tailwind's bg-red-50/50 generates class .bg-red-50\/50 which does
+   NOT match [data-theme] .bg-red-50 — use attribute selectors.       */
+[data-theme] [class*="bg-red-50/"]     { background-color: var(--tint-red); }
+[data-theme] [class*="bg-orange-50/"]  { background-color: var(--tint-orange); }
+[data-theme] [class*="bg-yellow-50/"]  { background-color: var(--tint-yellow); }
+[data-theme] [class*="bg-amber-50/"]   { background-color: var(--tint-orange); }
+[data-theme] [class*="bg-green-50/"]   { background-color: var(--tint-green); }
+[data-theme] [class*="bg-blue-50/"]    { background-color: var(--tint-blue); }
+[data-theme] [class*="bg-purple-50/"]  { background-color: var(--tint-purple); }
+[data-theme] [class*="bg-indigo-50/"]  { background-color: var(--tint-indigo); }
+[data-theme] [class*="bg-gray-50/"]    { background-color: var(--bg-surface); }
+
 /* --- Text --------------------------------------------------------- */
 [data-theme] .text-gray-900   { color: var(--text-primary); }
 [data-theme] .text-gray-800   { color: var(--text-primary); }
@@ -270,8 +292,20 @@
 [data-theme] .text-amber-800  { color: #fbbf24; }
 [data-theme] .text-indigo-600 { color: #818cf8; }
 [data-theme] .text-indigo-700 { color: #818cf8; }
+[data-theme] .text-orange-800 { color: #fb923c; }
+[data-theme] .text-yellow-800 { color: #facc15; }
+[data-theme] .text-purple-800 { color: #a78bfa; }
 [data-theme] .text-emerald-700 { color: #34d399; }
 [data-theme] .text-cyan-700    { color: #22d3ee; }
+
+/* --- Dark text shades (-900) — remap to bright on dark ----------- */
+[data-theme] .text-red-900    { color: #f87171; }
+[data-theme] .text-orange-900 { color: #fb923c; }
+[data-theme] .text-amber-900  { color: #fbbf24; }
+[data-theme] .text-yellow-900 { color: #facc15; }
+[data-theme] .text-green-900  { color: #4ade80; }
+[data-theme] .text-blue-900   { color: #60a5fa; }
+[data-theme] .text-purple-900 { color: #a78bfa; }
 
 /* --- Borders ------------------------------------------------------ */
 [data-theme] .border          { border-color: var(--border-default); }
@@ -298,6 +332,18 @@
 [data-theme] .border-indigo-700  { border-color: var(--border-indigo); }
 [data-theme] .border-emerald-200 { border-color: var(--border-emerald); }
 
+/* Stronger semantic borders (-300, -400) */
+[data-theme] .border-red-300     { border-color: var(--border-red); }
+[data-theme] .border-red-400     { border-color: var(--border-red); }
+[data-theme] .border-orange-300  { border-color: var(--border-orange); }
+[data-theme] .border-yellow-300  { border-color: var(--border-yellow); }
+[data-theme] .border-amber-300   { border-color: var(--border-orange); }
+[data-theme] .border-amber-400   { border-color: var(--border-orange); }
+[data-theme] .border-green-300   { border-color: var(--border-green); }
+[data-theme] .border-blue-300    { border-color: var(--border-blue); }
+[data-theme] .border-purple-300  { border-color: var(--border-purple); }
+[data-theme] .border-purple-400  { border-color: var(--border-purple); }
+
 /* --- Hover states ------------------------------------------------- */
 [data-theme] .hover\:bg-gray-50:hover  { background-color: var(--bg-hover); }
 [data-theme] .hover\:bg-gray-100:hover { background-color: var(--bg-hover); }
@@ -310,8 +356,19 @@
 [data-theme] .hover\:bg-purple-100:hover { background-color: var(--tint-purple-strong); }
 [data-theme] .hover\:bg-purple-900\/50:hover { background-color: var(--tint-purple-strong); }
 [data-theme] .hover\:bg-indigo-900\/30:hover { background-color: var(--tint-indigo); }
+[data-theme] .hover\:bg-red-200:hover     { background-color: var(--tint-red-strong); }
+[data-theme] .hover\:bg-orange-200:hover  { background-color: var(--tint-orange-strong); }
+[data-theme] .hover\:bg-green-200:hover   { background-color: var(--tint-green-strong); }
+[data-theme] .hover\:bg-blue-200:hover    { background-color: var(--tint-blue-strong); }
 [data-theme] .hover\:text-gray-900:hover { color: var(--text-primary); }
 [data-theme] .hover\:text-white:hover    { color: var(--text-primary); }
+[data-theme] .hover\:text-blue-800:hover  { color: #60a5fa; }
+[data-theme] .hover\:text-blue-900:hover  { color: #60a5fa; }
+[data-theme] .hover\:text-amber-800:hover { color: #fbbf24; }
+[data-theme] .hover\:text-amber-900:hover { color: #fbbf24; }
+[data-theme] .hover\:text-green-800:hover { color: #4ade80; }
+[data-theme] .hover\:text-orange-800:hover { color: #fb923c; }
+[data-theme] .hover\:text-purple-800:hover { color: #a78bfa; }
 
 /* --- dark: prefix compat (components still using dark: classes) ---- */
 [data-theme] .dark\:bg-slate-900       { background-color: var(--bg-raised); }
@@ -341,6 +398,51 @@
 [data-theme] .dark\:hover\:bg-slate-800:hover   { background-color: var(--bg-hover); }
 [data-theme] .dark\:hover\:bg-purple-900\/50:hover { background-color: var(--tint-purple-strong); }
 [data-theme] .dark\:hover\:bg-indigo-900\/30:hover { background-color: var(--tint-indigo); }
+[data-theme] .dark\:hover\:bg-blue-950\/30:hover   { background-color: var(--tint-blue); }
+[data-theme] .dark\:hover\:bg-slate-800\/60:hover   { background-color: var(--bg-hover); }
+
+/* Additional dark: bg compat */
+[data-theme] .dark\:bg-red-900\/40     { background-color: var(--tint-red); }
+[data-theme] .dark\:bg-red-950\/30     { background-color: var(--tint-red); }
+[data-theme] .dark\:bg-orange-900\/30  { background-color: var(--tint-orange); }
+[data-theme] .dark\:bg-amber-900\/20   { background-color: var(--tint-orange); }
+[data-theme] .dark\:bg-amber-900\/30   { background-color: var(--tint-orange); }
+[data-theme] .dark\:bg-amber-900\/40   { background-color: var(--tint-orange); }
+[data-theme] .dark\:bg-yellow-900\/30  { background-color: var(--tint-yellow); }
+[data-theme] .dark\:bg-yellow-950\/30  { background-color: var(--tint-yellow); }
+[data-theme] .dark\:bg-green-900\/20   { background-color: var(--tint-green); }
+[data-theme] .dark\:bg-green-900\/30   { background-color: var(--tint-green); }
+[data-theme] .dark\:bg-blue-900\/10    { background-color: var(--tint-blue); }
+[data-theme] .dark\:bg-blue-900\/20    { background-color: var(--tint-blue); }
+[data-theme] .dark\:bg-blue-950\/30    { background-color: var(--tint-blue); }
+[data-theme] .dark\:bg-gray-800        { background-color: var(--bg-raised); }
+
+/* Additional dark: text compat */
+[data-theme] .dark\:text-red-200       { color: #f87171; }
+[data-theme] .dark\:text-red-400       { color: #f87171; }
+[data-theme] .dark\:text-orange-200    { color: #fb923c; }
+[data-theme] .dark\:text-orange-400    { color: #fb923c; }
+[data-theme] .dark\:text-amber-200     { color: #fbbf24; }
+[data-theme] .dark\:text-amber-300     { color: #fbbf24; }
+[data-theme] .dark\:text-amber-400     { color: #fbbf24; }
+[data-theme] .dark\:text-yellow-200    { color: #facc15; }
+[data-theme] .dark\:text-yellow-300    { color: #facc15; }
+[data-theme] .dark\:text-green-200     { color: #4ade80; }
+[data-theme] .dark\:text-green-300     { color: #4ade80; }
+[data-theme] .dark\:text-green-400     { color: #4ade80; }
+[data-theme] .dark\:text-blue-200      { color: #60a5fa; }
+[data-theme] .dark\:text-slate-200     { color: var(--text-primary); }
+[data-theme] .dark\:text-gray-400      { color: var(--text-tertiary); }
+[data-theme] .dark\:text-gray-500      { color: var(--text-tertiary); }
+
+/* Additional dark: border compat */
+[data-theme] .dark\:border-red-700     { border-color: var(--border-red); }
+[data-theme] .dark\:border-red-800     { border-color: var(--border-red); }
+[data-theme] .dark\:border-green-700   { border-color: var(--border-green); }
+[data-theme] .dark\:border-green-800\/40 { border-color: var(--border-green); }
+[data-theme] .dark\:border-yellow-800  { border-color: var(--border-yellow); }
+[data-theme] .dark\:border-amber-800   { border-color: var(--border-orange); }
+[data-theme] .dark\:border-blue-700    { border-color: var(--border-blue); }
 
 /* --- Shadows ------------------------------------------------------ */
 [data-theme] .shadow-sm  { box-shadow: var(--shadow-sm); }
@@ -641,6 +743,68 @@ code, pre, .font-mono {
   white-space: nowrap;
 }
 
+/* ── Type Badges (outlined, low visual weight) ───────────────────── */
+
+.badge-type-purple {
+  border: 1px solid rgba(147, 130, 220, 0.35);
+  color: #9ca3af;
+  background: transparent;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-flex;
+  white-space: nowrap;
+}
+
+.badge-type-cyan {
+  border: 1px solid rgba(80, 180, 200, 0.30);
+  color: #9ca3af;
+  background: transparent;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-flex;
+  white-space: nowrap;
+}
+
+.badge-type-teal {
+  border: 1px solid rgba(60, 170, 160, 0.30);
+  color: #9ca3af;
+  background: transparent;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-flex;
+  white-space: nowrap;
+}
+
+.badge-type-indigo {
+  border: 1px solid rgba(120, 130, 210, 0.30);
+  color: #9ca3af;
+  background: transparent;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-flex;
+  white-space: nowrap;
+}
+
+.badge-type-pink {
+  border: 1px solid rgba(200, 120, 160, 0.30);
+  color: #9ca3af;
+  background: transparent;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-flex;
+  white-space: nowrap;
+}
+
 /* ── Signal Chip Styles ────────────────────────────────────────────── */
 
 .signal-chip {
@@ -676,6 +840,12 @@ code, pre, .font-mono {
   background: rgba(127, 119, 221, 0.12);
   border-color: rgba(127, 119, 221, 0.6);
   color: #a78bfa;
+}
+
+.signal-chip.chip-active-data {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.6);
+  color: #38bdf8;
 }
 
 /* ── Row Tint — combo-risk identities (ungoverned + privileged) ──── */

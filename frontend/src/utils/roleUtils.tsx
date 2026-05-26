@@ -71,10 +71,51 @@ export function getRoleUsageBadge(
       </span>
     );
   }
-  // Inference ran but found no evidence — definitive result, not fallback
+  // Inference ran but found no activity signal — this does NOT confirm the role was unused
   return (
-    <span className={`${base} bg-gray-100 text-gray-500`} title={usage.evidence}>
-      No evidence
+    <span className={`${base} bg-gray-100 text-gray-500`} title={usage.evidence || 'No ARM management plane activity observed in the last 90 days. AuditGraph cannot confirm this role was unused — only that no activity was detectable.'}>
+      No activity signal
+    </span>
+  );
+}
+
+/**
+ * Classification badge for per-role usage confidence (4-tier model).
+ *
+ * Tiers:
+ *   proven:              ARM activity at matching scope, no overlapping roles
+ *   likely:              ARM activity detected, but overlapping roles prevent
+ *                        deterministic attribution
+ *   unknown:             Identity active, but no role-specific evidence
+ *   no_observed_usage:   No relevant activity within observation window
+ *   telemetry_blind:     No telemetry connectors — cannot determine usage
+ *   insufficient_coverage: Coverage data unavailable
+ *
+ * Legacy "used" value is mapped to "likely" for backward compatibility.
+ */
+export type RoleUsageClassification =
+  | 'proven' | 'likely' | 'unknown'
+  | 'no_observed_usage' | 'telemetry_blind' | 'insufficient_coverage'
+  | 'used';  // legacy compat
+
+const CLASSIFICATION_CONFIG: Record<string, { label: string; cls: string; title: string }> = {
+  proven:                { label: 'Proven Used',              cls: 'bg-green-100 text-green-700',   title: 'Role-scoped ARM activity confirmed — no overlapping roles at this scope' },
+  likely:                { label: 'Likely Used',              cls: 'bg-blue-100 text-blue-700',     title: 'Activity detected at scope but overlapping roles prevent deterministic attribution' },
+  unknown:               { label: 'Role Unconfirmed',         cls: 'bg-slate-100 text-slate-600',   title: 'Identity active but no role-specific evidence — cannot confirm this role was exercised' },
+  no_observed_usage:     { label: 'No activity observed',      cls: 'bg-amber-100 text-amber-700',   title: 'No ARM management plane activity observed in the last 90 days. AuditGraph cannot confirm this role was unused — only that no activity was detectable.' },
+  telemetry_blind:       { label: 'Telemetry blind',          cls: 'bg-gray-100 text-gray-500',     title: 'No telemetry connectors available — cannot determine usage' },
+  insufficient_coverage: { label: 'Insufficient data',        cls: 'bg-gray-50 text-gray-400 border border-gray-200', title: 'Coverage data unavailable — classification not possible' },
+  used:                  { label: 'Likely Used',              cls: 'bg-blue-100 text-blue-700',     title: 'Activity detected (legacy classification)' },
+};
+
+export function getClassificationBadge(classification: string | undefined | null): React.ReactElement | null {
+  if (!classification) return null;
+  const cfg = CLASSIFICATION_CONFIG[classification];
+  if (!cfg) return null;
+  const base = 'px-1.5 py-0.5 rounded text-[10px] font-semibold inline-flex items-center';
+  return (
+    <span className={`${base} ${cfg.cls}`} title={cfg.title}>
+      {cfg.label}
     </span>
   );
 }

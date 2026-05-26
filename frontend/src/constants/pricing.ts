@@ -30,10 +30,6 @@ export const BASE_FEATURES: Record<string, { label: string; description: string 
   identity_governance:   { label: 'Identity Governance',             description: 'Service account attestation and lifecycle management' },
 };
 
-// ── Coming Soon Features (visible but disabled) ─────────────────────────────
-export const COMING_SOON_FEATURES: Record<string, { label: string; description: string }> = {
-  terraform_export: { label: 'Terraform/Bicep Export & Bot', description: 'Export infrastructure as Terraform/Bicep with bot integration' },
-};
 
 // ── Subscription Terms & Progressive Discounts ──────────────────────────────
 // Monthly = no discount. Longer commitments get progressive discounts.
@@ -139,10 +135,11 @@ export const PLATFORM_FEE = {
 };
 
 // Phase 78: Tier limits for free/trial enforcement
-export const TIER_LIMITS: Record<string, { max_identities: number | null; trial_days?: number; blocked_features: string[] }> = {
-  free: { max_identities: 50, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso'] },
-  trial: { max_identities: 500, trial_days: 14, blocked_features: [] },
-  pro: { max_identities: null, blocked_features: [] },
+// Source of truth: backend TIER_LIMITS in handlers.py. These are display-only.
+export const TIER_LIMITS: Record<string, { max_identities: number | null; max_subscriptions: number | null; trial_days?: number; blocked_features: string[] }> = {
+  free: { max_identities: 500, max_subscriptions: 2, blocked_features: ['soar', 'api_keys', 'advanced_query', 'custom_risk_rules', 'ai_copilot', 'scheduled_reports', 'compliance_export', 'sso'] },
+  trial: { max_identities: null, max_subscriptions: null, trial_days: 30, blocked_features: [] },
+  pro: { max_identities: null, max_subscriptions: null, blocked_features: [] },
 };
 
 // ── Per-Subscription Billing (cents-based) ────────────────────────────────

@@ -736,8 +736,13 @@ class WorkloadExposureEngine:
         score = 0
         findings = []
 
+        # Microsoft first-party SPNs have no owner by design — skip orphan logic
+        is_ms_first_party = identity_data.get('is_microsoft_first_party', False)
+
         # Owner status — consider activity before declaring orphaned
-        if not owners or len(owners) == 0:
+        if is_ms_first_party and (not owners or len(owners) == 0):
+            owner_status = 'microsoft_managed'
+        elif not owners or len(owners) == 0:
             activity = (identity_data.get('activity_status') or '').lower()
             last_sign_in = identity_data.get('last_sign_in')
 
@@ -832,7 +837,7 @@ class WorkloadExposureEngine:
                     'finding_type': 'stale_identity',
                     'severity': 'high',
                     'title': f'Activity status: {activity}',
-                    'description': 'Identity is stale or never used — credentials may be abandoned.',
+                    'description': 'Identity is stale or shows no observed activity — credentials may be abandoned.',
                     'evidence': {'activity_status': activity},
                     'remediation': 'Investigate usage. Remove if confirmed unused.',
                     'component': 'lifecycle',

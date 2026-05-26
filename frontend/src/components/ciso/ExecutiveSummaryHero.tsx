@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import type { CISOViewModel } from '../../utils/cisoViewModel';
 import type { PostureV31Response } from '../../utils/cisoViewModel';
 import { DN, ScoreRing } from '../dashboard/ciso-shared';
-import { STATUS_DOT, STATUS_TEXT_CLS, CONFIDENCE_CLS, POSTURE_STATUS_COLOR, POSTURE_STATUS_BORDER, POSTURE_STATUS_LABEL, POSTURE_STATUS_TEXT, POSTURE_CONFIDENCE_COLOR, postureBandFromScore } from '../../constants/cisoColors';
+import { STATUS_DOT, STATUS_TEXT_CLS, CONFIDENCE_CLS, POSTURE_STATUS_COLOR, POSTURE_STATUS_BORDER, POSTURE_STATUS_LABEL, POSTURE_STATUS_TEXT, POSTURE_CONFIDENCE_COLOR, CONFIDENCE_DISPLAY_LABEL, CONFIDENCE_TOOLTIP, postureBandFromScore } from '../../constants/cisoColors';
 
 // ── Narrative helpers (legacy VM path) ───────────────────────
 
@@ -47,7 +47,7 @@ function buildInsightLines(vm: CISOViewModel): {
   riskFocus: string | null;
   actionHint: string | null;
 } {
-  const verdict = VERDICT_LINE[vm.status] || 'Identity posture data unavailable';
+  const verdict = VERDICT_LINE[vm.status] || 'Posture assessment pending — run a discovery scan to generate results.';
   const topDriver = vm.top_risk_drivers[0];
   const riskFocus = topDriver ? driverToRiskFocus(topDriver.title, topDriver.count) : null;
   const actionHint = topDriver ? driverToActionHint(topDriver.title) : null;
@@ -132,17 +132,15 @@ export function PostureScoreHero({ data }: { data: PostureV31Response }) {
         <div className="flex items-baseline gap-1.5">
           <span className="text-xl font-semibold text-gray-100 leading-none font-mono">{score.toFixed(0)}</span>
           <span className={`text-xs font-medium ${band.textCls}`}>&nbsp;&middot; {band.label}</span>
-          {delta == null ? (
-            <span className="text-xs text-gray-500 flex-shrink-0">Baseline established</span>
-          ) : delta === 0 ? (
+          {delta == null ? null : delta === 0 ? (
             <span className="text-xs text-gray-500 flex-shrink-0">&rarr; No change</span>
           ) : delta > 0 ? (
             <span className="text-xs font-medium flex-shrink-0 text-emerald-400">
-              &#9650; +{delta.toFixed(1)} since last scan
+              &#9650; +{(data.posture_change_pct ?? Math.abs(delta)).toFixed(1)}% since last scan
             </span>
           ) : (
-            <span className="text-xs font-medium flex-shrink-0 text-red-400">
-              &#9660; {delta.toFixed(1)} since last scan
+            <span className="text-xs font-medium flex-shrink-0 text-[#f59e0b]">
+              &#9660; &minus;{(data.posture_change_pct ?? Math.abs(delta)).toFixed(1)}% since last scan
             </span>
           )}
         </div>
@@ -159,8 +157,9 @@ export function PostureScoreHero({ data }: { data: PostureV31Response }) {
           <div className="flex-1 h-1 bg-[#1e2d4a] rounded-full max-w-[60px]">
             <div className="h-1 rounded-full transition-all" style={{ width: `${cov.coverage_pct}%`, backgroundColor: POSTURE_CONFIDENCE_COLOR[cov.confidence_level] || '#4a6080' }} />
           </div>
-          <span className="text-xs capitalize" style={{ color: POSTURE_CONFIDENCE_COLOR[cov.confidence_level] || '#4a6080' }}>
-            Confidence: {cov.confidence_level}
+          <span className="text-xs" style={{ color: POSTURE_CONFIDENCE_COLOR[cov.confidence_level] || '#4a6080' }}
+                title={CONFIDENCE_TOOLTIP}>
+            Confidence: {CONFIDENCE_DISPLAY_LABEL[cov.confidence_level] || 'Improving'}
           </span>
         </div>
       </div>

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  ADDON_PRICING, BASE_FEATURES, COMING_SOON_FEATURES,
+  ADDON_PRICING, BASE_FEATURES,
   CLOUD_LABELS, ACCOUNT_TIER_LABELS, PLATFORM_FEE_CENTS,
   SUBSCRIPTION_TERMS, getTermDiscount, getTermLabel,
   SUB_RATES_CENTS,
@@ -949,26 +949,6 @@ export default function AdminTenants() {
               </div>
             </div>
 
-            {/* Coming Soon */}
-            <div className="mb-6">
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-3">Coming Soon</h4>
-              <div className="space-y-2">
-                {Object.entries(COMING_SOON_FEATURES).map(([key, feat]) => (
-                  <div key={key} className="flex items-center justify-between border-2 border-gray-200 bg-gray-50/50 rounded-xl px-4 py-3 opacity-60">
-                    <div className="flex items-center gap-3">
-                      <div className="w-5 h-5 rounded flex items-center justify-center bg-gray-300 text-gray-500">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-                      </div>
-                      <div>
-                        <div className="text-xs font-semibold text-gray-500">{feat.label}</div>
-                        <div className="text-[10px] text-gray-400">{feat.description}</div>
-                      </div>
-                    </div>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold text-gray-500 bg-gray-200 uppercase tracking-wider">Soon</span>
-                  </div>
-                ))}
-              </div>
-            </div>
           </div>
 
           {/* Subscription Term */}

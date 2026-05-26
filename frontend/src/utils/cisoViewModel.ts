@@ -38,6 +38,7 @@ export interface PostureV31BlastRadius {
   scope_string: string;
   exploitation_text: string;
   impact_label?: string;
+  more_count?: number;
 }
 
 export interface PostureV31AttackPath {
@@ -98,8 +99,9 @@ export interface PostureV31DriftChange {
 
 export interface PostureV31Response {
   posture_score: number;
-  posture_status: 'STRONG' | 'MODERATE' | 'WEAK';
+  posture_status: 'STRONG' | 'MODERATE' | 'ELEVATED_RISK' | 'WEAK' | 'CRITICAL_EXPOSURE';
   score_delta: number | null;
+  posture_change_pct: number | null;
   narrative_text: string;
   top_risk_narrative: string | null;
   highest_risk_type: string | null;
@@ -157,6 +159,7 @@ export interface PostureV31Response {
     actions_applied: number;
     risk_reduction_pct: number;
   };
+  p2_enabled?: boolean;
 }
 
 // ── Extended VM Sub-Types ─────────────────────────────────────
@@ -1269,9 +1272,13 @@ export function mapSummaryToViewModel(response: any): CISOViewModel {
   const data = response.data || {};
   const { riskSummary, trends, anomalies, remediation, drift, spn } = data;
 
+  // Default-merge exposure so absent keys → 0 (not undefined)
+  const rawExposure = riskSummary?.exposure ?? {};
+  const exposure = { subscriptions: 0, active_subscriptions: 0, ...rawExposure };
+
   // SSOT: validate required fields from backend
-  const exposureSubs = riskSummary?.exposure?.subscriptions;
-  const exposureActiveSubs = riskSummary?.exposure?.active_subscriptions;
+  const exposureSubs = exposure.subscriptions;
+  const exposureActiveSubs = exposure.active_subscriptions;
   if (exposureSubs === undefined) {
     console.error('SSOT violation: exposure.subscriptions missing from backend response');
   }

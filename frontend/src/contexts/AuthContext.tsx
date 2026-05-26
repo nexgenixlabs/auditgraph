@@ -207,8 +207,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         const refreshed = await refreshingRef.current;
         if (refreshed) {
-          // Retry with new cookies (set by refresh response)
-          response = await origFetch(resolvedInput, init);
+          // Retry with new cookies (set by refresh response).
+          // Re-read CSRF token — refresh may have rotated it.
+          const retryHeaders = new Headers(init?.headers);
+          const retryMethod = (init?.method || 'GET').toUpperCase();
+          if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(retryMethod)) {
+            const freshCsrf = getCsrfToken();
+            if (freshCsrf) retryHeaders.set('X-CSRF-Token', freshCsrf);
+          }
+          response = await origFetch(resolvedInput, { ...init, headers: retryHeaders });
         } else {
           setUser(null);
         }

@@ -111,6 +111,7 @@ export interface IdentityDetailsResponse {
     deleted_at?: string | null;
     ca_coverage_status?: string | null;
     ca_mfa_enforced?: boolean;
+    has_federated_credentials?: boolean;
     removable_role_count?: number;
     group_count?: number;
     privileged_groups?: { group_name: string; group_type: string; inherited_role_count: number; highest_scope: string }[];
@@ -130,8 +131,21 @@ export interface IdentityDetailsResponse {
   app_roles: any[];
   owners: Owner[];
   role_intelligence: RoleIntelligence[];
+  lineage?: LineageData | null;
   trend?: TrendData | null;
   evidence?: EvidenceMetadata;
+}
+
+export interface LineageData {
+  narrative: string | null;
+  workload_origin: string | null;
+  workload_origin_source: string | null;
+  provisioned_by: string | null;
+  creation_method: string | null;
+  verdict: string | null;
+  confidence: number | null;
+  contributing_factors: Array<{ detail: string; source?: string; weight: number }> | null;
+  verdict_source: string | null;
 }
 
 export type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access';

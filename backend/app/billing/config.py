@@ -30,7 +30,8 @@ COMMITMENT_DISCOUNTS = {0: 0.0, 1: 0.15, 3: 0.25, 5: 0.35}
 
 # Plan limits
 PLAN_LIMITS = {
-    'free': {'max_active_subs': 1, 'max_identities': 50},
-    'trial': {'max_active_subs': 5, 'max_identities': 500},
+    'free': {'max_active_subs': 2, 'max_identities': 500},
+    'trial': {'max_active_subs': None, 'max_identities': None},
     'pro': {'max_active_subs': None, 'max_identities': None},
+    'enterprise': {'max_active_subs': None, 'max_identities': None},
 }

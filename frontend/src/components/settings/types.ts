@@ -32,6 +32,8 @@ export interface StatusData {
   scheduler_running: boolean;
   next_run: string | null;
   next_report: string | null;
+  last_report: string | null;
+  report_schedule_allowed: boolean;
 }
 
 export interface WebhookData {

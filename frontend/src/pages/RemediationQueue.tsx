@@ -44,10 +44,10 @@ export default function RemediationQueue() {
       {/* Header */}
       <div className="mb-5">
         <h1 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>
-          Remediation Queue
+          Change Control Center
         </h1>
         <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
-          {openCount} open item{openCount !== 1 ? 's' : ''} requiring action
+          Governed remediation with dual-approval gate and evidence packages
         </p>
       </div>
 
@@ -134,14 +134,36 @@ export default function RemediationQueue() {
       {/* State 3: Empty (only when no error) */}
       {!loading && !error && items.length === 0 && (
         <div className="rounded-xl border p-12 text-center" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
-          <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
-            {filters.status || filters.severity ? 'No items match the current filters' : 'No items in the remediation queue'}
-          </p>
-          <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>
-            {filters.status || filters.severity
-              ? 'Try adjusting filters or clearing them.'
-              : 'Priority actions from the Executive Posture dashboard will appear here when added.'}
-          </p>
+          {filters.status || filters.severity ? (
+            <>
+              <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                No items match the current filters
+              </p>
+              <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>
+                Try adjusting filters or clearing them.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                No pending approvals
+              </p>
+              <p className="text-xs mt-2 max-w-md mx-auto" style={{ color: 'var(--text-tertiary)' }}>
+                Remediation actions approved through the Remediation Plan will
+                appear here for dual-approval review before scripts are released.
+              </p>
+              <div className="flex items-center justify-center gap-3 mt-5">
+                <span className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                  Level 1 &mdash; Security review
+                </span>
+                <span className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium"
+                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                  Level 2 &mdash; Change Advisory Board + ticket reference
+                </span>
+              </div>
+            </>
+          )}
         </div>
       )}
 

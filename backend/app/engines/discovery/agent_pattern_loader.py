@@ -30,6 +30,7 @@ _patterns = {
     "display_name_patterns": [],
     "known_app_ids": [],
     "api_permission_signals": [],
+    "role_signals": {},
     "exclusion_patterns": [],
     "version": "0.0.0",
     "last_updated": None,
@@ -39,10 +40,17 @@ _patterns = {
 _compiled_display_name = []    # list of (regex, confidence, platform)
 _compiled_exclusions = []      # list of compiled regex
 
+# Role signal data (exact name set + lowercase scope substrings)
+_role_names_set = set()        # set of exact role names (case-sensitive)
+_scope_patterns_lower = []     # list of lowercase scope substrings
+_role_confidence = 0.95
+_role_platform = "azure_ai"
+
 
 def _compile_patterns(raw):
     """Compile regex patterns from the raw JSON config."""
     global _compiled_display_name, _compiled_exclusions
+    global _role_names_set, _scope_patterns_lower, _role_confidence, _role_platform
 
     compiled_dn = []
     for entry in raw.get("display_name_patterns", []):
@@ -61,6 +69,13 @@ def _compile_patterns(raw):
             compiled_ex.append(re.compile(pat_str))
         except re.error as e:
             logger.warning("Invalid exclusion pattern %r: %s", pat_str, e)
+
+    # Role signals: explicit role name list + scope substring list
+    rs = raw.get("role_signals", {})
+    _role_names_set = set(rs.get("role_names", []))
+    _scope_patterns_lower = [s.lower() for s in rs.get("scope_patterns", [])]
+    _role_confidence = rs.get("confidence", 0.95)
+    _role_platform = rs.get("platform", "azure_ai")
 
     _compiled_display_name = compiled_dn
     _compiled_exclusions = compiled_ex
@@ -176,6 +191,38 @@ def match_permissions(permissions):
                         signal.get("platform", "unknown"),
                     ))
     return matches
+
+
+def match_roles(role_assignments):
+    """Check if any role assignment signals AI workload access.
+
+    Uses explicit role name set and scope substring matching.
+    A match means the identity has confirmed access to an AI service.
+
+    Args:
+        role_assignments: list of dicts with 'role_name' and 'scope' keys.
+
+    Returns (platform, confidence) of the best match, or (None, 0.0).
+    """
+    if not role_assignments:
+        return None, 0.0
+
+    with _lock:
+        for ra in role_assignments:
+            role_name = ra.get('role_name', '') or ''
+            scope = ra.get('scope', '') or ''
+            scope_lower = scope.lower()
+
+            # Check exact role name match
+            if role_name in _role_names_set:
+                return _role_platform, _role_confidence
+
+            # Check scope substring match
+            for pat in _scope_patterns_lower:
+                if pat in scope_lower:
+                    return _role_platform, _role_confidence
+
+    return None, 0.0
 
 
 # ── Auto-load on import ──────────────────────────────────────────────

@@ -1,0 +1,54 @@
+# Tenant-scoped tables — authoritative list
+# Generated from: SELECT table_name FROM information_schema.columns
+#                  WHERE column_name='organization_id'
+# Kept in sync with integrity.py:RLS_PROTECTED_TABLES and tenant_scope.py:_BASELINE_TENANT_TABLES
+# AG-94: Any new table with organization_id MUST be added here + to both code registries
+activity_log
+agirs_scores
+anomalies
+api_keys
+app_registrations
+azure_key_vaults
+azure_storage_accounts
+cloud_connections
+compliance_framework_config
+compliance_snapshots
+copilot_conversations
+credentials
+dashboard_preferences
+discovery_runs
+discovery_stage_log
+drift_reports
+entra_role_assignments
+graph_api_permissions
+graph_attack_findings
+graph_edges
+identity_exposures
+identity_groups
+identity_group_members
+identity_subscription_access
+job_runs
+notifications
+pim_activations
+pim_eligible_assignments
+posture_scores
+remediation_actions
+remediation_playbooks
+risk_rules
+risk_scores
+risk_summary
+role_assignments
+sa_attestations
+saved_views
+scan_schedules
+security_findings
+settings
+snapshot_jobs
+snapshot_runs
+soar_actions
+soar_playbooks
+sp_app_roles
+webhooks
+workload_activity_stats
+workload_anomaly_events
+workload_signin_events

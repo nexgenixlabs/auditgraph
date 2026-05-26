@@ -1,0 +1,277 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AuditGraph — PR Gate (required checks before merge to main)
+#
+# Gates:
+#   1. PR Title Validation  — must contain Jira Story ID (AG-nnn)
+#   2. Code Quality Scan    — detect hardcoded secrets, credentials, vulnerabilities
+#   3. TypeScript Build      — frontend must compile without errors
+#   4. Infrastructure Plan  — Bicep what-if (only when infra/ changes)
+#
+# All gates must pass before a PR can be merged.
+# Deployment is manual via workflow_dispatch — never auto-triggered.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "PR Gate"
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 1. PR Title — must contain Jira Story ID (AG-nnn)
+  # ═══════════════════════════════════════════════════════════════════════════
+  title-check:
+    name: "PR Title — Jira Story ID"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title contains Jira ID
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          echo "PR Title: $TITLE"
+
+          if echo "$TITLE" | grep -qP 'AG-\d+'; then
+            JIRA_ID=$(echo "$TITLE" | grep -oP 'AG-\d+' | head -1)
+            echo "Jira Story ID found: $JIRA_ID"
+            echo "### PR Title Check" >> $GITHUB_STEP_SUMMARY
+            echo "Jira Story ID: **$JIRA_ID**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "::error::PR title must contain a Jira Story ID (e.g., AG-162). Got: '$TITLE'"
+            echo "### PR Title Check" >> $GITHUB_STEP_SUMMARY
+            echo ":red_circle: **FAILED** — No Jira Story ID found in PR title." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Expected format: \`AG-nnn: Description\` or \`feat(AG-nnn): Description\`" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 2. Code Quality — hardcoded secrets, credentials, vulnerabilities
+  # ═══════════════════════════════════════════════════════════════════════════
+  code-scan:
+    name: "Code Scan — Hardcoding & Credentials"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for hardcoded secrets and credentials
+        run: |
+          echo "### Code Scan — Hardcoded Credentials" >> $GITHUB_STEP_SUMMARY
+          FOUND=0
+
+          # Patterns that indicate hardcoded secrets (exclude test files, configs, workflows)
+          SCAN_DIRS="backend/app frontend/src"
+          EXCLUDE="--include='*.py' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx'"
+
+          # 1. Hardcoded passwords (password = "...", password: "...")
+          echo "Scanning for hardcoded passwords..."
+          PASSWORDS=$(grep -rn \
+            -E '(password|passwd|pwd)\s*[:=]\s*["\x27][^"\x27]{4,}["\x27]' \
+            --include='*.py' --include='*.ts' --include='*.tsx' --include='*.js' \
+            $SCAN_DIRS 2>/dev/null \
+            | grep -vi 'os\.environ\|getenv\|process\.env\|secrets\.\|config\.\|DB_PASSWORD\|placeholder\|example\|test_\|mock\|fixture\|TODO\|FIXME\|secretsmanager\|password_field\|password_input\|type.*password\|input.*password\|label.*password\|Password.*label\|\.get\(' \
+            || true)
+          if [ -n "$PASSWORDS" ]; then
+            COUNT=$(echo "$PASSWORDS" | wc -l)
+            FOUND=$((FOUND + COUNT))
+            echo ":warning: Potential hardcoded passwords ($COUNT):" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$PASSWORDS" | head -20 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # 2. API keys / tokens (api_key = "sk-...", token = "eyJ...")
+          echo "Scanning for hardcoded API keys..."
+          API_KEYS=$(grep -rn \
+            -E '(api[_-]?key|api[_-]?secret|auth[_-]?token|bearer|access[_-]?token)\s*[:=]\s*["\x27][A-Za-z0-9+/=_-]{20,}["\x27]' \
+            --include='*.py' --include='*.ts' --include='*.tsx' --include='*.js' \
+            $SCAN_DIRS 2>/dev/null \
+            | grep -vi 'os\.environ\|getenv\|process\.env\|secrets\.\|config\.\|placeholder\|example\|test\|mock\|header\|localStorage\|sessionStorage\|\.get(' \
+            || true)
+          if [ -n "$API_KEYS" ]; then
+            COUNT=$(echo "$API_KEYS" | wc -l)
+            FOUND=$((FOUND + COUNT))
+            echo ":warning: Potential hardcoded API keys ($COUNT):" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$API_KEYS" | head -20 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # 3. Connection strings with credentials
+          echo "Scanning for hardcoded connection strings..."
+          CONN_STRINGS=$(grep -rn \
+            -E '(postgresql|mysql|mongodb|redis|amqp)://[^:]+:[^@]+@[a-zA-Z0-9]' \
+            --include='*.py' --include='*.ts' --include='*.tsx' --include='*.js' \
+            $SCAN_DIRS 2>/dev/null \
+            | grep -vi 'os\.environ\|getenv\|process\.env\|example\|placeholder\|localhost\|127\.0\.0\.1\|test\|mock\|config\.' \
+            || true)
+          if [ -n "$CONN_STRINGS" ]; then
+            COUNT=$(echo "$CONN_STRINGS" | wc -l)
+            FOUND=$((FOUND + COUNT))
+            echo ":warning: Potential hardcoded connection strings ($COUNT):" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$CONN_STRINGS" | head -10 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # 4. Private keys
+          echo "Scanning for private keys..."
+          PRIV_KEYS=$(grep -rn \
+            -E 'BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY' \
+            --include='*.py' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.pem' --include='*.key' \
+            $SCAN_DIRS 2>/dev/null || true)
+          if [ -n "$PRIV_KEYS" ]; then
+            COUNT=$(echo "$PRIV_KEYS" | wc -l)
+            FOUND=$((FOUND + COUNT))
+            echo ":red_circle: Private keys found ($COUNT):" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$PRIV_KEYS" | head -10 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # 5. Azure/AWS/GCP specific credentials
+          echo "Scanning for cloud credentials..."
+          CLOUD_CREDS=$(grep -rn \
+            -E '(AZURE_CLIENT_SECRET|AWS_SECRET_ACCESS_KEY|GOOGLE_APPLICATION_CREDENTIALS)\s*[:=]\s*["\x27][^"\x27]{8,}["\x27]' \
+            --include='*.py' --include='*.ts' --include='*.tsx' --include='*.js' \
+            $SCAN_DIRS 2>/dev/null \
+            | grep -vi 'os\.environ\|getenv\|process\.env\|secrets\.\|example\|placeholder\|test\|mock' \
+            || true)
+          if [ -n "$CLOUD_CREDS" ]; then
+            COUNT=$(echo "$CLOUD_CREDS" | wc -l)
+            FOUND=$((FOUND + COUNT))
+            echo ":red_circle: Cloud credentials found ($COUNT):" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$CLOUD_CREDS" | head -10 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Gate decision
+          if [ "$FOUND" -gt "0" ]; then
+            echo ""
+            echo ":stop_sign: **Code scan FAILED**: $FOUND potential hardcoded credential(s) found." >> $GITHUB_STEP_SUMMARY
+            echo "::error::Code scan found $FOUND potential hardcoded credentials. Review findings above."
+            exit 1
+          else
+            echo ":white_check_mark: No hardcoded credentials detected." >> $GITHUB_STEP_SUMMARY
+            echo "Code scan passed — no hardcoded credentials found."
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 3. TypeScript — frontend must compile cleanly
+  # ═══════════════════════════════════════════════════════════════════════════
+  typescript-build:
+    name: "TypeScript Build"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: TypeScript compile check
+        working-directory: ./frontend
+        run: |
+          npx tsc --noEmit
+          echo "### TypeScript Build" >> $GITHUB_STEP_SUMMARY
+          echo ":white_check_mark: Frontend compiles without errors." >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 4. Infrastructure Plan — Bicep what-if (only when infra/ changes)
+  # ═══════════════════════════════════════════════════════════════════════════
+  infra-plan:
+    name: "Infrastructure Plan (Bicep)"
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.title, 'infra') ||
+      contains(github.event.pull_request.title, 'Infra') ||
+      contains(github.event.pull_request.body, 'infra/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+        continue-on-error: true
+
+      - name: Bicep what-if (DEV environment)
+        run: |
+          echo "### Infrastructure Plan (Bicep What-If)" >> $GITHUB_STEP_SUMMARY
+
+          if ! command -v az &> /dev/null; then
+            echo ":yellow_circle: Azure CLI not available — skipping Bicep plan." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # List changed infra files
+          echo "**Changed infrastructure files:**" >> $GITHUB_STEP_SUMMARY
+          git diff --name-only origin/main...HEAD -- infra/ >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No infra changes detected" >> $GITHUB_STEP_SUMMARY
+
+          # Run what-if if Bicep files exist
+          if ls infra/*.bicep 1>/dev/null 2>&1; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Bicep what-if output:**" >> $GITHUB_STEP_SUMMARY
+            az deployment group what-if \
+              --resource-group ${{ vars.DEV_RG || 'eus2-ag-nonprod-rg' }} \
+              --template-file infra/containerapps-dev.bicep \
+              --parameters environmentName=dev-cae-ext \
+              --no-pretty-print \
+              2>&1 | tee /tmp/whatif.txt || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat /tmp/whatif.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No .bicep files found in infra/" >> $GITHUB_STEP_SUMMARY
+          fi
+        continue-on-error: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 5. Gate Summary
+  # ═══════════════════════════════════════════════════════════════════════════
+  gate-summary:
+    name: "PR Gate Summary"
+    runs-on: ubuntu-latest
+    needs: [title-check, code-scan, typescript-build]
+    if: always()
+    steps:
+      - name: Evaluate gate results
+        run: |
+          echo "### PR Gate Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          TITLE="${{ needs.title-check.result }}"
+          CODE="${{ needs.code-scan.result }}"
+          TS="${{ needs.typescript-build.result }}"
+
+          [ "$TITLE" = "success" ] && echo "| Jira Story ID | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Jira Story ID | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
+          [ "$CODE" = "success" ] && echo "| Code Scan | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Code Scan | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
+          [ "$TS" = "success" ] && echo "| TypeScript Build | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| TypeScript Build | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$TITLE" != "success" ] || [ "$CODE" != "success" ] || [ "$TS" != "success" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":stop_sign: **PR Gate FAILED** — fix the issues above before merging." >> $GITHUB_STEP_SUMMARY
+            echo "::error::PR Gate FAILED. See summary for details."
+            exit 1
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo ":white_check_mark: **All PR gates passed.** Ready for review." >> $GITHUB_STEP_SUMMARY

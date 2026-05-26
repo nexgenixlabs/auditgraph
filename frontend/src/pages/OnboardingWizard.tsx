@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch', 'Scanning'];
+import { useLocation } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+
+const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch'];
 
 interface TestResult {
   status: string;
@@ -16,12 +19,32 @@ interface ChecklistItem {
 
 const CLOUD_OPTIONS = [
   { key: 'azure', label: 'Microsoft Azure', desc: 'Entra ID, Azure RBAC, Key Vaults, Storage' },
-  { key: 'aws', label: 'Amazon Web Services', desc: 'IAM, Organizations, S3, KMS (coming soon)' },
-  { key: 'gcp', label: 'Google Cloud', desc: 'Cloud IAM, Projects, GCS, KMS (coming soon)' },
 ];
 
+/** SessionStorage key for persisting wizard step across refreshes. */
+function stepKey(orgId: number | string): string {
+  return `ag_wizard_step_${orgId}`;
+}
+/** SessionStorage key recording explicit wizard completion. */
+function completeKey(orgId: number | string): string {
+  return `ag_wizard_complete_${orgId}`;
+}
+
 export default function OnboardingWizard() {
-  const [step, setStep] = useState(0);
+  const { user } = useAuth();
+  const location = useLocation();
+  const orgId = user?.organization_id ?? 0;
+
+  // Determine initial step: fromSignup → skip step 0 (org name already entered)
+  // Otherwise restore from sessionStorage, defaulting to step 0.
+  const fromSignup = !!(location.state as any)?.fromSignup;
+  const initialStep = (() => {
+    if (fromSignup) return 1; // Cloud Provider
+    const saved = sessionStorage.getItem(stepKey(orgId));
+    return saved ? Math.min(parseInt(saved, 10) || 0, STEPS.length - 1) : 0;
+  })();
+
+  const [step, setStep] = useState(initialStep);
   const [orgName, setOrgName] = useState('');
   const [selectedCloud, setSelectedCloud] = useState('azure');
   const [azureTenantId, setAzureTenantId] = useState('');
@@ -36,18 +59,35 @@ export default function OnboardingWizard() {
   const [error, setError] = useState<string | null>(null);
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
   const [showChecklist, setShowChecklist] = useState(false);
-  const [scanProgress, setScanProgress] = useState<string[]>([]);
+  const [orgNamePreFilled, setOrgNamePreFilled] = useState(false);
 
-  // Load checklist on mount
+  // Persist step to sessionStorage whenever it changes
+  useEffect(() => {
+    if (orgId) sessionStorage.setItem(stepKey(orgId), step.toString());
+  }, [step, orgId]);
+
+  // Load checklist + org name on mount
   useEffect(() => {
     fetch('/api/onboarding/status')
       .then(r => r.json())
       .then(data => {
         if (data.checklist) setChecklist(data.checklist);
-        if (data.onboarding_completed) setShowChecklist(true);
+
+        // FIX 3+4: Only show checklist when wizard was explicitly completed AND
+        // backend confirms cloud provider is actually configured.
+        // The backend now returns onboarding_completed=false if cloud_connections=0,
+        // but we also check client-side sessionStorage as a secondary gate.
+        const wizardExplicitlyDone =
+          sessionStorage.getItem(completeKey(orgId)) === 'true';
+        const hasCompletedRun = data.snapshot_completed === true;
+        if (data.onboarding_completed && (data.azure_configured || wizardExplicitlyDone || hasCompletedRun)) {
+          setShowChecklist(true);
+        }
+
+        if (data.org_name) { setOrgName(data.org_name); setOrgNamePreFilled(true); }
       })
       .catch(() => {});
-  }, []);
+  }, [orgId]);
 
   const canNext = useCallback((): boolean => {
     if (step === 0) return orgName.trim().length > 0;
@@ -59,9 +99,20 @@ export default function OnboardingWizard() {
       return false; // AWS/GCP not yet supported
     }
     if (step === 3) return testResult?.status === 'success';
-    if (step === 4) return !emailEnabled || (emailTo.includes('@'));
+    if (step === 4) return !emailEnabled || /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(emailTo.trim());
     return true;
   }, [step, orgName, selectedCloud, azureTenantId, azureClientId, azureClientSecret, testResult, emailEnabled, emailTo]);
+
+  // Auto-trigger test when arriving at Step 3 (Test Connection) with credentials filled
+  const autoTestTriggered = React.useRef(false);
+  useEffect(() => {
+    if (step === 3 && azureTenantId.trim() && azureClientId.trim() && azureClientSecret.trim()
+        && !testing && !testResult && !autoTestTriggered.current) {
+      autoTestTriggered.current = true;
+      handleTestConnection();
+    }
+    if (step !== 3) autoTestTriggered.current = false;
+  }, [step]);
 
   async function handleTestConnection() {
     setTesting(true);
@@ -112,42 +163,13 @@ export default function OnboardingWizard() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to save settings');
       }
-      // Trigger first snapshot and show scanning step
-      setStep(6);
-      setScanProgress(['Saving configuration...']);
-
-      const triggerRes = await fetch('/api/runs/trigger', { method: 'POST' });
-      if (triggerRes.ok) {
-        setScanProgress(prev => [...prev, 'Discovery scan triggered']);
-        setScanProgress(prev => [...prev, 'Building identity graph...']);
-
-        // Poll for completion (check every 5s, up to 3 minutes)
-        let attempts = 0;
-        const maxAttempts = 36;
-        const poll = setInterval(async () => {
-          attempts++;
-          try {
-            const statusRes = await fetch('/api/onboarding/status');
-            if (statusRes.ok) {
-              const statusData = await statusRes.json();
-              if (statusData.snapshot_completed) {
-                clearInterval(poll);
-                setScanProgress(prev => [...prev, 'Running attack path analysis...', 'Computing posture score...', 'First scan complete!']);
-                setTimeout(() => { window.location.href = '/'; }, 2000);
-                return;
-              }
-            }
-          } catch { /* ignore */ }
-          if (attempts >= maxAttempts) {
-            clearInterval(poll);
-            setScanProgress(prev => [...prev, 'Scan is running in the background. You can view results when ready.']);
-            setTimeout(() => { window.location.href = '/'; }, 3000);
-          }
-        }, 5000);
-      } else {
-        setScanProgress(prev => [...prev, 'Scan triggered — results will appear on the dashboard.']);
-        setTimeout(() => { window.location.href = '/'; }, 3000);
+      // Mark wizard as explicitly completed + clear step persistence
+      if (orgId) {
+        sessionStorage.setItem(completeKey(orgId), 'true');
+        sessionStorage.removeItem(stepKey(orgId));
       }
+      // Redirect to subscriptions so user can activate discovered subs
+      window.location.href = '/subscriptions';
     } catch (e: any) {
       setError(e?.message || 'Setup failed');
     } finally {
@@ -258,7 +280,8 @@ export default function OnboardingWizard() {
                 value={orgName}
                 onChange={e => setOrgName(e.target.value)}
                 placeholder="e.g., Contoso Ltd"
-                className="w-full px-4 py-2.5 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                disabled={orgNamePreFilled}
+                className="w-full px-4 py-2.5 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
               />
             </div>
           </div>
@@ -274,19 +297,14 @@ export default function OnboardingWizard() {
               </p>
             </div>
             <div className="space-y-3">
-              {CLOUD_OPTIONS.map(cloud => {
-                const disabled = cloud.key !== 'azure';
-                return (
+              {CLOUD_OPTIONS.map(cloud => (
                   <button
                     key={cloud.key}
-                    onClick={() => !disabled && setSelectedCloud(cloud.key)}
-                    disabled={disabled}
+                    onClick={() => setSelectedCloud(cloud.key)}
                     className={`w-full text-left p-4 rounded-xl border-2 transition ${
                       selectedCloud === cloud.key
                         ? 'border-blue-500 bg-blue-900/20'
-                        : disabled
-                          ? 'border-gray-700 bg-gray-800/30 opacity-50 cursor-not-allowed'
-                          : 'border-gray-700 hover:border-gray-500'
+                        : 'border-gray-700 hover:border-gray-500'
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -297,13 +315,9 @@ export default function OnboardingWizard() {
                       {selectedCloud === cloud.key && (
                         <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">{'\u2713'}</div>
                       )}
-                      {disabled && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-gray-600 text-gray-300">Coming Soon</span>
-                      )}
                     </div>
                   </button>
-                );
-              })}
+              ))}
             </div>
           </div>
         )}
@@ -486,7 +500,7 @@ export default function OnboardingWizard() {
             <div>
               <h2 className="text-xl font-bold text-white">Review &amp; Launch</h2>
               <p className="text-sm text-gray-400 mt-2">
-                Review your configuration and capture your first snapshot.
+                Review your configuration before completing setup.
               </p>
             </div>
 
@@ -527,67 +541,16 @@ export default function OnboardingWizard() {
               {saving ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Saving &amp; Capturing First Snapshot...
+                  Completing setup...
                 </>
               ) : (
-                'Complete Setup & Start Snapshot'
+                'Complete Setup'
               )}
             </button>
           </div>
         )}
 
-        {/* Step 6: Scanning Progress */}
-        {step === 6 && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-xl font-bold text-white">First Discovery Scan</h2>
-              <p className="text-sm text-gray-400 mt-2">
-                AuditGraph is scanning your cloud environment. This may take a few minutes.
-              </p>
-            </div>
-
-            {/* Progress animation */}
-            <div className="flex items-center justify-center py-4">
-              <div className="relative w-16 h-16">
-                <div className="absolute inset-0 border-4 border-gray-700 rounded-full" />
-                <div className="absolute inset-0 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              </div>
-            </div>
-
-            {/* Progress log */}
-            <div className="bg-gray-800 rounded-lg p-4 space-y-2">
-              {scanProgress.map((msg, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    i === scanProgress.length - 1 && !msg.includes('complete')
-                      ? 'bg-blue-400 animate-pulse'
-                      : msg.includes('complete') || msg.includes('Complete')
-                        ? 'bg-green-400'
-                        : 'bg-green-400'
-                  }`} />
-                  <span className={`text-sm ${
-                    msg.includes('complete') || msg.includes('Complete')
-                      ? 'text-green-400 font-medium'
-                      : 'text-gray-300'
-                  }`}>{msg}</span>
-                </div>
-              ))}
-            </div>
-
-            <div className="text-center text-xs text-gray-500">
-              You can close this page — the scan will continue in the background.
-            </div>
-
-            <button
-              onClick={() => { window.location.href = '/'; }}
-              className="w-full py-2.5 rounded-lg text-sm font-medium text-gray-300 border border-gray-600 hover:bg-gray-800 transition"
-            >
-              Go to Dashboard
-            </button>
-          </div>
-        )}
-
-        {/* Navigation — hidden during scanning */}
+        {/* Navigation */}
         {step < 6 && (
           <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-700">
             <button

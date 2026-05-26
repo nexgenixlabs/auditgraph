@@ -153,7 +153,7 @@ export async function fetchTenantData(wc: (u: string) => string = u => u): Promi
       const w = pils.usage_dormancy.weight || 0;
       pillarRemediations.push({
         action: 'Disable dormant identities',
-        description: `${d.dormant || 0} identities are stale or never used — disable or remove to reduce attack surface.`,
+        description: `${d.dormant || 0} identities are stale or show no activity — disable or remove to reduce attack surface.`,
         gain: w > 0 ? Math.round(pils.usage_dormancy.score * 0.3 * w / 10) : 0,
         complexity: 'LOW',
         affectedIds: d.dormant || 0, nav: '/identities?activity_status=stale',

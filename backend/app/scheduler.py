@@ -151,6 +151,15 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     Otherwise scan ALL connected connections for the organization.
     Requires at least one connected cloud_connection — legacy settings path is deprecated.
     """
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     import time as _time
 
     # Demo tenant guard — block real cloud discovery for demo orgs
@@ -319,12 +328,39 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
     # Check for identity changes and send email notification
     _send_change_notification_if_needed(db_org_id=db_org_id)
 
+    # Prune old identity runs to prevent unbounded accumulation
+    # (keep latest 2 completed runs per connection for drift detection)
+    try:
+        prune_db = Database()
+        result = prune_db.prune_old_identity_runs(db_org_id, keep_latest=2)
+        prune_db.close()
+        if result['identities_deleted'] > 0:
+            logger.info("IDENTITY_PRUNE tenant_id=%d deleted=%d runs_archived=%d",
+                        db_org_id, result['identities_deleted'], result['runs_pruned'])
+    except Exception as e:
+        logger.warning("Identity pruning failed for tenant %d: %s", db_org_id, e)
+
     # Phase 83: Dispatch scan_complete notification
     _dispatch_notification('scan_complete', {
         'title': f'Discovery Scan Complete — {org_name}',
         'description': f'Scheduled discovery run completed for {org_name}.',
         'severity': 'info',
     }, db_org_id=db_org_id)
+
+    # Background owned objects enrichment (deferred from main scan pipeline)
+    for conn in connected:
+        if conn.get('cloud', 'azure') == 'azure':
+            _launch_owned_objects_background(db_org_id, conn)
+
+    # Background IP enrichment (deferred from main scan pipeline — saves ~121s)
+    for conn in connected:
+        if conn.get('cloud', 'azure') == 'azure':
+            _launch_ip_enrichment_background(db_org_id, conn)
+
+    # Background sign-in intelligence (deferred from main scan pipeline — saves ~205s)
+    for conn in connected:
+        if conn.get('cloud', 'azure') == 'azure':
+            _launch_signin_intelligence_background(db_org_id, conn)
 
 
 def _classify_discovery_error(error):
@@ -347,6 +383,15 @@ def _classify_discovery_error(error):
 
 def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mode: str = 'deep'):
     """Run discovery for a single cloud connection with job lifecycle tracking."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     import time as _time
     if not AZURE_DISCOVERY_ENABLED and conn.get('cloud', 'azure') == 'azure':
         logger.info(f"  ⏭ Azure discovery disabled (APP_ENV=local), skipping connection '{conn.get('label', 'Unknown')}'")
@@ -367,7 +412,7 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
     job_id = None
     try:
         guard_db = Database()
-        active = guard_db.get_active_snapshot_job(conn_id)
+        active = guard_db.get_active_snapshot_job(conn_id, org_id=db_org_id)
         guard_db.close()
         if active:
             logger.info(
@@ -423,6 +468,7 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
             db_org_id=db_org_id,
             cloud_connection_id=conn_id,
         )
+        client_secret = None  # AG-116: zero after SDK init — prevent memory retention
     elif cloud == 'aws':
         if not AWS_DISCOVERY_ENABLED:
             logger.info(f"  ⏭ AWS discovery disabled (APP_ENV=local), skipping connection '{label}'")
@@ -556,6 +602,14 @@ def _run_connection_discovery(db_org_id: int, org_name: str, conn: dict, scan_mo
             except Exception as e:
                 logger.warning(f"  ⚠ Failed to complete snapshot job: {e}")
 
+        # ── Pipeline health metrics collection ──
+        # Captures stage-level ingestion counts from the discovery engine
+        # to detect silent persistence failures (like the Entra role bug).
+        try:
+            _collect_discovery_pipeline_metrics(engine, db_org_id, conn_id)
+        except Exception as _phm_err:
+            logger.debug("Pipeline health metrics collection failed (non-blocking): %s", _phm_err)
+
         # Invalidate CISO dashboard cache after discovery completes
         try:
             from app.api.handlers import _ciso_cache_invalidate
@@ -646,6 +700,91 @@ def _run_legacy_settings_discovery(db_org_id: int, org_name: str, scan_mode: str
         "Configure cloud_connections for org %d.", org_name, db_org_id
     )
     return
+
+
+def _collect_discovery_pipeline_metrics(engine, db_org_id: int, conn_id: int):
+    """Collect pipeline health metrics from the completed discovery engine.
+
+    Extracts stage-level counts (fetched/persisted/failed) from engine
+    attributes and persists them to pipeline_stage_metrics for health monitoring.
+    """
+    from app.engines.pipeline_health import PipelineHealthTracker
+
+    # Resolve latest run_id for this org
+    mdb = Database()
+    try:
+        cursor = mdb.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM discovery_runs
+            WHERE organization_id = %s AND status = 'completed'
+            ORDER BY id DESC LIMIT 1
+        """, (db_org_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return
+        run_id = row[0]
+        cursor.close()
+
+        tracker = PipelineHealthTracker(run_id=run_id, org_id=db_org_id, db=mdb)
+
+        # ── Identity Discovery ──
+        identities_fetched = getattr(engine, '_all_principal_count', 0) or len(getattr(engine, '_identities', []))
+        identities_saved = getattr(engine, '_identities_saved_count', 0)
+        with tracker.stage('identity_discovery') as s:
+            s.fetched = identities_fetched
+            s.matched = identities_fetched
+            s.persisted = identities_saved
+            s.failed = max(0, identities_fetched - identities_saved)
+
+        # ── RBAC Collection ──
+        rbac_fetched = getattr(engine, '_role_assignments_fetched', 0)
+        rbac_saved = getattr(engine, '_role_assignments_saved', 0)
+        with tracker.stage('rbac_collection') as s:
+            s.fetched = rbac_fetched
+            s.matched = rbac_fetched
+            s.persisted = rbac_saved
+            s.failed = max(0, rbac_fetched - rbac_saved) if rbac_fetched > 0 else 0
+
+        # ── Entra Role Collection ──
+        entra_fetched = getattr(engine, '_entra_roles_fetched', 0)
+        entra_matched = getattr(engine, '_entra_roles_matched', 0)
+        entra_saved = getattr(engine, '_entra_roles_saved', 0)
+        entra_failed = getattr(engine, '_entra_roles_failed', 0)
+        with tracker.stage('entra_role_collection') as s:
+            s.fetched = entra_fetched
+            s.matched = entra_matched
+            s.persisted = entra_saved
+            s.failed = entra_failed
+
+        # ── Credential Collection ──
+        creds_fetched = getattr(engine, '_credentials_fetched', 0)
+        creds_saved = getattr(engine, '_credentials_saved', 0)
+        with tracker.stage('credential_collection') as s:
+            s.fetched = creds_fetched
+            s.matched = creds_fetched
+            s.persisted = creds_saved
+            s.failed = max(0, creds_fetched - creds_saved) if creds_fetched > 0 else 0
+
+        # ── App Registration Discovery ──
+        apps_fetched = getattr(engine, '_app_registrations_fetched', 0)
+        apps_saved = getattr(engine, '_app_registrations_saved', 0)
+        with tracker.stage('app_registration_discovery') as s:
+            s.fetched = apps_fetched
+            s.matched = apps_fetched
+            s.persisted = apps_saved
+            s.failed = max(0, apps_fetched - apps_saved) if apps_fetched > 0 else 0
+
+        tracker.finalize()
+
+    except Exception as e:
+        logger.debug("_collect_discovery_pipeline_metrics error: %s", e)
+        try:
+            mdb.conn.rollback()
+        except Exception:
+            pass
+    finally:
+        mdb.close()
 
 
 def run_continuous_discovery():
@@ -754,12 +893,36 @@ def run_snapshot_job_maintenance():
             except Exception as e:
                 logger.warning(f"  ⚠ Failed to recover zombie job {z['id']}: {e}")
 
-        # 2. Enforce runtime limit (30 minutes max)
-        overtime = db.get_runtime_exceeded_jobs(max_runtime_minutes=30)
+        # 2. Enforce runtime limit (90 minutes max)
+        overtime = db.get_runtime_exceeded_jobs(max_runtime_minutes=90)
         for ot in overtime:
             try:
-                db.complete_snapshot_job(ot['id'], 'failed',
-                                        'Discovery exceeded 30-minute runtime limit',
+                # Check if partial results exist — mark as 'partial' instead of 'failed'
+                run_id = ot.get('discovery_run_id')
+                partial_count = 0
+                if run_id:
+                    try:
+                        cnt_cursor = db.conn.cursor()
+                        cnt_cursor.execute(
+                            "SELECT COUNT(*) FROM identities WHERE discovery_run_id = %s",
+                            (run_id,))
+                        partial_count = cnt_cursor.fetchone()[0]
+                        cnt_cursor.close()
+                    except Exception:
+                        try:
+                            db.conn.rollback()
+                        except Exception:
+                            pass
+
+                if partial_count > 0:
+                    final_status = 'partial'
+                    msg = f'Discovery exceeded 90-minute runtime limit ({partial_count} identities saved before timeout)'
+                else:
+                    final_status = 'failed'
+                    msg = 'Discovery exceeded 90-minute runtime limit'
+
+                db.complete_snapshot_job(ot['id'], final_status,
+                                        msg,
                                         error_type='runtime_exceeded')
                 logger.warning("  ⏰ RUNTIME_EXCEEDED job=%s connection=%s",
                                ot['id'], ot.get('cloud_connection_id'))
@@ -798,6 +961,7 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         db = Database(organization_id=db_org_id)
 
         # Get the two most recent completed runs PER CONNECTION
+        # Guard: only compare runs that actually discovered identities
         cursor = db.conn.cursor()
         cursor.execute("""
             SELECT cloud_connection_id, id,
@@ -805,6 +969,8 @@ def _send_change_notification_if_needed(db_org_id: int = None):
             FROM discovery_runs
             WHERE status = 'completed'
               AND cloud_connection_id IS NOT NULL AND cloud_connection_id > 0
+              AND completed_at IS NOT NULL
+              AND COALESCE(total_identities, 0) > 0
             ORDER BY cloud_connection_id, id DESC
         """)
         rows = cursor.fetchall()
@@ -823,114 +989,134 @@ def _send_change_notification_if_needed(db_org_id: int = None):
                 pairs.append((conn_id, run_ids[0], run_ids[1]))
 
         if not pairs:
-            logger.info("Not enough per-connection discovery runs for comparison - skipping change notification")
-            db.close()
-            return
+            logger.info("Not enough per-connection discovery runs for comparison - skipping drift/notification")
+            # First scan for this org — no drift pairs, but post-processing
+            # (agent classification, attack paths, risk scoring, etc.) must
+            # still run.  Resolve current_run_id from the latest completed
+            # run so tiered post-processing has a valid reference.
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                  AND COALESCE(total_identities, 0) > 0
+                ORDER BY id DESC LIMIT 1
+            """, (db_org_id,))
+            _first_row = cursor.fetchone()
+            cursor.close()
+            if not _first_row:
+                logger.info("No completed discovery run with identities for org %s — skipping post-processing", db_org_id)
+                db.close()
+                return
+            current_run_id = _first_row[0]
+            previous_run_id = None
 
-        # Compare runs per-connection and aggregate changes
-        detector = DriftDetector(db)
-        changes: dict = {
-            'new_identities': [], 'removed_identities': [],
-            'microsoft_removed_identities': [],
-            'permission_changes': [], 'risk_changes': [], 'credential_changes': [],
-        }
-        all_events: list = []
-        latest_current_run_id = 0
-        latest_previous_run_id = 0
-        for conn_id, current_run_id, previous_run_id in pairs:
-            logger.info(f"Comparing runs for connection {conn_id}: #{current_run_id} vs #{previous_run_id}")
-            result = detector.compare_runs_v2(current_run_id, previous_run_id)
-            conn_changes = result['legacy']
-            conn_events = result['events']
+        if pairs:
+            # ── Drift detection & notification (requires 2+ runs) ──
+            detector = DriftDetector(db)
+            changes: dict = {
+                'new_identities': [], 'removed_identities': [],
+                'microsoft_removed_identities': [],
+                'permission_changes': [], 'risk_changes': [], 'credential_changes': [],
+            }
+            all_events: list = []
+            latest_current_run_id = 0
+            latest_previous_run_id = 0
+            for conn_id, current_run_id, previous_run_id in pairs:
+                logger.info(f"Comparing runs for connection {conn_id}: #{current_run_id} vs #{previous_run_id}")
+                result = detector.compare_runs_v2(current_run_id, previous_run_id)
+                conn_changes = result['legacy']
+                conn_events = result['events']
 
-            # Persist per-connection drift report with typed events
-            report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes, events=conn_events)
-            logger.info(f"Drift report #{report_id} saved for connection {conn_id} (runs #{current_run_id} vs #{previous_run_id})")
+                # Persist per-connection drift report with typed events
+                report_id = db.save_drift_report(current_run_id, previous_run_id, conn_changes, events=conn_events)
+                logger.info(f"Drift report #{report_id} saved for connection {conn_id} (runs #{current_run_id} vs #{previous_run_id})")
 
-            # Aggregate into combined changes
-            for key in changes:
-                changes[key].extend(conn_changes.get(key, []))
-            all_events.extend(conn_events)
+                # Aggregate into combined changes
+                for key in changes:
+                    changes[key].extend(conn_changes.get(key, []))
+                all_events.extend(conn_events)
 
-            if current_run_id > latest_current_run_id:
-                latest_current_run_id = current_run_id
-                latest_previous_run_id = previous_run_id
+                if current_run_id > latest_current_run_id:
+                    latest_current_run_id = current_run_id
+                    latest_previous_run_id = previous_run_id
 
-        current_run_id = latest_current_run_id
-        previous_run_id = latest_previous_run_id
+            current_run_id = latest_current_run_id
+            previous_run_id = latest_previous_run_id
 
-        # Check if there are ANY significant changes (all 5 types)
-        new_count = len(changes.get('new_identities', []))
-        removed_count = len(changes.get('removed_identities', []))
-        perm_count = len(changes.get('permission_changes', []))
-        risk_count = len(changes.get('risk_changes', []))
-        cred_count = len(changes.get('credential_changes', []))
-        total_changes = new_count + removed_count + perm_count + risk_count + cred_count
+            # Check if there are ANY significant changes (all 5 types)
+            new_count = len(changes.get('new_identities', []))
+            removed_count = len(changes.get('removed_identities', []))
+            perm_count = len(changes.get('permission_changes', []))
+            risk_count = len(changes.get('risk_changes', []))
+            cred_count = len(changes.get('credential_changes', []))
+            total_changes = new_count + removed_count + perm_count + risk_count + cred_count
 
-        if total_changes > 0:
-            logger.info(
-                f"Changes detected: {new_count} new, {removed_count} removed, "
-                f"{perm_count} permission, {risk_count} risk, {cred_count} credential"
-            )
+            if total_changes > 0:
+                logger.info(
+                    f"Changes detected: {new_count} new, {removed_count} removed, "
+                    f"{perm_count} permission, {risk_count} risk, {cred_count} credential"
+                )
 
-            # Phase 15: Check notification settings before sending email
-            email_enabled = db.get_system_setting('email_enabled', 'true') == 'true'
-            if not email_enabled:
-                logger.info("Email notifications disabled in settings - skipping")
-            else:
-                # Filter changes based on per-type notification flags
-                filtered_changes = {}
-                notify_map = {
-                    'new_identities': 'notify_new_identities',
-                    'removed_identities': 'notify_removed_identities',
-                    'permission_changes': 'notify_permission_changes',
-                    'risk_changes': 'notify_risk_changes',
-                    'credential_changes': 'notify_credential_changes',
-                }
-                for change_key, setting_key in notify_map.items():
-                    if db.get_system_setting(setting_key, 'true') == 'true':
-                        filtered_changes[change_key] = changes.get(change_key, [])
-                    else:
-                        filtered_changes[change_key] = []
-
-                # Only send if there are still notifiable changes
-                notifiable_count = sum(len(v) for v in filtered_changes.values())
-                if notifiable_count > 0:
-                    category_counts = _get_category_counts(db, current_run_id, previous_run_id)
-
-                    email_service = EmailService()
-                    success = email_service.send_identity_change_report(
-                        changes=filtered_changes,
-                        current_run_id=current_run_id,
-                        previous_run_id=previous_run_id,
-                        category_counts=category_counts
-                    )
-
-                    if success:
-                        logger.info("Change report email sent successfully")
-                    else:
-                        logger.warning("Failed to send change report email")
+                # Phase 15: Check notification settings before sending email
+                email_enabled = db.get_system_setting('email_enabled', 'true') == 'true'
+                if not email_enabled:
+                    logger.info("Email notifications disabled in settings - skipping")
                 else:
-                    logger.info("No notifiable changes after filtering by settings")
-        else:
-            logger.info("No changes detected - no email notification needed")
+                    # Filter changes based on per-type notification flags
+                    filtered_changes = {}
+                    notify_map = {
+                        'new_identities': 'notify_new_identities',
+                        'removed_identities': 'notify_removed_identities',
+                        'permission_changes': 'notify_permission_changes',
+                        'risk_changes': 'notify_risk_changes',
+                        'credential_changes': 'notify_credential_changes',
+                    }
+                    for change_key, setting_key in notify_map.items():
+                        if db.get_system_setting(setting_key, 'true') == 'true':
+                            filtered_changes[change_key] = changes.get(change_key, [])
+                        else:
+                            filtered_changes[change_key] = []
 
-        # Phase 83: Dispatch drift notification
-        if total_changes > 0:
-            _dispatch_notification('drift_detected', {
-                'title': f'{total_changes} Changes Detected in Discovery',
-                'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
-                'severity': 'high' if new_count + removed_count > 0 else 'medium',
-            }, db_org_id=db_org_id)
+                    # Only send if there are still notifiable changes
+                    notifiable_count = sum(len(v) for v in filtered_changes.values())
+                    if notifiable_count > 0:
+                        category_counts = _get_category_counts(db, current_run_id, previous_run_id)
 
-        # Phase 43: SOAR evaluation for drift and change events
-        _evaluate_soar_triggers_for_changes(changes, db)
+                        email_service = EmailService()
+                        success = email_service.send_identity_change_report(
+                            changes=filtered_changes,
+                            current_run_id=current_run_id,
+                            previous_run_id=previous_run_id,
+                            category_counts=category_counts
+                        )
 
-        # Phase 28: Fire webhook events
-        _fire_webhook_events(current_run_id, changes, db)
+                        if success:
+                            logger.info("Change report email sent successfully")
+                        else:
+                            logger.warning("Failed to send change report email")
+                    else:
+                        logger.info("No notifiable changes after filtering by settings")
+            else:
+                logger.info("No changes detected - no email notification needed")
 
-        # Phase 30: Generate in-app notifications
-        _generate_notifications(current_run_id, changes, db)
+            # Phase 83: Dispatch drift notification
+            if total_changes > 0:
+                _dispatch_notification('drift_detected', {
+                    'title': f'{total_changes} Changes Detected in Discovery',
+                    'description': f'Run #{current_run_id}: {new_count} new, {removed_count} removed, {perm_count} permission, {risk_count} risk, {cred_count} credential changes.',
+                    'severity': 'high' if new_count + removed_count > 0 else 'medium',
+                }, db_org_id=db_org_id)
+
+            # Phase 43: SOAR evaluation for drift and change events
+            _evaluate_soar_triggers_for_changes(changes, db)
+
+            # Phase 28: Fire webhook events
+            _fire_webhook_events(current_run_id, changes, db)
+
+            # Phase 30: Generate in-app notifications
+            _generate_notifications(current_run_id, changes, db)
+
+        # ── Post-processing: runs on EVERY scan including first ──────
 
         # Ghost identity detection (disabled/deleted identities retaining roles)
         _run_ghost_detection(current_run_id, db)
@@ -944,186 +1130,1632 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 89: Run resource anomaly detection
         _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
 
-        # Identity exposure detection (persisted to identity_exposures)
-        _track_job('identity_exposures', db_org_id,
-                   _run_identity_exposure_detection, current_run_id, db)
+        # ── Tiered Parallel Post-Processing ─────────────────────────
+        # Jobs grouped by dependency.  Within each tier, jobs run
+        # concurrently in a ThreadPoolExecutor with per-job DB
+        # connections.  This collapses ~33 sequential jobs into
+        # 4 tiers, reducing wall-clock time by ~4-5×.
+        import time as _pp_time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        _pp_start = _pp_time.monotonic()
+        POST_PROCESSING_WORKERS = 6
 
-        # Phase 2: Security findings engine (tracked by Phase 8)
-        _track_job('security_findings', db_org_id,
-                   _run_security_findings, current_run_id, db)
+        def _parallel_job(job_type, func, *args_template):
+            """Run a tracked job with its own DB connection.
 
-        # Identity graph edges (identity→role→scope)
-        _track_job('identity_graph_builder', db_org_id,
-                   _run_identity_graph_builder, db_org_id, db)
+            Replaces any `db` argument with a fresh per-thread connection
+            so concurrent jobs don't share a psycopg2 connection.
+            """
+            job_db = Database(organization_id=db_org_id)
+            try:
+                real_args = tuple(
+                    job_db if (a is db) else a for a in args_template
+                )
+                _track_job(job_type, db_org_id, func, *real_args)
+            except Exception as e:
+                logger.error("Post-processing job %s failed: %s", job_type, e)
+            finally:
+                try:
+                    job_db.close()
+                except Exception:
+                    pass
 
-        # Connection-scoped security findings (3 rules)
-        _track_job('security_findings_engine', db_org_id,
-                   _run_security_findings_engine, db_org_id, db)
+        def _run_tier(tier_name, jobs):
+            """Execute a list of (job_type, func, *args) tuples in parallel."""
+            tier_start = _pp_time.monotonic()
+            with ThreadPoolExecutor(max_workers=POST_PROCESSING_WORKERS) as executor:
+                futures = {}
+                for job_spec in jobs:
+                    job_type, func = job_spec[0], job_spec[1]
+                    args = job_spec[2:]
+                    fut = executor.submit(_parallel_job, job_type, func, *args)
+                    futures[fut] = job_type
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        logger.error("Tier %s job %s exception: %s",
+                                     tier_name, futures[fut], e)
+            tier_elapsed = round(_pp_time.monotonic() - tier_start, 1)
+            logger.info("[post-processing] %s complete: %d jobs in %.1fs",
+                        tier_name, len(jobs), tier_elapsed)
 
-        # Connection-scoped security posture aggregation (from findings)
-        _track_job('connection_security_posture', db_org_id,
-                   _run_connection_security_posture, db_org_id, db)
+        # ── Tier 1: Independent foundation jobs (no dependencies) ──
+        _run_tier('tier1_foundation', [
+            ('identity_exposures', _run_identity_exposure_detection, current_run_id, db),
+            ('security_findings', _run_security_findings, current_run_id, db),
+            ('identity_graph_builder', _run_identity_graph_builder, db_org_id, db),
+            ('security_findings_engine', _run_security_findings_engine, db_org_id, db),
+            ('nhi_security', _run_nhi_analysis, db_org_id, db),
+            ('agent_classification', _run_agent_classification, current_run_id, db_org_id, db),
+            ('nhi_signin_enrichment', _run_nhi_signin_enrichment, current_run_id, db_org_id, db),
+        ])
 
-        # Phase 3: Attack path analysis (tracked by Phase 8)
-        _track_job('attack_paths', db_org_id,
-                   _run_attack_path_analysis, current_run_id, db)
+        # ── Tier 2: Depend on findings/graph/agents from Tier 1 ──
+        _run_tier('tier2_analysis', [
+            ('connection_security_posture', _run_connection_security_posture, db_org_id, db),
+            ('attack_paths', _run_attack_path_analysis, current_run_id, db),
+            ('fix_recommendations', _run_fix_recommendations, current_run_id, db),
+            ('blast_radius', _run_blast_radius_analysis, current_run_id, db),
+            ('risk_evaluation', _run_risk_evaluation, db_org_id, db),
+            ('iam_graph', _run_iam_graph_build, db_org_id, db),
+            ('escalation_detection', _run_escalation_detection, db_org_id, db),
+            ('agent_sp_signin_enrichment', _run_agent_sp_signin_enrichment, current_run_id, db_org_id, db),
+            ('agent_orphan_detection', _run_agent_orphan_detection, current_run_id, db_org_id, db),
+            ('policy_recommendations', _run_policy_recommendations, db_org_id, db),
+            ('auto_remediation', _run_auto_remediation, db_org_id, db),
+        ])
 
-        # Phase 4: Fix recommendations (tracked by Phase 8)
-        _track_job('fix_recommendations', db_org_id,
-                   _run_fix_recommendations, current_run_id, db)
+        # ── Tier 3: Depend on attack paths/blast radius/IAM graph from Tier 2 ──
+        _run_tier('tier3_enrichment', [
+            ('drift_intelligence', _run_drift_intelligence, db_org_id, db),
+            ('posture_metrics', _run_posture_metrics, db_org_id, db),
+            ('security_advisor', _run_security_advisor, db_org_id, db),
+            ('graph_visualization', _run_graph_visualization, db_org_id, db),
+            ('risk_forecast', _run_risk_forecast, db_org_id, db),
+            ('policy_generation', _run_policy_generation, db_org_id, db),
+            ('threat_detection', _run_threat_detection, db_org_id, db),
+            ('activity_ingestion', _run_activity_ingestion, db_org_id, db),
+            ('attack_replay', _run_attack_replay, db_org_id, db),
+            ('security_orchestration', _run_security_orchestration, db_org_id, db),
+            ('attack_prediction', _run_attack_prediction, db_org_id, db),
+            ('graph_intelligence', _run_graph_intelligence, db_org_id, db),
+            ('identity_governance', _run_identity_governance, db_org_id, db),
+            ('integration_dispatch', _run_integration_dispatch, db_org_id, db),
+            ('governance_analytics', _run_governance_analytics, db_org_id, db),
+            ('security_strategy', _run_security_strategy, db_org_id, db),
+            ('security_posture', _run_security_posture, db_org_id, db),
+        ])
 
-        # Phase 5: Blast radius analysis (tracked by Phase 8)
-        _track_job('blast_radius', db_org_id,
-                   _run_blast_radius_analysis, current_run_id, db)
+        # ── Tier 4: Final aggregation (depends on all above) ──
+        _run_tier('tier4_finalization', [
+            ('graph_attack_engine', _run_graph_attack_engine, current_run_id, db_org_id, db),
+            ('findings_normalization', _run_findings_normalization, current_run_id, db),
+        ])
 
-        # Drift intelligence enrichment (after attack paths + blast radius)
-        _track_job('drift_intelligence', db_org_id,
-                   _run_drift_intelligence, db_org_id, db)
+        # ── Tier 5: Scoring + SLA (depends on findings normalization) ──
+        _run_tier('tier5_scoring', [
+            ('posture_score', _run_posture_score, current_run_id, db_org_id, db),
+            ('sla_check', _run_sla_check, db_org_id, db),
+        ])
 
-        # Phase 6: Risk evaluation (rules-based findings per connection)
-        _track_job('risk_evaluation', db_org_id,
-                   _run_risk_evaluation, db_org_id, db)
+        _pp_elapsed = round(_pp_time.monotonic() - _pp_start, 1)
+        logger.info("[post-processing] ALL tiers complete in %.1fs org=%s",
+                    _pp_elapsed, db_org_id)
 
-        # Phase 7: IAM graph rebuild (relationship graph per connection)
-        _track_job('iam_graph', db_org_id,
-                   _run_iam_graph_build, db_org_id, db)
-
-        # Phase 8: Privilege escalation detection (after graph build)
-        _track_job('escalation_detection', db_org_id,
-                   _run_escalation_detection, db_org_id, db)
-
-        # Phase 9: Non-human identity security analysis
-        _track_job('nhi_security', db_org_id,
-                   _run_nhi_analysis, db_org_id, db)
-
-        # AI Agent Governance: classify agent identities (gated by feature flag)
-        _track_job('agent_classification', db_org_id,
-                   _run_agent_classification, current_run_id, db_org_id, db)
-
-        # AI Agent Governance Phase 2 B2-5: enrich agent SP sign-in data
-        _track_job('agent_sp_signin_enrichment', db_org_id,
-                   _run_agent_sp_signin_enrichment, current_run_id, db_org_id, db)
-
-        # NHI sign-in enrichment: backfill signin_pattern via auditLogs/signIns
-        # for identities where signInActivity was empty (no P2 license)
-        _track_job('nhi_signin_enrichment', db_org_id,
-                   _run_nhi_signin_enrichment, current_run_id, db_org_id, db)
-
-        # AI Agent Governance Phase 2: orphaned agent SPN detection
-        _track_job('agent_orphan_detection', db_org_id,
-                   _run_agent_orphan_detection, current_run_id, db_org_id, db)
-
-        # Phase 11: Policy Recommendation Engine
-        _track_job('policy_recommendations', db_org_id,
-                   _run_policy_recommendations, db_org_id, db)
-
-        # Phase 12: Automated Remediation (process approved actions)
-        _track_job('auto_remediation', db_org_id,
-                   _run_auto_remediation, db_org_id, db)
-
-        # Phase 14: Collect tenant posture metrics for benchmarking
-        _track_job('posture_metrics', db_org_id,
-                   _run_posture_metrics, db_org_id, db)
-
-        # Phase 15: AI Security Advisor report
-        _track_job('security_advisor', db_org_id,
-                   _run_security_advisor, db_org_id, db)
-
-        # Phase 16: Graph visualization cache
-        _track_job('graph_visualization', db_org_id,
-                   _run_graph_visualization, db_org_id, db)
-
-        # Phase 18: Risk forecasting
-        _track_job('risk_forecast', db_org_id,
-                   _run_risk_forecast, db_org_id, db)
-
-        # Phase 19: Least-privilege policy generation
-        _track_job('policy_generation', db_org_id,
-                   _run_policy_generation, db_org_id, db)
-
-        # Phase 20: Continuous identity threat detection
-        _track_job('threat_detection', db_org_id,
-                   _run_threat_detection, db_org_id, db)
-
-        # Phase 21: Identity activity data lake ingestion
-        _track_job('activity_ingestion', db_org_id,
-                   _run_activity_ingestion, db_org_id, db)
-
-        # Phase 23: Identity attack replay & forensics
-        _track_job('attack_replay', db_org_id,
-                   _run_attack_replay, db_org_id, db)
-
-        # Phase 24: Autonomous security response orchestration
-        _track_job('security_orchestration', db_org_id,
-                   _run_security_orchestration, db_org_id, db)
-
-        # Phase 26: Identity attack prediction
-        _track_job('attack_prediction', db_org_id,
-                   _run_attack_prediction, db_org_id, db)
-
-        # Phase 27: Identity graph intelligence
-        _track_job('graph_intelligence', db_org_id,
-                   _run_graph_intelligence, db_org_id, db)
-
-        # Phase 28: Identity governance
-        _track_job('identity_governance', db_org_id,
-                   _run_identity_governance, db_org_id, db)
-
-        # Phase 30: Enterprise integrations dispatch
-        _track_job('integration_dispatch', db_org_id,
-                   _run_integration_dispatch, db_org_id, db)
-
-        # Phase 31: Governance analytics
-        _track_job('governance_analytics', db_org_id,
-                   _run_governance_analytics, db_org_id, db)
-
-        # Phase 32: Security strategy advisor
-        _track_job('security_strategy', db_org_id,
-                   _run_security_strategy, db_org_id, db)
-
-        # Phase 33: Security command center posture
-        _track_job('security_posture', db_org_id,
-                   _run_security_posture, db_org_id, db)
-
-        # Phase 8 (v2): BFS graph attack engine (after graph intelligence)
-        _track_job('graph_attack_engine', db_org_id,
-                   _run_graph_attack_engine, current_run_id, db_org_id, db)
-
-        # Normalize all risk pipelines into unified security_findings
-        _track_job('findings_normalization', db_org_id,
-                   _run_findings_normalization, current_run_id, db)
-
-        # Phase 9: Compute security posture score (after graph attack engine)
-        _track_job('posture_score', db_org_id,
-                   _run_posture_score, current_run_id, db_org_id, db)
-
-        # Phase 11: SLA breach check (after findings are persisted)
-        _track_job('sla_check', db_org_id,
-                   _run_sla_check, db_org_id, db)
-
-        # Phase 51: Save compliance snapshot
+        # ── Sequential finalization (lightweight, uses shared db) ──
         _save_compliance_snapshot(current_run_id, db)
-
-        # Compute and persist canonical risk summary (includes AGIRS computation)
         _compute_risk_summary(current_run_id, db_org_id, db)
 
-        # Clean up any stale remediation entries for Microsoft/system identities
         try:
             db.cleanup_microsoft_remediations()
         except Exception as e:
             logger.warning(f"Microsoft remediation cleanup failed (non-blocking): {e}")
 
-        # Validate snapshot completeness (non-blocking)
         _validate_snapshot(current_run_id, db_org_id, db)
-
-        # Phase 8: Evaluate tenant health + discovery integrity (non-blocking)
         _run_platform_health_check(current_run_id, db_org_id, db)
+
+        # ── Pipeline health tracker for post-processing stages ──
+        from app.engines.pipeline_health import PipelineHealthTracker
+        _pp_tracker = PipelineHealthTracker(
+            run_id=current_run_id, org_id=db_org_id, db=db
+        )
+
+        # ── Optimization recommendation materialization ──
+        try:
+            with _pp_tracker.stage('optimization_materialization') as _stg:
+                _opt_result = _run_optimization_materialization(current_run_id, db_org_id, db)
+                if isinstance(_opt_result, dict):
+                    _stg.fetched = _opt_result.get('total_identities', 0)
+                    _stg.persisted = _opt_result.get('upserted', 0)
+        except Exception as e:
+            logger.warning("Optimization materialization failed (non-blocking): %s", e)
+
+        # ── Privilege drift detection ──
+        try:
+            with _pp_tracker.stage('privilege_drift_detection') as _stg:
+                _run_privilege_drift_detection(current_run_id, previous_run_id, db_org_id, db)
+        except Exception as e:
+            logger.warning("Privilege drift detection failed (non-blocking): %s", e)
+
+        # ── Workload attribution ──
+        try:
+            with _pp_tracker.stage('workload_attribution') as _stg:
+                _run_workload_attribution(current_run_id, db_org_id, db)
+        except Exception as e:
+            logger.warning("Workload attribution failed (non-blocking): %s", e)
+
+        # ── Azure Resource Graph inventory enumeration ──
+        try:
+            with _pp_tracker.stage('resource_inventory') as _stg:
+                _run_resource_inventory_collection(current_run_id, db_org_id, db)
+                # Pull stats from the collector's return value if available
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT COUNT(*) FROM discovered_resources
+                    WHERE discovery_run_id = %s AND discovery_source LIKE '%%inventory%%'
+                """, (current_run_id,))
+                inv_row = cursor.fetchone()
+                _stg.persisted = inv_row[0] if inv_row else 0
+                _stg.fetched = _stg.persisted  # Resource Graph fetched = persisted for now
+                cursor.close()
+        except Exception as e:
+            logger.warning("Resource inventory collection failed (non-blocking): %s", e)
+
+        # ── Resource scope extraction ──
+        try:
+            with _pp_tracker.stage('resource_scope_extraction') as _stg:
+                _run_resource_scope_extraction(current_run_id, db_org_id, db)
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT COUNT(*) FROM discovered_resources
+                    WHERE discovery_run_id = %s
+                """, (current_run_id,))
+                _stg.persisted = (cursor.fetchone()[0] or 0)
+                _stg.fetched = _stg.persisted
+                cursor.close()
+        except Exception as e:
+            logger.warning("Resource scope extraction failed (non-blocking): %s", e)
+
+        # ── Reachability computation ──
+        try:
+            with _pp_tracker.stage('reachability_computation') as _stg:
+                _run_reachability_computation(current_run_id, db_org_id, db)
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT COUNT(*) FROM identity_reachability
+                    WHERE discovery_run_id = %s
+                """, (current_run_id,))
+                _stg.persisted = (cursor.fetchone()[0] or 0)
+                _stg.fetched = _stg.persisted
+                cursor.close()
+        except Exception as e:
+            logger.warning("Reachability computation failed (non-blocking): %s", e)
+
+        # ── Finalize pipeline health and persist summary ──
+        try:
+            _pp_tracker.finalize()
+        except Exception as e:
+            logger.warning("Pipeline health finalization failed: %s", e)
 
         db.close()
 
     except Exception as e:
         logger.error(f"Error during change detection/notification: {e}")
         logger.exception(e)
+
+
+def _run_optimization_materialization(current_run_id, db_org_id, db):
+    """Materialize optimization recommendations for all identities in a run.
+
+    Iterates every identity in the completed discovery run, applies the
+    canonical role usage classification logic, computes optimization
+    candidates, and upserts them into optimization_recommendations.
+
+    Stale recommendations (from previous runs, still in 'open' status)
+    are auto-closed after the current batch is written.
+    """
+    from datetime import datetime, timezone
+    from psycopg2.extras import RealDictCursor
+    from app.api.handlers import _compute_identity_optimization
+    _OBSERVATION_WINDOW_DAYS = 90
+    _now = datetime.now(timezone.utc)
+
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Fetch all identities in this run
+        cursor.execute("""
+            SELECT id, identity_id, display_name, identity_category,
+                   is_microsoft_system, is_discovery_connector,
+                   telemetry_coverage, last_activity_date,
+                   last_sign_in, last_noninteractive_signin,
+                   auth_activity
+            FROM identities
+            WHERE discovery_run_id = %s
+        """, (current_run_id,))
+        identity_rows = [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        logger.error("Optimization materialization: failed to fetch identities: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        cursor.close()
+        return
+
+    upserted = 0
+    identities_processed = 0
+
+    for ident in identity_rows:
+        identity_db_id = ident['id']
+        try:
+            roles = db.get_identity_roles_enriched(identity_db_id)
+        except Exception as e:
+            logger.warning("Optimization materialization: roles fetch failed for identity %s: %s",
+                           identity_db_id, e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+            continue
+
+        if not roles:
+            continue
+
+        # ── Determine effective last activity (mirrors identity detail handler) ──
+        _last_activity = ident.get('last_activity_date')
+        _last_sign_in = ident.get('last_sign_in')
+        _last_ni = ident.get('last_noninteractive_signin')
+        eff_last = None
+        for dt_val in [_last_activity, _last_sign_in, _last_ni]:
+            if dt_val and hasattr(dt_val, 'date'):
+                if eff_last is None or dt_val > eff_last:
+                    eff_last = dt_val
+        identity_has_effective_activity = bool(eff_last)
+
+        _tel_cov = (ident.get('telemetry_coverage') or '').lower()
+
+        # Build auth_activity dict for _compute_identity_optimization
+        auth_activity_raw = ident.get('auth_activity')
+        if isinstance(auth_activity_raw, str):
+            try:
+                import json as _json
+                auth_activity_raw = _json.loads(auth_activity_raw)
+            except Exception:
+                auth_activity_raw = {}
+        if not isinstance(auth_activity_raw, dict):
+            auth_activity_raw = {}
+        auth_activity_raw['any_activity_observed'] = identity_has_effective_activity
+        ident['auth_activity'] = auth_activity_raw
+
+        # ── Role usage classification (mirrors identity detail enrichment) ──
+        _role_p1_cache = {}
+        for _ri, _r in enumerate(roles):
+            _rp1 = _r.get("last_used_at")
+            _best = None
+            if _rp1 and hasattr(_rp1, 'date'):
+                _best = (_now - _rp1).days
+            if _best is None:
+                _rp1b = _r.get("last_activity_date")
+                if _rp1b and hasattr(_rp1b, 'date'):
+                    _best = (_now - _rp1b).days
+            _role_p1_cache[_ri] = _best
+
+        _scope_role_map = {}
+        for _ri, _r in enumerate(roles):
+            _scope = (_r.get("scope") or '/').lower().rstrip('/') or '/'
+            _scope_role_map.setdefault(_scope, []).append(_ri)
+
+        def _count_p1_peers(role_scope, role_index):
+            scope = (role_scope or '/').lower().rstrip('/') or '/'
+            count = 0
+            for s, role_indices in _scope_role_map.items():
+                if s == scope:
+                    overlap = True
+                elif s == '/' or scope == '/':
+                    overlap = True
+                else:
+                    overlap = (scope.startswith(s + '/') or s.startswith(scope + '/'))
+                if not overlap:
+                    continue
+                for ri in role_indices:
+                    if ri == role_index:
+                        continue
+                    pd = _role_p1_cache.get(ri)
+                    if pd is not None and pd <= _OBSERVATION_WINDOW_DAYS:
+                        count += 1
+            return count
+
+        _roles_proven = 0
+        _roles_likely = 0
+        _roles_unknown = 0
+        _roles_no_observed_usage = 0
+
+        for _role_idx, role in enumerate(roles):
+            p1 = role.get("last_used_at")
+            _p1_delta = (_now - p1).days if p1 and hasattr(p1, 'date') else None
+
+            p1b = role.get("last_activity_date")
+            _p1b_delta = None
+            if p1b and hasattr(p1b, 'date'):
+                _p1b_delta = (_now - p1b).days
+
+            _best_role_delta = _p1_delta if _p1_delta is not None else _p1b_delta
+
+            _eff_tel_cov = _tel_cov
+            if not _eff_tel_cov and identity_has_effective_activity:
+                _eff_tel_cov = 'partial'
+
+            if _best_role_delta is not None and _best_role_delta <= _OBSERVATION_WINDOW_DAYS:
+                _oc = _count_p1_peers(role.get("scope"), _role_idx)
+                if _oc == 0:
+                    role["role_usage_classification"] = "proven"
+                    _roles_proven += 1
+                else:
+                    role["role_usage_classification"] = "likely"
+                    role["overlap_count"] = _oc
+                    _roles_likely += 1
+            elif identity_has_effective_activity and _eff_tel_cov in ('full', 'partial'):
+                role["role_usage_classification"] = "unknown"
+                _roles_unknown += 1
+            elif _eff_tel_cov == 'blind':
+                role["role_usage_classification"] = "telemetry_blind"
+            elif _eff_tel_cov in ('full', 'partial'):
+                role["role_usage_classification"] = "no_observed_usage"
+                _roles_no_observed_usage += 1
+            else:
+                role["role_usage_classification"] = "insufficient_coverage"
+
+            # Build display fields needed by _compute_identity_optimization
+            if _best_role_delta is not None:
+                role["days_since_last_used"] = _best_role_delta
+                role["last_used_display"] = f"{_best_role_delta} days ago" if _best_role_delta > 0 else "Today"
+                role["last_used_source"] = "Role-level activity record"
+            elif identity_has_effective_activity:
+                role["days_since_last_used"] = None
+                role["last_used_display"] = "Log-independent mode"
+                role["last_used_source"] = "Log-independent mode"
+            else:
+                role["days_since_last_used"] = None
+                role["last_used_display"] = "Never used"
+                role["last_used_source"] = "Log-independent mode"
+
+        # Build role_usage_summary for _compute_identity_optimization
+        ident['role_usage_summary'] = {
+            'roles_proven': _roles_proven,
+            'roles_likely': _roles_likely,
+            'roles_unknown': _roles_unknown,
+            'roles_no_observed_usage': _roles_no_observed_usage,
+        }
+        ident['last_seen_display'] = (
+            eff_last.strftime("%Y-%m-%d") if eff_last else None
+        )
+
+        # ── Compute optimization candidates ──
+        opt = _compute_identity_optimization(roles, ident, _OBSERVATION_WINDOW_DAYS)
+
+        # ── Upsert each candidate ──
+        all_candidates = (
+            opt.get('candidate_remove', [])
+            + opt.get('candidate_review', [])
+            + opt.get('insufficient_evidence', [])
+            + opt.get('scope_narrowing', [])
+        )
+        for cand in all_candidates:
+            cand['identity_id'] = ident.get('identity_id')
+            cand['identity_db_id'] = identity_db_id
+            cand['display_name'] = ident.get('display_name')
+            cand['identity_category'] = ident.get('identity_category')
+            cand['discovery_run_id'] = current_run_id
+            cand['observation_window_days'] = _OBSERVATION_WINDOW_DAYS
+            try:
+                db.upsert_optimization_recommendation(db_org_id, cand)
+                upserted += 1
+            except Exception as e:
+                logger.warning("Optimization materialization: upsert failed: %s", e)
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+
+        identities_processed += 1
+
+    # ── Close stale recommendations ──
+    try:
+        closed = db.close_stale_recommendations(db_org_id, current_run_id)
+        logger.info(
+            "Optimization materialization complete: %d identities processed, "
+            "%d candidates upserted, %d stale closed (org=%s, run=%s)",
+            identities_processed, upserted, len(closed), db_org_id, current_run_id,
+        )
+    except Exception as e:
+        logger.warning("Optimization materialization: stale cleanup failed: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+
+    cursor.close()
+
+
+def _run_privilege_drift_detection(current_run_id, previous_run_id, db_org_id, db):
+    """Compute and persist classified privilege drift events between two runs.
+
+    Compares role assignments (both Azure RBAC and Entra directory) between
+    the current and previous discovery runs.  Classifies each change into
+    one of 6 drift types and persists to privilege_drift_events.
+
+    Drift Types:
+        privilege_added    — New role assignment on an identity
+        privilege_removed  — Role assignment removed
+        scope_expanded     — Same role, broader scope
+        scope_reduced      — Same role, narrower scope
+        risk_increased     — Identity risk level escalated
+        risk_reduced       — Identity risk level de-escalated
+    """
+    from psycopg2.extras import RealDictCursor
+
+    if not previous_run_id:
+        logger.info("Privilege drift: no previous run — skipping (run=%s)", current_run_id)
+        return
+
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # ── Load identities + combined roles from BOTH runs ──
+        def _load_run_snapshot(run_id):
+            """Load identity→{meta, roles} map for a run.
+
+            Includes both Azure RBAC and Entra directory roles in a single
+            pass via UNION ALL.
+            """
+            cursor.execute("""
+                SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                       i.risk_level, i.risk_score,
+                       COALESCE(i.is_microsoft_system, false) as is_microsoft_system
+                FROM identities i
+                WHERE i.discovery_run_id = %s
+            """, (run_id,))
+            identities = {}
+            for row in cursor.fetchall():
+                identities[row['identity_id']] = {
+                    'db_id': row['id'],
+                    'identity_id': row['identity_id'],
+                    'display_name': row['display_name'],
+                    'identity_category': row['identity_category'],
+                    'risk_level': row['risk_level'],
+                    'risk_score': row['risk_score'] or 0,
+                    'is_microsoft_system': row['is_microsoft_system'],
+                    'roles': set(),
+                    'role_details': {},  # signature → role dict
+                }
+
+            # Azure RBAC roles
+            db_ids = [v['db_id'] for v in identities.values()]
+            if db_ids:
+                cursor.execute("""
+                    SELECT ra.identity_db_id, ra.role_name, ra.scope, ra.scope_type
+                    FROM role_assignments ra
+                    WHERE ra.identity_db_id = ANY(%s)
+                """, (db_ids,))
+                # Map db_id → identity_id for reverse lookup
+                dbid_to_iid = {v['db_id']: k for k, v in identities.items()}
+                for row in cursor.fetchall():
+                    iid = dbid_to_iid.get(row['identity_db_id'])
+                    if iid:
+                        sig = f"azure:{row['role_name']}:{row['scope_type'] or ''}:{row['scope'] or '/'}"
+                        identities[iid]['roles'].add(sig)
+                        identities[iid]['role_details'][sig] = {
+                            'role_name': row['role_name'],
+                            'role_type': 'azure',
+                            'scope': row['scope'] or '/',
+                            'scope_type': row['scope_type'] or '',
+                        }
+
+                # Entra directory roles
+                cursor.execute("""
+                    SELECT era.identity_db_id, era.role_name,
+                           COALESCE(era.directory_scope, '/') as scope
+                    FROM entra_role_assignments era
+                    WHERE era.identity_db_id = ANY(%s)
+                """, (db_ids,))
+                for row in cursor.fetchall():
+                    iid = dbid_to_iid.get(row['identity_db_id'])
+                    if iid:
+                        sig = f"entra:{row['role_name']}:directory:{row['scope']}"
+                        identities[iid]['roles'].add(sig)
+                        identities[iid]['role_details'][sig] = {
+                            'role_name': row['role_name'],
+                            'role_type': 'entra',
+                            'scope': row['scope'],
+                            'scope_type': 'directory',
+                        }
+
+            return identities
+
+        current_snap = _load_run_snapshot(current_run_id)
+        previous_snap = _load_run_snapshot(previous_run_id)
+
+    except Exception as e:
+        logger.error("Privilege drift: snapshot load failed: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        cursor.close()
+        return
+
+    # ── Privileged role check (reuse handlers constants) ──
+    from app.api.handlers import _PRIV_ENTRA, _PRIV_ARM
+
+    def _is_priv(sig):
+        parts = sig.split(':', 3)
+        rtype = parts[0]  # azure or entra
+        rname = parts[1].lower() if len(parts) > 1 else ''
+        if rtype == 'entra':
+            return rname in _PRIV_ENTRA
+        return rname in _PRIV_ARM
+
+    # ── Scope hierarchy for expansion/reduction detection ──
+    SCOPE_RANK = {
+        'management_group': 4,
+        'subscription': 3,
+        'resource_group': 2,
+        'resource': 1,
+        'directory': 3,  # Entra directory scope = tenant-wide
+        '': 0,
+    }
+
+    drift_events = []
+
+    # Identities present in both runs — detect role and risk changes
+    common_ids = set(current_snap.keys()) & set(previous_snap.keys())
+    for iid in common_ids:
+        curr = current_snap[iid]
+        prev = previous_snap[iid]
+
+        # Skip Microsoft system identities
+        if curr.get('is_microsoft_system'):
+            continue
+
+        curr_roles = curr['roles']
+        prev_roles = prev['roles']
+
+        added_sigs = curr_roles - prev_roles
+        removed_sigs = prev_roles - curr_roles
+
+        # ── Detect scope changes ──
+        # Group by (role_type, role_name) to find same role at different scopes
+        def _role_key(sig):
+            parts = sig.split(':', 3)
+            return (parts[0], parts[1])  # (type, name)
+
+        added_by_key = {}
+        for sig in added_sigs:
+            k = _role_key(sig)
+            added_by_key.setdefault(k, []).append(sig)
+
+        removed_by_key = {}
+        for sig in removed_sigs:
+            k = _role_key(sig)
+            removed_by_key.setdefault(k, []).append(sig)
+
+        # Match same role added+removed = scope change
+        matched_added = set()
+        matched_removed = set()
+
+        for rkey in set(added_by_key.keys()) & set(removed_by_key.keys()):
+            a_sigs = added_by_key[rkey]
+            r_sigs = removed_by_key[rkey]
+            pairs = min(len(a_sigs), len(r_sigs))
+            for i in range(pairs):
+                a_detail = curr['role_details'][a_sigs[i]]
+                r_detail = prev['role_details'][r_sigs[i]]
+                a_rank = SCOPE_RANK.get(a_detail.get('scope_type', '').lower(), 0)
+                r_rank = SCOPE_RANK.get(r_detail.get('scope_type', '').lower(), 0)
+
+                if a_rank > r_rank:
+                    dt = 'scope_expanded'
+                elif a_rank < r_rank:
+                    dt = 'scope_reduced'
+                else:
+                    # Same scope type but different scope path —
+                    # compare path depth (shorter = broader)
+                    a_depth = a_detail['scope'].count('/')
+                    r_depth = r_detail['scope'].count('/')
+                    if a_depth < r_depth:
+                        dt = 'scope_expanded'
+                    elif a_depth > r_depth:
+                        dt = 'scope_reduced'
+                    else:
+                        # Same depth, different path — treat as add+remove
+                        continue
+
+                drift_events.append({
+                    'identity_id': iid,
+                    'identity_db_id': curr['db_id'],
+                    'display_name': curr['display_name'],
+                    'identity_category': curr['identity_category'],
+                    'drift_type': dt,
+                    'role_name': a_detail['role_name'],
+                    'role_type': a_detail['role_type'],
+                    'scope': a_detail['scope'],
+                    'prior_scope': r_detail['scope'],
+                    'is_privileged': _is_priv(a_sigs[i]),
+                    'details': {
+                        'current_scope_type': a_detail.get('scope_type'),
+                        'prior_scope_type': r_detail.get('scope_type'),
+                    },
+                    'discovery_run_id': current_run_id,
+                    'previous_run_id': previous_run_id,
+                })
+                matched_added.add(a_sigs[i])
+                matched_removed.add(r_sigs[i])
+
+        # ── Pure additions ──
+        for sig in added_sigs - matched_added:
+            detail = curr['role_details'][sig]
+            drift_events.append({
+                'identity_id': iid,
+                'identity_db_id': curr['db_id'],
+                'display_name': curr['display_name'],
+                'identity_category': curr['identity_category'],
+                'drift_type': 'privilege_added',
+                'role_name': detail['role_name'],
+                'role_type': detail['role_type'],
+                'scope': detail['scope'],
+                'is_privileged': _is_priv(sig),
+                'details': {'scope_type': detail.get('scope_type')},
+                'discovery_run_id': current_run_id,
+                'previous_run_id': previous_run_id,
+            })
+
+        # ── Pure removals ──
+        for sig in removed_sigs - matched_removed:
+            detail = prev['role_details'][sig]
+            drift_events.append({
+                'identity_id': iid,
+                'identity_db_id': prev['db_id'],
+                'display_name': prev['display_name'],
+                'identity_category': prev['identity_category'],
+                'drift_type': 'privilege_removed',
+                'role_name': detail['role_name'],
+                'role_type': detail['role_type'],
+                'scope': detail['scope'],
+                'is_privileged': _is_priv(sig),
+                'details': {'scope_type': detail.get('scope_type')},
+                'discovery_run_id': current_run_id,
+                'previous_run_id': previous_run_id,
+            })
+
+        # ── Risk level changes ──
+        curr_risk = (curr.get('risk_level') or 'info').lower()
+        prev_risk = (prev.get('risk_level') or 'info').lower()
+        if curr_risk != prev_risk:
+            risk_order = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
+            if risk_order.get(curr_risk, 0) > risk_order.get(prev_risk, 0):
+                dt = 'risk_increased'
+            else:
+                dt = 'risk_reduced'
+            drift_events.append({
+                'identity_id': iid,
+                'identity_db_id': curr['db_id'],
+                'display_name': curr['display_name'],
+                'identity_category': curr['identity_category'],
+                'drift_type': dt,
+                'prior_risk_level': prev_risk,
+                'current_risk_level': curr_risk,
+                'prior_risk_score': prev.get('risk_score', 0),
+                'current_risk_score': curr.get('risk_score', 0),
+                'is_privileged': any(_is_priv(s) for s in curr_roles),
+                'details': {
+                    'prior_role_count': len(prev_roles),
+                    'current_role_count': len(curr_roles),
+                },
+                'discovery_run_id': current_run_id,
+                'previous_run_id': previous_run_id,
+            })
+
+    # ── New identities with privileged roles ──
+    new_ids = set(current_snap.keys()) - set(previous_snap.keys())
+    for iid in new_ids:
+        curr = current_snap[iid]
+        if curr.get('is_microsoft_system'):
+            continue
+        for sig in curr['roles']:
+            if _is_priv(sig):
+                detail = curr['role_details'][sig]
+                drift_events.append({
+                    'identity_id': iid,
+                    'identity_db_id': curr['db_id'],
+                    'display_name': curr['display_name'],
+                    'identity_category': curr['identity_category'],
+                    'drift_type': 'privilege_added',
+                    'role_name': detail['role_name'],
+                    'role_type': detail['role_type'],
+                    'scope': detail['scope'],
+                    'is_privileged': True,
+                    'details': {
+                        'scope_type': detail.get('scope_type'),
+                        'new_identity': True,
+                    },
+                    'discovery_run_id': current_run_id,
+                    'previous_run_id': previous_run_id,
+                })
+
+    # ── Persist ──
+    try:
+        inserted = db.save_privilege_drift_events(db_org_id, drift_events)
+        logger.info(
+            "Privilege drift detection complete: %d events persisted "
+            "(run=%s vs prev=%s, org=%s)",
+            inserted, current_run_id, previous_run_id, db_org_id,
+        )
+    except Exception as e:
+        logger.warning("Privilege drift: persist failed: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+
+    cursor.close()
+
+
+def _run_workload_attribution(current_run_id, db_org_id, db):
+    """Infer and persist parent workload attributions for all identities.
+
+    Synthesizes signals from multiple sources in priority order:
+      1. Managed identity bindings (system-assigned) — confidence 95
+      2. Managed identity bindings (user-assigned)  — confidence 90
+      3. ARM resource associations (discovery)       — confidence 85
+      4. identity_lineage_bindings table             — confidence from binding
+      5. Workload type inference (from roles)        — confidence from inference
+      6. Display name pattern matching               — confidence 60-70
+
+    Only processes NHI identities (service_principal, managed_identity_*).
+    """
+    from psycopg2.extras import RealDictCursor
+
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+    # ── AI workload indicators (for is_ai_workload flag) ──
+    AI_WORKLOAD_TYPES = frozenset({
+        'ai_service', 'ml_workload', 'ml_workspace', 'cognitive_services',
+    })
+    AI_NAME_SIGNALS = (
+        'openai', 'cognitive', 'aiservice', 'azure-ai', '-ml-', 'aml-',
+        'copilot', 'bot-', 'luis-', 'language-', 'form-recognizer',
+        'document-intelligence', 'speech-', 'vision-', 'anomaly-detector',
+    )
+    AI_RESOURCE_TYPES = frozenset({
+        'cognitiveservices', 'machinelearningservices', 'botservice',
+        'openai', 'search', 'cognitiveservices/accounts',
+    })
+
+    # ── Workload type mapping from ARM resource types ──
+    RESOURCE_TYPE_MAP = {
+        'sites': 'app_service',
+        'functionapp': 'function_app',
+        'managedclusters': 'aks',
+        'virtualmachines': 'vm',
+        'containerapps': 'container_app',
+        'workflows': 'logic_app',
+        'automationaccounts': 'automation',
+        'factories': 'data_factory',
+        'staticsites': 'static_web_app',
+        'accounts': 'cognitive_service',
+        'workspaces': 'ml_workspace',
+    }
+
+    # ── Display name patterns for workload inference ──
+    import re as _re
+    DISPLAY_NAME_PATTERNS = [
+        (_re.compile(r'(?:aks|kubernetes)[\-_]', _re.I), 'aks', 70),
+        (_re.compile(r'(?:webapp|appservice|app[\-_]service)', _re.I), 'app_service', 65),
+        (_re.compile(r'(?:func[\-_]|function[\-_]|azurefunc)', _re.I), 'function_app', 65),
+        (_re.compile(r'(?:devops|pipeline|github[\-_]action|azdo)', _re.I), 'cicd_pipeline', 65),
+        (_re.compile(r'(?:terraform|pulumi|bicep|arm[\-_]deploy)', _re.I), 'cicd_pipeline', 60),
+        (_re.compile(r'(?:datafactory|adf[\-_])', _re.I), 'data_factory', 65),
+        (_re.compile(r'(?:logic[\-_]app|workflow)', _re.I), 'logic_app', 60),
+        (_re.compile(r'(?:automation[\-_]|runbook)', _re.I), 'automation', 60),
+        (_re.compile(r'(?:vm[\-_]|virtual[\-_]machine)', _re.I), 'vm', 55),
+    ]
+
+    try:
+        # Fetch NHI identities from current run
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                   i.workload_type, i.workload_origin, i.workload_origin_source,
+                   i.associated_resource_id, i.associated_resource_type,
+                   i.associated_resource_name, i.associated_resource_group,
+                   i.associated_subscription_id,
+                   i.agent_identity_type
+            FROM identities i
+            WHERE i.discovery_run_id = %s
+              AND i.identity_category IN (
+                  'service_principal', 'managed_identity_system',
+                  'managed_identity_user', 'workload_identity'
+              )
+              AND NOT COALESCE(i.is_microsoft_system, false)
+        """, (current_run_id,))
+        identities = [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        logger.error("Workload attribution: identity fetch failed: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        cursor.close()
+        return
+
+    # Fetch existing lineage bindings for these identities
+    db_ids = [i['id'] for i in identities]
+    lineage_bindings = {}
+    if db_ids:
+        try:
+            cursor.execute("""
+                SELECT spn_id, resource_id, resource_type, resource_name,
+                       resource_group, subscription_id, binding_method,
+                       confidence_score, binding_evidence
+                FROM identity_lineage_bindings
+                WHERE spn_id = ANY(%s)
+            """, (db_ids,))
+            for row in cursor.fetchall():
+                lid = row['spn_id']
+                lineage_bindings.setdefault(lid, []).append(dict(row))
+        except Exception as e:
+            logger.warning("Workload attribution: lineage bindings fetch failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+    upserted = 0
+
+    for ident in identities:
+        idb_id = ident['id']
+        iid = ident['identity_id']
+        display_name = (ident.get('display_name') or '').lower()
+        category = ident.get('identity_category', '')
+        attributions = []  # list of attribution dicts to upsert
+
+        def _is_ai(wtype, resource_type_raw='', name=''):
+            """Check if workload is AI-related."""
+            if wtype in AI_WORKLOAD_TYPES:
+                return True
+            rt_lower = (resource_type_raw or '').lower()
+            if any(art in rt_lower for art in AI_RESOURCE_TYPES):
+                return True
+            n_lower = (name or display_name).lower()
+            if any(sig in n_lower for sig in AI_NAME_SIGNALS):
+                return True
+            return False
+
+        # ── Signal 1: System-assigned managed identity ──
+        # Category = managed_identity_system AND has associated_resource_id
+        if category == 'managed_identity_system' and ident.get('associated_resource_id'):
+            res_type_raw = (ident.get('associated_resource_type') or '').lower()
+            wtype = RESOURCE_TYPE_MAP.get(res_type_raw, res_type_raw or 'unknown')
+            attributions.append({
+                'identity_id': iid,
+                'identity_db_id': idb_id,
+                'workload_type': wtype,
+                'workload_name': ident.get('associated_resource_name'),
+                'workload_resource_id': ident.get('associated_resource_id'),
+                'workload_resource_group': ident.get('associated_resource_group'),
+                'workload_subscription_id': ident.get('associated_subscription_id'),
+                'attribution_confidence': 95,
+                'attribution_basis': 'managed_identity_system',
+                'attribution_signals': [{
+                    'signal': 'system_assigned_mi_binding',
+                    'resource_id': ident.get('associated_resource_id'),
+                    'confidence': 95,
+                }],
+                'is_ai_workload': _is_ai(wtype, res_type_raw, ident.get('associated_resource_name')),
+                'discovery_run_id': current_run_id,
+            })
+
+        # ── Signal 2: Lineage bindings (MI and other) ──
+        for binding in lineage_bindings.get(idb_id, []):
+            method = binding.get('binding_method', '')
+            res_type_raw = (binding.get('resource_type') or '').lower()
+            wtype = RESOURCE_TYPE_MAP.get(res_type_raw, res_type_raw or 'unknown')
+            confidence = binding.get('confidence_score', 0)
+
+            if method == 'ManagedIdentitySystemAssigned':
+                basis = 'managed_identity_system'
+                confidence = max(confidence, 95)
+            elif method == 'ManagedIdentityUserAssigned':
+                basis = 'managed_identity_user'
+                confidence = max(confidence, 90)
+            elif method == 'FederatedCredential':
+                basis = 'federated_credential'
+                confidence = max(confidence, 80)
+            elif method == 'HardcodedClientId':
+                basis = 'arm_resource_binding'
+                confidence = max(confidence, 75)
+            elif method == 'WorkloadIdentityAnnotation':
+                basis = 'arm_resource_binding'
+                confidence = max(confidence, 85)
+            else:
+                basis = 'arm_resource_binding'
+                confidence = max(confidence, 70)
+
+            attributions.append({
+                'identity_id': iid,
+                'identity_db_id': idb_id,
+                'workload_type': wtype,
+                'workload_name': binding.get('resource_name'),
+                'workload_resource_id': binding.get('resource_id', ''),
+                'workload_resource_group': binding.get('resource_group'),
+                'workload_subscription_id': binding.get('subscription_id'),
+                'attribution_confidence': confidence,
+                'attribution_basis': basis,
+                'attribution_signals': [{
+                    'signal': f'lineage_binding_{method}',
+                    'resource_id': binding.get('resource_id'),
+                    'binding_method': method,
+                    'confidence': confidence,
+                }],
+                'is_ai_workload': _is_ai(wtype, res_type_raw, binding.get('resource_name')),
+                'discovery_run_id': current_run_id,
+            })
+
+        # ── Signal 3: ARM resource association (identity columns) ──
+        if (ident.get('associated_resource_id')
+                and category != 'managed_identity_system'):
+            # Avoid duplicating the system MI attribution already added
+            res_type_raw = (ident.get('associated_resource_type') or '').lower()
+            wtype = RESOURCE_TYPE_MAP.get(res_type_raw, res_type_raw or 'unknown')
+            attributions.append({
+                'identity_id': iid,
+                'identity_db_id': idb_id,
+                'workload_type': wtype,
+                'workload_name': ident.get('associated_resource_name'),
+                'workload_resource_id': ident.get('associated_resource_id'),
+                'workload_resource_group': ident.get('associated_resource_group'),
+                'workload_subscription_id': ident.get('associated_subscription_id'),
+                'attribution_confidence': 85,
+                'attribution_basis': 'arm_resource_binding',
+                'attribution_signals': [{
+                    'signal': 'identity_associated_resource',
+                    'source': ident.get('workload_origin_source', 'discovery'),
+                    'confidence': 85,
+                }],
+                'is_ai_workload': _is_ai(wtype, res_type_raw, ident.get('associated_resource_name')),
+                'discovery_run_id': current_run_id,
+            })
+
+        # ── Signal 4: Workload type from role inference ──
+        wt = (ident.get('workload_type') or '').lower()
+        if wt and wt != 'unknown' and not attributions:
+            # Only use role-inferred workload if no stronger signals exist
+            attributions.append({
+                'identity_id': iid,
+                'identity_db_id': idb_id,
+                'workload_type': wt,
+                'workload_name': ident.get('workload_origin'),
+                'workload_resource_id': '',
+                'attribution_confidence': 65,
+                'attribution_basis': 'workload_type_inference',
+                'attribution_signals': [{
+                    'signal': 'role_topology_inference',
+                    'workload_type': wt,
+                    'source': ident.get('workload_origin_source', 'role_inference'),
+                    'confidence': 65,
+                }],
+                'is_ai_workload': _is_ai(wt),
+                'discovery_run_id': current_run_id,
+            })
+
+        # ── Signal 5: Display name pattern matching ──
+        if not attributions and display_name:
+            for pattern, wtype, confidence in DISPLAY_NAME_PATTERNS:
+                if pattern.search(display_name):
+                    attributions.append({
+                        'identity_id': iid,
+                        'identity_db_id': idb_id,
+                        'workload_type': wtype,
+                        'workload_name': None,
+                        'workload_resource_id': '',
+                        'attribution_confidence': confidence,
+                        'attribution_basis': 'display_name_pattern',
+                        'attribution_signals': [{
+                            'signal': 'display_name_match',
+                            'pattern': pattern.pattern,
+                            'display_name': ident.get('display_name'),
+                            'confidence': confidence,
+                        }],
+                        'is_ai_workload': _is_ai(wtype),
+                        'discovery_run_id': current_run_id,
+                    })
+                    break  # First match wins
+
+        # ── Signal 6: AI classification as compound signal ──
+        agent_type = ident.get('agent_identity_type') or ''
+        if agent_type in ('ai_agent', 'possible_ai_agent') and not any(
+            a.get('is_ai_workload') for a in attributions
+        ):
+            # Mark existing attributions as AI if identity is AI-classified
+            for a in attributions:
+                a['is_ai_workload'] = True
+            # If no attributions at all, create a minimal AI workload attribution
+            if not attributions:
+                attributions.append({
+                    'identity_id': iid,
+                    'identity_db_id': idb_id,
+                    'workload_type': 'ai_service',
+                    'workload_name': None,
+                    'workload_resource_id': '',
+                    'attribution_confidence': 50,
+                    'attribution_basis': 'ai_classification',
+                    'attribution_signals': [{
+                        'signal': 'agent_classification',
+                        'agent_identity_type': agent_type,
+                        'confidence': 50,
+                    }],
+                    'is_ai_workload': True,
+                    'discovery_run_id': current_run_id,
+                })
+
+        # ── Persist attributions ──
+        for attr in attributions:
+            try:
+                db.upsert_workload_attribution(db_org_id, attr)
+                upserted += 1
+            except Exception as e:
+                logger.warning("Workload attribution: upsert failed: %s", e)
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+
+    logger.info(
+        "Workload attribution complete: %d identities processed, "
+        "%d attributions upserted (org=%s, run=%s)",
+        len(identities), upserted, db_org_id, current_run_id,
+    )
+    cursor.close()
+
+
+def _run_resource_inventory_collection(current_run_id, db_org_id, db):
+    """Enumerate full Azure resource inventory via Resource Graph.
+
+    Queries Azure Resource Graph for all resources across connected subscriptions.
+    Enriches discovered_resources with metadata (location, tags, sku, kind).
+    Runs BEFORE scope extraction so the merge step can augment existing rows.
+    """
+    if not AZURE_DISCOVERY_ENABLED:
+        return
+
+    from psycopg2.extras import RealDictCursor
+
+    # Look up the cloud_connection_id for this run
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("""
+            SELECT cloud_connection_id FROM discovery_runs
+            WHERE id = %s
+        """, (current_run_id,))
+        row = cursor.fetchone()
+        cursor.close()
+    except Exception as e:
+        logger.debug("Resource inventory: failed to get cloud_connection_id: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        return
+
+    if not row or not row.get('cloud_connection_id'):
+        logger.debug("Resource inventory: no cloud_connection_id for run %s", current_run_id)
+        return
+
+    conn_id = row['cloud_connection_id']
+
+    # Retrieve connection credentials (admin context, bypasses RLS)
+    admin_db = Database()
+    try:
+        connections = admin_db.get_cloud_connections(db_org_id, include_secrets=True)
+    finally:
+        admin_db.close()
+
+    conn = next((c for c in connections if c['id'] == conn_id), None)
+    if not conn:
+        logger.debug("Resource inventory: connection %d not found for org %d", conn_id, db_org_id)
+        return
+
+    metadata = conn.get('metadata') or {}
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    client_secret = metadata.get('client_secret')
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.debug("Resource inventory: incomplete credentials for connection %d", conn_id)
+        return
+
+    # Build credential and get subscription list
+    try:
+        from azure.identity import ClientSecretCredential
+        credential = ClientSecretCredential(
+            tenant_id=azure_directory_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            connection_timeout=10,
+            read_timeout=30,
+        )
+    except Exception as e:
+        logger.warning("Resource inventory: credential creation failed: %s", e)
+        return
+    client_secret = None  # AG-116: zero after SDK init — prevent memory retention
+
+    # Get monitored subscription IDs from cloud_subscriptions
+    sub_ids = []
+    try:
+        sub_cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        sub_cursor.execute("""
+            SELECT account_id FROM cloud_subscriptions
+            WHERE cloud_connection_id = %s AND monitored = true AND deleted = false
+        """, (conn_id,))
+        sub_ids = [r['account_id'] for r in sub_cursor.fetchall() if r.get('account_id')]
+        sub_cursor.close()
+    except Exception as e:
+        logger.debug("Resource inventory: failed to get subscriptions: %s", e)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+
+    if not sub_ids:
+        # Fallback: extract subscription IDs from role_assignments scopes
+        import re
+        _sub_re = re.compile(r'/subscriptions/([^/]+)', re.IGNORECASE)
+        try:
+            sub_cursor = db.conn.cursor()
+            sub_cursor.execute("""
+                SELECT DISTINCT ra.scope FROM role_assignments ra
+                JOIN identities i ON i.id = ra.identity_db_id
+                WHERE i.discovery_run_id = %s
+                  AND ra.scope LIKE '/subscriptions/%%'
+            """, (current_run_id,))
+            seen = set()
+            for r in sub_cursor.fetchall():
+                m = _sub_re.match(r[0] or '')
+                if m:
+                    seen.add(m.group(1).lower())
+            sub_ids = list(seen)
+            sub_cursor.close()
+        except Exception as e:
+            logger.debug("Resource inventory: fallback subscription query failed: %s", e)
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
+    if not sub_ids:
+        logger.info("Resource inventory: no subscriptions found for org %d", db_org_id)
+        return
+
+    # Run the collector
+    from app.engines.resource_inventory_collector import ResourceInventoryCollector
+    collector = ResourceInventoryCollector(credential, sub_ids, db, db_org_id)
+    stats = collector.collect_and_persist(current_run_id)
+    logger.info(
+        "Resource inventory collection: %d enumerated, %d persisted "
+        "(org=%s, run=%s, subs=%d)",
+        stats.get('total_resources', 0), stats.get('persisted', 0),
+        db_org_id, current_run_id, len(sub_ids),
+    )
+
+
+def _run_resource_scope_extraction(current_run_id, db_org_id, db):
+    """Extract discovered resources from RBAC scope data.
+
+    Parses ARM resource IDs from role_assignments.scope to build a canonical
+    resource inventory. Zero additional Azure API calls — uses data already
+    collected during discovery.
+    """
+    from app.engines.resource_scope_extractor import ResourceScopeExtractor
+
+    extractor = ResourceScopeExtractor(db)
+    stats = extractor.extract_and_persist(current_run_id, db_org_id)
+    logger.info(
+        "Resource scope extraction: %d resources (%d high-value), %d types "
+        "(org=%s, run=%s)",
+        stats['total_resources'], stats['high_value_count'],
+        len(stats.get('by_type', {})), db_org_id, current_run_id,
+    )
+
+
+def _run_reachability_computation(current_run_id, db_org_id, db):
+    """Compute per-identity reachability metrics and risk flags.
+
+    Uses centralized thresholds from app.constants.blast_radius_policy.
+    For each non-system identity in the run:
+      1. Loads RBAC + Entra role assignments
+      2. Expands scopes → reachable subscriptions, resource groups
+      3. Enumerates reachable resources (storage accounts + key vaults)
+      4. Computes: reachable_privileged_resource_count, high_value_targets
+      5. Cross-references blast_radius_results for risk_score / exposure_level
+      6. Computes risk flags using configurable thresholds
+      7. Persists into identity_reachability table
+    """
+    from psycopg2.extras import RealDictCursor
+    from app.constants.blast_radius_policy import (
+        get_thresholds, SCOPE_RANK, DORMANT_ACTIVITY_STATUSES,
+        AI_IDENTITY_TYPES, MAX_REACHABLE_RESOURCES_PER_IDENTITY,
+    )
+    from app.constants.roles import PRIVILEGED_RBAC_ROLES, PRIVILEGED_ENTRA_ROLES
+
+    # Load thresholds (with optional tenant overrides from settings)
+    thresholds = get_thresholds(db, db_org_id)
+
+    cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+    # ── Load identities for this run ──
+    cursor.execute("""
+        SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+               COALESCE(i.agent_identity_type, '') as agent_identity_type,
+               COALESCE(i.activity_status, 'unknown') as activity_status
+        FROM identities i
+        WHERE i.discovery_run_id = %s
+          AND NOT COALESCE(i.is_microsoft_system, false)
+        ORDER BY i.id
+    """, (current_run_id,))
+    identities = cursor.fetchall()
+
+    if not identities:
+        cursor.close()
+        logger.info("Reachability: no identities for run #%s", current_run_id)
+        return
+
+    identity_ids = [r['id'] for r in identities]
+
+    # ── Load RBAC role assignments (grouped by identity) ──
+    rbac_by_id = {}
+    cursor.execute("""
+        SELECT ra.identity_db_id, ra.role_name, ra.scope, ra.scope_type
+        FROM role_assignments ra
+        WHERE ra.identity_db_id = ANY(%s)
+    """, (identity_ids,))
+    for ra in cursor.fetchall():
+        rbac_by_id.setdefault(ra['identity_db_id'], []).append(dict(ra))
+
+    # ── Load Entra role assignments ──
+    entra_by_id = {}
+    try:
+        cursor.execute("SAVEPOINT _reach_entra")
+        cursor.execute("""
+            SELECT era.identity_db_id, era.role_name
+            FROM entra_role_assignments era
+            WHERE era.identity_db_id = ANY(%s)
+        """, (identity_ids,))
+        for era in cursor.fetchall():
+            entra_by_id.setdefault(era['identity_db_id'], []).append(dict(era))
+        cursor.execute("RELEASE SAVEPOINT _reach_entra")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _reach_entra")
+        except Exception:
+            pass
+
+    # ── Load group-inherited RBAC ──
+    try:
+        cursor.execute("SAVEPOINT _reach_group_rbac")
+        cursor.execute("""
+            SELECT eg.identity_db_id, eg.rbac_roles
+            FROM entra_groups eg
+            WHERE eg.identity_db_id = ANY(%s)
+              AND eg.rbac_roles IS NOT NULL
+              AND eg.rbac_roles != '[]'::jsonb
+        """, (identity_ids,))
+        for gr in cursor.fetchall():
+            roles = gr['rbac_roles']
+            if isinstance(roles, str):
+                import json as _json
+                roles = _json.loads(roles)
+            if isinstance(roles, list):
+                for role in roles:
+                    if isinstance(role, dict):
+                        rbac_by_id.setdefault(gr['identity_db_id'], []).append(role)
+        cursor.execute("RELEASE SAVEPOINT _reach_group_rbac")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _reach_group_rbac")
+        except Exception:
+            pass
+
+    # ── Load resources (from discovered_resources, fallback to legacy tables) ──
+    resources = []
+    try:
+        cursor.execute("SAVEPOINT _reach_resources")
+        cursor.execute("""
+            SELECT resource_id, subscription_id, resource_group,
+                   resource_type, data_classification, risk_level,
+                   is_high_value
+            FROM discovered_resources
+            WHERE discovery_run_id = %s AND organization_id = %s
+        """, (current_run_id, db_org_id))
+        resources = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("RELEASE SAVEPOINT _reach_resources")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _reach_resources")
+        except Exception:
+            pass
+
+    # Fallback to legacy tables if discovered_resources is empty
+    if not resources:
+        try:
+            cursor.execute("SAVEPOINT _reach_resources_legacy")
+            cursor.execute("""
+                SELECT resource_id, subscription_id, resource_group,
+                       'storage_account' as resource_type, data_classification,
+                       risk_level
+                FROM azure_storage_accounts
+                WHERE discovery_run_id = %s
+            """, (current_run_id,))
+            resources.extend([dict(r) for r in cursor.fetchall()])
+            cursor.execute("""
+                SELECT resource_id, subscription_id, resource_group,
+                       'key_vault' as resource_type, data_classification,
+                       risk_level
+                FROM azure_key_vaults
+                WHERE discovery_run_id = %s
+            """, (current_run_id,))
+            resources.extend([dict(r) for r in cursor.fetchall()])
+            cursor.execute("RELEASE SAVEPOINT _reach_resources_legacy")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT _reach_resources_legacy")
+            except Exception:
+                pass
+
+    # ── Load existing blast radius results for cross-reference ──
+    br_by_id = {}
+    try:
+        cursor.execute("SAVEPOINT _reach_br")
+        cursor.execute("""
+            SELECT identity_id, risk_score, identity_exposure_level
+            FROM blast_radius_results
+            WHERE discovery_run_id = %s
+        """, (current_run_id,))
+        for br in cursor.fetchall():
+            br_by_id[br['identity_id']] = dict(br)
+        cursor.execute("RELEASE SAVEPOINT _reach_br")
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK TO SAVEPOINT _reach_br")
+        except Exception:
+            pass
+
+    # ── Process each identity ──
+    results = []
+    for ident in identities:
+        idb_id = ident['id']
+        rbac = rbac_by_id.get(idb_id, [])
+        entra = entra_by_id.get(idb_id, [])
+
+        # Expand scopes → reachable resources
+        scopes = {'subscription': set(), 'resource_group': set(), 'resource': set(), 'management_group': set()}
+        for ra in rbac:
+            st = ra.get('scope_type', '')
+            scope = (ra.get('scope') or '').lower()
+            if st in scopes and scope:
+                scopes[st].add(scope)
+                if st in ('subscription', 'management_group'):
+                    scopes['subscription'].add(scope)
+
+        # Enumerate reachable resources
+        reachable = []
+        for res in resources:
+            if len(reachable) >= MAX_REACHABLE_RESOURCES_PER_IDENTITY:
+                break
+            res_id = (res.get('resource_id') or '').lower()
+            res_sub = (res.get('subscription_id') or '').lower()
+            res_rg = (res.get('resource_group') or '').lower()
+
+            matched = False
+            for sub_scope in scopes.get('subscription', set()):
+                if res_sub and res_sub in sub_scope:
+                    matched = True
+                    break
+            if not matched:
+                for mg_scope in scopes.get('management_group', set()):
+                    if res_sub and res_sub in mg_scope:
+                        matched = True
+                        break
+            if not matched:
+                for rg_scope in scopes.get('resource_group', set()):
+                    if res_rg and res_rg.lower() in rg_scope:
+                        matched = True
+                        break
+            if not matched:
+                for r_scope in scopes.get('resource', set()):
+                    if res_id and res_id in r_scope:
+                        matched = True
+                        break
+            if matched:
+                reachable.append(res)
+
+        # ── Compute reachability metrics ──
+        sub_ids = set()
+        rg_ids = set()
+        for r in reachable:
+            if r.get('subscription_id'):
+                sub_ids.add(r['subscription_id'])
+            if r.get('resource_group'):
+                rg_ids.add(r['resource_group'])
+
+        reachable_resource_count = len(reachable)
+        subscriptions_reachable = len(sub_ids)
+        resource_groups_reachable = len(rg_ids)
+
+        # Privileged resource count: resources reachable via privileged RBAC roles
+        priv_scopes = {'subscription': set(), 'resource_group': set(), 'resource': set(), 'management_group': set()}
+        for ra in rbac:
+            if ra.get('role_name') in PRIVILEGED_RBAC_ROLES:
+                st = ra.get('scope_type', '')
+                scope = (ra.get('scope') or '').lower()
+                if st in priv_scopes and scope:
+                    priv_scopes[st].add(scope)
+                    if st in ('subscription', 'management_group'):
+                        priv_scopes['subscription'].add(scope)
+
+        priv_reachable = 0
+        for res in reachable:
+            res_id = (res.get('resource_id') or '').lower()
+            res_sub = (res.get('subscription_id') or '').lower()
+            res_rg = (res.get('resource_group') or '').lower()
+            matched = False
+            for sub_scope in priv_scopes.get('subscription', set()):
+                if res_sub and res_sub in sub_scope:
+                    matched = True
+                    break
+            if not matched:
+                for rg_scope in priv_scopes.get('resource_group', set()):
+                    if res_rg and res_rg.lower() in rg_scope:
+                        matched = True
+                        break
+            if not matched:
+                for r_scope in priv_scopes.get('resource', set()):
+                    if res_id and res_id in r_scope:
+                        matched = True
+                        break
+            if matched:
+                priv_reachable += 1
+
+        # High-value targets: is_high_value flag, key vaults, or classified data
+        hvt = 0
+        for r in reachable:
+            if r.get('is_high_value'):
+                hvt += 1
+            elif r.get('resource_type') == 'key_vault':
+                hvt += 1
+            elif r.get('data_classification'):
+                hvt += 1
+
+        # Privileged role analysis
+        priv_role_names = set()
+        for ra in rbac:
+            if ra.get('role_name') in PRIVILEGED_RBAC_ROLES:
+                priv_role_names.add(ra['role_name'])
+        for era in entra:
+            if era.get('role_name') in PRIVILEGED_ENTRA_ROLES:
+                priv_role_names.add(era['role_name'])
+        has_privileged = bool(priv_role_names)
+
+        # Highest scope type
+        highest_scope = None
+        max_rank = 0
+        for ra in rbac:
+            st = ra.get('scope_type', '')
+            rank = SCOPE_RANK.get(st, 0)
+            if rank > max_rank:
+                max_rank = rank
+                highest_scope = st
+
+        # Cross-reference blast radius results
+        br = br_by_id.get(idb_id, {})
+        br_risk_score = br.get('risk_score', 0)
+        br_exposure = br.get('identity_exposure_level', 'LOW')
+
+        agent_type = ident.get('agent_identity_type', '') or ''
+        activity = ident.get('activity_status', 'unknown') or 'unknown'
+
+        # ── Risk flags (using centralized thresholds) ──
+        flags = []
+
+        t_broad = thresholds['broad_blast_radius_threshold']
+        t_broad_crit = thresholds['broad_blast_radius_critical_threshold']
+        flag_broad = reachable_resource_count >= t_broad
+        if flag_broad:
+            flags.append({
+                'flag': 'broad_blast_radius',
+                'flag_reason': f'Identity can reach {reachable_resource_count} resources '
+                               f'across {subscriptions_reachable} subscriptions',
+                'trigger_metric': reachable_resource_count,
+                'threshold_used': t_broad,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'high' if reachable_resource_count >= t_broad_crit else 'medium',
+            })
+
+        t_priv_sub = thresholds['privileged_wide_reach_subscription_threshold']
+        t_priv_crit = thresholds['privileged_wide_reach_critical_subscription_threshold']
+        flag_priv_wide = has_privileged and subscriptions_reachable >= t_priv_sub
+        if flag_priv_wide:
+            flags.append({
+                'flag': 'privileged_wide_reach',
+                'flag_reason': f'Privileged identity spans {subscriptions_reachable} subscriptions '
+                               f'with roles: {", ".join(sorted(priv_role_names))}',
+                'trigger_metric': subscriptions_reachable,
+                'threshold_used': t_priv_sub,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'critical' if subscriptions_reachable >= t_priv_crit else 'high',
+            })
+
+        t_ai = thresholds['ai_excessive_blast_threshold']
+        flag_ai = agent_type in AI_IDENTITY_TYPES and reachable_resource_count >= t_ai
+        if flag_ai:
+            flags.append({
+                'flag': 'ai_excessive_blast',
+                'flag_reason': f'AI agent identity ({agent_type}) can reach '
+                               f'{reachable_resource_count} resources',
+                'trigger_metric': reachable_resource_count,
+                'threshold_used': t_ai,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'high',
+            })
+
+        t_dormant = thresholds['dormant_high_blast_threshold']
+        t_dormant_sev = thresholds['dormant_high_blast_severe_threshold']
+        flag_dormant = activity in DORMANT_ACTIVITY_STATUSES and reachable_resource_count >= t_dormant
+        if flag_dormant:
+            flags.append({
+                'flag': 'dormant_high_blast',
+                'flag_reason': f'{activity} identity can reach {reachable_resource_count} resources '
+                               f'including {hvt} high-value targets',
+                'trigger_metric': reachable_resource_count,
+                'threshold_used': t_dormant,
+                'threshold_source': 'blast_radius_policy',
+                'severity': 'high' if reachable_resource_count >= t_dormant_sev else 'medium',
+            })
+
+        results.append({
+            'organization_id': db_org_id,
+            'identity_id': ident['identity_id'],
+            'identity_db_id': idb_id,
+            'display_name': ident['display_name'],
+            'identity_category': ident['identity_category'],
+            'reachable_resource_count': reachable_resource_count,
+            'reachable_privileged_resource_count': priv_reachable,
+            'subscriptions_reachable': subscriptions_reachable,
+            'resource_groups_reachable': resource_groups_reachable,
+            'high_value_targets_reachable': hvt,
+            'has_privileged_roles': has_privileged,
+            'privileged_role_names': sorted(priv_role_names),
+            'highest_scope_type': highest_scope,
+            'flag_broad_blast_radius': flag_broad,
+            'flag_privileged_wide_reach': flag_priv_wide,
+            'flag_ai_excessive_blast': flag_ai,
+            'flag_dormant_high_blast': flag_dormant,
+            'risk_flag_count': len(flags),
+            'risk_flag_details': flags,
+            'blast_radius_risk_score': br_risk_score,
+            'blast_radius_exposure_level': br_exposure,
+            'agent_identity_type': agent_type or None,
+            'activity_status': activity,
+        })
+
+    # ── Persist ──
+    cursor.close()
+    count = db.save_identity_reachability(current_run_id, results)
+    flagged = sum(1 for r in results if r['risk_flag_count'] > 0)
+    logger.info(
+        "Reachability computation complete: %d identities, %d flagged "
+        "(org=%s, run=%s)",
+        len(results), flagged, db_org_id, current_run_id,
+    )
 
 
 def _dispatch_notification(event_type: str, event_data: dict, db_org_id: int = None):
@@ -1136,6 +2768,257 @@ def _dispatch_notification(event_type: str, event_data: dict, db_org_id: int = N
         db.close()
     except Exception as e:
         logger.warning(f"Failed to dispatch {event_type} notification: {e}")
+
+
+def _launch_owned_objects_background(db_org_id: int, conn: dict):
+    """Launch background thread to enrich SPNs with owned/created objects.
+
+    Runs after scan completes so it doesn't block the main pipeline (~12 min savings).
+    Uses parallel Graph API calls with semaphore throttling.
+    """
+    import threading
+
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+
+    # Decrypt credential if encrypted
+    from app.encryption import decrypt_field
+    raw_secret = metadata.get('client_secret')
+    client_secret = decrypt_field(raw_secret) if raw_secret else None
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.warning("[owned_objects_bg] Skipping — incomplete credentials for connection %s", conn.get('id'))
+        return
+
+    def _run():
+        nonlocal client_secret
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Find latest completed run for this org
+            db = Database()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                run_id = row[0] if row else None
+            except Exception as e:
+                logger.error("[owned_objects_bg] Failed to find run_id: %s", e)
+                db.close()
+                return
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+            db.close()
+
+            if not run_id:
+                logger.warning("[owned_objects_bg] No completed run found for org=%s", db_org_id)
+                return
+
+            from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+            loop.run_until_complete(
+                AzureDiscoveryEngine.enrich_owned_objects_background(
+                    azure_directory_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db_org_id=db_org_id,
+                    run_id=run_id,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("[owned_objects_bg] Background enrichment failed: %s", e)
+        finally:
+            client_secret = None  # AG-116: zero secret after background work completes
+
+    t = threading.Thread(target=_run, name=f"owned_objects_bg_org{db_org_id}", daemon=True)
+    t.start()
+    logger.info("[owned_objects_bg] Background thread launched for org=%s connection=%s",
+                db_org_id, conn.get('id'))
+
+
+def _launch_ip_enrichment_background(db_org_id: int, conn: dict):
+    """Launch background thread to enrich identities with last observed IP.
+
+    Runs after scan completes so it doesn't block the main pipeline (~121s savings).
+    Uses parallel API calls with semaphore throttling.
+    """
+    import threading
+
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+
+    from app.encryption import decrypt_field
+    raw_secret = metadata.get('client_secret')
+    client_secret = decrypt_field(raw_secret) if raw_secret else None
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.warning("[ip_enrichment_bg] Skipping — incomplete credentials for connection %s", conn.get('id'))
+        return
+
+    def _run():
+        nonlocal client_secret
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Find latest completed run for this org
+            db = Database()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                run_id = row[0] if row else None
+            except Exception as e:
+                logger.error("[ip_enrichment_bg] Failed to find run_id: %s", e)
+                db.close()
+                return
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+            db.close()
+
+            if not run_id:
+                logger.warning("[ip_enrichment_bg] No completed run found for org=%s", db_org_id)
+                return
+
+            # Fetch subscription IDs using the service principal
+            sub_ids = []
+            try:
+                from azure.identity import ClientSecretCredential
+                from azure.mgmt.resource import SubscriptionClient
+                cred = ClientSecretCredential(
+                    tenant_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+                sub_client = SubscriptionClient(cred)
+                for sub in sub_client.subscriptions.list():
+                    if sub.state and sub.state.lower() == 'enabled':
+                        sub_ids.append(sub.subscription_id)
+                logger.info("[ip_enrichment_bg] Found %d subscriptions for ARM queries", len(sub_ids))
+            except Exception as e:
+                logger.warning("[ip_enrichment_bg] Failed to list subscriptions: %s", e)
+
+            from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+            loop.run_until_complete(
+                AzureDiscoveryEngine.enrich_ips_background(
+                    azure_directory_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db_org_id=db_org_id,
+                    run_id=run_id,
+                    subscription_ids=sub_ids,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("[ip_enrichment_bg] Background enrichment failed: %s", e)
+        finally:
+            client_secret = None  # AG-116: zero secret after background work completes
+
+    t = threading.Thread(target=_run, name=f"ip_enrichment_bg_org{db_org_id}", daemon=True)
+    t.start()
+    logger.info("[ip_enrichment_bg] Background thread launched for org=%s connection=%s",
+                db_org_id, conn.get('id'))
+
+
+def _launch_signin_intelligence_background(db_org_id: int, conn: dict):
+    """Launch background thread to enrich SPNs with sign-in intelligence.
+
+    Runs after scan completes so it doesn't block the main pipeline (~205s savings).
+    Uses parallel API calls with semaphore throttling.
+    """
+    import threading
+
+    azure_directory_id = conn.get('azure_directory_id')
+    client_id = conn.get('client_id')
+    metadata = conn.get('metadata') or {}
+
+    from app.encryption import decrypt_field
+    raw_secret = metadata.get('client_secret')
+    client_secret = decrypt_field(raw_secret) if raw_secret else None
+
+    if not all([azure_directory_id, client_id, client_secret]):
+        logger.warning("[signin_intel_bg] Skipping — incomplete credentials for connection %s", conn.get('id'))
+        return
+
+    connection_id = conn.get('id')
+
+    def _run():
+        nonlocal client_secret
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Find latest completed run for this org
+            db = Database()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM discovery_runs
+                    WHERE organization_id = %s AND status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                """, (db_org_id,))
+                row = cursor.fetchone()
+                cursor.close()
+                run_id = row[0] if row else None
+            except Exception as e:
+                logger.error("[signin_intel_bg] Failed to find run_id: %s", e)
+                db.close()
+                return
+            finally:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
+            db.close()
+
+            if not run_id:
+                logger.warning("[signin_intel_bg] No completed run found for org=%s", db_org_id)
+                return
+
+            from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+            loop.run_until_complete(
+                AzureDiscoveryEngine.enrich_signin_intelligence_background(
+                    azure_directory_id=azure_directory_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    db_org_id=db_org_id,
+                    run_id=run_id,
+                    cloud_connection_id=connection_id,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("[signin_intel_bg] Background enrichment failed: %s", e)
+        finally:
+            client_secret = None  # AG-116: zero secret after background work completes
+
+    t = threading.Thread(target=_run, name=f"signin_intel_bg_org{db_org_id}", daemon=True)
+    t.start()
+    logger.info("[signin_intel_bg] Background thread launched for org=%s connection=%s",
+                db_org_id, conn.get('id'))
 
 
 def _save_compliance_snapshot(run_id: int, db: Database):
@@ -3025,8 +4908,17 @@ def check_scan_schedules():
                     for conn_row in connections:
                         if conn_row.get('cloud') == 'azure' and conn_row.get('enabled'):
                             try:
-                                engine = AzureDiscoveryEngine(conn_row, org_db)
-                                engine.discover()
+                                metadata = conn_row.get('metadata') or {}
+                                _cs = metadata.get('client_secret')
+                                engine = AzureDiscoveryEngine(
+                                    azure_directory_id=conn_row.get('azure_directory_id'),
+                                    client_id=conn_row.get('client_id'),
+                                    client_secret=_cs,
+                                    db_org_id=org_id,
+                                    cloud_connection_id=conn_row['id'],
+                                )
+                                _cs = None  # AG-116: zero after SDK init
+                                engine.run_discovery()
                                 ran = True
                             except Exception as de:
                                 logger.error(f"Discovery error for organization {org_id}: {de}")
@@ -3087,6 +4979,8 @@ def start_scheduler():
 
         logger.info("=" * 70)
         logger.info("INITIALIZING DISCOVERY SCHEDULER")
+        logger.info("[SCHEDULER] Post-processing gate: FIRST-SCAN-AWARE = True")
+        logger.info("[SCHEDULER] File: %s", __file__)
         logger.info("=" * 70)
 
         # Create scheduler (inside lock to prevent double-init race)
@@ -3523,18 +5417,24 @@ def _run_agent_classification(current_run_id, db_org_id, db):
     """
     from app.config import FEATURE_AI_AGENT_GOVERNANCE
     if not FEATURE_AI_AGENT_GOVERNANCE:
+        logger.info("[CLASSIFY] FEATURE_AI_AGENT_GOVERNANCE=False — skipping org=%s run=%s",
+                     db_org_id, current_run_id)
         return
 
+    logger.info("[CLASSIFY] Starting agent classification org=%s run=%s", db_org_id, current_run_id)
     try:
         from app.services.agent_classifier import classify_tenant
         stats = classify_tenant(db, db_org_id, run_id=current_run_id)
         logger.info(
-            "Agent classification for org %s: %d ai_agent, %d possible, %d unknown",
-            db_org_id, stats.get('ai_agent', 0),
+            "[CLASSIFY] Result org=%s run=%s: %d evaluated, %d ai_agent, %d possible, %d unknown (patterns v%s)",
+            db_org_id, current_run_id,
+            stats.get('total_evaluated', 0), stats.get('ai_agent', 0),
             stats.get('possible_ai_agent', 0), stats.get('unknown', 0),
+            stats.get('pattern_version', '?'),
         )
     except Exception as e:
-        logger.warning("Agent classification failed (non-blocking): %s", e)
+        logger.error("[CLASSIFY] FAILED org=%s run=%s: %s", db_org_id, current_run_id, e)
+        logger.exception(e)
 
 
 def _run_agent_sp_signin_enrichment(current_run_id, db_org_id, db):
@@ -3590,6 +5490,7 @@ def _run_agent_sp_signin_enrichment(current_run_id, db_org_id, db):
             client_id=client_id,
             client_secret=client_secret,
         )
+        client_secret = None  # AG-116: zero after SDK init — prevent memory retention
 
         from app.engines.discovery.activity_tracker import ActivityTracker
         tracker = ActivityTracker(credential)
@@ -3706,6 +5607,7 @@ def _run_nhi_signin_enrichment(current_run_id, db_org_id, db):
             client_id=client_id,
             client_secret=client_secret,
         )
+        client_secret = None  # AG-116: zero after SDK init — prevent memory retention
 
         from app.engines.discovery.activity_tracker import ActivityTracker
         tracker = ActivityTracker(credential)
