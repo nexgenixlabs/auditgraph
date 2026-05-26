@@ -231,7 +231,7 @@ jobs:
             az deployment group what-if \
               --resource-group ${{ vars.DEV_RG || 'cus-ag-nonprod-rg' }} \
               --template-file infra/containerapps-dev.bicep \
-              --parameters environmentName=dev-cae-ext \
+              --parameters environmentName=dev-cae \
               --no-pretty-print \
               2>&1 | tee /tmp/whatif.txt || true
             echo '```' >> $GITHUB_STEP_SUMMARY
