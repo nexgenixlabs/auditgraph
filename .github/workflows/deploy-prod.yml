@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AuditGraph — Deploy to Production
+#
+# Manual deployment only (workflow_dispatch).
+# Promote after successful Staging deployment and production sign-off.
+#
+# Prerequisites: Configure GitHub Environment "production" with:
+#   - Required reviewers (approval gate before deploy runs)
+#   - Required secrets for production Azure resources
+#   - Update env vars below with production resource names
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "Deploy — Production"
+
+on:
+  workflow_dispatch:
+
+env:
+  RG: eus2-ag-prod-rg
+  ACR: auditgraphcr
+  ACR_SERVER: auditgraphcr.azurecr.io
+  CAE: prod-cae-ext
+  API_APP: auditgraph-api
+  CLIENT_APP: auditgraph-app
+  ADMIN_APP: auditgraph-admin
+
+  # ──────────────────────────────────────────────────────
+  # Required GitHub Actions secrets (GitHub Environment: production):
+  #   AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_SUBSCRIPTION_ID / AZURE_TENANT_ID
+  #   PROD_DB_* / PROD_JWT_* / PROD_ADMIN_* / PROD_AZURE_*
+  #
+  # Recommended: Enable "Required reviewers" on the production
+  # environment in GitHub Settings → Environments for approval gate.
+  # ──────────────────────────────────────────────────────
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Production deployment placeholder
+        run: |
+          echo "═══════════════════════════════════════════════"
+          echo "Production deployment workflow"
+          echo "═══════════════════════════════════════════════"
+          echo ""
+          echo "This workflow will deploy to the Production environment."
+          echo "Infrastructure not yet provisioned."
+          echo ""
+          echo "To activate: replace this step with build + deploy"
+          echo "jobs from deploy-dev.yml, updated with PROD env vars"
+          echo "and production-specific Bicep template."
+          echo ""
+          echo "::notice::Production environment not yet provisioned. Configure infrastructure and update this workflow."

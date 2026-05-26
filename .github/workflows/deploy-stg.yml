@@ -1,0 +1,50 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AuditGraph — Deploy to Staging
+#
+# Manual deployment only (workflow_dispatch).
+# Promote after successful QA deployment and stakeholder sign-off.
+#
+# Prerequisites: Configure GitHub Environment "staging" with required secrets
+# and update the env vars below with STG-specific resource names.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "Deploy — Staging"
+
+on:
+  workflow_dispatch:
+
+env:
+  RG: eus2-ag-nonprod-rg
+  ACR: auditgraphcr
+  ACR_SERVER: auditgraphcr.azurecr.io
+  CAE: stg-cae-ext
+  API_APP: auditgraph-api-stg
+  CLIENT_APP: auditgraph-app-stg
+  ADMIN_APP: auditgraph-admin-stg
+
+  # ──────────────────────────────────────────────────────
+  # Required GitHub Actions secrets (GitHub Environment: staging):
+  #   AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_SUBSCRIPTION_ID / AZURE_TENANT_ID
+  #   STG_DB_* / STG_JWT_* / STG_ADMIN_* / STG_AZURE_*
+  # ──────────────────────────────────────────────────────
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Staging deployment placeholder
+        run: |
+          echo "═══════════════════════════════════════════════"
+          echo "Staging deployment workflow"
+          echo "═══════════════════════════════════════════════"
+          echo ""
+          echo "This workflow will deploy to the Staging environment."
+          echo "Infrastructure not yet provisioned."
+          echo ""
+          echo "To activate: replace this step with build + deploy"
+          echo "jobs from deploy-dev.yml, updated with STG env vars."
+          echo ""
+          echo "::notice::Staging environment not yet provisioned. Configure infrastructure and update this workflow."
