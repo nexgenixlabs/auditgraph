@@ -1,16 +1,14 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# AuditGraph — DevSecOps Security Scanning Pipeline
-#
-# Triggers: PRs to main/dev, pushes to main/dev, weekly schedule
+# AuditGraph — Code Security Scan (fast — runs on every PR)
 #
 # Stages:
-#   1. security-static-analysis   — Bandit (Python) + ESLint security (React)
-#   2. dependency-scan            — pip-audit + npm audit
-#   3. secret-scan                — Gitleaks
-#   4. container-scan             — Trivy on Docker images
-#   5. infra-scan                 — Checkov on Bicep IaC
-#   6. sbom-generation            — Syft SBOM + license audit
-#   7. security-report            — Aggregate results, PR comment, gate
+#   1. Static Analysis     — Bandit (Python SAST) + ESLint security (React)
+#   2. Dependency Scan     — pip-audit + npm audit
+#   3. Secret Scan         — Gitleaks
+#   4. Security Gate       — aggregate results, PR comment, pass/fail
+#
+# Container scanning, infra scanning, and SBOM generation are in a separate
+# workflow (container-infra-scan.yml) that runs weekly + before deployments.
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: "Security Scan"
@@ -18,15 +16,12 @@ name: "Security Scan"
 on:
   pull_request:
     branches: [main]
-  schedule:
-    # Weekly full scan — Sunday 03:00 UTC
-    - cron: "0 3 * * 0"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write        # PR comment with findings
-  security-events: write      # SARIF upload to GitHub Security tab
+  pull-requests: write
+  security-events: write
   actions: read
 
 concurrency:
@@ -55,7 +50,6 @@ jobs:
           pip install bandit[toml]
           mkdir -p ../security-reports
 
-          # Run Bandit — JSON for machine parsing, terminal for logs
           bandit -r app/ \
             -f json \
             -o ../security-reports/bandit-results.json \
@@ -64,7 +58,7 @@ jobs:
             -x ./app/tests \
             || true
 
-          # Also generate SARIF for GitHub Security tab
+          # SARIF for GitHub Security tab
           pip install bandit-sarif-formatter 2>/dev/null || true
           bandit -r app/ \
             -f sarif \
@@ -85,10 +79,8 @@ jobs:
               med  = len([r for r in results if r.get('issue_severity') == 'MEDIUM'])
               low  = len([r for r in results if r.get('issue_severity') == 'LOW'])
               print(f'{high} high, {med} medium, {low} low')
-              sys.exit(0)
           except Exception as e:
               print(f'Parse error: {e}')
-              sys.exit(0)
           ")
           echo "Python SAST: $ISSUES" >> $GITHUB_STEP_SUMMARY
 
@@ -105,14 +97,12 @@ jobs:
         run: |
           npm ci
 
-          # Install security-focused ESLint plugin
           npm install --save-dev \
             eslint \
             eslint-plugin-security \
             @microsoft/eslint-plugin-sdl \
             2>/dev/null || npm install --save-dev eslint eslint-plugin-security
 
-          # Create a security-focused ESLint flat config
           cat > eslint.security.config.mjs << 'ESLINT_CONFIG'
           import security from "eslint-plugin-security";
 
@@ -144,12 +134,10 @@ jobs:
             src/ \
             || true
 
-          # Summary
           ESLINT_COUNT=$(python3 -c "
           import json
           try:
               data = json.load(open('../security-reports/eslint-security.json'))
-              total = sum(len(f.get('messages',[])) for f in data)
               errors = sum(1 for f in data for m in f.get('messages',[]) if m.get('severity') == 2)
               warns  = sum(1 for f in data for m in f.get('messages',[]) if m.get('severity') == 1)
               print(f'{errors} errors, {warns} warnings')
@@ -201,12 +189,10 @@ jobs:
             --desc \
             || true
 
-          # Count and summarize
           python3 << 'PYEOF'
-          import json, sys
+          import json
           try:
               data = json.load(open("../security-reports/pip-audit.json"))
-              # pip-audit JSON can be a list of dicts or {"dependencies": [...]}
               vulns = data if isinstance(data, list) else data.get("dependencies", [])
               vuln_pkgs = [v for v in vulns if v.get("vulns")]
               total_vulns = sum(len(v.get("vulns", [])) for v in vuln_pkgs)
@@ -241,7 +227,6 @@ jobs:
 
           npm audit --json > ../security-reports/npm-audit.json 2>&1 || true
 
-          # Parse and summarize
           python3 << 'PYEOF'
           import json
           try:
@@ -280,7 +265,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # Full history for scanning all commits
+          fetch-depth: 0
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
@@ -330,7 +315,6 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      # Hard gate: fail the pipeline if secrets are found
       - name: Fail on secrets detected
         if: env.leaks_found != '0'
         run: |
@@ -338,277 +322,20 @@ jobs:
           exit 1
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Stage 4: Container Security Scanning
+  # Stage 4: Security Gate — Aggregate, PR Comment, Pass/Fail
   # ───────────────────────────────────────────────────────────────────────────
-  container-scan:
-    name: "Container Scan (Trivy)"
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - dockerfile: backend/Dockerfile
-            context: ./backend
-            image_name: auditgraph-api
-          - dockerfile: Dockerfile.app
-            context: .
-            image_name: auditgraph-app
-          - dockerfile: Dockerfile.admin
-            context: .
-            image_name: auditgraph-admin
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build Docker image (${{ matrix.image_name }})
-        run: |
-          docker build \
-            -f ${{ matrix.dockerfile }} \
-            -t ${{ matrix.image_name }}:scan \
-            ${{ matrix.context }}
-
-      - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: "${{ matrix.image_name }}:scan"
-          format: "json"
-          output: "trivy-${{ matrix.image_name }}.json"
-          severity: "CRITICAL,HIGH,MEDIUM"
-          exit-code: "0"        # Don't fail here — gate in security-report job
-
-      - name: Run Trivy SARIF scan
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: "${{ matrix.image_name }}:scan"
-          format: "sarif"
-          output: "trivy-${{ matrix.image_name }}.sarif"
-          severity: "CRITICAL,HIGH"
-        continue-on-error: true
-
-      - name: Trivy summary
-        if: always()
-        run: |
-          echo "### Trivy: ${{ matrix.image_name }}" >> $GITHUB_STEP_SUMMARY
-          python3 << 'PYEOF'
-          import json
-          try:
-              data = json.load(open("trivy-${{ matrix.image_name }}.json"))
-              results = data.get("Results", [])
-              counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-              for r in results:
-                  for v in r.get("Vulnerabilities", []):
-                      sev = v.get("Severity", "UNKNOWN").upper()
-                      counts[sev] = counts.get(sev, 0) + 1
-              for k, v in counts.items():
-                  if v > 0:
-                      print(f"  {k}: {v}")
-          except Exception as e:
-              print(f"  Parse error: {e}")
-          PYEOF
-
-      - name: Upload SARIF (Trivy)
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: "trivy-${{ matrix.image_name }}.sarif"
-          category: "trivy-${{ matrix.image_name }}"
-        continue-on-error: true
-
-      - name: Upload Trivy reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: "container-scan-${{ matrix.image_name }}"
-          path: "trivy-${{ matrix.image_name }}.json"
-          retention-days: 30
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Stage 5: Infrastructure Security (Bicep)
-  # ───────────────────────────────────────────────────────────────────────────
-  infra-scan:
-    name: "Infrastructure Scan (Checkov)"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Checkov on Bicep files
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: infra/
-          framework: bicep
-          output_format: json
-          output_file_path: security-reports/
-          soft_fail: true       # Don't block pipeline — report findings
-
-      - name: Checkov summary
-        if: always()
-        run: |
-          mkdir -p security-reports
-          echo "### Checkov (Bicep IaC)" >> $GITHUB_STEP_SUMMARY
-          if [ -f security-reports/results_json.json ]; then
-            python3 << 'PYEOF'
-          import json
-          try:
-              data = json.load(open("security-reports/results_json.json"))
-              passed = data.get("summary", {}).get("passed", 0)
-              failed = data.get("summary", {}).get("failed", 0)
-              skipped = data.get("summary", {}).get("skipped", 0)
-              print(f"Passed: {passed}, Failed: {failed}, Skipped: {skipped}")
-              if failed > 0:
-                  print("\nFailed checks:")
-                  for check in data.get("results", {}).get("failed_checks", [])[:10]:
-                      print(f"  - {check.get('check_id')}: {check.get('check_result', {}).get('evaluated_keys', [''])[0] if check.get('check_result') else ''} — {check.get('name', '')}")
-          except Exception as e:
-              print(f"Parse error: {e}")
-          PYEOF
-          else
-            echo "No Checkov results found (Bicep files may not have matching checks)" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload Checkov reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: infra-scan-report
-          path: security-reports/
-          retention-days: 30
-          if-no-files-found: ignore
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Stage 6: SBOM Generation + License Audit
-  # ───────────────────────────────────────────────────────────────────────────
-  sbom-generation:
-    name: "SBOM & License Audit"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Syft
-        uses: anchore/sbom-action/download-syft@v0
-        id: syft-install
-
-      - name: Generate SBOM (backend)
-        run: |
-          mkdir -p security-reports
-          syft dir:./backend \
-            -o spdx-json=security-reports/sbom-backend.spdx.json \
-            -o cyclonedx-json=security-reports/sbom-backend.cdx.json
-
-      - name: Generate SBOM (frontend)
-        run: |
-          syft dir:./frontend \
-            -o spdx-json=security-reports/sbom-frontend.spdx.json \
-            -o cyclonedx-json=security-reports/sbom-frontend.cdx.json
-
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: License compliance check (frontend)
-        working-directory: ./frontend
-        run: |
-          npm ci
-          npx license-checker \
-            --json \
-            --out ../security-reports/licenses-frontend.json \
-            || true
-
-          # Flag copyleft / problematic licenses
-          python3 << 'PYEOF'
-          import json
-          RESTRICTED = {"GPL-2.0", "GPL-3.0", "AGPL-3.0", "SSPL-1.0", "EUPL-1.1", "EUPL-1.2",
-                        "GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only"}
-          try:
-              data = json.load(open("../security-reports/licenses-frontend.json"))
-              flagged = []
-              for pkg, info in data.items():
-                  lic = info.get("licenses", "")
-                  for r in RESTRICTED:
-                      if r.lower() in lic.lower():
-                          flagged.append(f"{pkg}: {lic}")
-                          break
-              if flagged:
-                  print(f"WARNING: {len(flagged)} packages with restricted licenses:")
-                  for f in flagged:
-                      print(f"  - {f}")
-                  with open("../security-reports/license-flags.txt", "w") as out:
-                      out.write("\n".join(flagged))
-              else:
-                  print("No restricted licenses detected.")
-          except Exception as e:
-              print(f"License check error: {e}")
-          PYEOF
-
-      - name: License compliance check (backend)
-        run: |
-          pip install pip-licenses
-          pip install -r backend/requirements.txt 2>/dev/null || true
-          pip-licenses \
-            --format json \
-            --output-file security-reports/licenses-backend.json \
-            || true
-
-          python3 << 'PYEOF'
-          import json
-          RESTRICTED = {"GPL-2.0", "GPL-3.0", "AGPL-3.0", "SSPL-1.0",
-                        "GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only"}
-          try:
-              data = json.load(open("security-reports/licenses-backend.json"))
-              flagged = []
-              for pkg in data:
-                  lic = pkg.get("License", "")
-                  for r in RESTRICTED:
-                      if r.lower() in lic.lower():
-                          flagged.append(f"{pkg.get('Name')}: {lic}")
-                          break
-              if flagged:
-                  print(f"WARNING: {len(flagged)} packages with restricted licenses:")
-                  for f in flagged:
-                      print(f"  - {f}")
-              else:
-                  print("No restricted licenses detected in Python deps.")
-          except Exception as e:
-              print(f"License check error: {e}")
-          PYEOF
-
-      - name: SBOM summary
-        if: always()
-        run: |
-          echo "### SBOM & License Audit" >> $GITHUB_STEP_SUMMARY
-          echo "Generated SPDX + CycloneDX SBOMs for backend and frontend" >> $GITHUB_STEP_SUMMARY
-          if [ -f security-reports/license-flags.txt ]; then
-            echo "**License warnings:**" >> $GITHUB_STEP_SUMMARY
-            cat security-reports/license-flags.txt >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload SBOM artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-and-licenses
-          path: security-reports/
-          retention-days: 90
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Stage 7: Security Report — Aggregate, Gate, PR Comment
-  # ───────────────────────────────────────────────────────────────────────────
-  security-report:
-    name: "Security Gate & PR Report"
+  security-gate:
+    name: "Security Gate"
     runs-on: ubuntu-latest
     needs:
       - security-static-analysis
       - dependency-scan
       - secret-scan
-      - container-scan
-      - infra-scan
-      - sbom-generation
     if: always()
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all scan artifacts
+      - name: Download scan artifacts
         uses: actions/download-artifact@v4
         with:
           path: all-reports/
@@ -642,100 +369,53 @@ jobs:
           fi
 
           # ── Dependency scan ─────────────────────────────────
-          DEP_CRITICAL=0
-          DEP_HIGH=0
+          # Only fail on critical pip vulnerabilities with available fixes.
+          # npm high/critical from CRA transitive dev deps are build-time only
+          # and not shipped to production (nginx serves pre-built static files).
+          PIP_FIXABLE=0
           if [ -f all-reports/dependency-scan-reports/pip-audit.json ]; then
-            DEP_CRITICAL=$(python3 -c "
+            PIP_FIXABLE=$(python3 -c "
           import json
           try:
               data = json.load(open('all-reports/dependency-scan-reports/pip-audit.json'))
               vulns = data if isinstance(data, list) else data.get('dependencies', [])
-              count = sum(len(v.get('vulns',[])) for v in vulns if v.get('vulns'))
-              print(count)
+              fixable = sum(1 for v in vulns if v.get('vulns') and v.get('fix_versions'))
+              print(fixable)
           except: print(0)
           ")
           fi
+
+          NPM_CRITICAL=0
           if [ -f all-reports/dependency-scan-reports/npm-audit.json ]; then
-            NPM_CRIT=$(python3 -c "
+            NPM_CRITICAL=$(python3 -c "
           import json
           try:
               data = json.load(open('all-reports/dependency-scan-reports/npm-audit.json'))
-              meta = data.get('metadata',{}).get('vulnerabilities',{})
-              print(meta.get('critical',0) + meta.get('high',0))
+              print(data.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))
           except: print(0)
           ")
-            DEP_HIGH=$((DEP_HIGH + NPM_CRIT))
-          fi
-          TOTAL_DEP=$((DEP_CRITICAL + DEP_HIGH))
-          if [ "$TOTAL_DEP" -gt "0" ]; then
-            REPORT+="| Dependencies | :yellow_circle: WARN | $TOTAL_DEP vulnerability/ies found |\n"
-          else
-            REPORT+="| Dependencies | :green_circle: PASS | No known vulnerabilities |\n"
           fi
 
-          # ── Container scan ──────────────────────────────────
-          CONTAINER_STATUS="${{ needs.container-scan.result }}"
-          CONTAINER_CRIT=0
-          for f in all-reports/container-scan-*/trivy-*.json; do
-            if [ -f "$f" ]; then
-              COUNT=$(python3 -c "
-          import json
-          try:
-              data = json.load(open('$f'))
-              results = data.get('Results', [])
-              crit = sum(1 for r in results for v in r.get('Vulnerabilities',[]) if v.get('Severity','').upper() == 'CRITICAL')
-              print(crit)
-          except: print(0)
-          ")
-              CONTAINER_CRIT=$((CONTAINER_CRIT + COUNT))
+          if [ "$PIP_FIXABLE" -gt "0" ] || [ "$NPM_CRITICAL" -gt "0" ]; then
+            REPORT+="| Dependencies | :yellow_circle: WARN | pip fixable: $PIP_FIXABLE, npm critical: $NPM_CRITICAL |\n"
+            # Only hard-fail on pip fixable CVEs or npm critical (not high from CRA)
+            if [ "$PIP_FIXABLE" -gt "5" ] || [ "$NPM_CRITICAL" -gt "0" ]; then
+              GATE_FAILED=true
             fi
-          done
-          if [ "$CONTAINER_CRIT" -gt "0" ]; then
-            REPORT+="| Containers (Trivy) | :red_circle: FAIL | $CONTAINER_CRIT critical CVE(s) in images |\n"
-            GATE_FAILED=true
           else
-            REPORT+="| Containers (Trivy) | :green_circle: PASS | No critical CVEs |\n"
-          fi
-
-          # ── Infra scan ──────────────────────────────────────
-          INFRA_STATUS="${{ needs.infra-scan.result }}"
-          REPORT+="| Infrastructure (Checkov) | :large_blue_circle: INFO | Bicep scan complete |\n"
-
-          # ── SBOM ────────────────────────────────────────────
-          SBOM_STATUS="${{ needs.sbom-generation.result }}"
-          if [ "$SBOM_STATUS" = "success" ]; then
-            REPORT+="| SBOM & Licenses | :green_circle: PASS | SPDX + CycloneDX generated |\n"
-          else
-            REPORT+="| SBOM & Licenses | :yellow_circle: WARN | SBOM generation issue |\n"
+            REPORT+="| Dependencies | :green_circle: PASS | No actionable vulnerabilities |\n"
           fi
 
           REPORT+="\n"
 
-          # ── Gate decision ───────────────────────────────────
-          # Fail on: secrets detected OR critical container CVEs
-          # Also fail if high-severity vulns exceed threshold
-          #
-          # NOTE: Threshold raised from 5 → 30 (2026-03-26).
-          # Remaining ~26 vulns are all transitive dev dependencies of react-scripts (CRA),
-          # e.g. nth-check, serialize-javascript, postcss, webpack-dev-server, underscore.
-          # These are build-time only — NOT shipped to production (Docker images serve
-          # pre-built static files via nginx). Will be eliminated when CRA → Vite migration
-          # is completed. See: npm audit report for full breakdown.
-          TOTAL_HIGH=$((DEP_HIGH + CONTAINER_CRIT))
-          if [ "$TOTAL_HIGH" -gt "30" ]; then
-            REPORT+="**:stop_sign: Gate FAILED**: >30 high/critical vulnerabilities ($TOTAL_HIGH found)\n"
-            GATE_FAILED=true
-          fi
-
           if [ "$GATE_FAILED" = "true" ]; then
-            REPORT+="\n> :lock: **Security gate blocked this build.** Fix findings above before merging.\n"
+            REPORT+="> :lock: **Security gate blocked this PR.** Fix findings above before merging.\n"
             echo "gate_passed=false" >> $GITHUB_OUTPUT
           else
-            REPORT+="\n> :white_check_mark: **All security gates passed.**\n"
+            REPORT+="> :white_check_mark: **All security gates passed.**\n"
             echo "gate_passed=true" >> $GITHUB_OUTPUT
           fi
 
-          # Save report for PR comment
           echo -e "$REPORT" > security-summary.md
           cat security-summary.md >> $GITHUB_STEP_SUMMARY
           cat security-summary.md
@@ -747,7 +427,7 @@ jobs:
           header: security-scan
           path: security-summary.md
 
-      - name: Upload final security summary
+      - name: Upload security summary
         if: always()
         uses: actions/upload-artifact@v4
         with:
