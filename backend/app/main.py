@@ -1028,10 +1028,12 @@ def create_app():
         _db_init = None
 
     if _db_init:
-        # Increase statement_timeout for startup DDL (default 30s is too short for large tables)
+        # Increase timeouts for startup DDL (default 30s statement_timeout + server-level
+        # lock_timeout are too short when old revisions hold locks on tables)
         try:
             _st_cur = _db_init.conn.cursor()
             _st_cur.execute("SET statement_timeout = '120s'")
+            _st_cur.execute("SET lock_timeout = '120s'")
             _st_cur.close()
             _db_init.conn.commit()
         except Exception:
