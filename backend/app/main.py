@@ -490,6 +490,11 @@ from app.api.handlers import (
     delete_agent_delegation,
     get_agent_risk_summary,
     get_agent_evidence,
+    get_ai_agents_enriched,
+    get_ai_agent_investigate,
+    get_ai_agents_permissions,
+    get_ai_security_stats,
+    get_ai_permissions_overview,
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -2047,6 +2052,27 @@ def create_app():
     @app.get("/api/identities/<identity_id>/ai-evidence")
     def agent_evidence_route(identity_id):
         return get_agent_evidence(identity_id)
+
+    # ── MVP-1: AI Identity Governance — Enriched Endpoints ──
+    @app.get("/api/ai-agents/enriched")
+    def ai_agents_enriched_route():
+        return get_ai_agents_enriched()
+
+    @app.get("/api/ai-agents/<identity_id>/investigate")
+    def ai_agent_investigate_route(identity_id):
+        return get_ai_agent_investigate(identity_id)
+
+    @app.get("/api/ai-agents/<identity_id>/permissions")
+    def ai_agents_permissions_route(identity_id):
+        return get_ai_agents_permissions(identity_id)
+
+    @app.get("/api/ai-security/stats")
+    def ai_security_stats_route():
+        return get_ai_security_stats()
+
+    @app.get("/api/ai-security/permissions")
+    def ai_permissions_overview_route():
+        return get_ai_permissions_overview()
 
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')

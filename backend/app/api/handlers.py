@@ -38504,6 +38504,944 @@ def _build_evidence_text(signal_type, platform, display_name, app_id):
 
 
 # ============================================================
+# MVP-1: AI Identity Governance — Enriched Endpoints
+# ============================================================
+
+
+def get_ai_agents_enriched():
+    """GET /api/ai-agents/enriched — AI agents with access-type columns.
+
+    Returns the same data as get_agent_identities() plus per-identity
+    access classification: model_access, key_vault_access, data_access,
+    telemetry, internet_egress, and risk score breakdown.
+
+    Query params: same as /api/agent-identities + include_possible.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        aggregate_access_levels,
+        compute_ai_risk_dimensions,
+        compute_ai_risk_score,
+        severity_from_score,
+    )
+
+    db = _db()
+    try:
+        page = max(1, _safe_query_int('page', 1))
+        per_page = min(500, max(1, _safe_query_int('per_page', 100)))
+        include_possible = request.args.get('include_possible', 'true').lower() == 'true'
+
+        type_filter = "ac.agent_identity_type = 'ai_agent'"
+        if include_possible:
+            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')"
+
+        platform = request.args.get('platform', 'all')
+        platform_filter = ""
+        params = []
+        if platform and platform != 'all':
+            platform_filter = " AND ac.detected_platform = %s"
+            params.append(platform)
+
+        cursor = db.conn.cursor()
+
+        # Count
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) i.id
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+        """, params)
+        total = _scalar(cursor, 0)
+
+        offset = (page - 1) * per_page
+        cursor.execute(f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (i.identity_id)
+                    i.id as db_id,
+                    i.identity_id,
+                    i.display_name,
+                    COALESCE(i.identity_category, '') as identity_category,
+                    i.risk_score,
+                    i.risk_level,
+                    i.activity_status,
+                    i.last_sign_in,
+                    i.credential_count,
+                    i.credential_risk,
+                    i.owner_display_name,
+                    i.privilege_tier,
+                    i.blast_radius_score,
+                    i.last_activity_date,
+                    i.last_activity_source,
+                    ac.agent_identity_type,
+                    ac.classification_confidence,
+                    ac.classification_reason,
+                    ac.detected_platform,
+                    ac.last_service_principal_sign_in
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT %s OFFSET %s
+        """, params + [per_page, offset])
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Batch fetch role assignments for all identities
+        db_ids = []
+        id_map = {}  # db_id -> identity_id
+        for row in rows:
+            item = dict(zip(columns, row))
+            db_ids.append(item['db_id'])
+            id_map[item['db_id']] = item['identity_id']
+
+        # Fetch role assignments for all agents in one query
+        role_data = {}  # identity_id -> list of role dicts
+        if db_ids:
+            try:
+                cursor.execute("SAVEPOINT _enriched_roles")
+                cursor.execute("""
+                    SELECT ra.identity_db_id, ra.role_name, ra.scope,
+                           ra.last_used_at,
+                           COUNT(ra.id) OVER (PARTITION BY ra.identity_db_id) as total_roles
+                    FROM role_assignments ra
+                    WHERE ra.identity_db_id = ANY(%s)
+                """, (db_ids,))
+                for r in cursor.fetchall():
+                    iid = id_map.get(r[0], str(r[0]))
+                    if iid not in role_data:
+                        role_data[iid] = []
+                    role_data[iid].append({
+                        'role_name': r[1] or '',
+                        'scope': r[2] or '',
+                        'last_used_at': r[3].isoformat() if r[3] else None,
+                    })
+                cursor.execute("RELEASE SAVEPOINT _enriched_roles")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT _enriched_roles")
+                except Exception:
+                    pass
+
+        cursor.close()
+
+        items = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            identity_id = item['identity_id']
+
+            # Serialize datetimes
+            for dt_field in ('last_sign_in', 'last_service_principal_sign_in', 'last_activity_date'):
+                if item.get(dt_field) and hasattr(item[dt_field], 'isoformat'):
+                    item[dt_field] = item[dt_field].isoformat()
+
+            item['risk_score'] = int(item.get('risk_score') or 0)
+            item['credential_count'] = int(item.get('credential_count') or 0)
+            item['blast_radius_score'] = int(item.get('blast_radius_score') or 0) if item.get('blast_radius_score') is not None else None
+            item['classification_confidence'] = float(item.get('classification_confidence') or 0.0)
+
+            # Compute access levels from role assignments
+            roles = role_data.get(identity_id, [])
+            access_levels = aggregate_access_levels(roles)
+            item['model_access'] = access_levels['model_access']
+            item['key_vault_access'] = access_levels['key_vault_access']
+            item['data_access'] = access_levels['data_access']
+            item['telemetry'] = access_levels['telemetry']
+            item['internet_egress'] = access_levels['internet_egress']
+
+            # AI-specific risk breakdown
+            dimensions = compute_ai_risk_dimensions(access_levels)
+            ai_risk = compute_ai_risk_score(dimensions)
+            item['ai_risk_score'] = ai_risk
+            item['ai_risk_severity'] = severity_from_score(ai_risk)
+            item['risk_dimensions'] = {
+                k: {'score': round(v, 2), 'level': access_levels.get(k, 'none')}
+                for k, v in dimensions.items()
+            }
+
+            # Effective last active (same logic as get_agent_identities)
+            last_act = item.get('last_activity_date')
+            sp_sign_in = item.get('last_service_principal_sign_in')
+            last_sign = item.get('last_sign_in')
+            if last_act:
+                item['effective_last_active'] = last_act
+            elif last_sign:
+                item['effective_last_active'] = last_sign
+            elif sp_sign_in:
+                item['effective_last_active'] = sp_sign_in
+            else:
+                item['effective_last_active'] = None
+
+            # Role summary
+            item['role_count'] = len(roles)
+
+            # Remove internal db_id from response
+            item.pop('db_id', None)
+            items.append(item)
+
+        return jsonify({
+            'items': items,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+        })
+    except Exception as e:
+        logger.error("get_ai_agents_enriched failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_agent_investigate(identity_id):
+    """GET /api/ai-agents/<id>/investigate — full investigation data for AI drawer.
+
+    Returns 7 sections:
+    1. Identity Summary
+    2. Permission Intelligence (access categories + roles)
+    3. Blast Radius (reachable resources, subscriptions)
+    4. Evidence Chain (classification signals)
+    5. AI Permission Graph data (nodes + edges for @xyflow/react)
+    6. Attack Path Preview
+    7. Remediation Recommendations
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        aggregate_access_levels,
+        compute_ai_risk_dimensions,
+        compute_ai_risk_score,
+        severity_from_score,
+        confidence_label,
+        classify_role_access,
+        REMEDIATION_P0_THRESHOLD,
+        REMEDIATION_P1_THRESHOLD,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        # Resolve identity
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.identity_type,
+                   COALESCE(i.identity_category, '') as identity_category,
+                   i.risk_score, i.risk_level, i.activity_status,
+                   i.last_sign_in, i.credential_count, i.credential_risk,
+                   i.credential_expiration, i.owner_display_name, i.owner_count,
+                   i.enabled, i.app_id, i.object_id, i.privilege_tier,
+                   i.blast_radius_score, i.primary_subscription_id,
+                   i.additional_subscription_count, i.pim_eligible_count,
+                   i.ca_coverage_status, i.last_activity_date, i.last_activity_source,
+                   i.agent_identity_type
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        cols = [desc[0] for desc in cursor.description]
+        identity = dict(zip(cols, ident))
+        db_id = identity['id']
+
+        # Serialize datetimes
+        for dt_field in ('last_sign_in', 'credential_expiration', 'last_activity_date'):
+            if identity.get(dt_field) and hasattr(identity[dt_field], 'isoformat'):
+                identity[dt_field] = identity[dt_field].isoformat()
+
+        # ── 1. Identity Summary ──
+        # Get classification info
+        cursor.execute("""
+            SELECT agent_identity_type, classification_confidence,
+                   classification_reason, detected_platform, pattern_version,
+                   classified_at
+            FROM agent_classifications
+            WHERE identity_db_id = %s
+            ORDER BY classified_at DESC LIMIT 1
+        """, (db_id,))
+        class_row = cursor.fetchone()
+        classification = None
+        if class_row:
+            classification = {
+                'agent_identity_type': class_row[0],
+                'confidence': float(class_row[1] or 0),
+                'confidence_label': confidence_label(float(class_row[1] or 0)),
+                'reason': class_row[2],
+                'platform': class_row[3],
+                'pattern_version': class_row[4],
+                'classified_at': class_row[5].isoformat() if class_row[5] else None,
+            }
+
+        summary = {
+            'identity_id': identity_id,
+            'display_name': identity.get('display_name'),
+            'identity_category': identity.get('identity_category'),
+            'identity_type': identity.get('identity_type'),
+            'risk_score': int(identity.get('risk_score') or 0),
+            'risk_level': identity.get('risk_level'),
+            'activity_status': identity.get('activity_status'),
+            'enabled': identity.get('enabled'),
+            'owner_display_name': identity.get('owner_display_name'),
+            'owner_count': int(identity.get('owner_count') or 0),
+            'credential_count': int(identity.get('credential_count') or 0),
+            'credential_risk': identity.get('credential_risk'),
+            'privilege_tier': identity.get('privilege_tier'),
+            'classification': classification,
+        }
+
+        # ── 2. Permission Intelligence ──
+        cursor.execute("""
+            SELECT ra.id, ra.role_name, ra.scope, ra.scope_type,
+                   ra.resource_type, ra.resource_name, ra.last_used_at,
+                   ra.risk_level as role_risk_level
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = %s
+        """, (db_id,))
+        ra_cols = [desc[0] for desc in cursor.description]
+        ra_rows = cursor.fetchall()
+
+        roles = []
+        role_dicts_for_agg = []
+        for ra_row in ra_rows:
+            ra = dict(zip(ra_cols, ra_row))
+            if ra.get('last_used_at') and hasattr(ra['last_used_at'], 'isoformat'):
+                ra['last_used_at'] = ra['last_used_at'].isoformat()
+            # Classify this role into access categories
+            access_cats = classify_role_access(ra.get('role_name', ''), ra.get('scope', ''))
+            ra['access_categories'] = {k: v for k, v in access_cats.items() if v is not None}
+            roles.append(ra)
+            role_dicts_for_agg.append({'role_name': ra.get('role_name', ''), 'scope': ra.get('scope', '')})
+
+        access_levels = aggregate_access_levels(role_dicts_for_agg)
+        dimensions = compute_ai_risk_dimensions(access_levels)
+        ai_risk = compute_ai_risk_score(dimensions)
+
+        permissions = {
+            'roles': roles,
+            'role_count': len(roles),
+            'access_levels': access_levels,
+            'risk_dimensions': {
+                k: {'score': round(v, 2), 'level': access_levels.get(k, 'none')}
+                for k, v in dimensions.items()
+            },
+            'ai_risk_score': ai_risk,
+            'ai_risk_severity': severity_from_score(ai_risk),
+        }
+
+        # ── 3. Blast Radius ──
+        blast_radius = None
+        try:
+            br_result = db.get_blast_radius_for_identity(db_id)
+            if br_result:
+                blast_radius = br_result
+        except Exception:
+            pass
+
+        if not blast_radius:
+            blast_radius = {
+                'reachable_resource_count': 0,
+                'reachable_subscription_count': 0,
+                'reachable_resource_group_count': 0,
+                'sensitive_resource_count': 0,
+                'privilege_escalation_paths': 0,
+                'identity_exposure_level': 'Unknown',
+                'risk_score': 0,
+                'resource_breakdown': {},
+            }
+
+        # ── 4. Evidence Chain ──
+        # Reuse the evidence logic from get_agent_evidence
+        evidence_signals = []
+        if classification:
+            signal_type = (classification.get('reason') or '').split(':')[0].strip() or 'unknown'
+            evidence_signals.append({
+                'signal_type': signal_type,
+                'confidence': classification.get('confidence', 0),
+                'platform': classification.get('platform'),
+                'evidence_text': _build_evidence_text(
+                    signal_type,
+                    classification.get('platform'),
+                    identity.get('display_name'),
+                    identity.get('app_id'),
+                ),
+                'is_primary': True,
+            })
+
+            # Check for corroborating role signals
+            from app.engines.discovery.agent_pattern_loader import match_roles, _role_names_set, _scope_patterns_lower
+            if role_dicts_for_agg:
+                role_platform, role_conf = match_roles(role_dicts_for_agg)
+                if role_platform and signal_type != 'role_scope_match':
+                    ai_role_names = [r['role_name'] for r in role_dicts_for_agg if r['role_name'] in _role_names_set]
+                    if not ai_role_names:
+                        # Check scope patterns
+                        for r in role_dicts_for_agg:
+                            for pat in _scope_patterns_lower:
+                                if pat in (r.get('scope', '') or '').lower():
+                                    ai_role_names.append(r['role_name'])
+                                    break
+                    if ai_role_names:
+                        evidence_signals.append({
+                            'signal_type': 'role_scope_match',
+                            'confidence': role_conf,
+                            'platform': role_platform,
+                            'evidence_text': f"Has {len(ai_role_names)} AI-related role(s): {', '.join(ai_role_names[:3])}",
+                            'is_primary': False,
+                        })
+
+        evidence = {
+            'signals': evidence_signals,
+            'signal_count': len(evidence_signals),
+        }
+
+        # ── 5. AI Permission Graph ──
+        # Build @xyflow/react compatible nodes and edges
+        graph_nodes = []
+        graph_edges = []
+
+        # Center node: the identity
+        graph_nodes.append({
+            'id': f'identity-{identity_id}',
+            'type': 'identity',
+            'data': {
+                'label': identity.get('display_name', 'Unknown'),
+                'identity_category': identity.get('identity_category'),
+                'risk_score': int(identity.get('risk_score') or 0),
+                'platform': classification.get('platform') if classification else None,
+            },
+            'position': {'x': 0, 'y': 0},
+        })
+
+        # Role nodes + edges
+        seen_roles = set()
+        for i, ra in enumerate(roles):
+            role_name = ra.get('role_name', f'Role-{i}')
+            role_key = f"role-{role_name.replace(' ', '_')}-{i}"
+            if role_key not in seen_roles:
+                seen_roles.add(role_key)
+                graph_nodes.append({
+                    'id': role_key,
+                    'type': 'role',
+                    'data': {
+                        'label': role_name,
+                        'scope': ra.get('scope', ''),
+                        'last_used_at': ra.get('last_used_at'),
+                        'access_categories': ra.get('access_categories', {}),
+                    },
+                    'position': {'x': 0, 'y': 0},
+                })
+                graph_edges.append({
+                    'id': f'edge-identity-{role_key}',
+                    'source': f'identity-{identity_id}',
+                    'target': role_key,
+                    'type': 'assigned_role',
+                    'data': {'role_name': role_name},
+                })
+
+                # Resource node from scope
+                scope = ra.get('scope', '')
+                if scope:
+                    resource_key = f"resource-{hash(scope) & 0xFFFFFFFF}"
+                    if resource_key not in seen_roles:
+                        seen_roles.add(resource_key)
+                        # Extract resource name from scope
+                        scope_parts = scope.split('/')
+                        resource_label = scope_parts[-1] if scope_parts else scope
+                        graph_nodes.append({
+                            'id': resource_key,
+                            'type': 'resource',
+                            'data': {
+                                'label': resource_label,
+                                'scope': scope,
+                                'resource_type': ra.get('resource_type', ''),
+                            },
+                            'position': {'x': 0, 'y': 0},
+                        })
+                    graph_edges.append({
+                        'id': f'edge-{role_key}-{resource_key}',
+                        'source': role_key,
+                        'target': resource_key,
+                        'type': 'grants_access',
+                    })
+
+        graph = {
+            'nodes': graph_nodes,
+            'edges': graph_edges,
+            'node_count': len(graph_nodes),
+            'edge_count': len(graph_edges),
+        }
+
+        # ── 6. Attack Path Preview ──
+        attack_paths = []
+        try:
+            cursor2 = db.conn.cursor()
+            cursor2.execute("SAVEPOINT _inv_attacks")
+            cursor2.execute("""
+                SELECT path_id, severity, risk_score, path_nodes,
+                       source_entity_id, target_entity_id,
+                       source_display_name, target_display_name,
+                       technique_id, technique_name
+                FROM attack_paths
+                WHERE source_entity_id = %s
+                   OR target_entity_id = %s
+                ORDER BY risk_score DESC
+                LIMIT 10
+            """, (identity_id, identity_id))
+            ap_cols = [desc[0] for desc in cursor2.description]
+            for ap_row in cursor2.fetchall():
+                ap = dict(zip(ap_cols, ap_row))
+                if ap.get('path_nodes') and isinstance(ap['path_nodes'], str):
+                    import json as _json
+                    try:
+                        ap['path_nodes'] = _json.loads(ap['path_nodes'])
+                    except (ValueError, TypeError):
+                        pass
+                attack_paths.append(ap)
+            cursor2.execute("RELEASE SAVEPOINT _inv_attacks")
+            cursor2.close()
+        except Exception:
+            try:
+                cursor2.execute("ROLLBACK TO SAVEPOINT _inv_attacks")
+            except Exception:
+                pass
+
+        # ── 7. Remediation Recommendations ──
+        risk_score = int(identity.get('risk_score') or 0)
+        remediation = {'actions': [], 'priority': 'p2'}
+        if risk_score >= REMEDIATION_P0_THRESHOLD:
+            remediation['priority'] = 'p0'
+            remediation['actions'].append({
+                'priority': 0,
+                'description': 'Immediate review — AI agent identity in Critical risk tier.',
+                'auto_fixable': False,
+            })
+        elif risk_score >= REMEDIATION_P1_THRESHOLD:
+            remediation['priority'] = 'p1'
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'Review elevated-risk AI agent identity within this sprint.',
+                'auto_fixable': False,
+            })
+
+        # Credential-specific recommendations
+        cred_risk = identity.get('credential_risk', '')
+        if cred_risk == 'expired':
+            remediation['actions'].append({
+                'priority': 0,
+                'description': 'Rotate expired credential for AI agent identity.',
+                'auto_fixable': True,
+            })
+        elif cred_risk == 'expiring_soon':
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'Schedule credential rotation before expiry.',
+                'auto_fixable': True,
+            })
+
+        # Overprivileged access recommendations
+        if access_levels.get('model_access') in ('owner', 'contributor'):
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'AI agent has elevated model access — review for least privilege.',
+                'auto_fixable': False,
+            })
+        if access_levels.get('key_vault_access') in ('administrator', 'secrets_officer'):
+            remediation['actions'].append({
+                'priority': 0,
+                'description': 'AI agent has Key Vault write access — high credential exfiltration risk.',
+                'auto_fixable': False,
+            })
+
+        # Owner check
+        if (identity.get('owner_count') or 0) == 0:
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'No owner assigned — orphaned AI agent identity.',
+                'auto_fixable': False,
+            })
+
+        cursor.close()
+
+        return jsonify({
+            'summary': summary,
+            'permissions': permissions,
+            'blast_radius': blast_radius,
+            'evidence': evidence,
+            'graph': graph,
+            'attack_paths': attack_paths,
+            'remediation': remediation,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_agent_investigate failed for %s: %s", identity_id, e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_agents_permissions(identity_id):
+    """GET /api/ai-agents/<id>/permissions — detailed permission intelligence.
+
+    Returns all role assignments with access categorization and risk scoring.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        classify_role_access,
+        aggregate_access_levels,
+        compute_ai_risk_dimensions,
+        compute_ai_risk_score,
+        severity_from_score,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        # Resolve identity
+        cursor.execute("""
+            SELECT i.id, i.display_name
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = ident[0]
+
+        # Get all role assignments
+        cursor.execute("""
+            SELECT ra.id, ra.role_name, ra.role_definition_name,
+                   ra.scope, ra.scope_type,
+                   ra.resource_type, ra.resource_name,
+                   ra.last_used_at, ra.risk_level,
+                   ra.why_critical
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = %s
+            ORDER BY ra.role_name
+        """, (db_id,))
+        ra_cols = [desc[0] for desc in cursor.description]
+        ra_rows = cursor.fetchall()
+        cursor.close()
+
+        roles = []
+        role_dicts_for_agg = []
+        for ra_row in ra_rows:
+            ra = dict(zip(ra_cols, ra_row))
+            if ra.get('last_used_at') and hasattr(ra['last_used_at'], 'isoformat'):
+                ra['last_used_at'] = ra['last_used_at'].isoformat()
+            access_cats = classify_role_access(ra.get('role_name', ''), ra.get('scope', ''))
+            ra['access_categories'] = {k: v for k, v in access_cats.items() if v is not None}
+            roles.append(ra)
+            role_dicts_for_agg.append({'role_name': ra.get('role_name', ''), 'scope': ra.get('scope', '')})
+
+        access_levels = aggregate_access_levels(role_dicts_for_agg)
+        dimensions = compute_ai_risk_dimensions(access_levels)
+        ai_risk = compute_ai_risk_score(dimensions)
+
+        return jsonify({
+            'identity_id': identity_id,
+            'display_name': ident[1],
+            'roles': roles,
+            'role_count': len(roles),
+            'access_levels': access_levels,
+            'risk_dimensions': {
+                k: {'score': round(v, 2), 'level': access_levels.get(k, 'none')}
+                for k, v in dimensions.items()
+            },
+            'ai_risk_score': ai_risk,
+            'ai_risk_severity': severity_from_score(ai_risk),
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_agents_permissions failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_security_stats():
+    """GET /api/ai-security/stats — aggregate stats for the AI Security section.
+
+    Returns counts, risk distributions, and top-risk agents for dashboards.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import severity_from_score
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Agent counts by type
+        cursor.execute("""
+            SELECT agent_identity_type, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) ac.agent_identity_type
+                FROM agent_classifications ac
+                JOIN identities i ON i.id = ac.identity_db_id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY agent_identity_type
+        """)
+        type_counts = {row[0]: row[1] for row in cursor.fetchall()}
+
+        # Risk distribution
+        cursor.execute("""
+            SELECT risk_level, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) i.risk_level
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY risk_level
+        """)
+        risk_dist = {row[0] or 'unknown': row[1] for row in cursor.fetchall()}
+
+        # Platform distribution
+        cursor.execute("""
+            SELECT detected_platform, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) ac.detected_platform
+                FROM agent_classifications ac
+                JOIN identities i ON i.id = ac.identity_db_id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY detected_platform
+            ORDER BY count DESC
+        """)
+        platform_dist = {row[0] or 'unknown': row[1] for row in cursor.fetchall()}
+
+        # Top 5 highest risk AI agents
+        cursor.execute("""
+            SELECT * FROM (
+                SELECT DISTINCT ON (i.identity_id)
+                    i.identity_id,
+                    i.display_name,
+                    i.risk_score,
+                    i.risk_level,
+                    ac.detected_platform,
+                    ac.classification_confidence
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT 5
+        """)
+        top_cols = [desc[0] for desc in cursor.description]
+        top_risk = [dict(zip(top_cols, row)) for row in cursor.fetchall()]
+        for item in top_risk:
+            item['risk_score'] = int(item.get('risk_score') or 0)
+            item['classification_confidence'] = float(item.get('classification_confidence') or 0.0)
+
+        # Average risk score
+        cursor.execute("""
+            SELECT AVG(risk_score)::int FROM (
+                SELECT DISTINCT ON (i.identity_id) i.risk_score
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+        """)
+        avg_risk = _scalar(cursor, 0)
+
+        cursor.close()
+
+        total_agents = type_counts.get('ai_agent', 0) + type_counts.get('possible_ai_agent', 0)
+
+        return jsonify({
+            'total_ai_agents': total_agents,
+            'total_ai_privileged_humans': type_counts.get('ai_privileged_human', 0),
+            'type_counts': type_counts,
+            'risk_distribution': risk_dist,
+            'platform_distribution': platform_dist,
+            'top_risk_agents': top_risk,
+            'avg_risk_score': avg_risk or 0,
+            'avg_risk_severity': severity_from_score(float(avg_risk or 0)),
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_security_stats failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_permissions_overview():
+    """GET /api/ai-security/permissions — org-wide AI permission analysis.
+
+    Returns aggregated permission data across all AI agents for the
+    AI Permissions page.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        classify_role_access,
+        MODEL_ACCESS_ROLES,
+        KEY_VAULT_ACCESS_ROLES,
+        DATA_ACCESS_ROLES,
+        TELEMETRY_ACCESS_ROLES,
+        BROAD_PRIVILEGE_ROLES,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Get all AI agent DB ids
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id) i.id, i.identity_id, i.display_name, i.risk_score
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agents = cursor.fetchall()
+        agent_db_ids = [a[0] for a in agents]
+
+        if not agent_db_ids:
+            cursor.close()
+            return jsonify({
+                'agents_with_model_access': 0,
+                'agents_with_key_vault_access': 0,
+                'agents_with_data_access': 0,
+                'agents_with_telemetry': 0,
+                'agents_with_internet_egress': 0,
+                'agents_with_broad_privilege': 0,
+                'role_frequency': [],
+                'overprivileged_agents': [],
+            })
+
+        # Get all role assignments for these agents
+        cursor.execute("""
+            SELECT ra.identity_db_id, ra.role_name, ra.scope
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = ANY(%s)
+        """, (agent_db_ids,))
+
+        # Count agents per access category
+        agents_model = set()
+        agents_kv = set()
+        agents_data = set()
+        agents_telemetry = set()
+        agents_egress = set()
+        agents_broad = set()
+        role_freq = {}
+
+        for row in cursor.fetchall():
+            db_id_val, role_name, scope = row[0], row[1] or '', row[2] or ''
+            cats = classify_role_access(role_name, scope)
+
+            if cats['model_access']:
+                agents_model.add(db_id_val)
+            if cats['key_vault_access']:
+                agents_kv.add(db_id_val)
+            if cats['data_access']:
+                agents_data.add(db_id_val)
+            if cats['telemetry']:
+                agents_telemetry.add(db_id_val)
+            if cats['internet_egress']:
+                agents_egress.add(db_id_val)
+            if role_name in BROAD_PRIVILEGE_ROLES:
+                agents_broad.add(db_id_val)
+
+            role_freq[role_name] = role_freq.get(role_name, 0) + 1
+
+        # Sort role frequency
+        sorted_roles = sorted(role_freq.items(), key=lambda x: x[1], reverse=True)[:20]
+
+        # Find overprivileged agents (broad privilege + AI classification)
+        overprivileged = []
+        agent_map = {a[0]: {'identity_id': a[1], 'display_name': a[2], 'risk_score': int(a[3] or 0)} for a in agents}
+        for db_id_val in agents_broad:
+            if db_id_val in agent_map:
+                overprivileged.append(agent_map[db_id_val])
+        overprivileged.sort(key=lambda x: x['risk_score'], reverse=True)
+
+        cursor.close()
+
+        return jsonify({
+            'agents_with_model_access': len(agents_model),
+            'agents_with_key_vault_access': len(agents_kv),
+            'agents_with_data_access': len(agents_data),
+            'agents_with_telemetry': len(agents_telemetry),
+            'agents_with_internet_egress': len(agents_egress),
+            'agents_with_broad_privilege': len(agents_broad),
+            'total_agents': len(agents),
+            'role_frequency': [{'role_name': r, 'count': c} for r, c in sorted_roles],
+            'overprivileged_agents': overprivileged[:10],
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_permissions_overview failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
 # Phase 2A: Entra Group Scanner
 # ============================================================
 

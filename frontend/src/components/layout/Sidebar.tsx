@@ -147,6 +147,15 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
+        label: 'AI Security',
+        color: '#8b5cf6',
+        items: [
+          { to: '/ai-identity-graph', label: 'AI Identity Graph', icon: agentBotIcon },
+          { to: '/ai-agents', label: 'AI Agents', icon: agentBotIcon },
+          { to: '/ai-permissions', label: 'AI Permissions', icon: effectiveAccessIcon },
+        ],
+      },
+      {
         label: 'Attack Surface',
         color: '#dc2626',
         items: [

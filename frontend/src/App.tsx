@@ -51,6 +51,9 @@ import AppRegistrations from './pages/AppRegistrations';
 import IdentityCorrelation from './pages/IdentityCorrelation';
 import WorkloadIdentities from './pages/WorkloadIdentities';
 import AIAgents from './pages/AIAgents';
+import AIIdentityGraph from './pages/AIIdentityGraph';
+import AIAgentsStandalone from './pages/AIAgentsStandalone';
+import AIPermissions from './pages/AIPermissions';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import ClientBilling from './pages/ClientBilling';
@@ -330,7 +333,9 @@ function AppContent() {
                   <Route path="/identities" element={<Navigate to="/identity-explorer/all" replace />} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-                  <Route path="/ai-agents" element={<Navigate to="/identity-explorer/ai-agents" replace />} />
+                  <Route path="/ai-agents" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAgentsStandalone /></ErrorBoundary>} />
+                  <Route path="/ai-identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIIdentityGraph /></ErrorBoundary>} />
+                  <Route path="/ai-permissions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIPermissions /></ErrorBoundary>} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
                   <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />
