@@ -204,9 +204,34 @@ jobs:
             azureClientId=${{ secrets.DEV_AZURE_CLIENT_ID }}
             azureClientSecret=${{ secrets.DEV_AZURE_CLIENT_SECRET }}
 
+      - name: Deactivate old revisions (prevent zombie lock contention)
+        run: |
+          for APP_NAME in ${{ env.API_APP }} ${{ env.CLIENT_APP }} ${{ env.ADMIN_APP }}; do
+            echo "=== Cleaning up old revisions for $APP_NAME ==="
+            LATEST=$(az containerapp revision list -n "$APP_NAME" -g ${{ env.RG }} \
+              --query "[0].name" -o tsv 2>/dev/null || echo "")
+            if [ -z "$LATEST" ]; then
+              echo "  No revisions found for $APP_NAME, skipping"
+              continue
+            fi
+            echo "  Latest revision: $LATEST"
+            # Deactivate all non-latest revisions
+            az containerapp revision list -n "$APP_NAME" -g ${{ env.RG }} \
+              --query "[].name" -o tsv 2>/dev/null | while read REV; do
+              if [ "$REV" != "$LATEST" ] && [ -n "$REV" ]; then
+                echo "  Deactivating old revision: $REV"
+                az containerapp revision deactivate -n "$APP_NAME" -g ${{ env.RG }} \
+                  --revision "$REV" 2>/dev/null || true
+              fi
+            done
+          done
+          echo ""
+          echo "Waiting 15s for old revisions to stop..."
+          sleep 15
+
       - name: Wait for container apps to be running
         run: |
-          echo "Checking container app revision status (internal CAE — no public HTTP access)..."
+          echo "Checking container app revision status..."
           for APP_NAME in ${{ env.API_APP }} ${{ env.CLIENT_APP }} ${{ env.ADMIN_APP }}; do
             echo ""
             echo "=== $APP_NAME ==="
