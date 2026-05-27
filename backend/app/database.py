@@ -79,6 +79,8 @@ from app.config import (
     DB_POOL_ENABLED, DB_POOL_MIN, DB_POOL_MAX, DB_SLOW_QUERY_MS,
 )
 
+logger = logging.getLogger(__name__)
+
 _db_logger = logging.getLogger(__name__)
 _BCRYPT_ROUNDS = int(os.environ.get('BCRYPT_ROUNDS', '12'))  # AG-112
 

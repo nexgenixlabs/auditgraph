@@ -1028,6 +1028,14 @@ def create_app():
         _db_init = None
 
     if _db_init:
+        # Increase statement_timeout for startup DDL (default 30s is too short for large tables)
+        try:
+            _st_cur = _db_init.conn.cursor()
+            _st_cur.execute("SET statement_timeout = '120s'")
+            _st_cur.close()
+            _db_init.conn.commit()
+        except Exception:
+            pass
         # ── Critical tables (must exist for Settings, Connections, etc.) ──
         _startup_ops = [
             ('settings table', lambda: _db_init.conn.cursor().execute("""
