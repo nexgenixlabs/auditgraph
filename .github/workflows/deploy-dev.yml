@@ -208,8 +208,8 @@ jobs:
         run: |
           for APP_NAME in ${{ env.API_APP }} ${{ env.CLIENT_APP }} ${{ env.ADMIN_APP }}; do
             echo "=== Cleaning up old revisions for $APP_NAME ==="
-            LATEST=$(az containerapp revision list -n "$APP_NAME" -g ${{ env.RG }} \
-              --query "[0].name" -o tsv 2>/dev/null || echo "")
+            LATEST=$(az containerapp show -n "$APP_NAME" -g ${{ env.RG }} \
+              --query "properties.latestRevisionName" -o tsv 2>/dev/null || echo "")
             if [ -z "$LATEST" ]; then
               echo "  No revisions found for $APP_NAME, skipping"
               continue
