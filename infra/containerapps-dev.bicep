@@ -193,7 +193,30 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_CLIENT_ID', value: azureClientId }
             { name: 'AZURE_CLIENT_SECRET', secretRef: 'azure-client-secret' }
           ]
-          probes: []
+          probes: [
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/health/live'
+                port: 8000
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/health/ready'
+                port: 8000
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+          ]
         }
       ]
       scale: {

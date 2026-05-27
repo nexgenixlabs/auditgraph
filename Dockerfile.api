@@ -29,11 +29,12 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" || exit 1
+# Health check — use /health/live (always 200 once gunicorn is up)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')" || exit 1
 
 USER auditgraph
 
-# Run with gunicorn — 2 workers, 120s timeout, preload to avoid DDL deadlock
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120", "--preload", "--access-logfile", "-", "wsgi:app"]
+# Run with gunicorn — 1 worker (DDL runs per-worker in background thread),
+# 300s timeout to allow long startup, no --preload (proxy needs per-worker init)
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "300", "--access-logfile", "-", "wsgi:app"]
