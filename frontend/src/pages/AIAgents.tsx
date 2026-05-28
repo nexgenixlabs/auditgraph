@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { TIME_MS } from '../constants/metrics';
 import {
@@ -42,6 +42,7 @@ interface AgentRow {
   ai_risk_severity: string;
   risk_dimensions: Record<string, RiskDimension>;
   role_count: number;
+  role_names?: string[];   // AG-162: exposed for URL ?role= filtering
 }
 
 const NHI_CATEGORIES = new Set(['service_principal', 'managed_identity_system', 'managed_identity_user', 'app', 'workload']);
@@ -77,6 +78,17 @@ type SortKey = 'display_name' | 'risk_score' | 'ai_risk_score' | 'model_access' 
 export default function AIAgents() {
   const { withConnection, selectedConnectionId } = useConnection();
   const navigate = useNavigate();
+  // AG-162: URL-driven filtering — `?role=X` from AI Access "Most Common Roles"
+  // and `?filter=metric` from tone cards. Both filter the agent list and show
+  // a clear-filter chip above the table.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const roleFilter = searchParams.get('role') || '';
+  const metricFilter = searchParams.get('filter') || '';
+  const clearFilters = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('role'); next.delete('filter');
+    setSearchParams(next, { replace: true });
+  };
   const [items, setItems] = useState<AgentRow[]>([]);
   const [totalCount, setTotalCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -113,7 +125,17 @@ export default function AIAgents() {
   const { nhiAgents, humanAgents } = useMemo(() => {
     const nhi: AgentRow[] = [];
     const human: AgentRow[] = [];
+    // AG-162: predicate from URL filters. Both apply if both set (AND).
+    const matchesFilters = (a: AgentRow): boolean => {
+      if (roleFilter && !(a.role_names || []).includes(roleFilter)) return false;
+      if (metricFilter) {
+        const lvl = (a as any)[metricFilter];
+        if (!lvl || lvl === 'none') return false;
+      }
+      return true;
+    };
     for (const item of items) {
+      if (!matchesFilters(item)) continue;
       if (item.agent_identity_type === 'ai_privileged_human' || item.identity_category === 'human_user') {
         human.push(item);
       } else if (NHI_CATEGORIES.has(item.identity_category) || item.agent_identity_type === 'ai_agent' || item.agent_identity_type === 'possible_ai_agent') {
@@ -121,7 +143,7 @@ export default function AIAgents() {
       }
     }
     return { nhiAgents: nhi, humanAgents: human };
-  }, [items]);
+  }, [items, roleFilter, metricFilter]);
 
   const sortItems = (list: AgentRow[]) => {
     const copy = [...list];
@@ -299,28 +321,139 @@ export default function AIAgents() {
         </p>
       </div>
 
-      {/* Summary Cards */}
+      {/* AG-162: Active filter chip — shown when arriving via "Most Common Roles" click or a tone-card filter */}
+      {(roleFilter || metricFilter) && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wider font-semibold" style={{ color: 'var(--text-tertiary)' }}>
+            Filtered by:
+          </span>
+          {roleFilter && (
+            <span
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border"
+              style={{
+                backgroundColor: 'rgba(36, 162, 161, 0.12)',
+                borderColor: 'rgba(36, 162, 161, 0.4)',
+                color: '#24A2A1',
+              }}
+            >
+              Role: {roleFilter}
+            </span>
+          )}
+          {metricFilter && (
+            <span
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border"
+              style={{
+                backgroundColor: 'rgba(139, 92, 246, 0.12)',
+                borderColor: 'rgba(139, 92, 246, 0.4)',
+                color: '#a78bfa',
+              }}
+            >
+              Has {metricFilter.replace(/_/g, ' ')}
+            </span>
+          )}
+          <button
+            onClick={clearFilters}
+            className="text-xs px-2 py-1 rounded hover:bg-slate-700/40 transition"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            Clear filter ×
+          </button>
+          <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+            · {nhiAgents.length + humanAgents.length} match{nhiAgents.length + humanAgents.length === 1 ? '' : 'es'}
+          </span>
+        </div>
+      )}
+
+      {/* AG-165: KPI cards are filter affordances. Click sets the URL filter
+          which `nhiAgents`/`humanAgents` already consume (see AG-162 wiring).
+          Active card shows a colored ring; "Clear filter ×" chip lives above
+          the table when any filter is active. */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-        <div className="rounded-lg border p-4" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}>
+        {/* AI Agents (NHI) — clear all filters; humans section auto-collapsed */}
+        <button
+          onClick={() => { clearFilters(); setHumanSectionOpen(false); }}
+          className={`rounded-lg border p-4 text-left transition hover:scale-[1.01] ${
+            !roleFilter && !metricFilter && !humanSectionOpen ? 'ring-2 ring-teal-400/60' : ''
+          }`}
+          style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+          title="Show all AI agents (NHI) · clear filters"
+        >
           <p className="text-xs text-slate-400">AI Agents (NHI)</p>
           <p className="text-2xl font-bold mt-1 text-teal-400">{stats.agentCount}</p>
-        </div>
-        <div className="rounded-lg border p-4" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}>
+          <p className="text-[10px] text-slate-600 mt-0.5">click to view all</p>
+        </button>
+
+        {/* AI-Privileged Humans — opens the humans section */}
+        <button
+          onClick={() => setHumanSectionOpen(prev => !prev)}
+          className={`rounded-lg border p-4 text-left transition hover:scale-[1.01] ${
+            humanSectionOpen ? 'ring-2 ring-violet-400/60' : ''
+          }`}
+          style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+          title="Toggle the AI-Privileged Humans section"
+        >
           <p className="text-xs text-slate-400">AI-Privileged Humans</p>
           <p className="text-2xl font-bold mt-1 text-violet-400">{stats.humanCount}</p>
-        </div>
-        <div className="rounded-lg border p-4" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}>
+          <p className="text-[10px] text-slate-600 mt-0.5">{humanSectionOpen ? 'hide section' : 'click to expand'}</p>
+        </button>
+
+        {/* Avg Risk Score — sort table by risk_score DESC */}
+        <button
+          onClick={() => { setSortCol('risk_score'); setSortDir('desc'); }}
+          className={`rounded-lg border p-4 text-left transition hover:scale-[1.01] ${
+            sortCol === 'risk_score' && sortDir === 'desc' ? 'ring-2 ring-white/40' : ''
+          }`}
+          style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+          title="Sort table by risk score (highest first)"
+        >
           <p className="text-xs text-slate-400">Avg Risk Score</p>
           <p className="text-2xl font-bold mt-1 text-white">{stats.avgRisk}</p>
-        </div>
-        <div className="rounded-lg border p-4" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}>
+          <p className="text-[10px] text-slate-600 mt-0.5">click to sort by risk</p>
+        </button>
+
+        {/* With Model Access — filter ?filter=model_access */}
+        <button
+          onClick={() => {
+            const next = new URLSearchParams(searchParams);
+            if (metricFilter === 'model_access') next.delete('filter');
+            else next.set('filter', 'model_access');
+            next.delete('role');
+            setSearchParams(next, { replace: true });
+          }}
+          className={`rounded-lg border p-4 text-left transition hover:scale-[1.01] ${
+            metricFilter === 'model_access' ? 'ring-2 ring-violet-400/60' : ''
+          }`}
+          style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+          title="Filter table to agents with Model Access"
+        >
           <p className="text-xs text-slate-400">With Model Access</p>
           <p className="text-2xl font-bold mt-1 text-violet-400">{stats.withModel}</p>
-        </div>
-        <div className="rounded-lg border p-4" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}>
+          <p className="text-[10px] text-slate-600 mt-0.5">
+            {metricFilter === 'model_access' ? '✓ filtering · click to clear' : 'click to filter'}
+          </p>
+        </button>
+
+        {/* With Key Vault — filter ?filter=key_vault_access */}
+        <button
+          onClick={() => {
+            const next = new URLSearchParams(searchParams);
+            if (metricFilter === 'key_vault_access') next.delete('filter');
+            else next.set('filter', 'key_vault_access');
+            next.delete('role');
+            setSearchParams(next, { replace: true });
+          }}
+          className={`rounded-lg border p-4 text-left transition hover:scale-[1.01] ${
+            metricFilter === 'key_vault_access' ? 'ring-2 ring-red-400/60' : ''
+          }`}
+          style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+          title="Filter table to agents with Key Vault access"
+        >
           <p className="text-xs text-slate-400">With Key Vault</p>
           <p className="text-2xl font-bold mt-1 text-red-400">{stats.withKv}</p>
-        </div>
+          <p className="text-[10px] text-slate-600 mt-0.5">
+            {metricFilter === 'key_vault_access' ? '✓ filtering · click to clear' : 'click to filter'}
+          </p>
+        </button>
       </div>
 
       {/* Truncation warning */}

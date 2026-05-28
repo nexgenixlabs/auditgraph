@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import AIInvestigateDrawer from '../components/AIInvestigateDrawer';
 
 /* ─── Focused View Types ───────────────────────────────────────────── */
 
@@ -80,6 +81,10 @@ interface ApiNode {
   risk_level?: string;
   is_attack_path?: boolean;
   tooltip?: NodeTooltip;
+  is_ai_agent?: boolean;
+  ai_agent_type?: string;
+  ai_platform?: string;
+  ai_confidence?: number;
 }
 
 interface ApiEdge {
@@ -97,6 +102,12 @@ interface GraphNode {
   risk_level: string;
   isAttackPath: boolean;
   tooltip: NodeTooltip | null;
+  // AI Identity Governance (e440e07): nodes whose identity has an
+  // agent_classifications row get a teal ring + AI badge + click→drawer
+  is_ai_agent?: boolean;
+  ai_agent_type?: string;      // ai_agent | ai_privileged_human | possible_ai_agent
+  ai_platform?: string;        // copilot_studio | azure_openai | azure_ml | ...
+  ai_confidence?: number;
 }
 
 interface GraphEdge {
@@ -213,6 +224,10 @@ function mapApiResponse(raw: Record<string, unknown>): GraphData {
       risk_level: n.risk_level || 'low',
       isAttackPath: !!n.is_attack_path,
       tooltip: (n.tooltip as NodeTooltip) || null,
+      is_ai_agent: !!n.is_ai_agent,
+      ai_agent_type: n.ai_agent_type,
+      ai_platform: n.ai_platform,
+      ai_confidence: n.ai_confidence,
     })),
     edges: apiEdges.map(e => ({
       source: e.source,
@@ -278,6 +293,7 @@ const IdentityGraph: React.FC = () => {
 
   // Side panel state
   const [selectedDetail, setSelectedDetail] = useState<IdentityDetail | null>(null);
+  const [aiDrawerIdentityId, setAiDrawerIdentityId] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -588,11 +604,35 @@ const IdentityGraph: React.FC = () => {
       ctx.fillStyle = color;
       ctx.fill();
 
+      // AI Agent ring (teal #24A2A1) — drawn before highlight ring so the
+      // white highlight ring still wins when selected.
+      if (node.is_ai_agent) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#24A2A1';
+        ctx.stroke();
+      }
+
       // Highlight / search ring
       if (isHighlighted || isSearchMatch) {
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#ffffff';
         ctx.stroke();
+      }
+
+      // AI badge (small teal pill bottom-right of node)
+      if (node.is_ai_agent && alpha > 0.3) {
+        const badgeX = pos.x + size / 2 - 1;
+        const badgeY = pos.y + size / 2 - 1;
+        ctx.fillStyle = '#24A2A1';
+        ctx.beginPath();
+        ctx.arc(badgeX, badgeY, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#06090f';
+        ctx.font = 'bold 7px Inter, system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('AI', badgeX, badgeY + 0.5);
+        ctx.textBaseline = 'alphabetic';
       }
 
       // Risk dot indicator (top-right)
@@ -698,6 +738,13 @@ const IdentityGraph: React.FC = () => {
     const node = findNodeAt(e);
     if (node) {
       setHighlightedNode(prev => prev === node.id ? null : node.id);
+      // AI-classified identities open the AI investigate drawer; other
+      // identities open the standard detail panel.
+      if (node.is_ai_agent) {
+        setAiDrawerIdentityId(node.id);
+        setActiveAttackPath(null);
+        return;
+      }
       const identityTypes = ['identity', 'service_principal', 'managed_identity', 'guest'];
       if (identityTypes.includes(node.type)) {
         fetchIdentityDetail(node.id);
@@ -1582,6 +1629,14 @@ const IdentityGraph: React.FC = () => {
       )}
 
       </>)}
+
+      {/* AI Investigate Drawer — opens when an AI-classified node is clicked. */}
+      {aiDrawerIdentityId && (
+        <AIInvestigateDrawer
+          identityId={aiDrawerIdentityId}
+          onClose={() => setAiDrawerIdentityId(null)}
+        />
+      )}
     </div>
   );
 };

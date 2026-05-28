@@ -7763,6 +7763,119 @@ class AzureDiscoveryEngine:
             return entra_roles  # return whatever we got so far
 
 
+    def discover_cognitive_services_and_deployments(self, run_id: int) -> dict:
+        """Phase 2.1: discover Cognitive Services / Azure OpenAI accounts and
+        their model deployments (gpt-4, gpt-4o, embeddings, etc.).
+
+        Architecture-only — reads the management plane, no logs/telemetry
+        required. Answers "which model is this AI agent using?" by linking an
+        agent's RBAC scope to the deployments hosted on the account.
+
+        Persists to azure_cognitive_services_accounts + azure_ai_model_deployments.
+        Returns {accounts, deployments} counts.
+        """
+        try:
+            from azure.mgmt.cognitiveservices import CognitiveServicesManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-cognitiveservices not installed — skipping AI model discovery")
+            return {'accounts': 0, 'deployments': 0}
+
+        accounts_persisted = 0
+        deployments_persisted = 0
+        conn = self.db.conn
+        cur = conn.cursor()
+
+        for sub in getattr(self, 'subscriptions', []) or []:
+            sub_id = sub.get('subscription_id') or sub.get('id')
+            sub_name = sub.get('display_name') or sub.get('name') or ''
+            if not sub_id:
+                continue
+            try:
+                cs_client = CognitiveServicesManagementClient(self.credential, sub_id, **ARM_TIMEOUT_KWARGS)
+            except Exception as e:
+                logger.warning("CognitiveServices client error for sub %s: %s", str(sub_id)[:8], e)
+                continue
+
+            try:
+                accounts = list(cs_client.accounts.list())
+            except Exception as e:
+                logger.warning("Could not list Cognitive Services accounts in sub %s: %s", str(sub_id)[:8], e)
+                continue
+
+            for acct in accounts:
+                try:
+                    rid = acct.id or ''
+                    rid_parts = rid.split('/')
+                    rg = ''
+                    try:
+                        rg = rid_parts[rid_parts.index('resourceGroups') + 1]
+                    except (ValueError, IndexError):
+                        pass
+                    props = getattr(acct, 'properties', None)
+                    network_acls = getattr(props, 'network_acls', None) if props else None
+                    pe = getattr(props, 'private_endpoint_connections', None) if props else None
+                    cur.execute("""
+                        INSERT INTO azure_cognitive_services_accounts
+                            (discovery_run_id, organization_id, resource_id, name, kind, sku,
+                             location, resource_group, subscription_id, subscription_name,
+                             public_network_access, network_acls_default_action,
+                             private_endpoint_count, custom_subdomain, endpoint_url)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (organization_id, resource_id, discovery_run_id) DO NOTHING
+                    """, (
+                        run_id, self.db_org_id, rid, acct.name,
+                        getattr(acct, 'kind', None),
+                        getattr(getattr(acct, 'sku', None), 'name', None),
+                        getattr(acct, 'location', None),
+                        rg, sub_id, sub_name,
+                        getattr(props, 'public_network_access', None) if props else None,
+                        getattr(network_acls, 'default_action', None) if network_acls else None,
+                        len(pe) if pe else 0,
+                        getattr(props, 'custom_sub_domain_name', None) if props else None,
+                        (getattr(props, 'endpoint', None) if props else None),
+                    ))
+                    accounts_persisted += 1
+
+                    # List deployments (the actual models)
+                    try:
+                        deployments = list(cs_client.deployments.list(rg, acct.name))
+                    except Exception as e:
+                        logger.debug("No deployments for %s: %s", acct.name, e)
+                        deployments = []
+                    for dep in deployments:
+                        dprops = getattr(dep, 'properties', None)
+                        model = getattr(dprops, 'model', None) if dprops else None
+                        dsku = getattr(dep, 'sku', None)
+                        cur.execute("""
+                            INSERT INTO azure_ai_model_deployments
+                                (discovery_run_id, organization_id, account_resource_id, account_name,
+                                 deployment_name, model_name, model_version, model_format,
+                                 sku_name, sku_capacity, provisioning_state, rai_policy_name)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (organization_id, account_resource_id, deployment_name, discovery_run_id) DO NOTHING
+                        """, (
+                            run_id, self.db_org_id, rid, acct.name,
+                            dep.name,
+                            getattr(model, 'name', None) if model else (dep.name or 'unknown'),
+                            getattr(model, 'version', None) if model else None,
+                            getattr(model, 'format', None) if model else None,
+                            getattr(dsku, 'name', None) if dsku else None,
+                            getattr(dsku, 'capacity', None) if dsku else None,
+                            getattr(dprops, 'provisioning_state', None) if dprops else None,
+                            getattr(dprops, 'rai_policy_name', None) if dprops else None,
+                        ))
+                        deployments_persisted += 1
+                except Exception as e:
+                    logger.warning("Error persisting CS account %s: %s", getattr(acct, 'name', '?'), e)
+                    continue
+
+        conn.commit()
+        cur.close()
+        logger.info("AI model discovery: %d accounts, %d deployments (run %s)",
+                    accounts_persisted, deployments_persisted, run_id)
+        return {'accounts': accounts_persisted, 'deployments': deployments_persisted}
+
+
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
         Determine if a service principal is a Microsoft first-party app.

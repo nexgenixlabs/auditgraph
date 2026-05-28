@@ -8,6 +8,9 @@ import IdentityGraph from './IdentityGraph';
 // ── Tab definitions ─────────────────────────────────────────────────
 // Order matters — rendered left to right, with "All Identities" at the end.
 
+// 'graph' tab removed — Identity Graph now lives in sidebar (ACCESS
+// EXPLAINABILITY group) to avoid duplicate nav entries. Visiting
+// /identity-explorer/graph redirects to /identity-graph (handled in switchTab).
 type TabKey = 'humans' | 'nhi' | 'ai-agents' | 'privileged' | 'graph' | 'all';
 
 interface TabDef {
@@ -21,7 +24,6 @@ const TABS: TabDef[] = [
   { key: 'nhi', label: 'Non-Human Identities' },
   { key: 'ai-agents', label: 'AI Agents' },
   { key: 'privileged', label: 'Privileged Access' },
-  { key: 'graph', label: 'Identity Graph' },
   { key: 'all', label: 'All Identities', right: true },
 ];
 
@@ -48,6 +50,10 @@ const TAB_COMPONENT: Record<TabKey, React.FC> = {
 const IdentityExplorer: React.FC = () => {
   const { tab } = useParams<{ tab?: string }>();
   const navigate = useNavigate();
+  // Legacy redirect: /identity-explorer/graph → /identity-graph
+  React.useEffect(() => {
+    if (tab === 'graph') navigate('/identity-graph', { replace: true });
+  }, [tab, navigate]);
   const activeTab: TabKey = (tab as TabKey) || 'humans';
   const ActiveComponent = TAB_COMPONENT[activeTab] || TAB_COMPONENT.humans;
 

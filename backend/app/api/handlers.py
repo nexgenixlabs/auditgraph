@@ -30333,6 +30333,33 @@ def get_graph_visualization_handler():
                 except Exception: pass
                 pass
 
+        # ── AI classification enrichment ───────────────────────────────
+        # Join agent_classifications via identity DB id so AI-tagged nodes
+        # can be styled differently in the graph (teal border + AI badge).
+        ai_meta = {}  # identity_id → {agent_identity_type, confidence, platform}
+        if identity_ids:
+            try:
+                cursor.execute("""
+                    SELECT DISTINCT ON (i.identity_id)
+                           i.identity_id, ac.agent_identity_type,
+                           ac.classification_confidence, ac.detected_platform
+                    FROM agent_classifications ac
+                    JOIN identities i ON i.id = ac.identity_db_id
+                    WHERE i.identity_id = ANY(%s)
+                      AND ac.agent_identity_type IN ('ai_agent', 'ai_privileged_human', 'possible_ai_agent')
+                    ORDER BY i.identity_id, i.discovery_run_id DESC
+                """, (identity_ids,))
+                for r in cursor.fetchall():
+                    ai_meta[r['identity_id']] = {
+                        'agent_identity_type':      r['agent_identity_type'],
+                        'classification_confidence': r['classification_confidence'],
+                        'detected_platform':        r['detected_platform'],
+                    }
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                pass
+
         # ── Enrich subscriptions ───────────────────────────────────────
         sub_guid_map = {}  # nid → guid
         for nid in node_ids:
@@ -30593,14 +30620,24 @@ def get_graph_visualization_handler():
         # ── Build final nodes ──────────────────────────────────────────
         nodes = []
         for nid in sorted(node_ids):
-            nodes.append({
+            node_obj = {
                 'id': nid,
                 'type': _final_type(nid),
                 'label': _label(nid),
                 'risk_level': _risk_level(nid),
                 'is_attack_path': nid in attack_path_nodes,
                 'tooltip': _tooltip(nid),
-            })
+            }
+            # Tag AI-classified identities so the UI can render a teal border
+            # and route clicks to the AI investigate drawer.
+            ai = ai_meta.get(nid)
+            if ai:
+                node_obj['is_ai_agent']   = True
+                node_obj['ai_agent_type'] = ai['agent_identity_type']
+                node_obj['ai_platform']   = ai['detected_platform']
+                if ai.get('classification_confidence') is not None:
+                    node_obj['ai_confidence'] = ai['classification_confidence']
+            nodes.append(node_obj)
 
         # ── Enforce limits ─────────────────────────────────────────────
         truncated = False
@@ -38685,6 +38722,9 @@ def get_ai_agents_enriched():
 
             # Role summary
             item['role_count'] = len(roles)
+            # AG-162: expose role names so frontend can filter by role
+            # (e.g., click "Contributor" in AI Access → filter to agents holding Contributor).
+            item['role_names'] = sorted({r['role_name'] for r in roles if r.get('role_name')})
 
             # Remove internal db_id from response
             item.pop('db_id', None)
@@ -38728,6 +38768,10 @@ def get_ai_agent_investigate(identity_id):
         classify_role_access,
         REMEDIATION_P0_THRESHOLD,
         REMEDIATION_P1_THRESHOLD,
+        # Phase 1.5: signal-sum scoring (NIST/CVSS/MITRE-aligned) — same model
+        # the AI Inventory graph uses, surfaced in the drawer for consistency.
+        detect_signals,
+        compute_signal_score,
     )
 
     db = _db()
@@ -38836,6 +38880,99 @@ def get_ai_agent_investigate(identity_id):
         dimensions = compute_ai_risk_dimensions(access_levels)
         ai_risk = compute_ai_risk_score(dimensions)
 
+        # Phase 1.7: parse ARM scope → (resource_type_label, resource_name) and
+        # group distinct resources per access category. Answers the user's
+        # "shows Owner but on WHAT?" question.
+        import re as _re
+        _RESOURCE_LABELS = {
+            'Microsoft.KeyVault/vaults':                          'Key Vault',
+            'Microsoft.Storage/storageAccounts':                  'Storage Account',
+            'Microsoft.CognitiveServices/accounts':               'Azure AI / Cognitive',
+            'Microsoft.MachineLearningServices/workspaces':       'Azure ML Workspace',
+            'Microsoft.DocumentDB/databaseAccounts':              'Cosmos DB',
+            'Microsoft.Sql/servers':                              'SQL Server',
+            'Microsoft.Sql/servers/databases':                    'SQL Database',
+            'Microsoft.Web/sites':                                'App Service',
+            'Microsoft.ContainerService/managedClusters':         'AKS Cluster',
+            'Microsoft.Logic/workflows':                          'Logic App',
+            'Microsoft.Automation/automationAccounts':            'Automation Account',
+            'Microsoft.DataFactory/factories':                    'Data Factory',
+        }
+        def _parse_scope(s: str):
+            """Return (resource_type_label, resource_name, scope_kind)."""
+            if not s:                       return ('Unknown', '', 'unknown')
+            if s == '/':                    return ('Tenant Root', '/', 'tenant')
+            if s.startswith('/providers/Microsoft.Management'):
+                return ('Management Group', s.rsplit('/', 1)[-1], 'mg')
+            m = _re.match(r'^/subscriptions/([^/]+)(?:/resourceGroups/([^/]+)(?:/providers/([^/]+)/([^/]+)/([^/]+))?)?$', s)
+            if not m:                       return ('Unknown', s, 'unknown')
+            _sub, rg, prov, rtype, rname = m.groups()
+            if rname and prov and rtype:
+                label = _RESOURCE_LABELS.get(f'{prov}/{rtype}', f'{prov.replace("Microsoft.", "")}/{rtype}')
+                return (label, rname, 'resource')
+            if rg:                          return ('Resource Group', rg, 'rg')
+            return ('Subscription', _sub or '', 'sub')
+
+        # Group: per access category, distinct list of (type_label, name)
+        # plus a flat "resources touched" list grouped by type.
+        from collections import OrderedDict
+        resources_by_category: dict[str, list[dict]] = {
+            'model_access': [], 'key_vault_access': [], 'data_access': [],
+            'telemetry': [], 'internet_egress': [], 'broad_privilege': [],
+        }
+        seen_in_cat: dict[str, set] = {k: set() for k in resources_by_category}
+        # Aggregate across types for "Resources Touched" panel
+        resources_by_type: 'OrderedDict[str, list[dict]]' = OrderedDict()
+        seen_global: set = set()
+
+        for ra in roles:
+            rtype_label, rname, kind = _parse_scope(ra.get('scope') or '')
+            ra['parsed_resource_type'] = rtype_label
+            ra['parsed_resource_name'] = rname
+            cats = ra.get('access_categories') or {}
+            for cat_key in resources_by_category:
+                if cats.get(cat_key) and rname:
+                    key = (rtype_label, rname)
+                    if key not in seen_in_cat[cat_key]:
+                        seen_in_cat[cat_key].add(key)
+                        resources_by_category[cat_key].append({
+                            'resource_type':  rtype_label,
+                            'resource_name':  rname,
+                            'level':          cats[cat_key],
+                            'role_name':      ra.get('role_name'),
+                        })
+            if rname:
+                k2 = (rtype_label, rname)
+                if k2 not in seen_global:
+                    seen_global.add(k2)
+                    resources_by_type.setdefault(rtype_label, []).append({
+                        'resource_name': rname,
+                        'role_names':    [ra.get('role_name')] if ra.get('role_name') else [],
+                    })
+                else:
+                    # append role_name to existing entry
+                    for entry in resources_by_type.get(rtype_label, []):
+                        if entry['resource_name'] == rname:
+                            rn = ra.get('role_name')
+                            if rn and rn not in entry['role_names']:
+                                entry['role_names'].append(rn)
+                            break
+
+        # Phase 1.5: compute CVSS-aligned signal-sum score (same model the
+        # Inventory graph uses). This is the canonical AI risk score —
+        # ai_risk_score above is retained for backward compatibility but the
+        # drawer renders cvss_* as primary.
+        agent_meta_for_signals = {
+            'display_name':                    identity.get('display_name'),
+            'detected_platform':               (classification or {}).get('platform'),
+            'owner_display_name':              identity.get('owner_display_name'),
+            'credential_risk':                 identity.get('credential_risk'),
+            'last_sign_in':                    identity.get('last_sign_in'),
+            'last_activity_date':              identity.get('last_activity_date'),
+        }
+        fired = detect_signals(agent_meta_for_signals, role_dicts_for_agg, access_levels)
+        signal_pkg = compute_signal_score(fired)
+
         permissions = {
             'roles': roles,
             'role_count': len(roles),
@@ -38846,6 +38983,138 @@ def get_ai_agent_investigate(identity_id):
             },
             'ai_risk_score': ai_risk,
             'ai_risk_severity': severity_from_score(ai_risk),
+            # Phase 1.5: canonical CVSS-aligned score + breakdown
+            'cvss_score':     signal_pkg['score'],
+            'cvss_severity':  signal_pkg['severity'],
+            'signal_breakdown': signal_pkg['breakdown'],
+            # Phase 1.7: actual resources behind each access category, so the
+            # UI can render "Owner on Azure ML workspace foo" instead of just
+            # "Model Access: Owner".
+            'resources_by_category': resources_by_category,
+            'resources_by_type':     [
+                {'resource_type': k, 'resources': v}
+                for k, v in resources_by_type.items()
+            ],
+            # Phase 2.1: model deployments reachable via this agent's RBAC scope
+            # (architecture-derived — no logs). Populated below.
+            'model_deployments': [],
+        }
+
+        # ── Phase 2.1: link role scopes → discovered model deployments ──
+        # An agent "uses" a model if it holds any role at or above the
+        # Cognitive Services account that hosts the deployment.
+        try:
+            cs_account_scopes = [
+                ra.get('scope') for ra in roles
+                if ra.get('scope') and 'Microsoft.CognitiveServices/accounts/' in ra.get('scope')
+            ]
+            if cs_account_scopes:
+                # Normalize each scope to the account resource id (strip any sub-resource)
+                import re as _re2
+                acct_ids = set()
+                for sc in cs_account_scopes:
+                    m = _re2.match(r'^(.*/providers/Microsoft\.CognitiveServices/accounts/[^/]+)', sc)
+                    if m:
+                        acct_ids.add(m.group(1))
+                if acct_ids:
+                    cursor.execute("""
+                        SELECT DISTINCT d.account_name, d.deployment_name, d.model_name,
+                               d.model_version, d.sku_name, d.sku_capacity, d.account_resource_id
+                        FROM azure_ai_model_deployments d
+                        WHERE d.organization_id = %s
+                          AND d.account_resource_id = ANY(%s)
+                        ORDER BY d.account_name, d.model_name
+                    """, (org_id, list(acct_ids)))
+                    permissions['model_deployments'] = [
+                        {
+                            'account_name':    r[0],
+                            'deployment_name': r[1],
+                            'model_name':      r[2],
+                            'model_version':   r[3],
+                            'sku_name':        r[4],
+                            'sku_capacity':    r[5],
+                        }
+                        for r in cursor.fetchall()
+                    ]
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+
+        # ── Phase 2.2: Network exposure → egress verdict (architecture-only) ──
+        # For each resource the agent touches, read its network posture from the
+        # azure_* tables and derive an egress verdict. This replaces the prior
+        # substring heuristic for the Internet Egress category. No logs needed.
+        def _exposure_verdict(public_access, default_action, pe_count, public_blob=None):
+            """Map raw network posture → (verdict, severity)."""
+            pa = (public_access or '').lower()
+            da = (default_action or '').lower()
+            pe = pe_count or 0
+            # Public network explicitly enabled, or default action allows all
+            if pa == 'enabled' or da == 'allow' or public_blob is True:
+                return ('Public (internet-reachable)', 'concerning')
+            # Locked down: deny by default + has private endpoints
+            if da == 'deny' and pe > 0:
+                return ('Private Endpoint only', 'healthy')
+            if da == 'deny':
+                return ('Restricted (firewall allowlist)', 'borderline')
+            if pe > 0:
+                return ('Private Endpoint present', 'healthy')
+            return ('Unknown', 'unknown')
+
+        # Collect distinct full resource scopes the agent touches
+        touched_scopes = sorted({ra.get('scope') for ra in roles if ra.get('scope')})
+        exposure_by_resource = {}   # resource_id → {verdict, severity, resource_type}
+        worst_egress = ('Unknown', 'unknown')
+        _sev_rank = {'concerning': 3, 'borderline': 2, 'healthy': 1, 'unknown': 0}
+        if touched_scopes:
+            try:
+                # Storage accounts
+                cursor.execute("""
+                    SELECT resource_id, default_network_action, private_endpoint_count, public_blob_access
+                    FROM azure_storage_accounts
+                    WHERE organization_id = %s AND resource_id = ANY(%s)
+                """, (org_id, touched_scopes))
+                for rid, da, pe, pb in cursor.fetchall():
+                    v = _exposure_verdict(None, da, pe, pb)
+                    exposure_by_resource[rid] = {'verdict': v[0], 'severity': v[1], 'resource_type': 'Storage Account'}
+                # Key vaults
+                cursor.execute("""
+                    SELECT resource_id, public_network_access, default_network_action, private_endpoint_count
+                    FROM azure_key_vaults
+                    WHERE organization_id = %s AND resource_id = ANY(%s)
+                """, (org_id, touched_scopes))
+                for rid, pa, da, pe in cursor.fetchall():
+                    v = _exposure_verdict(pa, da, pe)
+                    exposure_by_resource[rid] = {'verdict': v[0], 'severity': v[1], 'resource_type': 'Key Vault'}
+                # Cognitive services accounts — match on account prefix of scope
+                cursor.execute("""
+                    SELECT resource_id, public_network_access, network_acls_default_action, private_endpoint_count
+                    FROM azure_cognitive_services_accounts
+                    WHERE organization_id = %s
+                """, (org_id,))
+                cs_rows = cursor.fetchall()
+                for sc in touched_scopes:
+                    for rid, pa, da, pe in cs_rows:
+                        if sc.startswith(rid):
+                            v = _exposure_verdict(pa, da, pe)
+                            exposure_by_resource[sc] = {'verdict': v[0], 'severity': v[1], 'resource_type': 'Azure AI / Cognitive'}
+                            break
+                # Worst egress rollup
+                for info in exposure_by_resource.values():
+                    if _sev_rank.get(info['severity'], 0) > _sev_rank.get(worst_egress[1], 0):
+                        worst_egress = (info['verdict'], info['severity'])
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
+        permissions['network_exposure'] = {
+            'by_resource': [
+                {'resource_id': k, 'resource_name': k.rsplit('/', 1)[-1], **v}
+                for k, v in exposure_by_resource.items()
+            ],
+            'worst_egress_verdict':  worst_egress[0],
+            'worst_egress_severity': worst_egress[1],
+            'resources_evaluated':   len(exposure_by_resource),
         }
 
         # ── 3. Blast Radius ──
@@ -39339,6 +39608,8 @@ def get_ai_permissions_overview():
         DATA_ACCESS_ROLES,
         TELEMETRY_ACCESS_ROLES,
         BROAD_PRIVILEGE_ROLES,
+        assess_tone,
+        synthesize_findings,
     )
 
     db = _db()
@@ -39367,8 +39638,11 @@ def get_ai_permissions_overview():
                 'agents_with_telemetry': 0,
                 'agents_with_internet_egress': 0,
                 'agents_with_broad_privilege': 0,
+                'total_agents': 0,
                 'role_frequency': [],
                 'overprivileged_agents': [],
+                'assessments': {},
+                'findings': synthesize_findings({}, 0, 0),
             })
 
         # Get all role assignments for these agents
@@ -39419,6 +39693,18 @@ def get_ai_permissions_overview():
 
         cursor.close()
 
+        # AG-162: per-metric tone assessment + plain-English findings.
+        total_n = len(agents)
+        metrics = {
+            'model_access':     assess_tone('model_access',     len(agents_model),     total_n),
+            'key_vault_access': assess_tone('key_vault_access', len(agents_kv),        total_n),
+            'data_access':      assess_tone('data_access',      len(agents_data),      total_n),
+            'telemetry':        assess_tone('telemetry',        len(agents_telemetry), total_n),
+            'internet_egress':  assess_tone('internet_egress',  len(agents_egress),    total_n),
+            'broad_privilege':  assess_tone('broad_privilege',  len(agents_broad),     total_n),
+        }
+        findings = synthesize_findings(metrics, total_n, overprivileged)
+
         return jsonify({
             'agents_with_model_access': len(agents_model),
             'agents_with_key_vault_access': len(agents_kv),
@@ -39426,9 +39712,12 @@ def get_ai_permissions_overview():
             'agents_with_telemetry': len(agents_telemetry),
             'agents_with_internet_egress': len(agents_egress),
             'agents_with_broad_privilege': len(agents_broad),
-            'total_agents': len(agents),
+            'total_agents': total_n,
             'role_frequency': [{'role_name': r, 'count': c} for r, c in sorted_roles],
             'overprivileged_agents': overprivileged[:10],
+            # AG-162: assessment context for each card + plain-English findings
+            'assessments': metrics,
+            'findings': findings,
         })
     except Exception as e:
         try:
@@ -39436,6 +39725,471 @@ def get_ai_permissions_overview():
         except Exception:
             pass
         logger.error("get_ai_permissions_overview failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AG-167: Actual endpoint reach (AI Runtime Phase 1)
+# ============================================================
+
+def get_ai_agent_actual_access(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/actual-access — what an AI agent is
+    really touching, based on the telemetry we currently ingest.
+
+    Phase 1 scope (per AG-167):
+      - Pulls `role_assignments.last_used_at` (when populated) per role
+      - Marks each touched scope with its inferred resource_type
+      - Returns an explicit coverage notice listing telemetry sources we DON'T
+        yet ingest (sign-in logs, Activity Log, Graph audit) so users never
+        mistake "no data" for "no activity"
+
+    Phase 2 (separate ticket) will ingest the missing sources.
+    """
+    import re
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Resolve identity_id → latest identity row
+        cursor.execute("""
+            SELECT DISTINCT ON (identity_id)
+                id, identity_id, display_name, last_sign_in, last_activity_date
+            FROM identities
+            WHERE identity_id = %s
+              AND deleted_at IS NULL
+            ORDER BY identity_id, discovery_run_id DESC
+        """, (identity_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+        db_id, ident_id, display_name, last_sign_in, last_activity_date = row
+
+        # All role assignments + their last_used_at
+        cursor.execute("""
+            SELECT role_name, scope, last_used_at
+            FROM role_assignments
+            WHERE identity_db_id = %s
+            ORDER BY last_used_at DESC NULLS LAST
+        """, (db_id,))
+        role_rows = cursor.fetchall()
+        cursor.close()
+
+        # Classify scope → resource_type (cheap regex over ARM scope strings)
+        def infer_resource_type(scope: str) -> str:
+            if not scope:
+                return 'Unknown'
+            if scope == '/':
+                return 'Tenant Root'
+            if scope.startswith('/providers/Microsoft.Management'):
+                return 'Management Group'
+            m = re.match(r'^/subscriptions/[^/]+(?:/resourceGroups/[^/]+(?:/providers/([^/]+)/([^/]+)/[^/]+)?)?$', scope)
+            if not m:
+                return 'Unknown'
+            if not m.group(1):
+                return 'Subscription' if '/resourceGroups/' not in scope else 'Resource Group'
+            provider, rtype = m.group(1), m.group(2)
+            # Friendly labels for the common types AI agents touch
+            label = f"{provider.replace('Microsoft.', '')}/{rtype}"
+            mapping = {
+                'Microsoft.KeyVault/vaults': 'Key Vault',
+                'Microsoft.Storage/storageAccounts': 'Storage Account',
+                'Microsoft.CognitiveServices/accounts': 'Azure AI / Cognitive',
+                'Microsoft.MachineLearningServices/workspaces': 'Azure ML Workspace',
+                'Microsoft.DocumentDB/databaseAccounts': 'Cosmos DB',
+                'Microsoft.Sql/servers': 'SQL Server',
+                'Microsoft.Web/sites': 'App Service',
+                'Microsoft.ContainerService/managedClusters': 'AKS Cluster',
+            }
+            return mapping.get(f'{provider}/{rtype}', label)
+
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        window_days = 30
+        window_start = now - _dt.timedelta(days=window_days)
+
+        roles_with_usage = 0
+        in_window = 0
+        resources_touched = []
+        for role_name, scope, last_used in role_rows:
+            entry = {
+                'role_name':     role_name or 'Unknown',
+                'scope':         scope or '',
+                'resource_type': infer_resource_type(scope or ''),
+                'last_used_at':  last_used.isoformat() if last_used else None,
+                'in_window':     bool(last_used and last_used >= window_start),
+            }
+            if last_used is not None:
+                roles_with_usage += 1
+                if entry['in_window']:
+                    in_window += 1
+            resources_touched.append(entry)
+
+        # Architecture-derived access — AuditGraph's core principle is to
+        # infer from the cloud control plane, not from runtime telemetry
+        # (70% of orgs don't configure sign-in / activity logs). Telemetry,
+        # if available, CONFIRMS what we already derived from architecture.
+        coverage = {
+            'roles_total':              len(role_rows),
+            'roles_with_usage_data':    roles_with_usage,
+            'roles_used_in_window':     in_window,
+            'window_days':              window_days,
+            'architecture_sources': [
+                'rbac_assignments',
+                'role_scope_usage',  # last_used_at when populated by Azure
+            ],
+            'telemetry_optional': [
+                # These would CONFIRM but are not required:
+                'sign_in_logs',
+                'azure_activity_log',
+                'graph_audit_log',
+            ],
+            'notice': (
+                'Access derived from your cloud architecture (RBAC + resource scope). '
+                'When usage telemetry is available we surface last-used timestamps to '
+                'confirm activity; absence of telemetry does NOT mean an agent is inactive — '
+                'the access path is always derived from architecture.'
+            ),
+        }
+
+        return jsonify({
+            'identity': {
+                'identity_id':         ident_id,
+                'display_name':        display_name,
+                'last_sign_in':        last_sign_in.isoformat() if last_sign_in else None,
+                'last_activity_date':  last_activity_date.isoformat() if last_activity_date else None,
+            },
+            'window_days':       window_days,
+            'resources_touched': resources_touched,
+            'coverage':          coverage,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_agent_actual_access failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AG-163: AI Inventory clustered graph
+# ============================================================
+
+# Cluster priority — when an agent touches multiple resource types we want to
+# assign it to the cluster that best characterises its blast radius. Vaults
+# (secret material) outrank Data (storage) outrank Network (egress) outrank
+# Models. Keep these in sync with the frontend cluster definitions.
+_INVENTORY_CLUSTER_PRIORITY = ['vaults', 'data', 'network', 'models']
+
+_INVENTORY_CLUSTERS = [
+    {'id': 'cluster:vaults',  'cluster': 'vaults',  'label': 'Vaults',  'description': 'Key Vault secrets / certs / keys'},
+    {'id': 'cluster:data',    'cluster': 'data',    'label': 'Data',    'description': 'Storage / SQL / Cosmos data plane'},
+    {'id': 'cluster:network', 'cluster': 'network', 'label': 'Network', 'description': 'Internet-facing resources'},
+    {'id': 'cluster:models',  'cluster': 'models',  'label': 'Models',  'description': 'Azure AI / ML / OpenAI / Cognitive'},
+]
+
+# Map access-dimension key → cluster name for primary_cluster assignment
+_DIMENSION_TO_CLUSTER = {
+    'key_vault_access': 'vaults',
+    'data_access':      'data',
+    'internet_egress':  'network',
+    'model_access':     'models',
+}
+
+# Edge color based on highest privilege the agent holds in its primary cluster.
+# Mirrors the frontend severity palette.
+_EDGE_COLOR_BY_LEVEL = {
+    # vaults
+    'administrator':  '#ef4444',
+    'secrets_officer':'#ef4444',
+    'secrets_user':   '#fb923c',
+    # data
+    'owner':          '#ef4444',
+    'contributor':    '#fb923c',
+    'data_reader_writer': '#facc15',
+    'data_reader':    '#facc15',
+    # network
+    'unrestricted':   '#ef4444',
+    'restricted':     '#facc15',
+    'blocked':        '#22c55e',
+    # models
+    'developer':      '#fb923c',
+    'user':           '#facc15',
+    # generic
+    'full_access':    '#ef4444',
+    'reader':         '#facc15',
+    'none':           '#475569',
+}
+
+
+def _why_top_risk(agent_id: int, role_rows: list[tuple], display_name: str) -> str:
+    """Build a 1-sentence WHY for a top-risk agent from its role assignments."""
+    from app.constants.ai_risk import BROAD_PRIVILEGE_ROLES
+    roles = [r for r in role_rows if r[0] == agent_id]
+    if not roles:
+        return f'No active role assignments detected for {display_name}'
+    # Highlight broad privileges first
+    broad = [r[1] for r in roles if r[1] in BROAD_PRIVILEGE_ROLES]
+    if broad:
+        scope = roles[0][2] or 'tenant scope'
+        scope_short = scope.split('/')[2] if scope.startswith('/subscriptions/') else 'subscription'
+        return f'Holds {broad[0]} on {scope_short} — full control of all resources beneath this scope'
+    # Otherwise pick the most-privileged named role
+    role_names = sorted({r[1] for r in roles if r[1]})
+    top = role_names[0] if role_names else 'an unknown role'
+    extra = f' + {len(role_names)-1} more' if len(role_names) > 1 else ''
+    return f'Holds {top}{extra} — review whether least-privilege scope applies'
+
+
+def get_ai_inventory_graph():
+    """GET /api/ai-security/inventory-graph — clustered AI agent inventory graph.
+
+    Returns the data the AI Inventory page uses to render a force-directed
+    relationship map (replacing the prior wall-of-circles). Structure:
+
+      stats        — 3 KPIs for the page header strip
+      clusters     — 4 fixed clusters (vaults, data, network, models)
+      agents       — per-agent: id, label, platform, risk_score, primary_cluster,
+                     edge_color, edge_label, severity
+      top_risks    — top 5 by risk_score, each with a generated WHY sentence
+
+    All data live from `agent_classifications` + `role_assignments`. Tenant
+    scoping inherits from RLS (organization_id column + rowsecurity=t).
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        aggregate_access_levels,
+        # AG-164: signal-sum scoring (NIST + CVSS v3.1 + MITRE-aligned)
+        detect_signals,
+        compute_signal_score,
+        classify_role_access,
+        BROAD_PRIVILEGE_ROLES,
+        KEY_VAULT_WEIGHTS,
+        DATA_ACCESS_WEIGHTS,
+        INTERNET_EGRESS_WEIGHTS,
+        MODEL_ACCESS_WEIGHTS,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Resolve the tenant label for the graph center node — org name, plus
+        # connection label when a specific connection is in context (multi-tenant
+        # architecture: customers want to see WHICH connector this graph is for).
+        org_id = _org_id()
+        conn_id = _connection_id()
+        tenant_label = 'Your Tenant'
+        try:
+            cursor.execute("SELECT name FROM organizations WHERE id = %s", (org_id,))
+            _r = cursor.fetchone()
+            org_name = _r[0] if _r else None
+            conn_label = None
+            if conn_id:
+                cursor.execute("SELECT label FROM cloud_connections WHERE id = %s AND organization_id = %s",
+                               (conn_id, org_id))
+                _c = cursor.fetchone()
+                conn_label = _c[0] if _c else None
+            if org_name and conn_label:
+                tenant_label = f"{org_name} · {conn_label}"
+            elif org_name:
+                tenant_label = org_name
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+
+        # Pull AI-classified agents (one row per identity_id, latest run).
+        # AG-164: extra columns needed for signal detection (telemetry, ownership,
+        # credentials, last activity) — drives the no_telemetry / dormant_agent /
+        # expired_credential / no_owner signals.
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id)
+                i.id, i.identity_id, i.display_name, i.risk_score,
+                ac.agent_identity_type, ac.detected_platform,
+                i.owner_display_name, i.credential_risk,
+                i.last_sign_in, i.last_activity_date,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agent_rows = cursor.fetchall()
+        if not agent_rows:
+            cursor.close()
+            return jsonify({
+                'tenant_label': tenant_label,
+                'clusters': _INVENTORY_CLUSTERS,
+                'agents': [],
+                'stats': {'total_agents': 0, 'critical_agents': 0,
+                          'with_subscription_owner': 0, 'with_kv_admin_or_blob_owner': 0},
+                'top_risks': [],
+            })
+
+        agent_db_ids = [r[0] for r in agent_rows]
+
+        # Pull all role assignments for these agents
+        cursor.execute("""
+            SELECT ra.identity_db_id, ra.role_name, ra.scope
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = ANY(%s)
+        """, (agent_db_ids,))
+        role_rows = cursor.fetchall()
+        cursor.close()
+
+        # Group roles by agent for downstream lookups
+        roles_by_agent: dict[int, list[dict]] = {}
+        for db_id, role_name, scope in role_rows:
+            roles_by_agent.setdefault(db_id, []).append({
+                'role_name': role_name or '',
+                'scope':     scope or '',
+            })
+
+        # Build per-agent payload
+        agents_out = []
+        cluster_counts = {c['cluster']: 0 for c in _INVENTORY_CLUSTERS}
+        cluster_critical = {c['cluster']: 0 for c in _INVENTORY_CLUSTERS}
+        critical_total = 0
+        with_sub_owner = 0
+        with_kv_admin_or_blob_owner = 0
+
+        for row in agent_rows:
+            (db_id, identity_id, display_name, _legacy_score, agent_type, platform,
+             owner_name, cred_risk, last_sign_in, last_activity, sp_sign_in) = row
+            agent_roles = roles_by_agent.get(db_id, [])
+            access = aggregate_access_levels(agent_roles)
+
+            # AG-164: signal-sum scoring (CVSS-aligned 0–10 + per-signal breakdown)
+            agent_meta = {
+                'display_name':                    display_name,
+                'detected_platform':               platform,
+                'owner_display_name':              owner_name,
+                'credential_risk':                 cred_risk,
+                'last_sign_in':                    last_sign_in,
+                'last_activity_date':              last_activity,
+                'last_service_principal_sign_in': sp_sign_in,
+            }
+            fired = detect_signals(agent_meta, agent_roles, access)
+            score_pkg = compute_signal_score(fired)
+            score = score_pkg['score']
+            severity = score_pkg['severity']
+            breakdown = score_pkg['breakdown']
+
+            # Assign to primary cluster — highest-weighted dimension that's non-none
+            weight_maps = {
+                'vaults':  (KEY_VAULT_WEIGHTS,        access.get('key_vault_access', 'none')),
+                'data':    (DATA_ACCESS_WEIGHTS,      access.get('data_access', 'none')),
+                'network': (INTERNET_EGRESS_WEIGHTS,  access.get('internet_egress', 'none')),
+                'models':  (MODEL_ACCESS_WEIGHTS,     access.get('model_access', 'none')),
+            }
+            best_cluster = None
+            best_weight = -1.0
+            for cname in _INVENTORY_CLUSTER_PRIORITY:
+                wmap, lvl = weight_maps[cname]
+                w = wmap.get(lvl, 0.0)
+                if w > best_weight:
+                    best_weight = w
+                    best_cluster = cname
+            # If everything is "none", fall back to models (visual placement)
+            if best_weight <= 0:
+                best_cluster = 'models'
+
+            level_for_edge = weight_maps[best_cluster][1]
+            edge_color = _EDGE_COLOR_BY_LEVEL.get(level_for_edge, '#475569')
+            edge_label = level_for_edge.replace('_', ' ').title() if level_for_edge != 'none' else 'No access'
+
+            cluster_counts[best_cluster] += 1
+            if severity == 'critical':
+                cluster_critical[best_cluster] += 1
+                critical_total += 1
+
+            # KPI flags
+            role_names = [r['role_name'] for r in agent_roles]
+            scopes = [r['scope'] for r in agent_roles]
+            if any(rn in BROAD_PRIVILEGE_ROLES for rn in role_names) and any(
+                    s.count('/') == 2 and s.startswith('/subscriptions/') for s in scopes):
+                with_sub_owner += 1
+            if 'Key Vault Administrator' in role_names or 'Storage Blob Data Owner' in role_names:
+                with_kv_admin_or_blob_owner += 1
+
+            agents_out.append({
+                'id':              identity_id,
+                'label':           display_name or identity_id,
+                'platform':        platform or 'unknown',
+                'agent_type':      agent_type,
+                'risk_score':      score,            # AG-164: CVSS-aligned 0–10
+                'severity':        severity,
+                'primary_cluster': best_cluster,
+                'edge_color':      edge_color,
+                'edge_label':      edge_label,
+                'access':          access,
+                # AG-164: signal-level breakdown — drives the "Risk Breakdown"
+                # tooltip in the AI Inventory drawer / top-5 panel.
+                'signal_count':    len(breakdown),
+                'top_signals':     [{'key': s['key'], 'title': s['title'],
+                                     'weight': s['weight'], 'mitre': s['mitre']}
+                                    for s in breakdown[:3]],
+            })
+
+        # Sort agents within each cluster by risk DESC for stable layout
+        agents_out.sort(key=lambda a: (a['primary_cluster'], -a['risk_score']))
+
+        # Enrich clusters with counts
+        clusters_out = []
+        for c in _INVENTORY_CLUSTERS:
+            clusters_out.append({
+                **c,
+                'agent_count':    cluster_counts[c['cluster']],
+                'critical_count': cluster_critical[c['cluster']],
+            })
+
+        # Top 5 risks — sorted by signal-derived score, WHY built from top signals.
+        top_sorted = sorted(agents_out, key=lambda a: -a['risk_score'])[:5]
+        top_risks = []
+        for a in top_sorted:
+            top_titles = [s['title'] for s in a.get('top_signals', [])[:2]]
+            why = ' · '.join(top_titles) if top_titles else 'No risk signals detected'
+            top_risks.append({
+                'id':        a['id'],
+                'label':     a['label'],
+                'platform':  a['platform'],
+                'score':     a['risk_score'],
+                'severity':  a['severity'],
+                'why':       why,
+                # Surface MITRE techniques on the top-5 card for at-a-glance defensibility
+                'mitre':     sorted({m for s in a.get('top_signals', []) for m in (s.get('mitre') or [])}),
+            })
+
+        return jsonify({
+            'tenant_label': tenant_label,
+            'clusters': clusters_out,
+            'agents':   agents_out,
+            'stats': {
+                'total_agents':                 len(agents_out),
+                'critical_agents':              critical_total,
+                'with_subscription_owner':      with_sub_owner,
+                'with_kv_admin_or_blob_owner':  with_kv_admin_or_blob_owner,
+            },
+            'top_risks': top_risks,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_inventory_graph failed: %s", e, exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()

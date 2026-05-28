@@ -140,6 +140,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Access Explainability',
         color: '#0891b2',
         items: [
+          { to: '/identity-graph', label: 'Identity Graph', icon: identityIcon },
           { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon }] : []),
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon }] : []),
@@ -147,12 +148,17 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
+        // 5-pillar IA per AG-161. Order: Inventory (who/what) → Access (what
+        // can they touch) → Runtime (where they execute) → Risk (how they're
+        // exploited) → Governance (are we within policy).
         label: 'AI Security',
         color: '#8b5cf6',
         items: [
-          { to: '/ai-identity-graph', label: 'AI Identity Graph', icon: agentBotIcon },
-          { to: '/ai-agents', label: 'AI Agents', icon: agentBotIcon },
-          { to: '/ai-permissions', label: 'AI Permissions', icon: effectiveAccessIcon },
+          { to: '/ai-inventory',  label: 'AI Inventory',  icon: agentBotIcon },
+          { to: '/ai-access',     label: 'AI Access',     icon: effectiveAccessIcon },
+          { to: '/ai-runtime',    label: 'AI Runtime',    icon: agentBotIcon },
+          { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
+          { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },
         ],
       },
       {

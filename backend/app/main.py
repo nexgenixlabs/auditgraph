@@ -495,6 +495,8 @@ from app.api.handlers import (
     get_ai_agents_permissions,
     get_ai_security_stats,
     get_ai_permissions_overview,
+    get_ai_inventory_graph,  # AG-163: AI Inventory clustered graph
+    get_ai_agent_actual_access,  # AG-167: Actual endpoint reach (AI Runtime Phase 1)
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -2073,6 +2075,16 @@ def create_app():
     @app.get("/api/ai-security/permissions")
     def ai_permissions_overview_route():
         return get_ai_permissions_overview()
+
+    # AG-163: AI Inventory clustered graph (replaces wall-of-circles page)
+    @app.get("/api/ai-security/inventory-graph")
+    def ai_inventory_graph_route():
+        return get_ai_inventory_graph()
+
+    # AG-167: Actual endpoint reach — what an AI agent is really touching
+    @app.get("/api/ai-agents/<identity_id>/actual-access")
+    def ai_agent_actual_access_route(identity_id):
+        return get_ai_agent_actual_access(identity_id)
 
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')

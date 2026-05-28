@@ -51,9 +51,14 @@ import AppRegistrations from './pages/AppRegistrations';
 import IdentityCorrelation from './pages/IdentityCorrelation';
 import WorkloadIdentities from './pages/WorkloadIdentities';
 import AIAgents from './pages/AIAgents';
-import AIIdentityGraph from './pages/AIIdentityGraph';
-import AIAgentsStandalone from './pages/AIAgentsStandalone';
-import AIPermissions from './pages/AIPermissions';
+// 5-pillar AI Security IA per AG-161. The standalone AIIdentityGraph,
+// AIAgentsStandalone, and AIPermissions pages are now wrapped inside these
+// pillars; legacy URLs redirect (see Route declarations below).
+import AIInventory from './pages/AIInventory';
+import AIAccess from './pages/AIAccess';
+import AIRuntime from './pages/AIRuntime';
+import AIRisk from './pages/AIRisk';
+import AIGovernance from './pages/AIGovernance';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import ClientBilling from './pages/ClientBilling';
@@ -321,7 +326,7 @@ function AppContent() {
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
                   <Route path="/identity-explorer" element={<Navigate to="/identity-explorer/humans" replace />} />
                   <Route path="/identity-explorer/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExplorer /></ErrorBoundary>} />
-                  <Route path="/identity-graph" element={<Navigate to="/identity-explorer/graph" replace />} />
+                  <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
                   <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
                   <Route path="/privilege-drift" element={<Navigate to="/drift-analysis" replace />} />
@@ -333,9 +338,17 @@ function AppContent() {
                   <Route path="/identities" element={<Navigate to="/identity-explorer/all" replace />} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-                  <Route path="/ai-agents" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAgentsStandalone /></ErrorBoundary>} />
-                  <Route path="/ai-identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIIdentityGraph /></ErrorBoundary>} />
-                  <Route path="/ai-permissions" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIPermissions /></ErrorBoundary>} />
+                  {/* AG-161: 5-pillar AI Security IA. Legacy routes below redirect into new pillars. */}
+                  <Route path="/ai-inventory" element={<Navigate to="/ai-inventory/graph" replace />} />
+                  <Route path="/ai-inventory/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIInventory /></ErrorBoundary>} />
+                  <Route path="/ai-access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAccess /></ErrorBoundary>} />
+                  <Route path="/ai-runtime" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRuntime /></ErrorBoundary>} />
+                  <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />
+                  <Route path="/ai-governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIGovernance /></ErrorBoundary>} />
+                  {/* Legacy redirects — preserve bookmarks from before AG-161 */}
+                  <Route path="/ai-identity-graph" element={<Navigate to="/ai-inventory/graph" replace />} />
+                  <Route path="/ai-agents" element={<Navigate to="/ai-inventory/agents" replace />} />
+                  <Route path="/ai-permissions" element={<Navigate to="/ai-access" replace />} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
                   <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />
