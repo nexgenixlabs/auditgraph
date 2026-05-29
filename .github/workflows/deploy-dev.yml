@@ -274,6 +274,50 @@ jobs:
           az containerapp show -n ${{ env.ADMIN_APP }} -g ${{ env.RG }} \
             --query "{app:name, fqdn:properties.configuration.ingress.fqdn}" -o table
 
+      # The Bicep redeploy above recreates the container apps WITHOUT the custom
+      # domain bindings (they're applied here, not in the template), so every
+      # deploy clears them and dev.app/admin/api.auditgraph.ai return
+      # ERR_CONNECTION_RESET until re-bound. This step restores them idempotently.
+      # The managed certs persist at the env level (not touched by Bicep); we look
+      # them up by subject so the binding survives cert-name suffix changes.
+      - name: Re-bind custom domains (Bicep redeploy clears them)
+        run: |
+          bind() {
+            local app="$1" host="$2"
+            echo "=== $host -> $app ==="
+            if az containerapp hostname list -n "$app" -g ${{ env.RG }} \
+                 --query "[?name=='$host'] | [0].name" -o tsv 2>/dev/null | grep -qx "$host"; then
+              echo "  already bound — skipping"
+              return 0
+            fi
+            CERT_ID=$(az containerapp env certificate list -g ${{ env.RG }} -n ${{ env.CAE }} \
+              --managed-certificates-only \
+              --query "[?properties.subjectName=='$host'].id | [0]" -o tsv 2>/dev/null)
+            if [ -n "$CERT_ID" ]; then
+              az containerapp hostname bind -n "$app" -g ${{ env.RG }} \
+                --hostname "$host" --environment ${{ env.CAE }} \
+                --certificate "$CERT_ID" --output none \
+                && echo "  ✓ bound with existing managed cert" \
+                || echo "::warning::bind failed for $host — re-bind manually"
+            else
+              # No managed cert yet — create + bind via CNAME validation
+              # (asuid TXT + CNAME records already exist in DNS).
+              az containerapp hostname bind -n "$app" -g ${{ env.RG }} \
+                --hostname "$host" --environment ${{ env.CAE }} \
+                --validation-method CNAME --output none \
+                && echo "  ✓ bound + provisioned new managed cert" \
+                || echo "::warning::bind+provision failed for $host — re-bind manually"
+            fi
+          }
+          bind "${{ env.API_APP }}"    dev.api.auditgraph.ai
+          bind "${{ env.CLIENT_APP }}" dev.app.auditgraph.ai
+          bind "${{ env.ADMIN_APP }}"  dev.admin.auditgraph.ai
+          echo ""
+          echo "=== Bound hostnames ==="
+          for a in ${{ env.API_APP }} ${{ env.CLIENT_APP }} ${{ env.ADMIN_APP }}; do
+            echo "  $a: $(az containerapp hostname list -n "$a" -g ${{ env.RG }} --query "[].name" -o tsv 2>/dev/null | tr '\n' ' ')"
+          done
+
   # ═══════════════════════════════════════════════════════════════════════════
   # 6. Final Status
   # ═══════════════════════════════════════════════════════════════════════════
