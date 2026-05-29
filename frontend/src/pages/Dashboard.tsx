@@ -388,20 +388,25 @@ export default function Dashboard() {
           {/* Sticky section nav — Risk Monitoring is intentionally section-rich
               (the SOC needs all of these views), so instead of hiding sections
               we give the operator one-click navigation. Sticks below the global
-              header (56px) so it's always reachable while scrolling. */}
+              header (56px) so it's always reachable while scrolling. Slate band
+              with a brand accent bottom-border for visibility + brand identity. */}
           <nav
-            className="sticky z-20 -mx-4 sm:-mx-5 lg:-mx-6 px-4 sm:px-5 lg:px-6 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-medium border-y bg-white/95 backdrop-blur"
-            style={{ top: 'var(--header-height, 56px)', borderColor: COLORS.border }}
+            className="sticky z-20 -mx-4 sm:-mx-5 lg:-mx-6 px-4 sm:px-5 lg:px-6 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-medium bg-slate-50"
+            style={{
+              top: 'var(--header-height, 56px)',
+              borderTop: `1px solid ${COLORS.border}`,
+              borderBottom: `2px solid ${COLORS.accentPrimary}`,
+            }}
             aria-label="Risk Monitoring sections"
           >
-            <span style={{ color: COLORS.textMuted }}>Jump to:</span>
-            <a href="#anomaly-alerts" className="text-blue-600 hover:underline">Alerts</a>
-            <a href="#risk-trend" className="text-blue-600 hover:underline">Trend</a>
-            <a href="#risk-heatmap" className="text-blue-600 hover:underline">Heat Map</a>
-            <a href="#drift-analysis" className="text-blue-600 hover:underline">Drift</a>
-            <a href="#attack-surface" className="text-blue-600 hover:underline">Attack Surface</a>
-            <a href="#machine-identity" className="text-blue-600 hover:underline">Machine ID</a>
-            <a href="#credentials" className="text-blue-600 hover:underline">Credentials</a>
+            <span className="font-semibold uppercase tracking-wider text-[10px]" style={{ color: COLORS.textMuted }}>Jump to:</span>
+            <a href="#anomaly-alerts" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Alerts</a>
+            <a href="#risk-trend" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Trend</a>
+            <a href="#risk-heatmap" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Heat Map</a>
+            <a href="#drift-analysis" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Drift</a>
+            <a href="#attack-surface" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Attack Surface</a>
+            <a href="#machine-identity" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Machine ID</a>
+            <a href="#credentials" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Credentials</a>
           </nav>
 
           {/* Section 2: Active Identity Alerts */}
