@@ -14,6 +14,7 @@ import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { mapSummaryToViewModel, buildEmptyCISOViewModel, type CISOViewModel, type PostureV31Response } from '../utils/cisoViewModel';
 import { DN } from '../components/dashboard/ciso-shared';
+import AudienceBadge from '../components/AudienceBadge';
 import { IdentityDrawerProvider } from '../contexts/IdentityDrawerContext';
 import { IdentityContextDrawer } from '../components/dashboard/IdentityContextDrawer';
 import { usePostureDashboard, type PosturePhase } from '../hooks/usePostureDashboard';
@@ -284,9 +285,10 @@ function PageHeader() {
   return (
     <>
       <header className="flex items-center justify-between p-3 flex-shrink-0">
-        <div className="flex items-baseline gap-3">
+        <div className="flex items-baseline gap-3 min-w-0">
           <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
-          <span className="text-xs text-gray-400">{getTimezoneLabel()}</span>
+          <AudienceBadge label="BOARD / CISO" variant="amber" />
+          <span className="text-xs text-gray-400 hidden md:inline">Board-ready summary · {getTimezoneLabel()}</span>
         </div>
         <div className="flex gap-3 flex-shrink-0">
           <DN navigateTo="/reports/executive">

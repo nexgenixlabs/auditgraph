@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useCopilot } from '../contexts/CopilotContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import AudienceBadge from '../components/AudienceBadge';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -267,9 +268,12 @@ export default function SecurityCommandCenter() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Security Command Center</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-white">Security Command Center</h1>
+            <AudienceBadge label="OPS CONSOLE" variant="blue" />
+          </div>
           <p className="text-sm text-slate-400 mt-1">
-            Real-time security posture, risk analysis, and remediation priorities
+            Active risks and remediation queue — what needs action now
             {overview?.discovery_metadata?.data_as_of && (
               <span className="ml-3 text-slate-500">
                 Data as of: {new Date(overview.discovery_metadata.data_as_of).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
