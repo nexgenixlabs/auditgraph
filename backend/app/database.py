@@ -19893,6 +19893,10 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Pre-existing tables may lack the PK on `key` (older schema) — ensure a
+        # unique index so the ON CONFLICT (key) upsert below has a match target.
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_settings_key ON platform_settings (key)")
         # Seed defaults
         for k, v in [
             ('company_name', 'AuditGraph Inc.'),

@@ -484,25 +484,51 @@ def auth_middleware():
         except (ValueError, TypeError):
             pass
 
-    # Phase 3A.1: Global plan_status enforcement — suspended/cancelled orgs blocked
-    if not g.current_user.get('is_superadmin'):
-        _ps_org_id = g.current_user.get('organization_id')
-        if _ps_org_id:
+    # Phase 3A.1: Per-request principal liveness + plan_status enforcement.
+    # A stateless JWT stays valid until expiry, so without this a deleted or
+    # disabled user (or a user whose org was deleted) keeps full access on an
+    # active session. Verify the principal still exists + is enabled and the org
+    # still exists, and block suspended/cancelled orgs — in one lookup that this
+    # block already performed for plan_status. Fail-open on DB error so a
+    # transient blip can't mass-logout everyone. (Superadmins/demo exempt.)
+    if not g.current_user.get('is_superadmin') and not g.current_user.get('is_demo'):
+        _uid = g.current_user.get('id')
+        if _uid:
+            _live_row = None
+            _live_ok = False
             try:
-                _ps_db = Database(_admin_reason='auth_middleware: plan_status check')
+                _ps_db = Database(_admin_reason='auth_middleware: principal liveness + plan_status')
                 _ps_cur = _ps_db.conn.cursor()
-                _ps_cur.execute("SELECT plan_status FROM organizations WHERE id = %s", (_ps_org_id,))
-                _ps_row = _ps_cur.fetchone()
+                _ps_cur.execute(
+                    """SELECT u.enabled, u.organization_id, o.id, o.plan_status
+                       FROM users u
+                       LEFT JOIN organizations o ON o.id = u.organization_id
+                       WHERE u.id = %s""",
+                    (_uid,),
+                )
+                _live_row = _ps_cur.fetchone()
                 _ps_cur.close()
                 _ps_db.close()
-                if _ps_row and _ps_row[0] in ('suspended', 'cancelled'):
+                _live_ok = True
+            except Exception:
+                pass  # fail-open: don't block on lookup failure
+            if _live_ok:
+                if _live_row is None:
+                    return jsonify({'error': 'Session invalid — account no longer exists',
+                                    'session_invalid': True}), 401
+                _enabled, _u_org, _o_id, _plan = _live_row
+                if not _enabled:
+                    return jsonify({'error': 'Session invalid — account disabled',
+                                    'session_invalid': True}), 401
+                if _u_org and _o_id is None:
+                    return jsonify({'error': 'Session invalid — organization no longer exists',
+                                    'session_invalid': True}), 401
+                if _plan in ('suspended', 'cancelled'):
                     return jsonify({
-                        'error': f'Organization account is {_ps_row[0]}. Contact support to restore access.',
-                        'plan_status': _ps_row[0],
+                        'error': f'Organization account is {_plan}. Contact support to restore access.',
+                        'plan_status': _plan,
                         'account_blocked': True,
                     }), 403
-            except Exception:
-                pass  # Don't block on lookup failure
 
     # Phase 23: Trial expiry check — only fires on client portal
     if portal == 'client' and not g.current_user.get('is_superadmin') and not g.current_user.get('portal_role'):
