@@ -1086,6 +1086,7 @@ def create_app():
             ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
             ('identity_lineage_columns', lambda: _db_init.ensure_identity_lineage_columns()),
             ('last_activity_columns', lambda: _db_init.ensure_last_activity_columns()),
+            ('nhi_human_columns', lambda: _db_init.ensure_nhi_human_columns()),
             ('spn_exposure', lambda: _db_init._ensure_spn_exposure()),
             ('app_reg_exposure', lambda: _db_init._ensure_app_reg_exposure()),
             ('workload_telemetry', lambda: _db_init._ensure_workload_telemetry_tables()),

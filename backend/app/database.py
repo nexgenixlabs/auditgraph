@@ -1841,6 +1841,7 @@ class Database:
     _telemetry_coverage_col_ensured = False
     _ms_first_party_col_ensured = False
     _lineage_verdicts_ensured = False
+    _nhi_human_cols_ensured = False
 
     def backfill_microsoft_flag(self):
         """Startup backfill of is_microsoft_system for ALL data.
@@ -2272,6 +2273,44 @@ class Database:
         except Exception as e:
             self._rollback()
             _log.warning("last_activity columns migration error: %s", e)
+        finally:
+            cursor.close()
+
+    def ensure_nhi_human_columns(self):
+        """Startup migration: NHI (AG-159) + Humans (AG-160) enrichment columns.
+
+        These were originally added lazily inside save_identity (write path),
+        which meant a DB that hadn't re-run discovery on the new code lacked
+        them — and the identities read path (_identity_list_select) 500s on the
+        missing column. Adding them at startup makes the read path safe on any
+        tenant regardless of discovery state. Pure additive / idempotent.
+        """
+        if Database._nhi_human_cols_ensured:
+            return
+        _log = logging.getLogger(__name__)
+        cursor = self.conn.cursor()
+        try:
+            required_cols = [
+                # NHI enrichment (AG-159)
+                ("secret_expiry_earliest", "TIMESTAMPTZ"),
+                ("secret_expiry_status", "VARCHAR(20)"),
+                ("federated_cred_count", "INTEGER DEFAULT 0"),
+                ("owner_resolved", "TEXT"),
+                # Humans enrichment (AG-160)
+                ("mfa_status", "VARCHAR(20)"),
+                ("mfa_methods", "JSONB"),
+                ("department", "VARCHAR(255)"),
+                ("manager_id", "VARCHAR(255)"),
+                ("job_title", "VARCHAR(255)"),
+                ("upn", "VARCHAR(500)"),
+            ]
+            for col_name, col_type in required_cols:
+                cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            self._commit()
+            Database._nhi_human_cols_ensured = True
+        except Exception as e:
+            self._rollback()
+            _log.warning("NHI/Humans columns migration error: %s", e)
         finally:
             cursor.close()
 
