@@ -64,6 +64,12 @@ interface ActivityEntry {
 
 // ─── Badge Maps ───────────────────────────────────────────────────
 
+// Cap the inline Top Risky Identities + Remediation Priority lists at the top
+// items so the page stays above-the-fold; "View All" still routes to the full
+// page (Identities / Remediation Center). Fetch limits are intentionally left
+// higher so the cap is purely a render concern.
+const ROW_CAP = 5;
+
 const SEVERITY_BADGE: Record<string, string> = {
   critical: 'bg-red-500/20 text-red-400 border border-red-500/30',
   high: 'bg-orange-500/20 text-orange-400 border border-orange-500/30',
@@ -125,6 +131,12 @@ export default function SecurityCommandCenter() {
   const { withConnection, selectedConnectionId } = useConnection();
   const { activeOrgId } = useAuth();
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
+  // Canonical Posture Score — the SAME number the CISO board renders
+  // (/api/dashboard/posture), so the Command Center can't disagree with the
+  // exec view. Previously this gauge read overview.posture_score which used a
+  // different formula (privileged %) and disagreed with the CISO's 100-(crit+high)%
+  // posture metric, causing the 93-vs-69 conflict.
+  const [cisoPostureScore, setCisoPostureScore] = useState<number | null>(null);
   const [riskyIdentities, setRiskyIdentities] = useState<RiskyIdentity[]>([]);
   const [recommendations, setRecommendations] = useState<FixRecommendation[]>([]);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
@@ -135,15 +147,27 @@ export default function SecurityCommandCenter() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      // Single primary call + lazy-loaded lists in parallel
-      const [overviewRes, riskyRes, recsRes, activityRes] = await Promise.all([
+      // Single primary call + lazy-loaded lists + canonical posture score in parallel
+      const [overviewRes, postureRes, riskyRes, recsRes, activityRes] = await Promise.all([
         fetch(withConnection('/api/security/overview')),
+        fetch(withConnection('/api/dashboard/posture')),
         fetch(withConnection('/api/identities?risk_level=critical&limit=10')),
         fetch(withConnection('/api/fix-recommendations?limit=10&status=open')),
         fetch(withConnection('/api/activity?limit=15')),
       ]);
 
       if (overviewRes.ok) setOverview(await overviewRes.json());
+
+      // Canonical posture score (SSOT — same field the CISO board uses).
+      // Fail-open: if this endpoint blips, gauge falls back to 0 (handled below)
+      // rather than disagreeing with the CISO board with a stale/divergent value.
+      if (postureRes.ok) {
+        try {
+          const p = await postureRes.json();
+          const s = typeof p?.posture_score === 'number' ? p.posture_score : null;
+          if (s !== null) setCisoPostureScore(s);
+        } catch { /* ignore */ }
+      }
 
       if (riskyRes.ok) {
         const d = await riskyRes.json();
@@ -222,7 +246,11 @@ export default function SecurityCommandCenter() {
   }
 
   // Derived metrics from overview
-  const postureScore = overview?.posture_score ?? 0;
+  // SSOT: prefer the canonical CISO posture score; fall back to 0 if not yet
+  // loaded (gauge component handles 0 cleanly). Do NOT fall back to
+  // overview.posture_score — that's a different metric (privileged %) and
+  // mixing the two is what caused the 93-vs-69 inconsistency.
+  const postureScore = cisoPostureScore !== null ? Math.round(cisoPostureScore) : 0;
   const find = overview?.findings || { critical: 0, high: 0, medium: 0, low: 0 };
   const attackPathCount = overview?.attack_paths?.identities_with_paths ?? 0;
   const cred = overview?.credentials || { total: 0, expired: 0, expiring_soon: 0 };
@@ -354,7 +382,7 @@ export default function SecurityCommandCenter() {
           <div className="divide-y divide-slate-700/30">
             {riskyIdentities.length === 0 ? (
               <div className="px-4 py-6 text-center text-sm text-slate-500">No risky identities found</div>
-            ) : riskyIdentities.map((identity) => (
+            ) : riskyIdentities.slice(0, ROW_CAP).map((identity) => (
               <button
                 key={identity.identity_id}
                 onClick={() => navigate(`/identities/${identity.identity_id}`)}
@@ -396,7 +424,7 @@ export default function SecurityCommandCenter() {
                 <div className="text-sm text-slate-500">No remediation actions generated yet.</div>
                 <button onClick={() => navigate('/remediation')} className="text-xs text-blue-400 hover:text-blue-300 mt-1">Generate plan from findings →</button>
               </div>
-            ) : recommendations.map((rec) => (
+            ) : recommendations.slice(0, ROW_CAP).map((rec) => (
               <div key={rec.id} className="px-4 py-2.5 flex items-start gap-3">
                 <span className={`mt-0.5 px-2 py-0.5 text-[10px] font-medium rounded whitespace-nowrap ${SEVERITY_BADGE[rec.effort || 'medium'] || 'bg-slate-600 text-slate-300'}`}>
                   {(rec.effort || 'medium').toUpperCase()}
@@ -539,15 +567,15 @@ function PostureGauge({ score }: { score: number }) {
         <text x="80" y="95" textAnchor="middle" fill={color} fontSize="12" fontWeight="500">{label}</text>
       </svg>
       <div className="text-xs text-slate-500 mt-1 flex items-center justify-center gap-1">
-        Identity Hygiene Score
+        Posture Score
         <span className="relative group">
           <span className="text-slate-600 cursor-help" style={{ fontSize: 14 }}>{'\u24D8'}</span>
           <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block bg-slate-900 border border-slate-700 text-slate-200 text-[10px] px-2.5 py-1.5 rounded-md max-w-[280px] whitespace-normal z-50 shadow-lg pointer-events-none leading-relaxed">
-            Calculated as 100 minus the percentage of critical and high risk identities in your environment. A score of 100 means zero critical or high risk identities. Complements the posture score which measures attack surface across 7 pillars.
+            Canonical posture score (same as the Executive Posture board): 100 minus the percentage of identities at critical or high risk. A score of 100 means zero critical or high risk identities.
           </span>
         </span>
       </div>
-      <div className="text-[10px] text-slate-600 -mt-0.5">% of identities with clean governance status</div>
+      <div className="text-[10px] text-slate-600 -mt-0.5">% of identities not at critical or high risk</div>
     </div>
   );
 }
