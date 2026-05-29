@@ -40352,6 +40352,120 @@ def get_ai_governance():
 
 
 # ============================================================
+# AI Risk pillar — attack scenarios
+# ============================================================
+
+def get_ai_risk_scenarios():
+    """GET /api/ai-security/risk — evaluate AI agents against the attack-scenario
+    catalog. Scenarios are signal COMBINATIONS (e.g. data access + egress =
+    exfiltration path). Architecture-derived; reuses computed signals, no telemetry.
+
+    Returns:
+      summary   — exploitable_agents, total_scenarios, by_severity
+      scenarios — per-scenario: affected_count, severity, narrative, mitre,
+                  prevented_by, top_affected[]
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import aggregate_access_levels, detect_signals
+    from app.constants.ai_attack_scenarios import (
+        AI_ATTACK_SCENARIOS, SCENARIO_ORDER, evaluate_scenarios, severity_rank,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id)
+                i.id, i.identity_id, i.display_name, ac.detected_platform,
+                i.owner_display_name, i.credential_risk,
+                i.last_sign_in, i.last_activity_date,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agent_rows = cursor.fetchall()
+        agent_db_ids = [r[0] for r in agent_rows]
+
+        per_scenario = {sid: [] for sid in SCENARIO_ORDER}
+        exploitable_agents = set()
+        by_severity = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+
+        if agent_db_ids:
+            cursor.execute("""
+                SELECT ra.identity_db_id, ra.role_name, ra.scope
+                FROM role_assignments ra WHERE ra.identity_db_id = ANY(%s)
+            """, (agent_db_ids,))
+            roles_by_agent = {}
+            for db_id, rn, sc in cursor.fetchall():
+                roles_by_agent.setdefault(db_id, []).append({'role_name': rn or '', 'scope': sc or ''})
+
+            for row in agent_rows:
+                (db_id, identity_id, display_name, platform, owner_name, cred_risk,
+                 last_sign_in, last_activity, sp_sign_in) = row
+                agent_roles = roles_by_agent.get(db_id, [])
+                access = aggregate_access_levels(agent_roles)
+                meta = {
+                    'display_name': display_name, 'detected_platform': platform,
+                    'owner_display_name': owner_name, 'credential_risk': cred_risk,
+                    'last_sign_in': last_sign_in, 'last_activity_date': last_activity,
+                    'last_service_principal_sign_in': sp_sign_in,
+                }
+                fired = {s['key'] for s in detect_signals(meta, agent_roles, access)}
+                scenarios = evaluate_scenarios(fired)
+                if scenarios:
+                    exploitable_agents.add(identity_id)
+                for sc in scenarios:
+                    per_scenario[sc['id']].append({
+                        'identity_id': identity_id, 'display_name': display_name or identity_id,
+                    })
+
+        cursor.close()
+
+        scenarios_out = []
+        for sid in SCENARIO_ORDER:
+            sc = AI_ATTACK_SCENARIOS[sid]
+            affected = per_scenario[sid]
+            if affected:
+                by_severity[sc['severity']] = by_severity.get(sc['severity'], 0) + len(affected)
+            scenarios_out.append({
+                'scenario_id':    sid,
+                'name':           sc['name'],
+                'severity':       sc['severity'],
+                'narrative':      sc['narrative'],
+                'mitre':          sc['mitre'],
+                'prevented_by':   sc['prevented_by'],
+                'affected_count': len(affected),
+                'top_affected':   sorted(affected, key=lambda x: x['display_name'])[:10],
+            })
+        # Most-affected + highest severity first
+        scenarios_out.sort(key=lambda x: (-x['affected_count'], -severity_rank(x['severity'])))
+
+        return jsonify({
+            'summary': {
+                'total_agents':        len(agent_rows),
+                'exploitable_agents':  len(exploitable_agents),
+                'scenario_types':      sum(1 for s in scenarios_out if s['affected_count'] > 0),
+                'by_severity':         by_severity,
+            },
+            'scenarios': scenarios_out,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_risk_scenarios failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
 # Phase 2A: Entra Group Scanner
 # ============================================================
 
