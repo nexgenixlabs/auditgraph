@@ -99,8 +99,12 @@ export function DiscoveryProgressModal({
             setSawRunning(true);
             if (d.active_job.status === 'failed') setFailed(true);
           } else if (sawRunning || pollCount > 3) {
-            // Job disappeared after running → completed
-            setCompleted(true);
+            // Job left the active set → completed. Adopt the finalized job
+            // record so we show the real identities_discovered count (the last
+            // in-flight poll still had 0 before the final metrics write).
+            if (d.last_job) setJob(d.last_job);
+            if (d.last_job?.status === 'failed') setFailed(true);
+            else setCompleted(true);
           }
         } else {
           // Poll org-level status for any active job
@@ -116,7 +120,12 @@ export function DiscoveryProgressModal({
             setSawRunning(true);
             if (activeJob.status === 'failed') setFailed(true);
           } else if (sawRunning || pollCount > 5) {
-            setCompleted(true);
+            // No active job → adopt the most recent (finalized) job so the
+            // summary shows the real counts, not the last in-flight 0.
+            const latest = (d.jobs || [])[0];
+            if (latest) setJob(latest);
+            if (latest?.status === 'failed') setFailed(true);
+            else setCompleted(true);
           }
         }
       } catch { /* ignore */ }

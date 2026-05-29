@@ -12273,6 +12273,51 @@ class Database:
             return result
         return None
 
+    def get_latest_snapshot_job(self, cloud_connection_id, *, org_id: int = None):
+        """Get the most recent snapshot job for a connection regardless of status.
+
+        Used by the progress modal: active_job goes null the instant a job
+        completes, but the finalized identities_discovered count is only written
+        at completion — so the modal must read the completed row to show the
+        real total instead of the last in-flight (0) value.
+        """
+        effective_org_id = org_id or self._organization_id
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if effective_org_id:
+            cursor.execute("""
+                SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                       scan_mode, status, stage, progress, error_message,
+                       retry_count, duration_seconds,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       created_at, started_at, completed_at, last_heartbeat_at,
+                       stage_timings, estimated_remaining_seconds
+                FROM snapshot_jobs
+                WHERE cloud_connection_id = %s AND organization_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (cloud_connection_id, effective_org_id))
+        else:
+            cursor.execute("""
+                SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                       scan_mode, status, stage, progress, error_message,
+                       retry_count, duration_seconds,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       created_at, started_at, completed_at, last_heartbeat_at,
+                       stage_timings, estimated_remaining_seconds
+                FROM snapshot_jobs
+                WHERE cloud_connection_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (cloud_connection_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            result = dict(row)
+            result['id'] = str(result['id'])
+            for ts_key in ('created_at', 'started_at', 'completed_at', 'last_heartbeat_at'):
+                if result.get(ts_key):
+                    result[ts_key] = result[ts_key].isoformat()
+            return result
+        return None
+
     def get_snapshot_jobs_for_org(self, org_id, limit=20):
         """List recent snapshot jobs for an organization with connection labels."""
         cursor = self.conn.cursor(cursor_factory=RealDictCursor)

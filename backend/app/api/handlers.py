@@ -25669,7 +25669,13 @@ def get_snapshot_job_status(connection_id):
     admin_db = Database(_admin_reason='snapshot_job_status')
     try:
         job = admin_db.get_active_snapshot_job(connection_id, org_id=_org_id())
-        return jsonify({'active_job': job})
+        resp = {'active_job': job}
+        if not job:
+            # active_job goes null at completion before the modal captures the
+            # finalized counts; expose the most recent job so the UI can render
+            # the real identities_discovered total instead of the in-flight 0.
+            resp['last_job'] = admin_db.get_latest_snapshot_job(connection_id, org_id=_org_id())
+        return jsonify(resp)
     finally:
         admin_db.close()
 

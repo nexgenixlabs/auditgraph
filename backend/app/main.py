@@ -1126,6 +1126,23 @@ def create_app():
             ('keyvault_metadata', lambda: _db_init._ensure_keyvault_metadata_table()),
             ('role_assignment_group_cols', lambda: _db_init._ensure_role_assignment_group_cols()),
             ('snapshot_timing_cols', lambda: _ensure_snapshot_timing_cols(_db_init)),
+            # Lazy-only tables: created here (admin) so the first tenant-scoped
+            # request (app user, no CREATE on schema public) finds them already
+            # present — CREATE IF NOT EXISTS then skips instead of erroring with
+            # "permission denied for schema public". (Placed after organizations
+            # so FK references resolve.)
+            ('invoices', lambda: _db_init._ensure_invoices_table()),
+            ('platform_settings', lambda: _db_init._ensure_platform_settings_table()),
+            ('platform_ops', lambda: _db_init._ensure_platform_ops_tables()),
+            ('invitations', lambda: _db_init._ensure_invitations_table()),
+            ('connector_permissions', lambda: _db_init._ensure_connector_permissions_table()),
+            ('generated_remediations', lambda: _db_init._ensure_generated_remediations_table()),
+            ('identity_exposures', lambda: _db_init._ensure_identity_exposures_table()),
+            ('risk_summary', lambda: _db_init._ensure_risk_summary_table()),
+            ('access_review_tables', lambda: _db_init._ensure_access_review_tables()),
+            ('discovery_stage_log', lambda: _db_init._ensure_discovery_stage_log_table()),
+            ('agirs_scores', lambda: _db_init._ensure_agirs_scores_table()),
+            ('schema_migrations', lambda: _db_init._ensure_schema_migrations_table()),
         ]
 
         for label, op in _startup_ops:
