@@ -1,7 +1,6 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Identities from './Identities';
-import AIAgents from './AIAgents';
 import ServiceAccountGovernance from './ServiceAccountGovernance';
 import IdentityGraph from './IdentityGraph';
 
@@ -36,10 +35,22 @@ const HumansTab: React.FC = () => <Identities tabScope="humans" />;
 const NHITab: React.FC = () => <Identities tabScope="nhi" />;
 const AllTab: React.FC = () => <Identities tabScope="all" />;
 
+// AI Agents lives canonically in AI Security → AI Inventory (/ai-inventory/agents).
+// Keep the tab here for discoverability but redirect to the single source of
+// truth instead of re-rendering the full governance dashboard — mirrors how the
+// old 'graph' tab redirects to /identity-graph.
+const AIAgentsRedirect: React.FC = () => {
+  const navigate = useNavigate();
+  React.useEffect(() => {
+    navigate('/ai-inventory/agents', { replace: true });
+  }, [navigate]);
+  return null;
+};
+
 const TAB_COMPONENT: Record<TabKey, React.FC> = {
   humans: HumansTab,
   nhi: NHITab,
-  'ai-agents': AIAgents,
+  'ai-agents': AIAgentsRedirect,
   privileged: ServiceAccountGovernance,
   graph: IdentityGraph,
   all: AllTab,
