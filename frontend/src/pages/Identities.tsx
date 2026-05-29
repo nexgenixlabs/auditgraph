@@ -2135,18 +2135,19 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
         </div>
       </div>
 
-      {/* Tenant Scope Bar */}
+      {/* Tenant Scope Pill — compact scope indicator. Was a 23-word prose banner;
+          collapsed to an at-a-glance "N of M · activate K more →" pattern. */}
       {scopeSummary && scopeSummary.discovered > 0 && (
-        <div className="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-800">
-          <svg className="w-4 h-4 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 mb-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-800">
+          <svg className="w-3.5 h-3.5 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <span>
-            Tenant-scoped view: Showing identities from <strong>{scopeSummary.activated}</strong> activated subscriptions only.{' '}
+            Scope: <strong>{scopeSummary.activated}</strong> of <strong>{scopeSummary.activated + scopeSummary.discovered}</strong> subscription{(scopeSummary.activated + scopeSummary.discovered) !== 1 ? 's' : ''}
+            <span className="mx-1.5 text-blue-300" aria-hidden="true">·</span>
             <Link to="/subscriptions" className="font-semibold hover:opacity-80">
-              {scopeSummary.discovered} discovered subscription{scopeSummary.discovered !== 1 ? 's' : ''}
-            </Link>{' '}
-            {scopeSummary.discovered === 1 ? 'is' : 'are'} excluded until activated.
+              Activate {scopeSummary.discovered} more →
+            </Link>
           </span>
         </div>
       )}
