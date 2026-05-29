@@ -94,26 +94,14 @@ def main():
     result = engine.discover_cognitive_services_and_deployments(run_id)
     print(f"AI models — accounts: {result['accounts']}  deployments: {result['deployments']}")
 
-    # Phase 2.2: also collect storage / key-vault / resource network posture so
-    # the egress-verdict feature has data (architecture-only network exposure).
+    # Phase 2.2: fetch network posture for the storage / key-vault resources AI
+    # agents actually touch (targeted, fast) so egress verdicts cover them too.
     if not args.skip_resources:
         try:
-            from app.database import Database
-            from app.engines.resource_inventory_collector import ResourceInventoryCollector
-            sub_ids = [s['id'] for s in getattr(engine, 'subscriptions', []) if s.get('id')]
-            if sub_ids:
-                rdb = Database(organization_id=args.org_id)
-                try:
-                    collector = ResourceInventoryCollector(engine.credential, sub_ids, rdb, args.org_id)
-                    stats = collector.collect_and_persist(run_id)
-                    print(f"Resource inventory — enumerated: {stats.get('total_resources', 0)}  "
-                          f"persisted: {stats.get('persisted', 0)} (storage/KV network posture)")
-                finally:
-                    rdb.close()
-            else:
-                print("Resource inventory — no subscriptions resolved; skipped.")
+            net = engine.discover_ai_touched_resource_network(run_id)
+            print(f"AI-touched resource network — storage: {net['storage']}  key vaults: {net['key_vaults']}")
         except Exception as e:
-            print(f"Resource inventory — skipped ({e})")
+            print(f"Resource network posture — skipped ({e})")
 
     print("Re-open any AI agent in the drawer: 'Models Reachable' + per-resource egress verdicts.")
 

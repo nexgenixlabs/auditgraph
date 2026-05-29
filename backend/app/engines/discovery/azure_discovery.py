@@ -7876,6 +7876,123 @@ class AzureDiscoveryEngine:
         return {'accounts': accounts_persisted, 'deployments': deployments_persisted}
 
 
+    def discover_ai_touched_resource_network(self, run_id: int) -> dict:
+        """Phase 2.2: fetch network posture (firewall / Private Endpoint / public
+        access) for the storage accounts and key vaults that AI agents actually
+        hold roles on, and persist to azure_storage_accounts / azure_key_vaults.
+
+        Targeted (only AI-touched resources) so it's fast — not a full tenant
+        sweep. Architecture-only: powers the egress verdict for storage/KV the
+        same way Cognitive accounts already work.
+
+        Returns {storage, key_vaults} persisted counts.
+        """
+        import re as _re
+        conn = self.db.conn
+        cur = conn.cursor()
+
+        # Resource ids AI agents touch (latest run per identity)
+        cur.execute("""
+            SELECT DISTINCT ra.scope
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.organization_id = %s
+              AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+              AND (ra.scope ~ 'Microsoft\\.Storage/storageAccounts/[^/]+$'
+                   OR ra.scope ~ 'Microsoft\\.KeyVault/vaults/[^/]+$')
+        """, (self.db_org_id,))
+        storage_ids, kv_ids = set(), set()
+        for (scope,) in cur.fetchall():
+            if not scope:
+                continue
+            if _re.search(r'Microsoft\.Storage/storageAccounts/[^/]+$', scope):
+                storage_ids.add(scope)
+            elif _re.search(r'Microsoft\.KeyVault/vaults/[^/]+$', scope):
+                kv_ids.add(scope)
+
+        # Idempotency: clear this run's rows first
+        cur.execute("DELETE FROM azure_storage_accounts WHERE organization_id=%s AND discovery_run_id=%s",
+                    (self.db_org_id, run_id))
+        cur.execute("DELETE FROM azure_key_vaults WHERE organization_id=%s AND discovery_run_id=%s",
+                    (self.db_org_id, run_id))
+
+        def _parse(rid):
+            parts = rid.split('/')
+            sub = parts[parts.index('subscriptions') + 1] if 'subscriptions' in parts else ''
+            rg = parts[parts.index('resourceGroups') + 1] if 'resourceGroups' in parts else ''
+            return sub, rg, parts[-1]
+
+        storage_n = 0
+        try:
+            from azure.mgmt.storage import StorageManagementClient
+            sm_clients = {}
+            for rid in storage_ids:
+                sub, rg, name = _parse(rid)
+                if not (sub and rg and name):
+                    continue
+                cli = sm_clients.get(sub) or StorageManagementClient(self.credential, sub, **ARM_TIMEOUT_KWARGS)
+                sm_clients[sub] = cli
+                try:
+                    acct = cli.storage_accounts.get_properties(rg, name)
+                    nrs = getattr(acct, 'network_rule_set', None)
+                    default_action = getattr(nrs, 'default_action', None) if nrs else None
+                    ip_rules = len(getattr(nrs, 'ip_rules', []) or []) if nrs else 0
+                    vnet_rules = len(getattr(nrs, 'virtual_network_rules', []) or []) if nrs else 0
+                    pe = len(getattr(acct, 'private_endpoint_connections', []) or [])
+                    public_blob = getattr(acct, 'allow_blob_public_access', None)
+                    cur.execute("""
+                        INSERT INTO azure_storage_accounts
+                          (discovery_run_id, organization_id, resource_id, name, location,
+                           resource_group, subscription_id, default_network_action,
+                           ip_rules_count, vnet_rules_count, private_endpoint_count, public_blob_access)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (run_id, self.db_org_id, rid, name, getattr(acct, 'location', None),
+                          rg, sub, str(default_action) if default_action else None,
+                          ip_rules, vnet_rules, pe, public_blob))
+                    storage_n += 1
+                except Exception as e:
+                    logger.debug("storage net fetch failed for %s: %s", name, e)
+        except ImportError:
+            logger.warning("azure-mgmt-storage not installed — skipping storage network posture")
+
+        kv_n = 0
+        try:
+            from azure.mgmt.keyvault import KeyVaultManagementClient
+            kv_clients = {}
+            for rid in kv_ids:
+                sub, rg, name = _parse(rid)
+                if not (sub and rg and name):
+                    continue
+                cli = kv_clients.get(sub) or KeyVaultManagementClient(self.credential, sub, **ARM_TIMEOUT_KWARGS)
+                kv_clients[sub] = cli
+                try:
+                    vault = cli.vaults.get(rg, name)
+                    props = getattr(vault, 'properties', None)
+                    acls = getattr(props, 'network_acls', None) if props else None
+                    default_action = getattr(acls, 'default_action', None) if acls else None
+                    pe = len(getattr(props, 'private_endpoint_connections', []) or []) if props else 0
+                    pna = getattr(props, 'public_network_access', None) if props else None
+                    cur.execute("""
+                        INSERT INTO azure_key_vaults
+                          (discovery_run_id, organization_id, resource_id, name,
+                           public_network_access, default_network_action, private_endpoint_count)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """, (run_id, self.db_org_id, rid, name,
+                          pna, str(default_action) if default_action else None, pe))
+                    kv_n += 1
+                except Exception as e:
+                    logger.debug("kv net fetch failed for %s: %s", name, e)
+        except ImportError:
+            logger.warning("azure-mgmt-keyvault not installed — skipping KV network posture")
+
+        conn.commit()
+        cur.close()
+        logger.info("AI-touched resource network: %d storage, %d key vaults (run %s)",
+                    storage_n, kv_n, run_id)
+        return {'storage': storage_n, 'key_vaults': kv_n}
+
+
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
         Determine if a service principal is a Microsoft first-party app.

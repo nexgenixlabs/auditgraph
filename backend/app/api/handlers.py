@@ -39059,9 +39059,13 @@ def get_ai_agent_investigate(identity_id):
         # azure_* tables and derive an egress verdict. This replaces the prior
         # substring heuristic for the Internet Egress category. No logs needed.
         def _exposure_verdict(public_access, default_action, pe_count, public_blob=None):
-            """Map raw network posture → (verdict, severity)."""
-            pa = (public_access or '').lower()
-            da = (default_action or '').lower()
+            """Map raw network posture → (verdict, severity). Normalizes SDK enum
+            string forms like 'NetworkRuleAction.ALLOW' → 'allow'."""
+            def _norm(v):
+                s = (str(v) if v is not None else '').lower()
+                return s.rsplit('.', 1)[-1] if '.' in s else s
+            pa = _norm(public_access)
+            da = _norm(default_action)
             pe = pe_count or 0
             # Public network explicitly enabled, or default action allows all
             if pa == 'enabled' or da == 'allow' or public_blob is True:
