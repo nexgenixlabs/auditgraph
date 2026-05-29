@@ -88,10 +88,20 @@ param azureClientId string = ''
 @description('Azure SP Client Secret for discovery')
 param azureClientSecret string = ''
 
+// ── Field Encryption ────────────────────────────────────────────────────────
+
+@secure()
+@minLength(40)
+@description('Fernet key for field-level encryption of stored credentials. MUST be stable — changing it makes existing encrypted secrets undecryptable. Required (no default) so a missing key fails the deploy instead of silently disabling encryption.')
+param encryptionKey string
+
 // ── Optional Parameters ─────────────────────────────────────────────────────
 
 @description('CORS allowed origins')
 param corsOrigins string = 'https://dev.app.auditgraph.ai,https://dev.admin.auditgraph.ai,https://demo.auditgraph.ai'
+
+@description('Cookie domain shared across dev.app/dev.api/dev.admin for cross-subdomain auth + CSRF')
+param cookieDomain string = '.auditgraph.ai'
 
 @description('Max DB pool connections per replica')
 param dbPoolMax int = 8
@@ -157,6 +167,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'client-jwt-secret', value: clientJwtSecret }
         { name: 'admin-password', value: adminPassword }
         { name: 'azure-client-secret', value: empty(azureClientSecret) ? 'not-configured' : azureClientSecret }
+        { name: 'encryption-key', value: encryptionKey }
       ]
     }
     template: {
@@ -192,6 +203,8 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_TENANT_ID', value: azureDirectoryId }
             { name: 'AZURE_CLIENT_ID', value: azureClientId }
             { name: 'AZURE_CLIENT_SECRET', secretRef: 'azure-client-secret' }
+            { name: 'COOKIE_DOMAIN', value: cookieDomain }
+            { name: 'ENCRYPTION_KEY', secretRef: 'encryption-key' }
           ]
           probes: [
             {

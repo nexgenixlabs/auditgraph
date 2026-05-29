@@ -203,6 +203,8 @@ jobs:
             azureDirectoryId=${{ secrets.DEV_AZURE_DIRECTORY_ID }}
             azureClientId=${{ secrets.DEV_AZURE_CLIENT_ID }}
             azureClientSecret=${{ secrets.DEV_AZURE_CLIENT_SECRET }}
+            encryptionKey=${{ secrets.DEV_ENCRYPTION_KEY }}
+            cookieDomain=.auditgraph.ai
 
       - name: Deactivate old revisions (prevent zombie lock contention)
         run: |

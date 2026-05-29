@@ -113,14 +113,38 @@ def _load_key():
 ENCRYPTED_PREFIX = 'enc:'
 
 
+class EncryptionUnavailableError(RuntimeError):
+    """Raised when a secret must be encrypted (production) but no key is configured.
+
+    Fail-closed: we refuse to persist a credential in plaintext rather than
+    silently degrading. Surfaces as a 5xx at the save path so the misconfig is
+    loud instead of leaking secrets at rest.
+    """
+
+
+def _encryption_required() -> bool:
+    """True in real deployments, where plaintext-at-rest is never acceptable.
+
+    Mirrors _load_key()'s dev carve-out: only FLASK_ENV=development gets the
+    ephemeral-key fallback, so anything explicitly production-like must encrypt.
+    Local dev (FLASK_ENV unset/development) is left untouched.
+    """
+    return (os.getenv('FLASK_ENV', '').lower() == 'production'
+            or os.getenv('APP_ENV', '').lower() in ('production', 'prod'))
+
+
 def encrypt_field(plaintext):
-    """Encrypt a string value. Returns 'enc:<base64>' or original if encryption unavailable.
+    """Encrypt a string value. Returns 'enc:<base64>'.
 
     Args:
         plaintext: String value to encrypt. None/empty values pass through unchanged.
 
     Returns:
-        Encrypted string prefixed with 'enc:' or original value if encryption disabled.
+        Encrypted string prefixed with 'enc:'.
+
+    Raises:
+        EncryptionUnavailableError: in production when no key is configured —
+        we will not store the secret in plaintext.
     """
     if not plaintext or not isinstance(plaintext, str):
         return plaintext
@@ -131,6 +155,11 @@ def encrypt_field(plaintext):
 
     fernet = _load_key()
     if fernet is None:
+        if _encryption_required():
+            raise EncryptionUnavailableError(
+                "ENCRYPTION_KEY is not configured; refusing to store a secret in "
+                "plaintext. Set ENCRYPTION_KEY (a Fernet key) on the API."
+            )
         return plaintext
 
     try:
@@ -138,6 +167,8 @@ def encrypt_field(plaintext):
         return ENCRYPTED_PREFIX + encrypted.decode('utf-8')
     except Exception as e:
         logger.error("Encryption failed: %s", e)
+        if _encryption_required():
+            raise EncryptionUnavailableError(f"Encryption failed: {e}") from e
         return plaintext
 
 
