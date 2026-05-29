@@ -499,6 +499,7 @@ from app.api.handlers import (
     get_ai_agent_actual_access,  # AG-167: Actual endpoint reach (AI Runtime Phase 1)
     get_ai_governance,  # AI Governance pillar — policy compliance
     get_ai_risk_scenarios,  # AI Risk pillar — attack scenarios
+    get_ai_runtime_fleet,  # AI Runtime pillar — fleet view
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -2097,6 +2098,11 @@ def create_app():
     @app.get("/api/ai-security/risk")
     def ai_risk_scenarios_route():
         return get_ai_risk_scenarios()
+
+    # AI Runtime pillar — fleet view (platforms, models, network, telemetry)
+    @app.get("/api/ai-security/runtime")
+    def ai_runtime_fleet_route():
+        return get_ai_runtime_fleet()
 
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')

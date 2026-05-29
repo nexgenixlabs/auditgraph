@@ -40352,6 +40352,127 @@ def get_ai_governance():
 
 
 # ============================================================
+# AI Runtime pillar — fleet view of where AI executes
+# ============================================================
+
+def get_ai_runtime_fleet():
+    """GET /api/ai-security/runtime — fleet-level view of the AI runtime layer:
+    platforms in use, model deployments reachable across the org, network-exposure
+    rollup, and telemetry coverage. Architecture-derived; no telemetry required
+    (telemetry coverage itself is reported as an observability metric).
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # ── Platform distribution (where AI runs) ──
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id) ac.detected_platform
+            FROM identities i JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false) AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        plat_counts = {}
+        total_agents = 0
+        for (plat,) in cursor.fetchall():
+            total_agents += 1
+            key = plat or 'unknown'
+            plat_counts[key] = plat_counts.get(key, 0) + 1
+        platforms = sorted(
+            [{'platform': k, 'agent_count': v} for k, v in plat_counts.items()],
+            key=lambda x: -x['agent_count'],
+        )
+
+        # ── Models in use (deployments discovered org-wide) ──
+        cursor.execute("""
+            SELECT model_name, COUNT(DISTINCT account_resource_id) AS accounts,
+                   COUNT(*) AS deployments, MAX(sku_capacity) AS max_capacity
+            FROM azure_ai_model_deployments
+            WHERE organization_id = %s
+            GROUP BY model_name
+            ORDER BY deployments DESC, model_name
+        """, (org_id,))
+        models = [
+            {'model_name': r[0], 'account_count': r[1], 'deployment_count': r[2], 'max_capacity': r[3]}
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT COUNT(*) , COUNT(DISTINCT account_resource_id)
+            FROM azure_ai_model_deployments WHERE organization_id = %s
+        """, (org_id,))
+        _md = cursor.fetchone()
+        total_deployments, total_accounts = (_md[0] or 0), (_md[1] or 0)
+
+        # ── Network exposure rollup across AI-relevant resources ──
+        # Cognitive accounts (always discovered for AI); storage/KV when present.
+        exposure_rollup = {'public': 0, 'restricted': 0, 'private': 0, 'unknown': 0}
+        cursor.execute("""
+            SELECT public_network_access, network_acls_default_action, private_endpoint_count
+            FROM azure_cognitive_services_accounts WHERE organization_id = %s
+        """, (org_id,))
+        for pa, da, pe in cursor.fetchall():
+            pa = (pa or '').lower(); da = (da or '').lower(); pe = pe or 0
+            if pa == 'enabled' or da == 'allow':
+                exposure_rollup['public'] += 1
+            elif da == 'deny' and pe > 0:
+                exposure_rollup['private'] += 1
+            elif da == 'deny':
+                exposure_rollup['restricted'] += 1
+            elif pe > 0:
+                exposure_rollup['private'] += 1
+            else:
+                exposure_rollup['unknown'] += 1
+
+        # ── Telemetry coverage (observability metric, NOT a risk gate) ──
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE has_telem) AS with_telem,
+              COUNT(*) AS total
+            FROM (
+              SELECT DISTINCT ON (i.identity_id)
+                (i.last_sign_in IS NOT NULL OR i.last_activity_date IS NOT NULL
+                 OR ac.last_service_principal_sign_in IS NOT NULL) AS has_telem
+              FROM identities i JOIN agent_classifications ac ON ac.identity_db_id = i.id
+              WHERE ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+                AND NOT COALESCE(i.is_microsoft_system, false) AND i.deleted_at IS NULL
+              ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) t
+        """)
+        _tc = cursor.fetchone()
+        telem_with, telem_total = (_tc[0] or 0), (_tc[1] or 0)
+        telemetry_coverage_pct = round((telem_with / telem_total) * 100, 1) if telem_total else 0.0
+
+        cursor.close()
+        return jsonify({
+            'summary': {
+                'total_agents':            total_agents,
+                'platform_count':          len(platforms),
+                'distinct_models':         len(models),
+                'total_deployments':       total_deployments,
+                'cognitive_accounts':      total_accounts,
+                'public_egress_resources': exposure_rollup['public'],
+                'telemetry_coverage_pct':  telemetry_coverage_pct,
+            },
+            'platforms':       platforms,
+            'models':          models,
+            'network_exposure': exposure_rollup,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_runtime_fleet failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
 # AI Risk pillar — attack scenarios
 # ============================================================
 
