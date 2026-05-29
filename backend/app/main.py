@@ -497,6 +497,7 @@ from app.api.handlers import (
     get_ai_permissions_overview,
     get_ai_inventory_graph,  # AG-163: AI Inventory clustered graph
     get_ai_agent_actual_access,  # AG-167: Actual endpoint reach (AI Runtime Phase 1)
+    get_ai_governance,  # AI Governance pillar — policy compliance
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -2085,6 +2086,11 @@ def create_app():
     @app.get("/api/ai-agents/<identity_id>/actual-access")
     def ai_agent_actual_access_route(identity_id):
         return get_ai_agent_actual_access(identity_id)
+
+    # AI Governance pillar — policy compliance across all AI agents
+    @app.get("/api/ai-security/governance")
+    def ai_governance_route():
+        return get_ai_governance()
 
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')

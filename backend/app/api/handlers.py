@@ -40224,6 +40224,134 @@ def get_ai_inventory_graph():
 
 
 # ============================================================
+# AI Governance pillar — policy compliance
+# ============================================================
+
+def get_ai_governance():
+    """GET /api/ai-security/governance — evaluate every AI agent against the
+    governance policy catalog and return compliance posture.
+
+    Architecture-only: reuses the same signals the risk score is built from,
+    so each policy is a cheap pass/fail check. No telemetry, no extra Azure calls.
+
+    Returns:
+      summary  — overall_compliance_pct, total_agents, agents_in_violation, total_violations
+      policies — per-policy compliance: violating_count, compliant_count, compliance_pct,
+                 severity, framework, top_violators[]
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import aggregate_access_levels, detect_signals
+    from app.constants.ai_governance import (
+        AI_GOVERNANCE_POLICIES, POLICY_ORDER, policy_list, severity_rank,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id)
+                i.id, i.identity_id, i.display_name, ac.detected_platform,
+                i.owner_display_name, i.credential_risk,
+                i.last_sign_in, i.last_activity_date,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agent_rows = cursor.fetchall()
+        agent_db_ids = [r[0] for r in agent_rows]
+
+        # Per-policy accumulators
+        per_policy = {pid: {'violating': [], } for pid in POLICY_ORDER}
+        agents_in_violation = set()
+        total_violations = 0
+
+        if agent_db_ids:
+            cursor.execute("""
+                SELECT ra.identity_db_id, ra.role_name, ra.scope
+                FROM role_assignments ra WHERE ra.identity_db_id = ANY(%s)
+            """, (agent_db_ids,))
+            roles_by_agent = {}
+            for db_id, rn, sc in cursor.fetchall():
+                roles_by_agent.setdefault(db_id, []).append({'role_name': rn or '', 'scope': sc or ''})
+
+            for row in agent_rows:
+                (db_id, identity_id, display_name, platform, owner_name, cred_risk,
+                 last_sign_in, last_activity, sp_sign_in) = row
+                agent_roles = roles_by_agent.get(db_id, [])
+                access = aggregate_access_levels(agent_roles)
+                meta = {
+                    'display_name': display_name, 'detected_platform': platform,
+                    'owner_display_name': owner_name, 'credential_risk': cred_risk,
+                    'last_sign_in': last_sign_in, 'last_activity_date': last_activity,
+                    'last_service_principal_sign_in': sp_sign_in,
+                }
+                fired = {s['key'] for s in detect_signals(meta, agent_roles, access)}
+                agent_violated = False
+                for pid in POLICY_ORDER:
+                    if AI_GOVERNANCE_POLICIES[pid]['signal_key'] in fired:
+                        per_policy[pid]['violating'].append({
+                            'identity_id': identity_id, 'display_name': display_name or identity_id,
+                        })
+                        total_violations += 1
+                        agent_violated = True
+                if agent_violated:
+                    agents_in_violation.add(identity_id)
+
+        cursor.close()
+        total_agents = len(agent_rows)
+
+        policies_out = []
+        for pid in POLICY_ORDER:
+            pol = AI_GOVERNANCE_POLICIES[pid]
+            violators = per_policy[pid]['violating']
+            v_count = len(violators)
+            compliant = max(0, total_agents - v_count)
+            compliance_pct = round((compliant / total_agents) * 100, 1) if total_agents else 100.0
+            policies_out.append({
+                'policy_id':       pid,
+                'name':            pol['name'],
+                'severity':        pol['severity'],
+                'framework':       pol['framework'],
+                'rationale':       pol['rationale'],
+                'remediation':     pol['remediation'],
+                'violating_count': v_count,
+                'compliant_count': compliant,
+                'compliance_pct':  compliance_pct,
+                'top_violators':   sorted(violators, key=lambda x: x['display_name'])[:10],
+            })
+        # Sort: most-violated + highest severity first
+        policies_out.sort(key=lambda p: (-p['violating_count'], -severity_rank(p['severity'])))
+
+        # Overall compliance = mean of per-policy compliance (every policy weighted equally)
+        overall = round(sum(p['compliance_pct'] for p in policies_out) / len(policies_out), 1) if policies_out else 100.0
+
+        return jsonify({
+            'summary': {
+                'total_agents':            total_agents,
+                'agents_in_violation':     len(agents_in_violation),
+                'total_violations':        total_violations,
+                'policy_count':            len(POLICY_ORDER),
+                'overall_compliance_pct':  overall,
+            },
+            'policies': policies_out,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_governance failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
 # Phase 2A: Entra Group Scanner
 # ============================================================
 
