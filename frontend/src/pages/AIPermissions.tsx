@@ -30,7 +30,7 @@ interface PermissionsData {
   agents_with_internet_egress: number;
   agents_with_broad_privilege: number;
   total_agents: number;
-  role_frequency: Array<{ role_name: string; count: number }>;
+  role_frequency: Array<{ role_name: string; count: number; incident_count?: number }>;
   overprivileged_agents: Array<{
     identity_id: string;
     display_name: string;
@@ -218,8 +218,20 @@ export default function AIPermissions() {
                   className="w-full flex items-center justify-between text-xs rounded px-2 py-1.5 hover:bg-slate-800/40 transition-colors text-left group"
                   title={`Show all agents holding ${role.role_name}`}
                 >
-                  <span className="text-slate-300 truncate max-w-[300px] group-hover:text-white transition-colors">
-                    {role.role_name}
+                  <span className="flex items-center gap-1.5 truncate max-w-[300px]">
+                    <span className="text-slate-300 truncate group-hover:text-white transition-colors">
+                      {role.role_name}
+                    </span>
+                    {/* AG-166: documented-breach badge */}
+                    {!!role.incident_count && role.incident_count > 0 && (
+                      <span
+                        className="text-[9px] font-semibold px-1 py-0.5 rounded border flex-shrink-0"
+                        style={{ color: '#fb923c', borderColor: 'rgba(251,146,60,0.4)', backgroundColor: 'rgba(251,146,60,0.1)' }}
+                        title={`Abused in ${role.incident_count} documented real-world breach${role.incident_count === 1 ? '' : 'es'} — see Risk Breakdown in the agent drawer`}
+                      >
+                        ⚠ {role.incident_count}
+                      </span>
+                    )}
                   </span>
                   <div className="flex items-center gap-2">
                     <div className="w-20 h-1.5 rounded-full bg-slate-800 overflow-hidden">

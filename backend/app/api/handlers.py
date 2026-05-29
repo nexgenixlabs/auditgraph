@@ -38973,6 +38973,20 @@ def get_ai_agent_investigate(identity_id):
         fired = detect_signals(agent_meta_for_signals, role_dicts_for_agg, access_levels)
         signal_pkg = compute_signal_score(fired)
 
+        # AG-166: attach real-world incident precedents to each fired signal.
+        try:
+            from app.constants.role_threat_intel import incidents_for_signal
+            for _sig in signal_pkg.get('breakdown', []):
+                _incs = incidents_for_signal(_sig.get('key', ''))
+                if _incs:
+                    _sig['incidents'] = [
+                        {'name': i['name'], 'year': i['year'], 'summary': i['summary'],
+                         'mitre': i['mitre'], 'cve': i.get('cve'), 'source_url': i['source_url']}
+                        for i in _incs
+                    ]
+        except Exception:
+            pass
+
         permissions = {
             'roles': roles,
             'role_count': len(roles),
@@ -39591,6 +39605,15 @@ def get_ai_security_stats():
         db.close()
 
 
+def _role_incident_count(role_name: str) -> int:
+    """AG-166: documented real-world breach count for a role (0 if none)."""
+    try:
+        from app.constants.role_threat_intel import incident_count_for_role
+        return incident_count_for_role(role_name)
+    except Exception:
+        return 0
+
+
 def get_ai_permissions_overview():
     """GET /api/ai-security/permissions — org-wide AI permission analysis.
 
@@ -39713,7 +39736,12 @@ def get_ai_permissions_overview():
             'agents_with_internet_egress': len(agents_egress),
             'agents_with_broad_privilege': len(agents_broad),
             'total_agents': total_n,
-            'role_frequency': [{'role_name': r, 'count': c} for r, c in sorted_roles],
+            # AG-166: include real-world incident count per role so the UI can
+            # surface "this role was abused in N documented breaches".
+            'role_frequency': [
+                {'role_name': r, 'count': c, 'incident_count': _role_incident_count(r)}
+                for r, c in sorted_roles
+            ],
             'overprivileged_agents': overprivileged[:10],
             # AG-162: assessment context for each card + plain-English findings
             'assessments': metrics,

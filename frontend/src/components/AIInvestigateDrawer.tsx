@@ -521,6 +521,28 @@ export default function AIInvestigateDrawer({ identityId, onClose }: AIInvestiga
                           <span className="font-semibold" style={{ color: '#4ade80' }}>Fix: </span>{s.remediation}
                         </p>
                       )}
+                      {/* AG-166: real-world precedents — documented breaches that abused this capability */}
+                      {s.incidents && s.incidents.length > 0 && (
+                        <div className="mt-1.5 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                          <p className="text-[9px] font-semibold uppercase tracking-wider mb-1" style={{ color: '#fb923c' }}>
+                            Real-world precedent
+                          </p>
+                          {s.incidents.map((inc: any, j: number) => (
+                            <a key={j} href={inc.source_url} target="_blank" rel="noopener noreferrer"
+                              className="block mb-1 group" title={inc.summary}>
+                              <span className="text-[10px] font-semibold group-hover:underline" style={{ color: '#fb923c' }}>
+                                {inc.name} ({inc.year}) ↗
+                              </span>
+                              {inc.cve && (
+                                <span className="text-[9px] font-mono ml-1" style={{ color: '#f87171' }}>{inc.cve}</span>
+                              )}
+                              <span className="block text-[9px] leading-snug" style={{ color: 'var(--text-tertiary)' }}>
+                                {inc.summary}
+                              </span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
