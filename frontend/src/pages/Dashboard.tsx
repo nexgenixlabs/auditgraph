@@ -312,6 +312,12 @@ export default function Dashboard() {
           </div>
           <p className="text-sm" style={{ color: COLORS.textSecondary }}>
             Operational identity risk monitoring — What happened?
+            <span className="ml-3 text-[11px] hidden lg:inline" style={{ color: COLORS.textMuted }}>
+              <span style={{ color: COLORS.textMuted }}>Related:</span>{' '}
+              <Link to="/" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>↗ Executive Posture</Link>
+              <span className="mx-1" style={{ color: COLORS.border }}>·</span>
+              <Link to="/command-center" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>↗ Command Center</Link>
+            </span>
           </p>
           {latest?.completed_at && (
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">

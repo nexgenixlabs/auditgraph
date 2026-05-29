@@ -289,6 +289,13 @@ function PageHeader() {
           <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
           <AudienceBadge label="BOARD / CISO" variant="amber" />
           <span className="text-xs text-gray-400 hidden md:inline">Board-ready summary · {getTimezoneLabel()}</span>
+          <span className="text-[10px] text-gray-500 hidden lg:inline ml-2">
+            <span className="text-gray-600">Related:</span>
+            {' '}
+            <DN navigateTo="/command-center"><span className="text-gray-400 hover:text-gray-200 cursor-pointer">↗ Command Center</span></DN>
+            <span className="text-gray-700 mx-1">·</span>
+            <DN navigateTo="/dashboard"><span className="text-gray-400 hover:text-gray-200 cursor-pointer">↗ Risk Monitoring</span></DN>
+          </span>
         </div>
         <div className="flex gap-3 flex-shrink-0">
           <DN navigateTo="/reports/executive">

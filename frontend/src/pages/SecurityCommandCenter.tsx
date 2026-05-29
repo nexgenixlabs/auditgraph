@@ -279,6 +279,12 @@ export default function SecurityCommandCenter() {
                 Data as of: {new Date(overview.discovery_metadata.data_as_of).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </span>
             )}
+            <span className="ml-3 text-[11px] text-slate-500 hidden lg:inline">
+              Related:{' '}
+              <a href="/" className="text-blue-400 hover:text-blue-300 transition-colors">↗ Executive Posture</a>
+              <span className="mx-1 text-slate-600">·</span>
+              <a href="/dashboard" className="text-blue-400 hover:text-blue-300 transition-colors">↗ Risk Monitoring</a>
+            </span>
           </p>
         </div>
         <div className="flex gap-2">
@@ -580,6 +586,9 @@ function PostureGauge({ score }: { score: number }) {
         </span>
       </div>
       <div className="text-[10px] text-slate-600 -mt-0.5">% of identities not at critical or high risk</div>
+      <a href="/" className="text-[10px] text-blue-400 hover:text-blue-300 mt-1 transition-colors">
+        → Executive Posture (board view)
+      </a>
     </div>
   );
 }
