@@ -54,6 +54,14 @@ interface FixRecommendation {
   status: string;
 }
 
+// SSOT: GET /api/remediation-queue/summary
+interface RemediationQueueSummary {
+  total: number;
+  by_status: { open?: number; in_progress?: number; resolved?: number; dismissed?: number };
+  by_severity: { CRITICAL?: number; HIGH?: number; MEDIUM?: number; LOW?: number };
+  avg_resolution_days: number | null;
+}
+
 interface ActivityEntry {
   id: number;
   action_type: string;
@@ -108,13 +116,6 @@ function scoreColor(score: number): string {
   return '#ef4444';
 }
 
-function scoreLabel(score: number): string {
-  if (score >= 80) return 'Good';
-  if (score >= 60) return 'Fair';
-  if (score >= 40) return 'Poor';
-  return 'Critical';
-}
-
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -136,8 +137,13 @@ export default function SecurityCommandCenter() {
   // (/api/dashboard/posture), so the Command Center can't disagree with the
   // exec view. Previously this gauge read overview.posture_score which used a
   // different formula (privileged %) and disagreed with the CISO's 100-(crit+high)%
-  // posture metric, causing the 93-vs-69 conflict.
+  // posture metric, causing the 93-vs-69 conflict. Kept on this page as a small
+  // header chip (Command Center is the OPS view; the headline is queue health).
   const [cisoPostureScore, setCisoPostureScore] = useState<number | null>(null);
+  // Remediation Queue Health — Command Center's real headline metric as an
+  // OPS console: "what's in flight, what's stuck, what closed." SSOT:
+  // /api/remediation-queue/summary.
+  const [queueSummary, setQueueSummary] = useState<RemediationQueueSummary | null>(null);
   const [riskyIdentities, setRiskyIdentities] = useState<RiskyIdentity[]>([]);
   const [recommendations, setRecommendations] = useState<FixRecommendation[]>([]);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
@@ -148,10 +154,11 @@ export default function SecurityCommandCenter() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      // Single primary call + lazy-loaded lists + canonical posture score in parallel
-      const [overviewRes, postureRes, riskyRes, recsRes, activityRes] = await Promise.all([
+      // Single primary call + lazy-loaded lists + canonical posture score + queue summary in parallel
+      const [overviewRes, postureRes, queueRes, riskyRes, recsRes, activityRes] = await Promise.all([
         fetch(withConnection('/api/security/overview')),
         fetch(withConnection('/api/dashboard/posture')),
+        fetch(withConnection('/api/remediation-queue/summary')),
         fetch(withConnection('/api/identities?risk_level=critical&limit=10')),
         fetch(withConnection('/api/fix-recommendations?limit=10&status=open')),
         fetch(withConnection('/api/activity?limit=15')),
@@ -167,6 +174,15 @@ export default function SecurityCommandCenter() {
           const p = await postureRes.json();
           const s = typeof p?.posture_score === 'number' ? p.posture_score : null;
           if (s !== null) setCisoPostureScore(s);
+        } catch { /* ignore */ }
+      }
+
+      // Remediation queue summary (SSOT). Empty/error → card renders empty
+      // state cleanly; never crashes the page.
+      if (queueRes.ok) {
+        try {
+          const q = await queueRes.json();
+          if (q && typeof q === 'object') setQueueSummary(q as RemediationQueueSummary);
         } catch { /* ignore */ }
       }
 
@@ -322,11 +338,13 @@ export default function SecurityCommandCenter() {
         </div>
       )}
 
-      {/* Row 1: Posture Score Gauge + Summary Cards */}
+      {/* Row 1: Remediation Queue Health (ops headline) + Summary Cards.
+          Was the Posture Score gauge — that's the CISO board's headline. Command
+          Center's role is "what are we doing about it?" so the headline is queue
+          health. Posture is still surfaced as a small header chip + cross-link. */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Posture Score Gauge */}
         <div className="lg:col-span-4 bg-slate-800/60 border border-slate-700/50 rounded-xl p-6 flex flex-col items-center justify-center">
-          <PostureGauge score={postureScore} />
+          <RemediationQueueCard summary={queueSummary} posture={postureScore} />
         </div>
 
         {/* Summary Cards */}
@@ -552,43 +570,80 @@ export default function SecurityCommandCenter() {
 
 // ─── Sub-components ───────────────────────────────────────────────
 
-function PostureGauge({ score }: { score: number }) {
-  const color = scoreColor(score);
-  const label = scoreLabel(score);
-  const radius = 60;
-  const circumference = Math.PI * radius;
-  const offset = circumference - (score / 100) * circumference;
+
+/**
+ * Remediation Queue Health — Command Center's headline metric as the ops view.
+ * Active = open + in_progress (in-flight items). Sub-stats break out the queue
+ * by status. A small posture chip + cross-link to Executive Posture preserves
+ * the SSOT score on this page without it being the headline. Empty queue gets
+ * a CTA so the page never dead-ends.
+ */
+function RemediationQueueCard({ summary, posture }: { summary: RemediationQueueSummary | null; posture: number }) {
+  const navigate = useNavigate();
+
+  if (!summary) {
+    return (
+      <div className="flex flex-col items-center w-full text-slate-500 text-xs">
+        <div className="h-20 w-20 rounded-full bg-slate-700/30 animate-pulse mb-2" />
+        Loading queue…
+      </div>
+    );
+  }
+
+  const open = summary.by_status?.open || 0;
+  const inProg = summary.by_status?.in_progress || 0;
+  const resolved = summary.by_status?.resolved || 0;
+  const active = open + inProg;
+  const total = summary.total || 0;
+  const crit = summary.by_severity?.CRITICAL || 0;
+
+  // Big-number color reflects urgency: red if any critical, amber if any active, emerald if clear
+  const headlineColor = crit > 0 ? '#ef4444' : active > 0 ? '#f59e0b' : '#22c55e';
+  const statusLabel = total === 0 ? 'Queue is empty'
+                    : active === 0 ? 'All resolved'
+                    : crit > 0 ? 'Critical items in flight'
+                    : 'Active in queue';
 
   return (
-    <div className="flex flex-col items-center">
-      <svg width="160" height="100" viewBox="0 0 160 100">
-        <path d="M 10 90 A 60 60 0 0 1 150 90" fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
-        <path
-          d="M 10 90 A 60 60 0 0 1 150 90"
-          fill="none"
-          stroke={color}
-          strokeWidth="12"
-          strokeLinecap="round"
-          strokeDasharray={`${circumference}`}
-          strokeDashoffset={offset}
-          style={{ transition: 'stroke-dashoffset 1s ease-out' }}
-        />
-        <text x="80" y="78" textAnchor="middle" fill="white" fontSize="28" fontWeight="bold">{score}</text>
-        <text x="80" y="95" textAnchor="middle" fill={color} fontSize="12" fontWeight="500">{label}</text>
-      </svg>
-      <div className="text-xs text-slate-500 mt-1 flex items-center justify-center gap-1">
-        Posture Score
-        <span className="relative group">
-          <span className="text-slate-600 cursor-help" style={{ fontSize: 14 }}>{'\u24D8'}</span>
-          <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block bg-slate-900 border border-slate-700 text-slate-200 text-[10px] px-2.5 py-1.5 rounded-md max-w-[280px] whitespace-normal z-50 shadow-lg pointer-events-none leading-relaxed">
-            Canonical posture score (same as the Executive Posture board): 100 minus the percentage of identities at critical or high risk. A score of 100 means zero critical or high risk identities.
-          </span>
-        </span>
+    <div className="flex flex-col items-center w-full">
+      <div className="text-xs text-slate-400 uppercase tracking-wider font-medium mb-2">Remediation Queue</div>
+      <div className="text-5xl font-bold leading-none" style={{ color: headlineColor }}>{active}</div>
+      <div className="text-xs mt-1" style={{ color: headlineColor }}>{statusLabel}</div>
+
+      {total > 0 ? (
+        <div className="text-[11px] text-slate-500 mt-3 flex items-center gap-3">
+          <span>open <span className="text-amber-400 font-mono">{open}</span></span>
+          <span className="text-slate-700">·</span>
+          <span>in progress <span className="text-blue-400 font-mono">{inProg}</span></span>
+          <span className="text-slate-700">·</span>
+          <span>resolved <span className="text-emerald-400 font-mono">{resolved}</span></span>
+        </div>
+      ) : (
+        <div className="text-[11px] text-slate-500 mt-3">No items yet — generate from findings</div>
+      )}
+
+      {summary.avg_resolution_days != null && (
+        <div className="text-[10px] text-slate-600 mt-1">
+          Avg time to resolve: {summary.avg_resolution_days.toFixed(1)}d
+        </div>
+      )}
+
+      <button
+        onClick={() => navigate(total === 0 ? '/remediation' : '/remediation-queue')}
+        className="text-[11px] text-blue-400 hover:text-blue-300 mt-3 transition-colors"
+      >
+        {total === 0 ? '+ Generate from findings →' : '→ View remediation queue'}
+      </button>
+
+      {/* Posture cross-reference — SSOT value preserved, but clearly framed as
+          "see Executive Posture for the board view" rather than competing for
+          headline space on the ops console. */}
+      <div className="mt-3 pt-3 border-t border-slate-700/40 w-full flex items-center justify-center gap-2 text-[10px] text-slate-500">
+        <span>Posture</span>
+        <span className="font-mono font-semibold" style={{ color: scoreColor(posture) }}>{posture}</span>
+        <span className="text-slate-700">·</span>
+        <a href="/" className="text-blue-400 hover:text-blue-300 transition-colors">↗ Executive Posture</a>
       </div>
-      <div className="text-[10px] text-slate-600 -mt-0.5">% of identities not at critical or high risk</div>
-      <a href="/" className="text-[10px] text-blue-400 hover:text-blue-300 mt-1 transition-colors">
-        → Executive Posture (board view)
-      </a>
     </div>
   );
 }
