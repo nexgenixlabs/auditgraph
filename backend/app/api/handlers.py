@@ -39590,6 +39590,23 @@ def get_ai_security_stats():
         """)
         avg_risk = _scalar(cursor, 0)
 
+        # AI agents with no human owner — the governance gap surfaced on the
+        # Executive Posture "AI Identity Risk" tile. Counts AI agents whose
+        # COALESCE(owner_count, 0) = 0 (no resolved owner on the identity).
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) COALESCE(i.owner_count, 0) AS oc
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            WHERE oc = 0
+        """)
+        no_owner_count = _scalar(cursor, 0)
+
         cursor.close()
 
         total_agents = type_counts.get('ai_agent', 0) + type_counts.get('possible_ai_agent', 0)
@@ -39603,6 +39620,7 @@ def get_ai_security_stats():
             'top_risk_agents': top_risk,
             'avg_risk_score': avg_risk or 0,
             'avg_risk_severity': severity_from_score(float(avg_risk or 0)),
+            'ai_agents_no_owner': no_owner_count or 0,
         })
     except Exception as e:
         try:

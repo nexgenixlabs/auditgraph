@@ -18,10 +18,13 @@ interface TabDef {
   right?: boolean; // push to right side of bar
 }
 
+// 'ai-agents' is intentionally NOT in the visible tab bar — AI Agents lives
+// canonically in AI Security → AI Inventory (/ai-inventory/agents). The
+// AIAgentsRedirect entry in TAB_COMPONENT still handles /identity-explorer/ai-agents
+// direct URLs (legacy/bookmarks). Same pattern as the old 'graph' tab.
 const TABS: TabDef[] = [
   { key: 'humans', label: 'Humans' },
   { key: 'nhi', label: 'Non-Human Identities' },
-  { key: 'ai-agents', label: 'AI Agents' },
   { key: 'privileged', label: 'Privileged Access' },
   { key: 'all', label: 'All Identities', right: true },
 ];

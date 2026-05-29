@@ -31,6 +31,7 @@ import { ImmediateRisksPanel } from '../components/ciso/ImmediateRisksSection';
 // v3.1 components
 import { NarrativeBanner, PostureScoreHero } from '../components/ciso/ExecutiveSummaryHero';
 import { BlastRadiusCardV31, AttackPathCardV31, IdentityRiskCardV31 } from '../components/ciso/BlastRadiusSection';
+import { AIIdentityRiskCard } from '../components/ciso/AIIdentityRiskCard';
 import { AnomalyWidgetV31 } from '../components/ciso/ActiveThreatsSection';
 import { BusinessImpactWidgetV31 } from '../components/ciso/BusinessImpactSection';
 import { DriftWidgetV31 } from '../components/ciso/ActivityDriftSection';
@@ -504,15 +505,15 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
           </div>
         </div>
 
-        {/* ━━━ ROW 2 — Block 3 (Intel Row) ━━━ */}
-        <div className="col-span-3">
+        {/* ━━━ ROW 2 — Block 3 (Intel Row) — 4 peer tiles in a sub-grid so the
+            AI Identity Risk pillar sits with Blast/Attack/Identity (the
+            differentiator surfaces at the CISO level, not buried in AI Security).
+            Right rail (col-span-3, row-span-2) is preserved. ━━━ */}
+        <div className="col-span-9 grid grid-cols-4 gap-3">
           <BlastRadiusCardV31 data={data} />
-        </div>
-        <div className="col-span-3">
           <AttackPathCardV31 data={data} />
-        </div>
-        <div className="col-span-3">
           <IdentityRiskCardV31 data={data} />
+          <AIIdentityRiskCard />
         </div>
 
         {/* Right Rail — spans row 2 + row 3 */}
