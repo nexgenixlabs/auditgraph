@@ -501,6 +501,13 @@ export default function OverviewTab({
   pimData,
   onTabChange,
 }: OverviewTabProps) {
+  // Progressive disclosure — the always-visible above-the-fold view is
+  // the top triage signal: warnings, security posture (4-quadrant), and the
+  // hero stats grid. Everything else (activity sources, sign-in history,
+  // risk trajectory chart, effective scope, contextual panels, risk reasons)
+  // is collapsed by default and reachable in one click. Avoids the
+  // 10-section scrolling wall the founder flagged on 2026-05-30.
+  const [showAllSections, setShowAllSections] = useState(false);
   return (
     <div className="space-y-6">
       {/* Correlated Accounts / Zombie Warning */}
@@ -799,6 +806,68 @@ export default function OverviewTab({
         </div>
       </div>
 
+      {/* Hero stats — always visible. Lifted from the bottom of the tab so
+          the most-scanned metrics aren't hidden behind a "show more" click.
+          Mirrors the original 4-card grid (Roles / API Perms / Credentials /
+          Owners) — clicking each routes to the matching tab. */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <button onClick={() => onTabChange('roles')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{(data?.roles || []).length}</div>
+          <div className="text-xs text-gray-500 mt-1">Total Roles</div>
+        </button>
+        <button onClick={() => onTabChange('permissions')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{(data?.graph_permissions || []).length}</div>
+          <div className="text-xs text-gray-500 mt-1">API Permissions</div>
+        </button>
+        <button onClick={() => onTabChange('credentials')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{identity.credential_count ?? 0}</div>
+          <div className="text-xs text-gray-500 mt-1">Credentials</div>
+        </button>
+        <button onClick={() => onTabChange('ownership')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{(data?.owners || []).length}</div>
+          <div className="text-xs text-gray-500 mt-1">Owners</div>
+        </button>
+      </div>
+
+      {/* Risk reasons — top 3 always visible. Full list inside expanded view. */}
+      {identity.risk_reasons && identity.risk_reasons.length > 0 && (
+        <div>
+          <div className="text-sm font-semibold text-gray-900 mb-2">Risk Reasons</div>
+          <ul className="space-y-2">
+            {identity.risk_reasons.slice(0, 3).map((r, idx) => (
+              <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
+                <span className="text-red-500 mt-0.5 flex-shrink-0">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </span>
+                {r}
+              </li>
+            ))}
+          </ul>
+          {identity.risk_reasons.length > 3 && !showAllSections && (
+            <button
+              onClick={() => setShowAllSections(true)}
+              className="text-xs font-medium text-blue-600 hover:text-blue-700 mt-2"
+            >
+              + {identity.risk_reasons.length - 3} more reasons & full activity / scope / context →
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Progressive disclosure toggle */}
+      <div className="flex justify-center">
+        <button
+          onClick={() => setShowAllSections(v => !v)}
+          className="text-xs font-medium text-blue-600 hover:text-blue-700 px-3 py-1.5 rounded-md hover:bg-blue-50 transition"
+        >
+          {showAllSections ? '↑ Hide detailed sections' : '↓ Show all activity, scope & context details'}
+        </button>
+      </div>
+
+      {/* ──── Detailed sections (collapsed by default) ──── */}
+      {showAllSections && (<>
       {/* Rule 4: Activity Source panel — shows data source hierarchy */}
       {!!(identity as any).activity_sources && (
         <div className="border border-gray-200 rounded-xl p-4">
@@ -1360,14 +1429,14 @@ export default function OverviewTab({
       {/* Authentication History */}
       <AuthHistorySection identityId={identity.identity_id as string} />
 
-      {/* Risk reasons */}
-      <div>
-        <div className="text-sm font-semibold text-gray-900 mb-2">Risk Reasons</div>
-        {identity.risk_reasons && identity.risk_reasons.length > 0 ? (
+      {/* Full risk reasons (when expanded) — top 3 already shown above. */}
+      {identity.risk_reasons && identity.risk_reasons.length > 3 && (
+        <div>
+          <div className="text-sm font-semibold text-gray-900 mb-2">All Risk Reasons ({identity.risk_reasons.length})</div>
           <ul className="space-y-2">
-            {identity.risk_reasons.map((r, idx) => (
+            {identity.risk_reasons.slice(3).map((r, idx) => (
               <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
-                <span className="text-red-500 mt-0.5">
+                <span className="text-red-500 mt-0.5 flex-shrink-0">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
@@ -1376,10 +1445,9 @@ export default function OverviewTab({
               </li>
             ))}
           </ul>
-        ) : (
-          <div className="text-sm text-gray-500">No risk reasons recorded.</div>
-        )}
-      </div>
+        </div>
+      )}
+      </>)}
     </div>
   );
 }
