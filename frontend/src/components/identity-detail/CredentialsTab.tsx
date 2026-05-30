@@ -110,7 +110,7 @@ export function CredentialsTab({ identity, data }: CredentialsTabProps) {
   );
 }
 
-function FederatedCredentialsSection({ identityId, credentialCount }: { identityId: string; credentialCount: number }) {
+export function FederatedCredentialsSection({ identityId, credentialCount }: { identityId: string; credentialCount: number }) {
   const [creds, setCreds] = useState<FederatedCredential[]>([]);
   const [loading, setLoading] = useState(true);
 

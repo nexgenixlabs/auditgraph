@@ -11,6 +11,7 @@ import {
 import { deriveIdentityState, STATE_COLORS } from '../constants/identityState';
 import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../utils/roleUtils';
 import StatusBadge from './ui/StatusBadge';
+import { FederatedCredentialsSection } from './identity-detail/CredentialsTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -68,6 +69,7 @@ interface IdentityDetail {
   effective_scope?: string;
   federated_workload_type?: string | null;
   federated_workload_name?: string | null;
+  has_federated_credentials?: boolean;
   associated_resource_name?: string | null;
   role_count?: number;
   effective_access?: string | null;
@@ -204,6 +206,11 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
   const [credentials, setCredentials] = useState<CredentialItem[]>([]);
   const [scopeHierarchy, setScopeHierarchy] = useState<ScopeItem[]>([]);
   const [graphPermissions, setGraphPermissions] = useState<GraphPermission[]>([]);
+  // SSOT: full-detail Permissions tab shows BOTH graph_permissions AND
+  // app_roles (Application Role Assignments). Drawer must show both too or
+  // an SPN with 0 graph perms and N app roles looks empty here while the
+  // full-detail page shows assignments. Source: /api/identities/<id>.app_roles.
+  const [appRoles, setAppRoles] = useState<Array<Record<string, any>>>([]);
   const [owners, setOwners] = useState<OwnerInfo[]>([]);
   const [entraScopes, setEntraScopes] = useState<{ role_name: string; directory_scope: string; risk_level: string; is_removable?: boolean }[]>([]);
   const [enrichedRoles, setEnrichedRoles] = useState<EnrichedRole[]>([]);
@@ -232,6 +239,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
       if (detailData) {
         setDetail(detailData.identity || detailData);
         setGraphPermissions(detailData.graph_permissions || []);
+        setAppRoles(detailData.app_roles || []);
         setOwners(detailData.owners || []);
         setEnrichedRoles(detailData.roles || []);
         // Canonical role_usage from build_identity_state() — may be {} for
@@ -332,7 +340,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
             roleUsage={drawerRoleUsage}
           />
         ) : tab === 'api' ? (
-          <ApiPermsTab permissions={graphPermissions} />
+          <ApiPermsTab permissions={graphPermissions} appRoles={appRoles} detail={detail} />
         ) : tab === 'credentials' ? (
           <CredentialsTab credentials={credentials} detail={detail} />
         ) : tab === 'usage' ? (
@@ -844,12 +852,29 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail, 
 
 // ─── Tab 3: API Permissions ───────────────────────────────────────
 
-function ApiPermsTab({ permissions }: { permissions: GraphPermission[] }) {
-  if (permissions.length === 0) {
-    return <p className="text-sm text-gray-400 text-center py-8">No Graph API permissions.</p>;
+function ApiPermsTab({ permissions, appRoles, detail }: { permissions: GraphPermission[]; appRoles: Array<Record<string, any>>; detail: IdentityDetail }) {
+  const hasGraph = permissions.length > 0;
+  const hasAppRoles = appRoles.length > 0;
+
+  // SSOT contextual empty state — if neither graph perms nor app role
+  // assignments exist, point the user to where the access actually lives
+  // so they don't think "this identity has no access" when really it has
+  // Azure RBAC roles in the Access tab.
+  if (!hasGraph && !hasAppRoles) {
+    const hasAzureRbac = (detail.role_count || 0) > 0 || (detail.assigned_roles || 0) > 0;
+    return (
+      <div className="text-center py-8 space-y-2">
+        <p className="text-sm text-gray-400">No Microsoft Graph API permissions or app role assignments.</p>
+        {hasAzureRbac && (
+          <p className="text-xs text-gray-500">
+            This identity holds Azure RBAC roles — see the <span className="font-medium">Access</span> tab.
+          </p>
+        )}
+      </div>
+    );
   }
 
-  // Group by resource_app
+  // Group graph perms by resource_app
   const grouped: Record<string, GraphPermission[]> = {};
   permissions.forEach(p => {
     const app = p.resource_app || 'Unknown';
@@ -861,28 +886,51 @@ function ApiPermsTab({ permissions }: { permissions: GraphPermission[] }) {
 
   return (
     <div className="space-y-4">
-      {Object.entries(grouped).map(([app, perms]) => (
-        <div key={app}>
-          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">{app} ({perms.length})</h4>
-          <div className="space-y-1">
-            {perms.map((p, idx) => {
-              const isDangerous = dangerPatterns.some(pat => p.permission_name.includes(pat));
-              return (
-                <div key={idx} className={`flex items-center justify-between text-xs rounded px-2.5 py-1.5 ${isDangerous ? 'bg-red-50' : 'bg-gray-50'}`}>
-                  <span className={`font-medium ${isDangerous ? 'text-red-700' : 'text-gray-900'}`}>{p.permission_name}</span>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
-                      p.permission_type === 'Application' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-600'
-                    }`}>
-                      {p.permission_type || 'Application'}
-                    </span>
-                  </div>
+      {hasGraph && (
+        <div>
+          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">Microsoft Graph API ({permissions.length})</h4>
+          <div className="space-y-3">
+            {Object.entries(grouped).map(([app, perms]) => (
+              <div key={app}>
+                {Object.keys(grouped).length > 1 && (
+                  <div className="text-[10px] text-gray-400 uppercase mb-1.5">{app} ({perms.length})</div>
+                )}
+                <div className="space-y-1">
+                  {perms.map((p, idx) => {
+                    const isDangerous = dangerPatterns.some(pat => p.permission_name.includes(pat));
+                    return (
+                      <div key={idx} className={`flex items-center justify-between text-xs rounded px-2.5 py-1.5 ${isDangerous ? 'bg-red-50' : 'bg-gray-50'}`}>
+                        <span className={`font-medium ${isDangerous ? 'text-red-700' : 'text-gray-900'}`}>{p.permission_name}</span>
+                        <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
+                          p.permission_type === 'Application' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-600'
+                        }`}>
+                          {p.permission_type || 'Application'}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         </div>
-      ))}
+      )}
+
+      {hasAppRoles && (
+        <div>
+          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">Application Role Assignments ({appRoles.length})</h4>
+          <div className="space-y-1">
+            {appRoles.map((r, idx) => (
+              <div key={idx} className="text-xs bg-gray-50 rounded px-2.5 py-1.5">
+                <div className="font-medium text-gray-900">{r.resource_display_name || r.resource_id || 'App'}</div>
+                {r.resource_id && r.resource_display_name && (
+                  <div className="text-[10px] text-gray-500 mt-0.5 break-all">{r.resource_id}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -898,7 +946,22 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
     );
   }
 
+  // SSOT: even when there are no secrets/certificates, federated credentials
+  // (GitHub Actions OIDC, Azure Managed Identity issuer, etc.) are also
+  // "credentials" from a risk perspective and must be shown so the drawer
+  // doesn't disagree with the full-detail page.
   if (credentials.length === 0) {
+    if (detail.has_federated_credentials) {
+      return (
+        <div className="space-y-3">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+            No secrets or certificates registered, but this identity authenticates via
+            federated credentials. Deleting the federated trust will break upstream pipelines.
+          </div>
+          <FederatedCredentialsSection identityId={detail.identity_id} credentialCount={detail.credential_count ?? 0} />
+        </div>
+      );
+    }
     return <p className="text-sm text-gray-400 text-center py-8">No credentials registered.</p>;
   }
 
@@ -961,6 +1024,12 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
           </div>
         ))}
       </div>
+
+      {/* SSOT: also render federated credentials when present, so the drawer
+          never disagrees with the full-detail Credentials tab. */}
+      {detail.has_federated_credentials && (
+        <FederatedCredentialsSection identityId={detail.identity_id} credentialCount={detail.credential_count ?? credentials.length} />
+      )}
     </div>
   );
 }
