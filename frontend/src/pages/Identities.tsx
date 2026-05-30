@@ -178,6 +178,13 @@ interface IdentityRow {
   manager_id?: string | null;
   job_title?: string | null;
   upn?: string | null;
+  // Access path classification (P0-A 2026-05-30) — lets CISO views show
+  // "174 direct · 949 via group" instead of conflating both into 977.
+  has_direct_rbac_path?: boolean;
+  has_direct_entra_path?: boolean;
+  has_pim_eligible_path?: boolean;
+  has_group_inherited_path?: boolean;
+  access_depth?: 'direct' | 'group_inherited' | 'none';
   // Dependency impact
   dependency_impact?: string | null;
   // Observed usage tracking
@@ -555,7 +562,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | 'direct_access' | 'group_inherited' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
     orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
@@ -854,6 +861,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
             federated_workload_type: raw.federated_workload_type || null,
             federated_workload_name: raw.federated_workload_name || null,
             has_federated_credentials: raw.has_federated_credentials ?? false,
+            has_direct_rbac_path: raw.has_direct_rbac_path ?? false,
+            has_direct_entra_path: raw.has_direct_entra_path ?? false,
+            has_pim_eligible_path: raw.has_pim_eligible_path ?? false,
+            has_group_inherited_path: raw.has_group_inherited_path ?? false,
+            access_depth: (raw.access_depth as 'direct' | 'group_inherited' | 'none') || 'none',
             federated_issuer_types: raw.federated_issuer_types || [],
             secret_expiry_earliest: raw.secret_expiry_earliest || null,
             secret_expiry_status: raw.secret_expiry_status || null,
@@ -989,6 +1001,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
           has_federated_credentials: raw.has_federated_credentials ?? false,
+          has_direct_rbac_path: raw.has_direct_rbac_path ?? false,
+          has_direct_entra_path: raw.has_direct_entra_path ?? false,
+          has_pim_eligible_path: raw.has_pim_eligible_path ?? false,
+          has_group_inherited_path: raw.has_group_inherited_path ?? false,
+          access_depth: (raw.access_depth as 'direct' | 'group_inherited' | 'none') || 'none',
           federated_issuer_types: raw.federated_issuer_types || [],
           // NHI enrichment (AG-159)
           secret_expiry_earliest: raw.secret_expiry_earliest || null,
@@ -1253,6 +1270,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
           has_federated_credentials: raw.has_federated_credentials ?? false,
+          has_direct_rbac_path: raw.has_direct_rbac_path ?? false,
+          has_direct_entra_path: raw.has_direct_entra_path ?? false,
+          has_pim_eligible_path: raw.has_pim_eligible_path ?? false,
+          has_group_inherited_path: raw.has_group_inherited_path ?? false,
+          access_depth: (raw.access_depth as 'direct' | 'group_inherited' | 'none') || 'none',
           federated_issuer_types: raw.federated_issuer_types || [],
           secret_expiry_earliest: raw.secret_expiry_earliest || null,
           secret_expiry_status: raw.secret_expiry_status || null,
@@ -1694,6 +1716,16 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     if (signalChip === 'secrets') result = result.filter(i => i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000));
     if (signalChip === 'no_owner') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (signalChip === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
+    // P0-A (2026-05-30): access-path filters — Direct narrows to actual
+    // Azure-access holders; Group filters to passive members of role-bearing
+    // groups (the inflation source CISOs were misled by).
+    if (signalChip === 'direct_access') result = result.filter(i =>
+      i.has_direct_rbac_path || i.has_direct_entra_path || i.has_pim_eligible_path
+    );
+    if (signalChip === 'group_inherited') result = result.filter(i =>
+      !i.has_direct_rbac_path && !i.has_direct_entra_path && !i.has_pim_eligible_path
+      && i.has_group_inherited_path
+    );
 
     // AG-162: Column-level filters
     for (const [field, vals] of Object.entries(columnFilters)) {
@@ -2770,6 +2802,48 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
 
         return (
           <div className="mb-3 space-y-2">
+            {/* P0-A (2026-05-30): Access-path breakdown for the Humans tab.
+                CISOs were misled by the conflated 977 count; the real "direct
+                Azure access" count is dramatically smaller. Showing both
+                turns the misleading single number into truthful triage info. */}
+            {tabScope === 'humans' && (() => {
+              const directHumans = filtered.filter(i =>
+                i.has_direct_rbac_path || i.has_direct_entra_path || i.has_pim_eligible_path
+              );
+              const groupOnlyHumans = filtered.filter(i =>
+                !i.has_direct_rbac_path && !i.has_direct_entra_path && !i.has_pim_eligible_path
+                && i.has_group_inherited_path
+              );
+              if (groupOnlyHumans.length === 0) return null;
+              const directRbacCount  = filtered.filter(i => i.has_direct_rbac_path).length;
+              const directEntraCount = filtered.filter(i => i.has_direct_entra_path).length;
+              const pimCount         = filtered.filter(i => i.has_pim_eligible_path).length;
+              return (
+                <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400 px-1">
+                  <span className="font-semibold uppercase tracking-wider text-slate-500">Access depth:</span>
+                  <button
+                    onClick={() => setSignalChip(s => s === 'direct_access' ? null : 'direct_access' as any)}
+                    className={`px-2 py-0.5 rounded-md transition-colors ${signalChip === 'direct_access' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-300'}`}
+                    title="Identities with direct RBAC, Entra role, or PIM eligibility — the real Azure-access count"
+                  >
+                    {directHumans.length} direct
+                  </button>
+                  <span className="text-slate-600">
+                    ({directRbacCount} RBAC{directEntraCount > 0 ? ` · ${directEntraCount} Entra` : ''}{pimCount > 0 ? ` · ${pimCount} PIM` : ''})
+                  </span>
+                  <span className="text-slate-700">·</span>
+                  <button
+                    onClick={() => setSignalChip(s => s === 'group_inherited' ? null : 'group_inherited' as any)}
+                    className={`px-2 py-0.5 rounded-md transition-colors ${signalChip === 'group_inherited' ? 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/40' : 'hover:bg-slate-800/60 text-slate-300'}`}
+                    title="Passive members of role-bearing groups — included for coverage but typically lower-signal"
+                  >
+                    {groupOnlyHumans.length} via group
+                  </button>
+                  <span className="text-slate-600">·</span>
+                  <span className="text-slate-500">{filtered.length} total</span>
+                </div>
+              );
+            })()}
             <div className={`grid gap-2 ${tiles.length <= 5 ? 'grid-cols-5' : 'grid-cols-6'}`}>
               {tiles.map(tile => (
                 <button key={tile.key}

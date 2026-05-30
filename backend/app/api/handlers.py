@@ -4976,7 +4976,23 @@ def _identity_list_select():
                 WHEN i.last_sign_in IS NOT NULL
                     THEN 'graph_sign_in_activity'
                 ELSE 'static_analysis_only'
-            END AS auth_source
+            END AS auth_source,
+
+            -- P0-A (2026-05-30): expose access_paths derivation so the UI can
+            -- show "174 direct · 949 via group" instead of conflating both
+            -- into a single inflated count. Backed by the access_paths JSONB
+            -- populated in _collect_relevant_principal_ids.
+            (jsonb_array_length(COALESCE(i.access_paths->'direct_rbac',      '[]'::jsonb)) > 0) AS has_direct_rbac_path,
+            (jsonb_array_length(COALESCE(i.access_paths->'direct_entra',     '[]'::jsonb)) > 0) AS has_direct_entra_path,
+            (jsonb_array_length(COALESCE(i.access_paths->'pim_eligible',     '[]'::jsonb)) > 0) AS has_pim_eligible_path,
+            (jsonb_array_length(COALESCE(i.access_paths->'group_membership', '[]'::jsonb)) > 0) AS has_group_inherited_path,
+            CASE
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'direct_rbac',  '[]'::jsonb)) > 0 THEN 'direct'
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'direct_entra', '[]'::jsonb)) > 0 THEN 'direct'
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'pim_eligible', '[]'::jsonb)) > 0 THEN 'direct'
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'group_membership', '[]'::jsonb)) > 0 THEN 'group_inherited'
+                ELSE 'none'
+            END AS access_depth
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -5156,6 +5172,12 @@ def _map_identity_row(row):
         "job_title": row.get('job_title'),
         "upn": row.get('upn'),
         "dependency_impact": row.get('dependency_impact'),
+        # Access path classification (P0-A 2026-05-30)
+        "has_direct_rbac_path": bool(row.get('has_direct_rbac_path', False)),
+        "has_direct_entra_path": bool(row.get('has_direct_entra_path', False)),
+        "has_pim_eligible_path": bool(row.get('has_pim_eligible_path', False)),
+        "has_group_inherited_path": bool(row.get('has_group_inherited_path', False)),
+        "access_depth": row.get('access_depth') or 'none',
         "observed_last_used": _isoformat_safe(row.get('observed_last_used')),
         "last_signin_at": _isoformat_safe(row.get('last_signin_at')),
         "last_signin_ip": row.get('last_signin_ip'),
@@ -25675,6 +25697,42 @@ def get_snapshot_job_status(connection_id):
             # finalized counts; expose the most recent job so the UI can render
             # the real identities_discovered total instead of the in-flight 0.
             resp['last_job'] = admin_db.get_latest_snapshot_job(connection_id, org_id=_org_id())
+
+        # P0-A (2026-05-30): enrich job with the actionable vs Microsoft-managed
+        # split so the scan-complete modal can say "2,044 actionable +
+        # 1,082 Microsoft-managed filtered" instead of just "3,126 identities
+        # discovered" (which is technically true but misleads CISOs — they think
+        # they need to govern 3,126 identities when really 1,082 are auto-managed
+        # by Microsoft and filtered out of all dashboards).
+        target_job = job or resp.get('last_job')
+        if target_job and target_job.get('discovery_run_id'):
+            try:
+                cur = admin_db.conn.cursor()
+                cur.execute(
+                    """
+                    SELECT
+                      COUNT(*) AS total,
+                      COUNT(*) FILTER (
+                        WHERE COALESCE(is_microsoft_system, false) = false
+                      ) AS actionable,
+                      COUNT(*) FILTER (
+                        WHERE COALESCE(is_microsoft_system, false) = true
+                      ) AS microsoft_managed
+                    FROM identities
+                    WHERE discovery_run_id = %s
+                    """,
+                    (target_job['discovery_run_id'],),
+                )
+                row = cur.fetchone()
+                cur.close()
+                if row:
+                    target_job['identities_total'] = int(row[0] or 0)
+                    target_job['identities_actionable'] = int(row[1] or 0)
+                    target_job['identities_microsoft_managed'] = int(row[2] or 0)
+            except Exception:
+                # Fail-open: existing identities_discovered field is still valid
+                pass
+
         return jsonify(resp)
     finally:
         admin_db.close()

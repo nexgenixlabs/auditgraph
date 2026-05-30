@@ -295,25 +295,41 @@ export function DiscoveryProgressModal({
         )}
 
         {/* Completion summary */}
-        {completed && (
-          <div className="px-6 pb-3">
-            <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/40 rounded-lg px-4 py-3">
-              <div className="flex items-center gap-2">
-                <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-green-800 dark:text-green-300">
-                    Scan Complete — {identities.toLocaleString()} identit{identities !== 1 ? 'ies' : 'y'} discovered
-                  </p>
-                  <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
-                    Total scan time: {formatDuration(finalElapsed ?? elapsed)}
-                  </p>
+        {completed && (() => {
+          // P0-A (2026-05-30): show the actionable vs Microsoft-managed split
+          // when the backend provides it, so CISOs see the real number of
+          // identities they need to govern (not the raw scan count which
+          // includes ~1000+ Microsoft-internal service principals).
+          const actionable = (job as any)?.identities_actionable as number | undefined;
+          const msManaged = (job as any)?.identities_microsoft_managed as number | undefined;
+          const haveSplit = typeof actionable === 'number' && typeof msManaged === 'number' && (actionable + msManaged) > 0;
+          return (
+            <div className="px-6 pb-3">
+              <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/40 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  <div>
+                    <p className="text-sm font-medium text-green-800 dark:text-green-300">
+                      Scan Complete — {haveSplit
+                        ? `${actionable!.toLocaleString()} actionable identit${actionable === 1 ? 'y' : 'ies'}`
+                        : `${identities.toLocaleString()} identit${identities !== 1 ? 'ies' : 'y'} discovered`}
+                    </p>
+                    {haveSplit && msManaged! > 0 && (
+                      <p className="text-[11px] text-green-700 dark:text-green-400 mt-0.5">
+                        {msManaged!.toLocaleString()} Microsoft-managed system identit{msManaged === 1 ? 'y' : 'ies'} filtered from dashboards
+                      </p>
+                    )}
+                    <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
+                      Total scan time: {formatDuration(finalElapsed ?? elapsed)}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Footer */}
         <div className="px-6 py-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between">
