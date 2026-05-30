@@ -176,10 +176,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (url.startsWith('/api/') || (API_BASE && url.startsWith(API_BASE))) {
         const headers = new Headers(init?.headers);
 
-        // Phase S1: CSRF token for mutating requests (double-submit cookie pattern)
+        // Phase S1: CSRF token for mutating requests (double-submit cookie pattern).
+        // If the csrf_token cookie is missing (cross-subdomain session whose
+        // cookie expired or was set before the CSRF flow shipped), trigger a
+        // refresh first — /api/auth/refresh re-issues all auth cookies including
+        // a fresh csrf_token. Otherwise the request would 403 with no recovery.
         const method = (init?.method || 'GET').toUpperCase();
         if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
-          const csrf = getCsrfToken();
+          let csrf = getCsrfToken();
+          if (!csrf && !url.includes('/api/auth/')) {
+            if (!refreshingRef.current) {
+              refreshingRef.current = tryRefresh().finally(() => { refreshingRef.current = null; });
+            }
+            await refreshingRef.current;
+            csrf = getCsrfToken();
+          }
           if (csrf) headers.set('X-CSRF-Token', csrf);
         }
 
