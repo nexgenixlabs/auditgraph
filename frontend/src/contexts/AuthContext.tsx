@@ -232,6 +232,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
+      // On 403 CSRF mismatch (stale or duplicate cookie — JS reads one value,
+      // browser sends a different one), force a refresh which re-issues a single
+      // canonical csrf_token cookie, then retry once. Distinct from the 401
+      // refresh path which handles expired access tokens.
+      if (response.status === 403 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+        const retryMethod = (init?.method || 'GET').toUpperCase();
+        if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(retryMethod)) {
+          let isCsrfError = false;
+          try {
+            const cloned = response.clone();
+            const body = await cloned.text();
+            isCsrfError = body.includes('CSRF token mismatch');
+          } catch { /* non-text body — skip */ }
+          if (isCsrfError) {
+            if (!refreshingRef.current) {
+              refreshingRef.current = tryRefresh().finally(() => { refreshingRef.current = null; });
+            }
+            const refreshed = await refreshingRef.current;
+            if (refreshed) {
+              const retryHeaders = new Headers(init?.headers);
+              const freshCsrf = getCsrfToken();
+              if (freshCsrf) retryHeaders.set('X-CSRF-Token', freshCsrf);
+              response = await origFetch(resolvedInput, { ...init, headers: retryHeaders });
+            }
+          }
+        }
+      }
+
       return response;
     };
 
