@@ -29,12 +29,17 @@ export const COLORS = {
   accentDanger: 'var(--accent-danger)',
 } as const;
 
+// Severity color tokens. Hex values pulled from SEVERITY_HEX (riskScoring.ts)
+// which is the canonical source for the entire app outside the CISO board.
+// Background uses the CSS tint variables for consistent dark-theme alpha.
+import { SEVERITY_HEX as _SEV } from './riskScoring';
+
 export const RISK_COLORS = {
-  critical: { color: 'var(--accent-danger)',  bg: 'var(--tint-red)' },
-  high:     { color: 'var(--accent-warning)', bg: 'var(--tint-orange)' },
-  medium:   { color: '#fbbf24',               bg: 'var(--tint-yellow)' },
-  low:      { color: 'var(--accent-success)',  bg: 'var(--tint-green)' },
-  info:     { color: 'var(--accent-primary)',  bg: 'var(--tint-blue)' },
+  critical: { color: _SEV.critical, bg: 'var(--tint-red)' },
+  high:     { color: _SEV.high,     bg: 'var(--tint-orange)' },
+  medium:   { color: _SEV.medium,   bg: 'var(--tint-yellow)' },
+  low:      { color: _SEV.low,      bg: 'var(--tint-green)' },
+  info:     { color: _SEV.info,     bg: 'var(--tint-blue)' },
 } as const;
 
 export const FRAMEWORK_COLORS = {

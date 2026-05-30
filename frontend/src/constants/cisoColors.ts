@@ -1,6 +1,16 @@
 /**
  * CISO Dashboard — Shared Color Maps
  * Extracted from CISODashboard.tsx for reuse across section components.
+ *
+ * INTENTIONALLY DISTINCT PALETTE — do not migrate these to the canonical
+ * SEVERITY_HEX in `riskScoring.ts`. The CISO board uses a more-saturated
+ * branded palette (#e8465a red, #FF7216 orange, #24A2A1 teal) to give the
+ * board-level view a distinct visual identity from the operational pages.
+ * Audits that flag this file as "drift" are incorrect — it's deliberate.
+ *
+ * Canonical app-wide severity colors live in:
+ *   constants/riskScoring.ts → SEVERITY_HEX
+ * Consumed by design.ts RISK_COLORS and components/ui/StatusBadge.tsx.
  */
 
 export const STATUS_DOT: Record<string, string> = {

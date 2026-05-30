@@ -11,6 +11,16 @@
  */
 
 // ── Severity Bands (CVSS v3.1 aligned) ──────────────────────
+//
+// CANONICAL severity hex source for the entire app outside the CISO board.
+// `design.ts` RISK_COLORS and `components/ui/StatusBadge.tsx` both consume
+// from here so "critical red" is the same red everywhere it renders.
+// The four hexes below are the Tailwind 500-band and are intentionally
+// visually distinct (red / orange / yellow / green) — do not collapse
+// medium to amber even if some CSS tint variables don't have a true yellow.
+//
+// The CISO board (`constants/cisoColors.ts`) intentionally uses a different,
+// more-saturated branded palette and is not drift to be unified.
 
 export interface SeverityBand {
   label: string;
@@ -26,6 +36,16 @@ export const SEVERITY_BANDS: Record<string, SeverityBand> = {
   medium:   { label: 'Medium',   min: 4.0, max: 6.9,  color: '#eab308', bgClass: 'bg-yellow-500' },
   low:      { label: 'Low',      min: 0.1, max: 3.9,  color: '#22c55e', bgClass: 'bg-green-500' },
   info:     { label: 'Info',     min: 0,   max: 0,    color: '#6b7280', bgClass: 'bg-gray-500' },
+};
+
+/** Hex-only severity map. Consumed by design.ts RISK_COLORS and StatusBadge
+ *  so all three sources resolve to the same color per severity. */
+export const SEVERITY_HEX: Record<string, string> = {
+  critical: SEVERITY_BANDS.critical.color,
+  high:     SEVERITY_BANDS.high.color,
+  medium:   SEVERITY_BANDS.medium.color,
+  low:      SEVERITY_BANDS.low.color,
+  info:     SEVERITY_BANDS.info.color,
 };
 
 export function getSeverityFromScore(score: number): string {
