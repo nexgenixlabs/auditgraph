@@ -21,6 +21,7 @@ import {
 } from './types';
 import { OWNER_STATUS_CONFIG, TIME_MS } from '../../constants/metrics';
 import { normalizeScore } from '../../utils/identityRiskScore';
+import StatusBadge from '../ui/StatusBadge';
 
 export interface CorrelatedAccount {
   id: number;
@@ -550,14 +551,9 @@ export default function OverviewTab({
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">Zombie</span>
                   )}
                   {acct.risk_level && (
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                      acct.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
-                      acct.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                      acct.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                      'bg-green-100 text-green-700'
-                    }`}>
+                    <StatusBadge variant={acct.risk_level as 'critical' | 'high' | 'medium' | 'low'} size="xs" pill>
                       {acct.risk_level}
-                    </span>
+                    </StatusBadge>
                   )}
                 </div>
               ))}
@@ -1275,14 +1271,10 @@ export default function OverviewTab({
                   <span className="text-sm font-medium text-gray-800">{srv.server_name}</span>
                   <span className="text-xs text-gray-400 ml-2">{srv.server_type}</span>
                 </div>
-                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                  srv.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
-                  srv.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                  'bg-green-100 text-green-700'
-                }`}>
+                <StatusBadge variant={(srv.risk_level === 'critical' || srv.risk_level === 'high') ? srv.risk_level : 'low'} size="sm" pill>
                   {srv.risk_level === 'critical' ? 'Mixed Auth + Open FW' :
                    srv.risk_level === 'high' ? 'Mixed Auth' : 'AAD-Only'}
-                </span>
+                </StatusBadge>
               </div>
             ))}
           </div>

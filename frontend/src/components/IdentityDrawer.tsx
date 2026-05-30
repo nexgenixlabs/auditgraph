@@ -10,6 +10,7 @@ import {
 } from '../constants/metrics';
 import { deriveIdentityState, STATE_COLORS } from '../constants/identityState';
 import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../utils/roleUtils';
+import StatusBadge from './ui/StatusBadge';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -934,12 +935,9 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
           <div key={idx} className={`border rounded-lg p-2.5 ${c.status === 'expired' ? 'border-red-200 bg-red-50/50' : 'border-gray-200'}`}>
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs font-medium text-gray-900">{c.display_name || c.credential_type}</span>
-              <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${
-                c.exposure_risk === 'critical' ? 'bg-red-100 text-red-700' :
-                c.exposure_risk === 'high' ? 'bg-orange-100 text-orange-700' :
-                c.exposure_risk === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                'bg-green-100 text-green-700'
-              }`}>{c.exposure_risk || c.status}</span>
+              <StatusBadge variant={(c.exposure_risk as 'critical' | 'high' | 'medium' | 'low') || 'neutral'} size="xs">
+                {c.exposure_risk || c.status}
+              </StatusBadge>
             </div>
             <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
               <div className="flex justify-between"><span className="text-gray-400">Type</span><span className="text-gray-700">{c.credential_type}</span></div>
