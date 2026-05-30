@@ -12,6 +12,7 @@ import { deriveIdentityState, STATE_COLORS } from '../constants/identityState';
 import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../utils/roleUtils';
 import StatusBadge from './ui/StatusBadge';
 import { FederatedCredentialsSection } from './identity-detail/CredentialsTab';
+import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../constants/activitySignals';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -1183,6 +1184,54 @@ function UsageTab({ detail, dormantStatus, roles, roleUsage }: { detail: Identit
           <span className="text-sm font-medium text-gray-700">{usageData.granted_vs_used.total_permissions}</span>
         </div>
       )}
+
+      {/* Feature D (2026-05-30): Last 3 Callers — source IP + target.
+          Answers the auditor's #1 question for SPNs: "where is this
+          actually used from?" — turns raw IPs into "GitHub Actions",
+          "Azure DevOps", "Terraform Cloud", etc. via classifyIpOrigin.
+          Data comes from identity_arm_connections (ARM activity log,
+          no Entra P2 dependency). */}
+      {(() => {
+        const conns = (detail as any).arm_connections as Array<{
+          event_timestamp?: string;
+          caller_ip_address?: string | null;
+          operation_short?: string;
+          resource_name?: string | null;
+          operation_name?: string;
+        }> | undefined;
+        if (!conns || conns.length === 0) return null;
+        return (
+          <div className="pt-3 mt-3 border-t border-gray-100">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2">
+              Last {Math.min(3, conns.length)} caller{conns.length === 1 ? '' : 's'} · ARM activity
+            </div>
+            <div className="space-y-1.5">
+              {conns.slice(0, 3).map((c, i) => {
+                const origin = c.caller_ip_address ? classifyIpOrigin(c.caller_ip_address) : null;
+                const when = c.event_timestamp ? new Date(c.event_timestamp) : null;
+                const whenStr = when
+                  ? Math.floor((Date.now() - when.getTime()) / 86_400_000) + 'd ago'
+                  : '—';
+                const target = c.resource_name || c.operation_short || c.operation_name || 'unknown';
+                return (
+                  <div key={i} className="flex items-center gap-2 text-[11px]">
+                    {origin && (
+                      <span
+                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border flex-shrink-0 ${IP_ORIGIN_COLORS[origin.kind]}`}
+                        title={`${c.caller_ip_address || ''}\n${origin.tooltip}`}
+                      >
+                        {origin.label}
+                      </span>
+                    )}
+                    <span className="text-gray-700 truncate flex-1" title={target}>{target}</span>
+                    <span className="text-gray-400 whitespace-nowrap" title={when?.toISOString()}>{whenStr}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

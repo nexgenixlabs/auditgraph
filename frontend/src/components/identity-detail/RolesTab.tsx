@@ -141,14 +141,38 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
         {!r.scope_exists && <span className="text-red-600">· Resource deleted</span>}
         {r.redundant_with && <span className="text-yellow-600">· Redundant with {r.redundant_with}</span>}
       </div>
-      {r.is_removable && (
-        <div className="mt-2 flex items-center gap-1 text-xs text-orange-700">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-          </svg>
-          No activity signal — review
-        </div>
-      )}
+      {r.is_removable && (() => {
+        // Feature E (2026-05-30): when a role has been assigned long enough
+        // AND has no observed usage, escalate the recommendation from "review"
+        // to "Likely unused — N days". 90+ days with no usage is a strong
+        // least-privilege removal signal. Counterfeit roles (just assigned)
+        // shouldn't get the strong recommendation yet.
+        const daysAssigned = r.days_since_assigned ?? 0;
+        const strongSignal = daysAssigned >= 90 && !r.last_used_at;
+        const moderateSignal = daysAssigned >= 30 && daysAssigned < 90 && !r.last_used_at;
+        return (
+          <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+            <span className={`flex items-center gap-1 ${strongSignal ? 'text-red-700' : moderateSignal ? 'text-amber-700' : 'text-orange-700'}`}>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              {strongSignal
+                ? `Likely unused — ${daysAssigned}d assigned, no observed activity`
+                : moderateSignal
+                ? `No activity signal yet (assigned ${daysAssigned}d ago)`
+                : 'No activity signal — review'}
+            </span>
+            {strongSignal && (
+              <button
+                onClick={() => onShowScript(generateRoleScript(identityName, identityId, r, roleUsage))}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700 hover:bg-red-200 transition border border-red-200"
+              >
+                Remove this role →
+              </button>
+            )}
+          </div>
+        );
+      })()}
       {r.why_critical && (() => {
         const breach = getBreachInfo(r.role_name || r.display_name || r.name || '');
         const isRecentlyActive = r.why_critical &&

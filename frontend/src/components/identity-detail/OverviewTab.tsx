@@ -22,6 +22,7 @@ import {
 import { OWNER_STATUS_CONFIG, TIME_MS } from '../../constants/metrics';
 import { normalizeScore } from '../../utils/identityRiskScore';
 import StatusBadge from '../ui/StatusBadge';
+import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../../constants/activitySignals';
 
 export interface CorrelatedAccount {
   id: number;
@@ -1032,17 +1033,45 @@ export default function OverviewTab({
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-left text-gray-400 text-[10px] uppercase tracking-wider">
+                      <th className="pb-1.5 pr-3">Caller</th>
                       <th className="pb-1.5 pr-3">Source IP</th>
-                      <th className="pb-1.5 pr-3">Target Service</th>
-                      <th className="pb-1.5">Timestamp</th>
+                      <th className="pb-1.5 pr-3">Target</th>
+                      <th className="pb-1.5">When</th>
                     </tr>
                   </thead>
                   <tbody>
                     {connections.map((c, i) => {
                       const ts = c.event_timestamp ? formatRelativeTime(c.event_timestamp) : null;
+                      // Feature D (2026-05-30): classify IP into known origin
+                      // (GitHub Actions / Azure DevOps / Terraform Cloud / etc)
+                      // so auditors can see what KIND of caller this was,
+                      // not just an opaque IP string.
+                      const origin = c.caller_ip_address
+                        ? classifyIpOrigin(c.caller_ip_address)
+                        : null;
                       return (
                         <tr key={i} className="border-t border-gray-100">
-                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]">{c.caller_ip_address || '\u2014'}</td>
+                          <td className="py-1.5 pr-3">
+                            {origin && origin.kind !== 'unknown' ? (
+                              <span
+                                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border ${IP_ORIGIN_COLORS[origin.kind]}`}
+                                title={origin.tooltip}
+                              >
+                                {origin.label}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-gray-400" title={origin?.tooltip}>
+                                {origin?.label || '\u2014'}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]" title={c.caller_ip_address || ''}>
+                            {c.caller_ip_address
+                              ? c.caller_ip_address.length > 22
+                                ? c.caller_ip_address.slice(0, 20) + '\u2026'
+                                : c.caller_ip_address
+                              : '\u2014'}
+                          </td>
                           <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.resource_name || c.operation_short}</td>
                           <td className="py-1.5 text-gray-600 whitespace-nowrap" title={ts?.full}>{ts?.relative || '\u2014'}</td>
                         </tr>

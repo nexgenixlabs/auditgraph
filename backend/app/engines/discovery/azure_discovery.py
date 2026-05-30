@@ -5801,14 +5801,14 @@ class AzureDiscoveryEngine:
         No P2 dependency. Falls back from the bulk credentialUserRegistrationDetails
         endpoint which requires Reports.Read.All.
 
-        Uses concurrent requests (bounded by _graph_semaphore) to cover
-        large tenants within the time budget.
+        Uses concurrent requests (bounded by a DEDICATED MFA semaphore that
+        doesn't compete with other Graph calls) to cover large tenants
+        within the time budget.
 
         Returns: dict mapping object_id -> {mfa_status, mfa_methods}
         """
         import time as _time
         phase_start = _time.monotonic()
-        TIME_BUDGET = 600  # seconds — enough for ~1000+ users with concurrency
 
         mfa_result: dict[str, dict] = {}
         if not human_identities:
@@ -5820,9 +5820,21 @@ class AzureDiscoveryEngine:
         if not targets:
             return mfa_result
 
+        # P2-C (2026-05-30) scan-time optimizations:
+        # 1. Adaptive time budget — when the MFA cache covered most users
+        #    (warm scan, residual <200 fetches), 90s is plenty. The original
+        #    600s budget was for cold scans of 1000+ users. A warm scan with
+        #    50 cache misses doesn't need a 10-minute ceiling.
+        # 2. Dedicated MFA semaphore at 50 concurrency — Graph's
+        #    /authentication/methods endpoint has a per-app rate limit
+        #    around 1000 req/min, comfortably above 50 concurrent. Sharing
+        #    _graph_semaphore (cap 20) was the bottleneck.
+        TIME_BUDGET = 90 if len(targets) < 200 else 600
+        mfa_semaphore = asyncio.Semaphore(50)
+
         logger.info(
-            "[MFA-methods] Collecting authentication methods for %s humans (concurrent). org=%s",
-            len(targets), self.db_org_id,
+            "[MFA-methods] Collecting auth methods for %s humans · concurrency=50 · budget=%ss · org=%s",
+            len(targets), TIME_BUDGET, self.db_org_id,
         )
 
         # Shared mutable state for the permission-check sentinel
@@ -5846,7 +5858,10 @@ class AzureDiscoveryEngine:
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
-                        async with self._graph_semaphore:
+                        # P2-C: use dedicated MFA semaphore (50), not the shared
+                        # _graph_semaphore (20) — MFA fetch was bottlenecked by
+                        # other concurrent Graph calls in the same scan phase.
+                        async with mfa_semaphore:
                             if not _permission_ok:
                                 return None
                             async with session.get(url, headers=headers) as resp:

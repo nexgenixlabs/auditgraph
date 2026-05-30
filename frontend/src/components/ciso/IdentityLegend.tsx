@@ -6,28 +6,48 @@ interface LegendItem {
   definition: string;
 }
 
+// P2-A (2026-05-30): Identity Risk Terminology tightening pass.
+// Changes from prior version:
+//  - Recolored Orphaned (governance gap, not threat) and Over-Privileged
+//    (significant exposure, not critical) so the color signals match how
+//    they're shown in the inventory tiles (orange/amber, not red).
+//  - Added the four states users actually encounter (Active, Stale,
+//    Disabled, Privileged) \u2014 terminology that was used in the UI but
+//    not defined here, leaving CISOs to guess.
+//  - Added a concrete EXAMPLE to each severity (CVSS-style) so the
+//    threshold feels real, not abstract.
+//  - Replaced "identity provider" with the cloud-agnostic phrasing so
+//    the same glossary works when AWS (Q3 2026) and GCP (Q1 2027) land.
+//  - Tightened Type definitions to explicitly distinguish Application
+//    Identity / Managed Workload Identity / Machine Identity (NHI is the
+//    superset; the others are subtypes).
+
 const IDENTITY_STATES: LegendItem[] = [
-  { term: 'Ghost', color: 'var(--orange, #FF7216)', definition: 'An identity that is disabled, deleted, or deprovisioned in the identity provider but still retains live access or role assignments. Access was never fully revoked. Ghost is the highest-priority classification \u2014 it overrides all other identity states.' },
-  { term: 'Dormant', color: 'var(--amber, #F59E0B)', definition: 'An identity with no observed authentication or activity in the past 90 days (default \u2014 configurable in Settings \u2192 Governance) while retaining active access assignments. Applies to human and external identities only.' },
-  { term: 'Orphaned', color: 'var(--red, #E8465A)', definition: 'An identity with no assigned owner, custodian, or accountable party responsible for its lifecycle and access decisions.' },
-  { term: 'Over-Privileged', color: 'var(--red, #E8465A)', definition: 'An identity whose assigned permissions materially exceed the access required for its intended business or operational function, based on observed usage.' },
-  { term: 'Provisioned \u2014 Never Used', color: 'var(--text-muted, #484F58)', definition: 'An identity that has been provisioned and granted access but has no observed authentication or activity since it was created.' },
+  { term: 'Ghost', color: '#E8465A', definition: 'A disabled / deleted / deprovisioned identity that still retains live access or role assignments. Access was never fully revoked. Ghost is the highest-priority classification \u2014 it overrides all other identity states. Example: a former employee\'s service principal still holds Contributor 6 months after offboarding.' },
+  { term: 'Dormant', color: '#F59E0B', definition: 'An identity with no observed authentication or activity in the past 90 days (configurable in Settings \u2192 Governance) while retaining active access. Applies to humans, guests, and non-human identities.' },
+  { term: 'Orphaned', color: '#FF7216', definition: 'An identity with no assigned owner / custodian / accountable party. This is a governance gap, not an active threat \u2014 but it blocks access review and incident response because nobody knows who to ask.' },
+  { term: 'Over-Privileged', color: '#FF7216', definition: 'An identity whose assigned permissions materially exceed what it needs based on observed usage. Example: holds Contributor but only used Storage Blob Data Reader operations in the last 90 days \u2014 the unused privilege is removable.' },
+  { term: 'Provisioned \u2014 Never Used', color: 'var(--text-secondary, #8B949E)', definition: 'Provisioned and granted access but no observed authentication or activity since creation. Often automation that never shipped, test accounts left behind, or break-glass credentials.' },
+  { term: 'Active', color: '#22C55E', definition: 'Recent observed authentication or activity (within the last 30 days). The healthy baseline.' },
+  { term: 'Stale', color: '#F59E0B', definition: 'Observed activity 30\u201390 days ago. Approaching dormancy; warrants attention if the identity holds privileged access.' },
+  { term: 'Disabled', color: 'var(--text-muted, #484F58)', definition: 'Sign-in is disabled at the identity provider. Without role-assignment cleanup, becomes Ghost \u2014 see above.' },
+  { term: 'Privileged', color: '#A78BFA', definition: 'Holds Tier 0 or Tier 1 administrative roles (e.g. Owner, Global Administrator, User Access Administrator). Tier definitions match Microsoft\'s enterprise access model.' },
 ];
 
 const RISK_SEVERITY: LegendItem[] = [
-  { term: 'Critical', color: '#E8465A', definition: 'Immediate threat \u2014 identity holds broad or privileged access with active risk signals. Requires immediate action.' },
-  { term: 'High', color: '#FF7216', definition: 'Significant exposure \u2014 identity holds elevated access with risk findings that require prompt remediation.' },
-  { term: 'Medium', color: '#F59E0B', definition: 'Moderate exposure \u2014 identity has access concerns that should be addressed within 30 days.' },
-  { term: 'Low', color: 'var(--text-secondary, #8B949E)', definition: 'Minimal risk \u2014 identity has minor policy deviations with no immediate threat to the environment.' },
-  { term: 'Info', color: 'var(--text-muted, #484F58)', definition: 'Informational \u2014 identity is flagged for awareness but poses no active security risk at this time.' },
+  { term: 'Critical', color: '#EF4444', definition: 'Immediate threat \u2014 broad or privileged access combined with an active risk signal (exposed secret, expired credential, dormant + Owner, etc.). Requires action now. Risk score 90\u2013100. Example: a service principal with Owner on subscription, no rotated secrets for 400 days, and no owner.' },
+  { term: 'High', color: '#F97316', definition: 'Significant exposure \u2014 elevated access with risk findings that need prompt remediation (\u2264 7 days). Risk score 70\u201389. Example: a human user with Contributor and no MFA enforced.' },
+  { term: 'Medium', color: '#EAB308', definition: 'Moderate exposure \u2014 should be addressed within 30 days. Risk score 40\u201369.' },
+  { term: 'Low', color: '#22C55E', definition: 'Minimal risk \u2014 minor policy deviations with no immediate threat. Risk score 1\u201339.' },
+  { term: 'Info', color: 'var(--text-muted, #484F58)', definition: 'Informational only \u2014 no active security risk at this time. Risk score 0.' },
 ];
 
 const IDENTITY_TYPES: LegendItem[] = [
-  { term: 'Human Identity', color: 'var(--teal, #24A2A1)', definition: 'A person within or affiliated with the organization \u2014 employee, contractor, administrator, or external collaborator \u2014 with a user account in the identity provider.' },
-  { term: 'Application Identity', color: 'rgba(36,162,161,0.6)', definition: 'A non-human identity used by applications, services, or automation to authenticate and access resources programmatically.' },
-  { term: 'Managed Workload Identity', color: 'var(--text-secondary, #8B949E)', definition: 'A cloud-native identity automatically managed and assigned to a compute resource for resource-to-resource authentication. No credentials to manage or rotate.' },
-  { term: 'Guest / External', color: 'rgba(245,158,11,0.6)', definition: 'An identity originating outside the organization that has been granted controlled access to internal resources. Requires regular access review and certification.' },
-  { term: 'Machine Identity (NHI)', color: 'var(--text-muted, #484F58)', definition: 'Any non-human identity used by software, infrastructure, workloads, or automation to access systems and resources. Includes application identities, managed workload identities, and service accounts across all cloud providers.' },
+  { term: 'Human Identity', color: 'var(--teal, #24A2A1)', definition: 'A person \u2014 employee, contractor, administrator, or external collaborator \u2014 with a user account in the cloud identity directory (Entra ID today; IAM Identity Center for AWS, Cloud Identity for GCP when those connectors land).' },
+  { term: 'Guest / External', color: 'rgba(245,158,11,0.6)', definition: 'A person originating outside the organization granted controlled access to internal resources. Requires periodic access review and certification.' },
+  { term: 'Machine Identity (NHI)', color: 'var(--text-muted, #484F58)', definition: 'Umbrella term for any non-human identity used by software, infrastructure, or automation. Includes Application Identities and Managed Workload Identities below; equivalent to "service accounts" in legacy terminology.' },
+  { term: 'Application Identity', color: 'rgba(36,162,161,0.6)', definition: 'NHI subtype: an identity registered to an application or service that authenticates with a secret, certificate, or federated credential (Service Principal in Azure; IAM Role / Programmatic User in AWS; Service Account in GCP).' },
+  { term: 'Managed Workload Identity', color: 'var(--text-secondary, #8B949E)', definition: 'NHI subtype: a cloud-managed identity automatically attached to a compute resource (VM, function, container) for resource-to-resource auth. No credentials to manage or rotate (Managed Identity in Azure; Instance Profile in AWS; Workload Identity in GCP).' },
 ];
 
 function Section({ heading, items }: { heading: string; items: LegendItem[] }) {
