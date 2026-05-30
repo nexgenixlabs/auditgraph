@@ -8583,6 +8583,50 @@ class AzureDiscoveryEngine:
             except Exception as e:
                 logger.warning("Custom risk rules error: %s", e)
 
+            # ============================================================
+            # NHI default = CRITICAL until proven safe
+            # (Founder principle, 2026-05-30: "for NHIs - everyone is critical")
+            # Service principals and managed identities start at CRITICAL and
+            # must EARN a downgrade by passing all 5 safety checks below.
+            # Microsoft-managed identities are excluded — they're already
+            # filtered out of the inventory.
+            # ============================================================
+            _nhi_types = ('service_principal', 'managed_identity_system', 'managed_identity_user')
+            if (identity.get('identity_type') in _nhi_types
+                    and not identity.get('is_microsoft_system')):
+                _all_roles = identity_roles + identity_entra_roles
+                _priv_kw = ('owner', 'contributor', 'user access administrator',
+                            'global administrator', 'privileged role administrator')
+                _has_priv_role = any(
+                    any(kw in (r.get('role_name') or '').lower() for kw in _priv_kw)
+                    for r in _all_roles
+                )
+                _days_inactive = identity.get('days_inactive')
+                _recent_activity = _days_inactive is not None and _days_inactive < 30
+                _has_owner = (identity.get('owner_count') or 0) > 0
+                _auth_gated = (
+                    bool(identity.get('has_federated_credentials'))
+                    or (identity.get('identity_type') or '').startswith('managed_identity')
+                    or active_cred_count == 0
+                )
+                _no_bad_creds = not has_expired and not has_expiring_soon
+
+                _failed_checks = []
+                if _has_priv_role:      _failed_checks.append('privileged role')
+                if not _recent_activity: _failed_checks.append('no recent activity')
+                if not _has_owner:      _failed_checks.append('no owner')
+                if not _auth_gated:     _failed_checks.append('ungated auth (long-lived secrets)')
+                if not _no_bad_creds:   _failed_checks.append('expired/expiring credentials')
+
+                # Floor the risk_level at CRITICAL when any safety check fails.
+                # Never downgrade a higher-than-critical result (none exists yet,
+                # but futureproof). Skip when already critical.
+                if _failed_checks and risk_level not in ('critical',):
+                    risk_level = 'critical'
+                    risk_reasons.append(
+                        'NHI default = CRITICAL (failed: ' + ', '.join(_failed_checks) + ')'
+                    )
+
             # Calculate role usage status (inference-based)
             identity_roles, identity_entra_roles = self._calculate_role_usage_status(
                 identity, identity_roles, identity_entra_roles
