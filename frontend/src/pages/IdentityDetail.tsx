@@ -363,11 +363,12 @@ function parseEffectiveAccessScope(roles: any[]): { subscriptions: string[]; res
 }
 
 // Tab component
-function TabBar({ activeTab, onTabChange, counts, labelOverrides }: {
+function TabBar({ activeTab, onTabChange, counts, labelOverrides, hideTabs }: {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
   counts: Record<TabId, number>;
   labelOverrides?: Partial<Record<TabId, string>>;
+  hideTabs?: TabId[];
 }) {
   const tabs: { id: TabId; label: string; icon: string }[] = [
     { id: 'overview', label: 'Overview', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
@@ -389,10 +390,14 @@ function TabBar({ activeTab, onTabChange, counts, labelOverrides }: {
     { id: 'timeline' as TabId, label: 'Timeline', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
+  const visibleTabs = hideTabs && hideTabs.length > 0
+    ? tabs.filter(t => !hideTabs.includes(t.id))
+    : tabs;
+
   return (
     <div className="border-b bg-white rounded-t-xl">
       <nav className="flex -mb-px overflow-x-auto">
-        {tabs.map(tab => {
+        {visibleTabs.map(tab => {
           const isActive = activeTab === tab.id;
           const count = counts[tab.id];
           return (
@@ -1141,11 +1146,26 @@ export default function IdentityDetail() {
 
           {/* Tabs */}
           <div className="bg-white border rounded-2xl overflow-hidden">
-            <TabBar activeTab={activeTab} onTabChange={setActiveTab} counts={tabCounts} labelOverrides={{
-              entra_groups: entraGroupMeta.total > 0
-                ? `Groups (${entraGroupMeta.total})${entraGroupMeta.withAccess > 0 ? ` \u00b7 ${entraGroupMeta.withAccess} with Azure access` : ''}`
-                : undefined,
-            }} />
+            <TabBar
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              counts={tabCounts}
+              labelOverrides={{
+                entra_groups: entraGroupMeta.total > 0
+                  ? `Groups (${entraGroupMeta.total})${entraGroupMeta.withAccess > 0 ? ` \u00b7 ${entraGroupMeta.withAccess} with Azure access` : ''}`
+                  : undefined,
+              }}
+              /* Humans authenticate via Entra ID, not app secrets/certificates,
+                 so the Credentials tab is always N/A for them \u2014 hide it. They
+                 also don't have "owners" in the SPN sense (the existing
+                 Ownership tab is built around appOwners); hide it for humans
+                 until a reversed "Owns N service principals" view is built. */
+              hideTabs={
+                identity && (identity.identity_category === 'human_user' || identity.identity_category === 'guest')
+                  ? ['credentials', 'ownership']
+                  : undefined
+              }
+            />
 
             <div className="p-6">
               {/* ═══ OVERVIEW TAB ═══ */}

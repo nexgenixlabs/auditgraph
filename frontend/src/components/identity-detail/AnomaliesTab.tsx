@@ -6,6 +6,7 @@ import {
   DataSource,
 } from './types';
 import StatusBadge from '../ui/StatusBadge';
+import EmptyState from '../ui/EmptyState';
 import { SEVERITY_HEX } from '../../constants/riskScoring';
 
 interface AnomaliesTabProps {
@@ -24,13 +25,15 @@ export function AnomaliesTab({ anomalyData, anomalyLoading, data }: AnomaliesTab
           <div className="h-16 bg-gray-100 rounded-xl" />
         </div>
       ) : !anomalyData || anomalyData.anomalies.length === 0 ? (
-        <div className="text-center py-8">
-          <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <p className="text-sm text-gray-500">No anomalies detected for this identity in the current snapshot.</p>
-          <p className="text-xs text-gray-400 mt-2">Source: AuditGraph anomaly engine</p>
-        </div>
+        <EmptyState
+          title="No anomalies detected"
+          description="The AuditGraph anomaly engine ran on the current snapshot and found no unusual behavior for this identity. Anomalies include permission escalation, dormant reactivation, credential surges, and off-hours PIM activation."
+          icon={
+            <svg className="w-10 h-10 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
+        />
       ) : (
         anomalyData.anomalies.map((a: any) => {
           // Severity-tinted card border/bg — colors come from the canonical

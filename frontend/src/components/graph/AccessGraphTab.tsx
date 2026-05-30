@@ -667,7 +667,18 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
             >
               <Controls position="bottom-right" showInteractive={false} />
               <Background gap={20} size={1} color="#e2e8f0" />
-              {viewMode === 'technical' && <MiniMap pannable zoomable nodeStrokeWidth={3} />}
+              {viewMode === 'technical' && (
+                <MiniMap
+                  pannable
+                  zoomable
+                  nodeStrokeWidth={3}
+                  position="bottom-left"
+                  /* Founder feedback 2026-05-30: default minimap was too large and
+                     overlapped the actual graph. Shrink + reposition + add a subtle
+                     dark backdrop so it sits cleanly over the graph canvas. */
+                  style={{ width: 130, height: 90, backgroundColor: 'rgba(15,23,42,0.85)' }}
+                />
+              )}
             </ReactFlow>
           </div>
         </>

@@ -434,7 +434,7 @@ function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
 }
 
 function LifecycleLabel({ state }: { state?: string | null }) {
-  const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Provisioned') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Provisioned;
+  const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Unknown') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Unknown;
   const isDisabled = state === 'Disabled';
   return (
     <span style={{
