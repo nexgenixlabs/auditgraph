@@ -5,6 +5,7 @@ import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { EXPORT_SCHEMA_VERSION } from '../utils/exportUtils';
+import ReportsExportsTabs from '../components/ui/ReportsExportsTabs';
 
 type ReportType = 'full' | 'executive' | 'compliance';
 
@@ -98,11 +99,14 @@ export default function Reports() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-gray-900">Reports</h2>
-        <p className="text-sm text-gray-600 mt-1">
-          Generate professional security audit reports for client delivery
-        </p>
+      <div className="space-y-3">
+        <ReportsExportsTabs />
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">PDF Reports</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Generate professional security audit reports for client delivery
+          </p>
+        </div>
       </div>
 
       {/* Report Type Selector */}

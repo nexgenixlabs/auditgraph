@@ -8,6 +8,10 @@ interface NavItem {
   label: string;
   icon: React.ReactNode;
   matchExact?: boolean;
+  // Optional: additional path prefixes that should keep this nav item
+  // highlighted as active. Used when one sidebar entry hosts a tabbed page
+  // that switches between sibling routes (e.g. /reports + /exports).
+  matchPrefixes?: string[];
 }
 
 interface NavSubGroup {
@@ -76,7 +80,6 @@ const storageIcon = icon('M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.5
 
 // Compliance
 const complianceIcon = icon('M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z');
-const evidenceIcon = icon('M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z');
 
 // Operations
 const driftIcon = icon('M13 7h8m0 0v8m0-8l-8 8-4-4-6 6');
@@ -130,16 +133,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        label: 'Identity Truth',
-        color: '#8b5cf6',
-        items: [
-          { to: '/identity-explorer', label: 'Identity Explorer', icon: identityIcon },
-        ],
-      },
-      {
-        label: 'Access Explainability',
+        // Win 1 (P1 nav consolidation): merged the 1-item "Identity Truth"
+        // section into "Access Explainability" and renamed to "Identity &
+        // Access". Win 2: items ordered broad → narrow so a new user can
+        // navigate top-to-bottom — start at the inventory list, drill into
+        // identity-to-identity relationships, then identity-to-resource
+        // access paths, then role cleanup. URLs unchanged.
+        label: 'Identity & Access',
         color: '#0891b2',
         items: [
+          { to: '/identity-explorer', label: 'Identity Explorer', icon: identityIcon },
           { to: '/identity-graph', label: 'Identity Graph', icon: identityIcon },
           { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon }] : []),
@@ -176,8 +179,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/compliance-posture', label: 'Compliance Posture', icon: complianceIcon },
           { to: '/compliance', label: 'Compliance Evidence', icon: complianceIcon },
           { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
-          { to: '/reports', label: 'Snapshots', icon: reportsIcon },
-          { to: '/exports', label: 'Export Center', icon: evidenceIcon },
+          // Win 3 (P1 nav consolidation): single entry for both /reports
+          // (PDF audit reports) and /exports (CSV/JSON data dumps). The two
+          // pages share a tab strip so users can switch between them in-page.
+          // Active-state highlighting matches either route via startsWith.
+          { to: '/reports', label: 'Reports & Exports', icon: reportsIcon, matchPrefixes: ['/reports', '/exports'] },
         ],
       },
       {
@@ -219,9 +225,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
 
   const renderNavItem = (item: NavItem, depth: number = 0, sectionColor?: string) => {
     const isSettings = item.to.startsWith('/settings');
+    const prefixActive = !!item.matchPrefixes?.some(p => location.pathname === p || location.pathname.startsWith(p + '/'));
     const active = isSettings
       ? location.pathname.startsWith('/settings') && location.pathname === item.to.split('?')[0]
-      : isActive(item.to, item.matchExact);
+      : isActive(item.to, item.matchExact) || prefixActive;
     const isLocked = locked && !isSettings;
 
     return (
