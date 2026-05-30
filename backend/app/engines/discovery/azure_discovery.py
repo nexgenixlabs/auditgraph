@@ -6156,16 +6156,34 @@ class AzureDiscoveryEngine:
                     ca_count += 1
 
         self._principal_access_paths = access_paths
-        result_set = set(access_paths.keys())
+
+        # Founder principle (2026-05-30): only discover humans who have ACTUAL
+        # Azure access — direct RBAC, direct Entra role, PIM eligibility, or
+        # membership in a role-bearing group. SPN ownership and CA-policy
+        # targeting are administrative associations, not access; they should
+        # not earn a principal a slot in the human inventory.
+        #
+        # We keep the spn_ownership / ca_targeted entries populated on the
+        # access_paths dict (they're useful context when the principal is
+        # ALSO included for a real access path), but they don't qualify a
+        # principal for inclusion on their own.
+        _ACCESS_PATHS = ('direct_rbac', 'direct_entra', 'pim_eligible', 'group_membership')
+        result_set = {
+            pid for pid, paths in access_paths.items()
+            if any(paths.get(k) for k in _ACCESS_PATHS)
+        }
+        excluded_count = len(access_paths) - len(result_set)
 
         logger.info(
-            "[_collect_relevant_principal_ids] %d unique principals "
-            "(RBAC=%d Entra=%d PIM=%d group_expanded=%d SPN_owners=%d CA=%d)",
+            "[_collect_relevant_principal_ids] %d included principals "
+            "(RBAC=%d Entra=%d PIM=%d group_expanded=%d) | "
+            "excluded %d (SPN_owners=%d / CA_targets=%d only, no access)",
             len(result_set),
             len({ra['principal_id'] for ra in role_assignments if ra.get('principal_id')}),
             len({er['principal_id'] for er in entra_roles if er.get('principal_id')}),
             len({pid for pid, d in pim_map.items() if d.get('eligible')}),
             expanded_from_groups,
+            excluded_count,
             owner_count,
             ca_count,
         )
