@@ -3,6 +3,8 @@
  * Single source of truth for the enterprise UI.
  */
 
+import { SEVERITY_HEX as _SEV } from './riskScoring';
+
 // ── Colors ─────────────────────────────────────────────────────────
 
 export const COLORS = {
@@ -32,8 +34,6 @@ export const COLORS = {
 // Severity color tokens. Hex values pulled from SEVERITY_HEX (riskScoring.ts)
 // which is the canonical source for the entire app outside the CISO board.
 // Background uses the CSS tint variables for consistent dark-theme alpha.
-import { SEVERITY_HEX as _SEV } from './riskScoring';
-
 export const RISK_COLORS = {
   critical: { color: _SEV.critical, bg: 'var(--tint-red)' },
   high:     { color: _SEV.high,     bg: 'var(--tint-orange)' },
