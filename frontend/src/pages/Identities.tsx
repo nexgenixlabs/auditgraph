@@ -2651,28 +2651,41 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
 
       {/* Tab-scoped sub-pills */}
       {!loading && identities.length > 0 && (() => {
+        // P0-B (2026-05-30): show counts on each sub-pill so CISOs see the
+        // composition of their identity inventory at a glance ("we have 466
+        // App SPNs, 494 System MIs, 107 User MIs") instead of one opaque
+        // "1067 NHI" total. Count from the tab-scoped slice of identities,
+        // not the fully-filtered `filtered` array, so pill counts don't
+        // change when other filters (subscription, signal chip, etc.) are
+        // active — pills should always show the universe they'd filter to.
+        const scopeCats = TAB_SCOPE_CATEGORIES[tabScope];
+        const scopedIdentities = scopeCats
+          ? identities.filter(i => scopeCats.includes(i.identity_category as IdentityCategory))
+          : identities;
+        const countWhere = (pred: (i: IdentityRow) => boolean) => scopedIdentities.filter(pred).length;
+
         // Define sub-pills per tab scope
-        const subPills: { key: string; label: string }[] =
+        const subPills: { key: string; label: string; count?: number }[] =
           tabScope === 'humans' ? [
-            { key: 'all', label: 'All Humans' },
-            { key: 'members', label: 'Members' },
-            { key: 'guests', label: 'Guests' },
-            { key: 'stale', label: 'Stale > 90d' },
-            { key: 'no_mfa', label: 'No MFA' },
+            { key: 'all', label: 'All Humans', count: scopedIdentities.length },
+            { key: 'members', label: 'Members', count: countWhere(i => i.identity_category === 'human_user') },
+            { key: 'guests', label: 'Guests', count: countWhere(i => i.identity_category === 'guest') },
+            { key: 'stale', label: 'Stale > 90d', count: countWhere(i => { const a = safeLower(i.activity_status); return a === 'stale' || a === 'never_used'; }) },
+            { key: 'no_mfa', label: 'No MFA', count: countWhere(i => i.mfa_status === 'not_enrolled') },
           ] : tabScope === 'nhi' ? [
-            { key: 'all', label: 'All NHI' },
-            { key: 'app_spn', label: 'App SPNs' },
-            { key: 'sys_msi', label: 'System MSI' },
-            { key: 'usr_msi', label: 'User MSI' },
-            { key: 'federated', label: 'Federated' },
-            { key: 'orphaned', label: 'Orphaned' },
+            { key: 'all', label: 'All NHI', count: scopedIdentities.length },
+            { key: 'app_spn', label: 'App SPNs', count: countWhere(i => i.identity_category === 'service_principal') },
+            { key: 'sys_msi', label: 'System MSI', count: countWhere(i => i.identity_category === 'managed_identity_system') },
+            { key: 'usr_msi', label: 'User MSI', count: countWhere(i => i.identity_category === 'managed_identity_user') },
+            { key: 'federated', label: 'Federated', count: countWhere(i => ((i as any).federated_cred_count ?? 0) > 0 || (i as any).is_federated) },
+            { key: 'orphaned', label: 'Orphaned', count: countWhere(i => i.governance_state === 'Orphaned') },
           ] : [
             // "All Identities" tab — original category pills
-            { key: 'all', label: 'All Identities' },
-            { key: 'human_user', label: 'Human Users' },
-            { key: 'service_principal', label: 'Service Principals' },
-            { key: 'managed_ids', label: 'Managed IDs' },
-            { key: 'guest', label: 'Guest' },
+            { key: 'all', label: 'All Identities', count: scopedIdentities.length },
+            { key: 'human_user', label: 'Human Users', count: countWhere(i => i.identity_category === 'human_user') },
+            { key: 'service_principal', label: 'Service Principals', count: countWhere(i => i.identity_category === 'service_principal') },
+            { key: 'managed_ids', label: 'Managed IDs', count: countWhere(i => i.identity_category === 'managed_identity_system' || i.identity_category === 'managed_identity_user') },
+            { key: 'guest', label: 'Guest', count: countWhere(i => i.identity_category === 'guest') },
           ];
 
         return (
@@ -2704,13 +2717,20 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                       setTabSubPill(tabSubPill === pill.key ? 'all' : pill.key);
                     }
                   }}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
                     isActive
                       ? 'bg-violet-600 text-white shadow-sm'
                       : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
                   {pill.label}
+                  {typeof pill.count === 'number' && (
+                    <span className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded ${
+                      isActive ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-600'
+                    }`}>
+                      {pill.count.toLocaleString()}
+                    </span>
+                  )}
                 </button>
               );
             })}
