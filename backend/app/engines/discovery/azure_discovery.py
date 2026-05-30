@@ -1134,7 +1134,44 @@ class AzureDiscoveryEngine:
             else:
                 # AG-161: Fallback — per-user /authentication/methods (no Reports.Read.All needed)
                 logger.info("[MFA] Bulk endpoint empty — falling back to per-user auth methods. org=%s", self.db_org_id)
-                human_ids = [i for i in all_identities if i.get('identity_category') in ('human_user', 'guest')]
+
+                # Warm-cache pass first: reuse mfa_status from the most recent
+                # completed discovery run for this connection. MFA enrollment
+                # changes rarely, so re-fetching every scan was burning 8-10 min
+                # of Graph API time per cold scan. With the cache, scan-2+ only
+                # hits the API for NEW users (not in prior run) and users whose
+                # prior status was 'unknown' (retry). Drops 1000-user scans
+                # from ~10 min in the MFA phase to <30s typically.
+                prev_mfa = self._load_prev_mfa_cache()
+                if prev_mfa:
+                    cache_hits = 0
+                    for identity in all_identities:
+                        if identity.get('identity_category') not in ('human_user', 'guest'):
+                            continue
+                        oid = identity.get('object_id')
+                        if oid and oid in prev_mfa and not identity.get('mfa_status'):
+                            cached = prev_mfa[oid]
+                            identity['mfa_status'] = cached['mfa_status']
+                            identity['ca_mfa_enforced'] = cached['mfa_status'] == 'enrolled'
+                            identity['mfa_methods'] = cached.get('mfa_methods', [])
+                            cache_hits += 1
+                    logger.info(
+                        "[MFA-cache] Reused %s cached MFA values from prior run. org=%s",
+                        cache_hits, self.db_org_id,
+                    )
+
+                # Only fetch for humans still missing mfa_status after cache pass.
+                # This is the fresh-fetch set: new users + previously-unknown users
+                # (whose status was filtered out of the cache).
+                human_ids = [
+                    i for i in all_identities
+                    if i.get('identity_category') in ('human_user', 'guest')
+                    and not i.get('mfa_status')
+                ]
+                logger.info(
+                    "[MFA-methods] Fresh fetch needed for %s humans (cache miss / new / retry). org=%s",
+                    len(human_ids), self.db_org_id,
+                )
                 try:
                     per_user_map = await self._collect_mfa_auth_methods(human_ids)
                     if per_user_map:
@@ -5706,6 +5743,56 @@ class AzureDiscoveryEngine:
         'passwordAuthenticationMethod',
         'emailAuthenticationMethod',
     }
+
+    def _load_prev_mfa_cache(self) -> dict:
+        """Load mfa_status + mfa_methods from the most recent completed
+        discovery run for this cloud_connection_id.
+
+        MFA enrollment changes rarely for established users. Reusing prior
+        values turns the per-user Graph API loop (which can take 8-10 min for
+        a 1000-user tenant due to rate limiting) into a thin "fetch only new
+        / previously-unknown users" pass. Drops scan-2+ duration significantly
+        and lets us hit the "10 min to blast radius" promise on warm scans.
+
+        Returns {} on first run, on error, or when no prior MFA data exists
+        (fail-open — caller still does the full fetch in that case).
+        """
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                """
+                SELECT i.object_id, i.mfa_status, i.mfa_methods
+                FROM identities i
+                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                WHERE dr.cloud_connection_id = %s
+                  AND dr.status = 'completed'
+                  AND i.identity_category IN ('human_user', 'guest')
+                  AND i.mfa_status IS NOT NULL
+                  AND i.mfa_status <> 'unknown'
+                  AND i.object_id IS NOT NULL
+                  AND dr.id = (
+                      SELECT MAX(id) FROM discovery_runs
+                      WHERE cloud_connection_id = %s
+                        AND status = 'completed'
+                  )
+                """,
+                (self.cloud_connection_id, self.cloud_connection_id),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            cache: dict = {}
+            for r in rows:
+                oid = r[0]
+                if not oid:
+                    continue
+                cache[oid] = {
+                    'mfa_status': r[1],
+                    'mfa_methods': r[2] or [],
+                }
+            return cache
+        except Exception as e:
+            logger.warning("[MFA-cache] Failed to load prior MFA cache: %s", e)
+            return {}
 
     async def _collect_mfa_auth_methods(self, human_identities: list) -> dict:
         """Collect per-user MFA enrollment via /users/{id}/authentication/methods.

@@ -397,12 +397,24 @@ export default function AIIdentityGraph() {
             >
               <Background gap={20} size={1} color="#1e2d4a" />
               <Controls position="bottom-left" showInteractive={false} />
-              <MiniMap nodeColor={(n) => {
-                if (n.id === 'tenant') return '#24A2A1';
-                if (n.id.startsWith('cluster:')) return '#475569';
-                const sev = (n.data as any)?.severity || 'low';
-                return SEVERITY_COLOR[sev] || SEVERITY_COLOR.low;
-              }} maskColor="rgba(8,15,28,0.6)" pannable zoomable />
+              <MiniMap
+                nodeColor={(n) => {
+                  if (n.id === 'tenant') return '#24A2A1';
+                  if (n.id.startsWith('cluster:')) return '#475569';
+                  const sev = (n.data as any)?.severity || 'low';
+                  return SEVERITY_COLOR[sev] || SEVERITY_COLOR.low;
+                }}
+                maskColor="rgba(8,15,28,0.6)"
+                pannable
+                zoomable
+                /* Founder feedback 2026-05-30: AI Identity Graph minimap was
+                   the xyflow default size and overlapped the actual graph,
+                   matching the Access Graph fix in the polish batch. Shrink
+                   + pin to bottom-right (Controls already occupy bottom-left)
+                   + add a translucent dark backdrop. */
+                position="bottom-right"
+                style={{ width: 130, height: 90, backgroundColor: 'rgba(15,23,42,0.85)' }}
+              />
             </ReactFlow>
           )}
         </div>
