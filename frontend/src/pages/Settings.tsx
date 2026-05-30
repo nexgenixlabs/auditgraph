@@ -542,7 +542,7 @@ export default function Settings() {
     }
   }
 
-  async function handleRunScan(connId: number) {
+  async function handleRunScan(connId: number): Promise<boolean> {
     setScanningConnId(connId);
     try {
       const res = await fetch('/api/runs/trigger', {
@@ -554,13 +554,20 @@ export default function Settings() {
         setSuccess('Snapshot capture started for this connection.');
         // Seed activeJobs so polling starts immediately
         setActiveJobs(prev => ({ ...prev, [connId]: { status: 'queued', stage: null, progress: 0 } }));
+        return true;
       } else if (res.status === 409) {
         setError('A scan is already in progress for this connection.');
+        // Treat as success for modal purposes — there IS an active job to watch
+        return true;
       } else {
-        setError('Failed to trigger snapshot');
+        let detail = '';
+        try { const data = await res.json(); detail = data?.error ? ` (${data.error})` : ''; } catch { /* ignore */ }
+        setError(`Failed to trigger snapshot${detail}`);
+        return false;
       }
     } catch {
       setError('Failed to trigger snapshot');
+      return false;
     } finally {
       setScanningConnId(null);
     }

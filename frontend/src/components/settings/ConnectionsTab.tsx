@@ -51,7 +51,7 @@ export interface ConnectionsTabProps {
   resetWizard: () => void;
   handleDeleteConnection: (connId: number) => void;
   removingConnId: number | null;
-  handleRunScan: (connId: number) => void;
+  handleRunScan: (connId: number) => Promise<boolean>;
   fetchConnections: () => void;
   handleUpdateDiscoverySettings: (connId: number, enabled: boolean, intervalMinutes: number) => void;
   handleTestConnection: () => void;
@@ -491,9 +491,9 @@ export function ConnectionsTab({
   // Purge data state for auth_failed connections
   const [purgingConnId, setPurgingConnId] = useState<number | null>(null);
 
-  function handleScanWithModal(connId: number) {
-    handleRunScan(connId);
-    setModalConnId(connId);
+  async function handleScanWithModal(connId: number) {
+    const started = await handleRunScan(connId);
+    if (started) setModalConnId(connId);
   }
 
   async function handlePurgeData(connId: number) {
