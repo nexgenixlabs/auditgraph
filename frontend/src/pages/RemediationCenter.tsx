@@ -518,7 +518,7 @@ export default function RemediationCenter() {
     && currentPostureScore !== null && attackPathCount !== null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
+    <div className="space-y-4">
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold" style={{ color: R.text }}>Remediation Center</h2>

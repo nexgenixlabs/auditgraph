@@ -54,12 +54,15 @@ interface FixRecommendation {
   status: string;
 }
 
-// SSOT: GET /api/remediation-queue/summary
+// SSOT: GET /api/remediation/generated — same source as Remediation Center page,
+// so the Command Center headline never disagrees with the page it links to.
+// (The separate /api/remediation-queue/summary endpoint covers the manual
+// workflow board, which is a different concept and almost always empty.)
 interface RemediationQueueSummary {
-  total: number;
-  by_status: { open?: number; in_progress?: number; resolved?: number; dismissed?: number };
-  by_severity: { CRITICAL?: number; HIGH?: number; MEDIUM?: number; LOW?: number };
-  avg_resolution_days: number | null;
+  open: number;
+  critical: number;
+  in_progress: number;
+  completed_this_week: number;
 }
 
 interface ActivityEntry {
@@ -158,7 +161,7 @@ export default function SecurityCommandCenter() {
       const [overviewRes, postureRes, queueRes, riskyRes, recsRes, activityRes] = await Promise.all([
         fetch(withConnection('/api/security/overview')),
         fetch(withConnection('/api/dashboard/posture')),
-        fetch(withConnection('/api/remediation-queue/summary')),
+        fetch(withConnection('/api/remediation/generated')),
         fetch(withConnection('/api/identities?risk_level=critical&limit=10')),
         fetch(withConnection('/api/fix-recommendations?limit=10&status=open')),
         fetch(withConnection('/api/activity?limit=15')),
@@ -177,12 +180,14 @@ export default function SecurityCommandCenter() {
         } catch { /* ignore */ }
       }
 
-      // Remediation queue summary (SSOT). Empty/error → card renders empty
-      // state cleanly; never crashes the page.
+      // Remediation queue summary (SSOT — /api/remediation/generated.stats).
+      // Same source the Remediation Center page renders, so the two never
+      // disagree. Empty/error → card renders empty-state cleanly.
       if (queueRes.ok) {
         try {
           const q = await queueRes.json();
-          if (q && typeof q === 'object') setQueueSummary(q as RemediationQueueSummary);
+          const s = q && typeof q === 'object' ? q.stats : null;
+          if (s && typeof s === 'object') setQueueSummary(s as RemediationQueueSummary);
         } catch { /* ignore */ }
       }
 
@@ -590,19 +595,20 @@ function RemediationQueueCard({ summary, posture }: { summary: RemediationQueueS
     );
   }
 
-  const open = summary.by_status?.open || 0;
-  const inProg = summary.by_status?.in_progress || 0;
-  const resolved = summary.by_status?.resolved || 0;
+  // /api/remediation/generated.stats shape: {open, critical, in_progress, completed_this_week}.
+  // "open" here already excludes in-progress/completed — it's the new+planned bucket.
+  const open = summary.open || 0;
+  const inProg = summary.in_progress || 0;
+  const completed = summary.completed_this_week || 0;
+  const crit = summary.critical || 0;
   const active = open + inProg;
-  const total = summary.total || 0;
-  const crit = summary.by_severity?.CRITICAL || 0;
 
   // Big-number color reflects urgency: red if any critical, amber if any active, emerald if clear
   const headlineColor = crit > 0 ? '#ef4444' : active > 0 ? '#f59e0b' : '#22c55e';
-  const statusLabel = total === 0 ? 'Queue is empty'
-                    : active === 0 ? 'All resolved'
-                    : crit > 0 ? 'Critical items in flight'
-                    : 'Active in queue';
+  const statusLabel = active === 0 && completed === 0 ? 'Nothing to remediate'
+                    : active === 0 ? 'All resolved this week'
+                    : crit > 0 ? 'Critical items waiting'
+                    : 'Items waiting';
 
   return (
     <div className="flex flex-col items-center w-full">
@@ -610,29 +616,29 @@ function RemediationQueueCard({ summary, posture }: { summary: RemediationQueueS
       <div className="text-5xl font-bold leading-none" style={{ color: headlineColor }}>{active}</div>
       <div className="text-xs mt-1" style={{ color: headlineColor }}>{statusLabel}</div>
 
-      {total > 0 ? (
+      {(active > 0 || completed > 0) ? (
         <div className="text-[11px] text-slate-500 mt-3 flex items-center gap-3">
           <span>open <span className="text-amber-400 font-mono">{open}</span></span>
           <span className="text-slate-700">·</span>
           <span>in progress <span className="text-blue-400 font-mono">{inProg}</span></span>
           <span className="text-slate-700">·</span>
-          <span>resolved <span className="text-emerald-400 font-mono">{resolved}</span></span>
+          <span>done this wk <span className="text-emerald-400 font-mono">{completed}</span></span>
         </div>
       ) : (
-        <div className="text-[11px] text-slate-500 mt-3">No items yet — generate from findings</div>
+        <div className="text-[11px] text-slate-500 mt-3">No items — risk graph is clean</div>
       )}
 
-      {summary.avg_resolution_days != null && (
-        <div className="text-[10px] text-slate-600 mt-1">
-          Avg time to resolve: {summary.avg_resolution_days.toFixed(1)}d
+      {crit > 0 && (
+        <div className="text-[10px] text-red-400 mt-1">
+          {crit} critical {crit === 1 ? 'item' : 'items'} need immediate action
         </div>
       )}
 
       <button
-        onClick={() => navigate(total === 0 ? '/remediation' : '/remediation-queue')}
+        onClick={() => navigate('/remediation')}
         className="text-[11px] text-blue-400 hover:text-blue-300 mt-3 transition-colors"
       >
-        {total === 0 ? '+ Generate from findings →' : '→ View remediation queue'}
+        → Open Remediation Center
       </button>
 
       {/* Posture cross-reference — SSOT value preserved, but clearly framed as
