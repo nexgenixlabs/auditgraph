@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import EmptyState from '../components/ui/EmptyState';
 import { useFeatureFlag } from '../contexts/FeatureFlagContext';
 import QueryBuilder from '../components/QueryBuilder';
 import type { AdvancedQuery, QueryFieldDefinition } from '../types';
@@ -2906,7 +2907,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
               ) : error ? (
                 <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">No identities match filters.</td></tr>
+                <tr><td colSpan={colSpan}><EmptyState compact title="No identities match filters." /></td></tr>
               ) : filtered.map(i => {
                 const isComboRisk = (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
                   && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged');
