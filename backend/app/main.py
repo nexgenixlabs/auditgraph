@@ -2890,6 +2890,17 @@ def create_app():
     def report_data():
         return get_report_data()
 
+    # AG-Hero-5 (2026-05-31): Auditor Pack — framework-mapped findings
+    @app.get("/api/reports/auditor-pack/frameworks")
+    def list_auditor_frameworks():
+        from app.api.handlers import get_auditor_pack_frameworks
+        return get_auditor_pack_frameworks()
+
+    @app.get("/api/reports/auditor-pack")
+    def auditor_pack():
+        from app.api.handlers import get_auditor_pack_data
+        return get_auditor_pack_data()
+
     # -----------------------
     # Drift Detection (Phase 14)
     # -----------------------

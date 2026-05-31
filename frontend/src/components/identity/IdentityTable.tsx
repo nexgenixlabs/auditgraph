@@ -480,7 +480,8 @@ export function IdentityTable({
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <RiskBadge label={row.risk_label} score={row.risk_score} />
+                    {/* CVSS-aligned 0-10 only — proprietary risk_score never shown to users (2026-05-31 directive) */}
+                    <RiskBadge label={row.risk_label} score={row.risk_score_cvss} />
                   </td>
                   <td className="px-4 py-3">
                     <GovernanceBadge value={row.governance} />

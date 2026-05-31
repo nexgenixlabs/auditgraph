@@ -42,7 +42,10 @@ export interface IdentityListRow {
   identity_type: IdentityType;
   cloud_provider: CloudProvider;
   risk_label: RiskLabel;
+  /** Proprietary score — internal only, do NOT render. Use risk_score_cvss. */
   risk_score: number;
+  /** CVSS-aligned 0-10 (industry standard, FIRST.org). Render this. */
+  risk_score_cvss?: number;
   governance: GovernanceClassification;
   lifecycle_state: LifecycleState;
   is_dormant: boolean;

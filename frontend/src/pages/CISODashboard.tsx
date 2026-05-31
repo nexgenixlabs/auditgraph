@@ -15,6 +15,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { mapSummaryToViewModel, buildEmptyCISOViewModel, type CISOViewModel, type PostureV31Response } from '../utils/cisoViewModel';
 import { DN } from '../components/dashboard/ciso-shared';
 import AudienceBadge from '../components/AudienceBadge';
+import { CopilotQuickAsk } from '../components/CopilotQuickAsk';
 import { IdentityDrawerProvider } from '../contexts/IdentityDrawerContext';
 import { IdentityContextDrawer } from '../components/dashboard/IdentityContextDrawer';
 import { usePostureDashboard, type PosturePhase } from '../hooks/usePostureDashboard';
@@ -467,6 +468,14 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
         </div>
       )}
 
+      {/* AG-Hero-3 (2026-05-31): AI Copilot front-and-center — V31 grid path
+          (the loaded-data render). Earlier edit added it only to the legacy
+          path, so it appeared during loading then vanished once V31 data
+          rendered. Mounting here so it persists in the steady-state view. */}
+      <div className="px-3 pt-2 flex-shrink-0">
+        <CopilotQuickAsk />
+      </div>
+
       {/* ── Main Grid ── */}
       <div className="flex-1 px-3 pb-0 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
 
@@ -588,6 +597,10 @@ function LegacyDashboardGrid({ vm, status, primaryGap, usableSources, totalSourc
       {status === 'PARTIAL' && (
         <PartialVisibilityBanner primaryGap={primaryGap} usableSources={usableSources} totalSources={totalSources} />
       )}
+      {/* AG-Hero-3 (2026-05-31): AI Copilot front-and-center on landing page */}
+      <div className="px-3 flex-shrink-0">
+        <CopilotQuickAsk />
+      </div>
       <div className="flex-1 px-3 pb-3 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
         <div className="col-span-5"><NarrativePanel vm={vm} /></div>
         <div className="col-span-4"><RiskScorePanel vm={vm} /></div>

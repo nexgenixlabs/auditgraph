@@ -386,7 +386,12 @@ export interface IdentityListRow {
   identity_type: IdentityType;
   cloud_provider: CloudProvider;
   risk_label: RiskLabel;
+  /** Proprietary internal score — NEVER displayed to users. Kept only for
+   *  sorting/aggregation. UI must use `risk_score_cvss` (industry standard). */
   risk_score: number;
+  /** CVSS-aligned 0–10 severity score (industry standard, FIRST.org CVSS 3.1).
+   *  THIS is what gets rendered in badges/tables/exports. */
+  risk_score_cvss?: number;
   governance: GovernanceClassification;
   lifecycle_state: LifecycleState;
   is_dormant: boolean;

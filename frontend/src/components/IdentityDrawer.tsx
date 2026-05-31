@@ -172,18 +172,21 @@ function relativeTime(d?: string | null): string {
   } catch { return ''; }
 }
 
-function RiskBadge({ level, score, cvss }: { level?: string; score?: number; cvss?: number }) {
+function RiskBadge({ level, cvss }: { level?: string; score?: number; cvss?: number }) {
   const risk = safeLower(level);
+  // CVSS-aligned 0-10 (FIRST.org CVSS 3.1 severity rating bands) is the SOLE
+  // numeric score shown to users. Proprietary internal points are never surfaced
+  // — founder directive 2026-05-31.
   return (
     <div className="flex items-center gap-1">
-      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}
+            title="CVSS 3.1 severity band: 9.0+ CRITICAL · 7.0-8.9 HIGH · 4.0-6.9 MEDIUM · 0.1-3.9 LOW">
         {risk || '?'}
       </span>
-      {/* AG-G: CVSS-aligned 0-10 normalization (industry standard severity number) */}
       {typeof cvss === 'number' && cvss > 0 && (
         <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-100 text-slate-700"
-              title={`CVSS-aligned 0–10 normalized severity (proprietary score: ${score ?? '?'})`}>
-          {cvss.toFixed(1)}
+              title="CVSS-aligned 0-10 severity score (industry standard, FIRST.org CVSS 3.1). Computed as MAX across contributing risk factors.">
+          CVSS {cvss.toFixed(1)}
         </span>
       )}
     </div>
@@ -1287,7 +1290,7 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       <div className="text-center py-8">
         <div className="text-3xl mb-2">&#9989;</div>
         <p className="text-sm text-gray-500">No risk factors identified.</p>
-        <p className="text-[10px] text-gray-400 mt-1">Risk score: {detail.risk_score ?? 0}</p>
+        <p className="text-[10px] text-gray-400 mt-1">CVSS: {(((detail as any).risk_score_cvss ?? 0) as number).toFixed(1)}</p>
       </div>
     );
   }
@@ -1318,7 +1321,15 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${s.badge}`}>{f.severity}</span>
                 {f.code && <span className="text-[9px] text-gray-400 font-mono">{f.code}</span>}
               </div>
-              <span className="text-xs font-mono text-gray-500">+{f.points}</span>
+              {/* CVSS-aligned 0-10 per factor (industry standard, severity-band-locked).
+                  Proprietary +points removed 2026-05-31 per founder directive — only
+                  NIST/CVSS/CIS/MITRE-recognized values shown to CISOs. */}
+              {typeof (f as any).cvss === 'number' && (f as any).cvss > 0 && (
+                <span className="text-xs font-mono font-semibold text-gray-700"
+                      title={`CVSS-aligned 0-10 (industry standard FIRST.org severity rating). Band: ${f.severity.toUpperCase()}.`}>
+                  {(f as any).cvss.toFixed(1)}
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-700 mt-1">{f.description}</p>
             {f.evidence && <p className="text-[10px] text-gray-400 mt-0.5 font-mono">{f.evidence}</p>}

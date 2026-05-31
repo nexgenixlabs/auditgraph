@@ -211,7 +211,12 @@ export default function PillarDrilldownPanel({ open, onClose, pillarKey, pillarD
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <span style={{
                         fontSize: 14, fontFamily: F.mono, fontWeight: 800, color: rColor,
-                      }}>{id.risk_score}</span>
+                      }} title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">{
+                        // CVSS-aligned 0-10; proprietary score never shown to users
+                        typeof (id as any).risk_score_cvss === 'number'
+                          ? (id as any).risk_score_cvss.toFixed(1)
+                          : '—'
+                      }</span>
                       <span style={{
                         fontSize: 8, fontFamily: F.mono, fontWeight: 700, textTransform: 'uppercase',
                         padding: '1px 5px', borderRadius: 3, color: rColor,

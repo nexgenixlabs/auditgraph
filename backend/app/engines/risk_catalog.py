@@ -532,52 +532,114 @@ def score_to_level_v2(score: int) -> str:
     return "info"
 
 
-# AG-G (2026-05-30): CVSS 3.1-style 0.0–10.0 normalization.
+# AG-G + 2026-05-31 follow-up: CVSS 3.1-aligned 0.0–10.0 is now the SOLE
+# scoring scale shown to users. The proprietary `points` field still exists
+# internally for backward compatibility, sort ordering, and severity-tier
+# derivation, but is NEVER surfaced in any UI or report — only NIST/CVSS/CIS/
+# MITRE-recognized values are presented to CISOs. Per founder directive
+# 2026-05-31: "stop using AuditGraph score and use industry standard only
+# across the product. do not confuse CISOs".
 #
-# Industry frameworks (CIS, NIST, MITRE ATT&CK) don't define numeric risk
-# scores — they define controls and techniques. The closest standardized
-# numeric severity is CVSS 3.1 (0.0–10.0, used universally for CVEs). We
-# normalize AuditGraph's proprietary additive point totals to that scale
-# so auditors and downstream tools (SIEM, GRC) have a recognizable number.
-#
-# Bucket boundaries match the CVSS 3.1 severity rating definition:
+# CVSS 3.1 severity rating bands (per the official spec, FIRST.org):
 #   0.0          → NONE       (no risk factors)
 #   0.1 – 3.9    → LOW        (info / minor)
 #   4.0 – 6.9    → MEDIUM
 #   7.0 – 8.9    → HIGH
 #   9.0 – 10.0   → CRITICAL
 #
-# Mapping from AuditGraph internal points → CVSS:
-#   internal 0          →  0.0
-#   internal 1–199      →  0.1–3.9   (low)
-#   internal 200–499    →  4.0–6.9   (medium)
-#   internal 500–899    →  7.0–8.9   (high)
-#   internal ≥ 900      →  9.0–10.0  (critical, capped at 10.0)
-# Within each band we linearly interpolate so a +400 factor reads as
-# higher CVSS than a +250 factor within the medium bucket.
+# Per-factor CVSS — derived from the catalog `severity` field (which is
+# hand-curated by domain experts). Standard practice: severity LABEL and
+# CVSS BAND must agree. A factor declared severity=critical lands in
+# CVSS 9.0–10.0; severity=high → 7.0–8.9; etc.
 #
-# This is a NORMALIZATION, not a literal CVSS vector — we don't compute
-# attack-vector/complexity/etc. base metrics. The label and presentation
-# explicitly say "CVSS-aligned 0–10 normalized score" to avoid implying
-# we're computing a true CVSS base score.
+# Within each band we use the legacy `points` field as a tie-break to give
+# higher-impact factors a higher CVSS within the same band — e.g.
+# TENANT_ADMIN_ROLE (severity=critical, 400 points) outranks
+# SUBSCRIPTION_OWNER (severity=critical, 350 points) → 9.6 vs 9.4 — so
+# rankings remain meaningful without ever exposing the proprietary number.
+#
+# Identity-total CVSS — standard CVSS asset rollup is MAX across factors,
+# not SUM. A host with one CRITICAL CVE (9.8) and ten LOW (2.0 each) is
+# rated CRITICAL — not 28. We use the same rule for identities.
+#
+# This is a NORMALIZATION presented as a CVSS-aligned 0–10. We don't
+# compute the full CVSS Base vector (AV/AC/PR/UI/S/C/I/A); the label
+# explicitly says "CVSS-aligned" to avoid implying a literal CVSS Base.
+
+# Per-severity CVSS band [min, max, span_for_within_band_weighting]
+_SEVERITY_CVSS_BANDS: Dict[str, tuple] = {
+    "critical": (9.0, 10.0),
+    "high":     (7.0, 8.9),
+    "medium":   (4.0, 6.9),
+    "low":      (0.1, 3.9),
+    "info":     (0.0, 0.0),
+}
+
+# Reference "max points typically seen in catalog" per band, used to
+# interpolate within the band so factors retain relative ranking without
+# exposing the raw points number. These are upper bounds — points above
+# saturate at the band ceiling.
+_BAND_POINT_REFERENCE: Dict[str, int] = {
+    "critical": 450,   # TENANT_ADMIN_ROLE max
+    "high":     300,
+    "medium":   200,
+    "low":      80,
+}
+
+
+def severity_to_cvss(severity: str, points: int = 0) -> float:
+    """Convert a factor's severity (+ optional points for within-band ranking)
+    into a CVSS 3.1-aligned 0.0–10.0 score. Severity label and CVSS band are
+    guaranteed to agree (critical severity → 9.0+, etc.).
+    """
+    sev = (severity or "info").lower()
+    if sev not in _SEVERITY_CVSS_BANDS:
+        return 0.0
+    lo, hi = _SEVERITY_CVSS_BANDS[sev]
+    if sev == "info" or lo == hi:
+        return lo
+    # Interpolate within band using points (no UI exposure of points)
+    ref = _BAND_POINT_REFERENCE.get(sev, 100)
+    pts = max(0, int(points or 0))
+    weight = min(1.0, pts / ref) if ref > 0 else 0.0
+    return round(lo + weight * (hi - lo), 1)
+
+
 def points_to_cvss(points: int) -> float:
-    """Normalize AuditGraph additive points → CVSS 3.1-aligned 0.0–10.0."""
+    """LEGACY: kept for backward compat (was used to roll up identity total
+    from sum of factor points). New code should use severity_to_cvss per
+    factor + identity_cvss_from_factors for the rollup.
+    Retains old curve so callers that haven't migrated still get a number.
+    """
     if points <= 0:
         return 0.0
     if points >= 900:
         return 10.0
     if points >= 500:
-        # 500..899 → 7.0..8.9
         return round(7.0 + (points - 500) / 399.0 * 1.9, 1)
     if points >= 200:
-        # 200..499 → 4.0..6.9
         return round(4.0 + (points - 200) / 299.0 * 2.9, 1)
-    # 1..199 → 0.1..3.9
     return round(0.1 + (points - 1) / 198.0 * 3.8, 1)
 
 
+def identity_cvss_from_factors(factors: List[Dict]) -> float:
+    """Standard CVSS asset rollup: MAX across contributing factors.
+
+    Per CVSS 3.1 SIG guidance, asset-level severity = max(CVE severities),
+    not sum. Mirroring that for identities: an identity with one CRITICAL
+    factor (9.8) and ten LOW (2.0 each) is rated 9.8, not capped sum.
+    """
+    if not factors:
+        return 0.0
+    scores = [
+        severity_to_cvss(f.get("severity"), f.get("points", 0))
+        for f in factors
+    ]
+    return max(scores) if scores else 0.0
+
+
 def cvss_to_severity(cvss: float) -> str:
-    """CVSS 3.1 severity rating bands (per the official spec)."""
+    """CVSS 3.1 severity rating bands (per the official FIRST.org spec)."""
     if cvss == 0.0:
         return "none"
     if cvss < 4.0:
@@ -619,10 +681,15 @@ def make_factor(code: str, evidence: str = "") -> Dict:
         "code": code,
         "description": entry["description"],
         "severity": entry["severity"],
+        # `points` is kept for internal sorting/aggregation but UI code MUST
+        # NOT display this value — see severity_to_cvss header note. CISOs
+        # only see industry-standard severity labels + CVSS-aligned 0-10.
         "points": entry["points"],
         "category": entry["category"],
         "evidence": evidence,
-        "cis": entry.get("cis", []) or [],
-        "mitre": entry.get("mitre", []) or [],
-        "cvss": points_to_cvss(entry["points"]),  # AG-G: CVSS-aligned 0-10
+        # Industry framework references
+        "cis": entry.get("cis", []) or [],     # CIS Foundations Benchmark IDs
+        "mitre": entry.get("mitre", []) or [], # MITRE ATT&CK Cloud techniques
+        # CVSS-aligned 0-10 score, severity-driven so band always matches label
+        "cvss": severity_to_cvss(entry["severity"], entry["points"]),
     }

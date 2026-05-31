@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { riskDisplay, CVSS_TOOLTIP } from '../../utils/riskDisplay';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -1152,8 +1153,9 @@ export default function OverviewTab({
             <div className="flex items-center gap-2 text-[10px] text-gray-500">
               <span>{riskHistory.length} runs</span>
               <span className="text-gray-300">|</span>
-              <span>
-                {normalizeScore(riskHistory[0].risk_score, 10).toFixed(1)} → {normalizeScore(riskHistory[riskHistory.length - 1].risk_score, 10).toFixed(1)}/10
+              <span title={CVSS_TOOLTIP}>
+                {/* CVSS 0-10 (industry standard) — proprietary score never shown */}
+                {riskDisplay(riskHistory[0]) ?? '—'} → {riskDisplay(riskHistory[riskHistory.length - 1]) ?? '—'} CVSS
                 {riskHistory[riskHistory.length - 1].risk_score > riskHistory[0].risk_score
                   ? <span className="text-red-500 ml-1">↑</span>
                   : riskHistory[riskHistory.length - 1].risk_score < riskHistory[0].risk_score
@@ -1188,7 +1190,10 @@ export default function OverviewTab({
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full" style={{ backgroundColor: levelColor[p.risk_level] || '#6b7280' }} />
-                        <span className="font-semibold">{p.risk_score}</span>
+                        {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                        <span className="font-semibold tabular-nums" title={CVSS_TOOLTIP}>
+                          {riskDisplay(p) ?? '—'}
+                        </span>
                         <span className="capitalize text-gray-400">{p.risk_level}</span>
                       </div>
                     </div>

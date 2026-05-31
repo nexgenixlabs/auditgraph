@@ -4,15 +4,23 @@ import React, { createContext, useContext, useState, useCallback, useEffect } fr
 
 type ToastType = 'success' | 'error' | 'info';
 
+/** Optional action button rendered on the right side of a toast.
+ *  Polish-tier upgrade 2026-05-31: makes "Failed — Retry" / "Started — View" possible. */
+interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface Toast {
   id: string;
   message: string;
   type: ToastType;
   createdAt: number;
+  action?: ToastAction;
 }
 
 interface ToastContextValue {
-  addToast: (message: string, type?: ToastType) => void;
+  addToast: (message: string, type?: ToastType, action?: ToastAction) => void;
 }
 
 // ── Context ─────────────────────────────────────────────────────
@@ -71,6 +79,15 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: string)
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={ICON_PATHS[toast.type]} />
       </svg>
       <div className="flex-1 text-sm font-medium">{toast.message}</div>
+      {/* Optional action button — turns "Failed" into "Failed — Retry" */}
+      {toast.action && (
+        <button
+          onClick={() => { toast.action!.onClick(); handleDismiss(); }}
+          className="flex-shrink-0 px-2 py-0.5 rounded text-xs font-semibold uppercase tracking-wide bg-white/40 hover:bg-white/60 dark:bg-white/10 dark:hover:bg-white/20 transition-colors border border-current/20"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         onClick={handleDismiss}
         className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
@@ -88,9 +105,9 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: string)
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = useCallback((message: string, type: ToastType = 'info') => {
+  const addToast = useCallback((message: string, type: ToastType = 'info', action?: ToastAction) => {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
-    setToasts(prev => [...prev, { id, message, type, createdAt: Date.now() }]);
+    setToasts(prev => [...prev, { id, message, type, createdAt: Date.now(), action }]);
   }, []);
 
   const removeToast = useCallback((id: string) => {

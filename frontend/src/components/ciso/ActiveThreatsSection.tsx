@@ -103,9 +103,16 @@ export function AnomalyWidgetV31({ data }: { data: PostureV31Response }) {
         )}
       </div>
       {totalUnresolved === 0 ? (
-        <div className="flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
-          <span className="text-xs text-emerald-400 font-medium">No anomalies detected</span>
+        // Celebratory clean state (2026-05-31 polish) — instead of looking
+        // empty/broken, communicate confidence: green dot + reassurance.
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0 animate-pulse" />
+            <span className="text-xs text-emerald-400 font-semibold">All clear</span>
+          </div>
+          <p className="text-[10px] text-gray-500 leading-snug">
+            No behavioral anomalies detected since last scan.
+          </p>
         </div>
       ) : (
         <div className="space-y-1.5">

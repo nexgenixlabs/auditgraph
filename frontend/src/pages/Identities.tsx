@@ -65,7 +65,10 @@ interface IdentityRow {
 
   // Risk fields
   risk_level?: RiskLevel;
+  /** Proprietary internal score — never displayed (2026-05-31 directive). */
   risk_score?: number;
+  /** CVSS-aligned 0-10 (industry standard) — render this in UI. */
+  risk_score_cvss?: number;
 
   // Canonical SSOT activity fields
   last_activity_date?: string | null;
@@ -376,14 +379,19 @@ function StatusBadge({ status }: { status?: IdentityStatus }) {
   return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${display.badge_class}`}>{display.label}</span>;
 }
 
+// CVSS-aligned 0-10 only. Proprietary score never shown to users (2026-05-31 directive).
 function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
   const risk = safeLower(level);
+  // `score` here is the CVSS-aligned 0-10 (callers pass risk_score_cvss);
+  // it's already in the industry-standard scale, no further normalization.
+  const showCvss = typeof score === 'number' && score > 0;
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1"
+         title={showCvss ? `CVSS-aligned ${score.toFixed(1)} (industry standard, FIRST.org CVSS 3.1)` : 'CVSS 3.1 severity band'}>
       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
         {risk || '?'}
       </span>
-      {score !== undefined && score > 0 && <span className="text-[10px] text-gray-400 font-mono">{score}</span>}
+      {showCvss && <span className="text-[10px] text-gray-400 font-mono tabular-nums">{score.toFixed(1)}</span>}
     </div>
   );
 }
@@ -842,6 +850,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
             enabled: raw.enabled,
             risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
             risk_score: raw.risk_score ?? 0,
+            risk_score_cvss: raw.risk_score_cvss ?? 0,
             activity_status: raw.activity_status || 'unknown',
             privilege_tier: raw.privilege_tier ?? undefined,
             pim_eligible_count: raw.pim_eligible_count ?? 0,
@@ -956,6 +965,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           enabled: raw.enabled,
           risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
           risk_score: raw.risk_score ?? 0,
+            risk_score_cvss: raw.risk_score_cvss ?? 0,
           activity_status: raw.activity_status || 'unknown',
           privilege_tier: raw.privilege_tier ?? undefined,
           pim_eligible_count: raw.pim_eligible_count ?? 0,
@@ -1234,6 +1244,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           enabled: raw.enabled,
           risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
           risk_score: raw.risk_score ?? 0,
+            risk_score_cvss: raw.risk_score_cvss ?? 0,
           activity_status: raw.activity_status || 'unknown',
           privilege_tier: raw.privilege_tier ?? undefined,
           pim_eligible_count: raw.pim_eligible_count ?? 0,

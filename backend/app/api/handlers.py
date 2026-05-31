@@ -173,10 +173,31 @@ def _scalar(cursor, default=None):
 
 
 def _points_to_cvss_safe(points):
-    """AG-G: convert proprietary risk points to CVSS-aligned 0-10. Safe wrapper."""
+    """LEGACY wrapper — kept for callers that haven't migrated to
+    _identity_cvss_safe(factors). Uses the old sum-curve, which over-rates
+    identities with many small factors. Prefer the factors-aware version."""
     try:
         from app.engines.risk_catalog import points_to_cvss
         return points_to_cvss(int(points or 0))
+    except Exception:
+        return 0.0
+
+
+def _identity_cvss_safe(factors, fallback_points=0):
+    """AG-G + 2026-05-31 follow-up: compute identity CVSS as MAX across
+    factor severities (standard CVSS asset rollup). `factors` is the JSONB
+    list of {severity, points, code, ...} dicts stored on each identity.
+
+    Falls back to legacy points→CVSS curve when factors list is empty
+    (older snapshots before structured factors landed, or identities
+    classified by a non-factor-based rule). Falls back to 0.0 on any error
+    so callers never crash."""
+    try:
+        from app.engines.risk_catalog import identity_cvss_from_factors, points_to_cvss
+        if isinstance(factors, list) and len(factors) > 0:
+            return identity_cvss_from_factors(factors)
+        # Legacy fallback — use total proprietary points to derive CVSS
+        return points_to_cvss(int(fallback_points or 0))
     except Exception:
         return 0.0
 
@@ -1735,8 +1756,12 @@ def get_identity_details(identity_id: str):
             "owner_display_name": row[22],
             "owner_count": int(row[23] or 0),
             # Risk scoring fields
+            # NOTE: `risk_score` is the internal proprietary additive total.
+            # It's kept for sort ordering + backward-compat but should NOT
+            # be rendered to users — only `risk_score_cvss` + severity bands
+            # are industry-standard (CVSS 3.1) and CISO-defensible.
             "risk_score": int(row[24] or 0),
-            "risk_score_cvss": _points_to_cvss_safe(int(row[24] or 0)),  # AG-G: CVSS-aligned 0-10
+            "risk_score_cvss": _identity_cvss_safe(row[29] if row[29] else [], fallback_points=int(row[24] or 0)),
             "api_permission_count": int(row[25] or 0),
             "app_role_count": int(row[26] or 0),
             "ca_coverage_status": row[27] or None,
@@ -4170,6 +4195,196 @@ def get_report_data():
         db.close()
 
 
+# ── AG-Hero-5: Auditor Pack (framework-mapped findings) ──────────────────────
+
+def get_auditor_pack_frameworks():
+    """List frameworks the Auditor Pack can generate for (UI dropdown)."""
+    from app.engines.auditor_frameworks import list_frameworks
+    return jsonify({"frameworks": list_frameworks()})
+
+
+def get_auditor_pack_data():
+    """Return framework-mapped findings for the Auditor Pack PDF.
+
+    Query params:
+      framework: soc2 | hipaa | pci | iso27001 | cis (default soc2)
+
+    Output shape:
+      {
+        framework: {name, version, publisher, scope_note},
+        organization: {name, slug},
+        snapshot: {id, completed_at, identities_total},
+        controls: [
+          {
+            id, title, description,
+            findings_count,
+            findings: [
+              {identity_id, display_name, risk_level, risk_score_cvss,
+               factor_code, factor_description, evidence, severity,
+               mitre: [...]}
+            ]
+          }
+        ],
+        summary: {total_controls, controls_with_findings, total_findings,
+                  critical_count, high_count, medium_count, low_count}
+      }
+    """
+    from app.engines.auditor_frameworks import get_framework, map_factor_to_controls, AUDITOR_FRAMEWORKS
+    from app.engines.risk_catalog import RISK_FACTOR_CATALOG
+
+    framework_code = (request.args.get('framework') or 'soc2').lower()
+    if framework_code not in AUDITOR_FRAMEWORKS:
+        return jsonify({
+            "error": f"Unknown framework '{framework_code}'. Supported: {sorted(AUDITOR_FRAMEWORKS.keys())}"
+        }), 400
+
+    fw = get_framework(framework_code)
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        # Pull identities with non-empty risk_factors for the latest snapshot
+        cursor.execute("""
+            SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
+                   i.risk_factors, i.identity_category
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND COALESCE(jsonb_array_length(i.risk_factors), 0) > 0
+              AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
+            ORDER BY i.risk_score DESC
+            LIMIT 5000
+        """, (run_ids,))
+        identity_rows = cursor.fetchall()
+
+        # Snapshot metadata — derive identities_total from the row count we
+        # already pulled (no schema dependency on a missing column).
+        cursor.execute("""
+            SELECT id, completed_at FROM discovery_runs WHERE id = ANY(%s)
+            ORDER BY id DESC LIMIT 1
+        """, (run_ids,))
+        snap_row = cursor.fetchone()
+        snapshot = {
+            "id": snap_row[0] if snap_row else None,
+            "completed_at": snap_row[1].isoformat() if snap_row and snap_row[1] else None,
+            "identities_total": len(identity_rows),
+        }
+
+        # Organization name
+        org_id = _org_id()
+        org_name = None
+        if org_id:
+            cursor.execute("SELECT name FROM organizations WHERE id = %s", (org_id,))
+            r = cursor.fetchone()
+            org_name = r[0] if r else None
+        cursor.close()
+
+        # Build per-control findings list. Walk each identity's risk_factors,
+        # determine which framework controls each factor maps to, append.
+        controls_list = fw.get("controls") or []
+
+        # CIS framework: auto-derive controls from RISK_FACTOR_CATALOG cis tags
+        if framework_code == "cis":
+            cis_to_meta = {}
+            for code, meta in RISK_FACTOR_CATALOG.items():
+                for cis_id in (meta.get("cis") or []):
+                    if cis_id not in cis_to_meta:
+                        cis_to_meta[cis_id] = {
+                            "id": cis_id,
+                            "title": cis_id,  # CIS IDs are descriptive enough as titles
+                            "description": f"CIS Foundations Benchmark control {cis_id}",
+                            "cis_map": [cis_id],
+                        }
+            controls_list = sorted(cis_to_meta.values(), key=lambda c: c["id"])
+
+        # Index controls by id for fast lookup, init findings list
+        controls_index = {c["id"]: {**c, "findings": []} for c in controls_list}
+
+        total_findings = 0
+        sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+        for row in identity_rows:
+            identity_id, display_name, risk_level, risk_score, factors, identity_category = row
+            if not isinstance(factors, list):
+                continue
+            cvss = _identity_cvss_safe(factors, fallback_points=int(risk_score or 0))
+            for factor in factors:
+                if not isinstance(factor, dict):
+                    continue
+                factor_cis = factor.get("cis") or []
+                # Old factors (pre-batch-E) won't have cis tags — derive from catalog
+                if not factor_cis:
+                    code = factor.get("code")
+                    if code and code in RISK_FACTOR_CATALOG:
+                        factor_cis = RISK_FACTOR_CATALOG[code].get("cis") or []
+                mapped_ctrl_ids = map_factor_to_controls(factor_cis, framework_code)
+                if not mapped_ctrl_ids:
+                    continue
+                sev = (factor.get("severity") or "info").lower()
+                if sev in sev_counts:
+                    sev_counts[sev] += 1
+                finding = {
+                    "identity_id": identity_id,
+                    "display_name": display_name,
+                    "identity_category": identity_category,
+                    "risk_level": risk_level,
+                    "risk_score_cvss": cvss,  # industry-standard score only
+                    "factor_code": factor.get("code"),
+                    "factor_description": factor.get("description"),
+                    "evidence": factor.get("evidence", ""),
+                    "severity": sev,
+                    "mitre": factor.get("mitre") or (
+                        RISK_FACTOR_CATALOG.get(factor.get("code", ""), {}).get("mitre") or []
+                    ),
+                }
+                for ctrl_id in mapped_ctrl_ids:
+                    if ctrl_id in controls_index:
+                        controls_index[ctrl_id]["findings"].append(finding)
+                        total_findings += 1
+
+        # Sort controls by ID and add findings_count
+        controls_out = []
+        for ctrl in sorted(controls_index.values(), key=lambda c: c["id"]):
+            ctrl["findings_count"] = len(ctrl["findings"])
+            controls_out.append(ctrl)
+
+        result = {
+            "framework": {
+                "code": framework_code,
+                "name": fw["name"],
+                "version": fw["version"],
+                "publisher": fw["publisher"],
+                "scope_note": fw["scope_note"],
+            },
+            "organization": {"id": org_id, "name": org_name},
+            "snapshot": snapshot,
+            "controls": controls_out,
+            "summary": {
+                "total_controls": len(controls_out),
+                "controls_with_findings": sum(1 for c in controls_out if c["findings_count"] > 0),
+                "total_findings": total_findings,
+                "critical_count": sev_counts["critical"],
+                "high_count": sev_counts["high"],
+                "medium_count": sev_counts["medium"],
+                "low_count": sev_counts["low"],
+            },
+            "disclaimer": (
+                "AuditGraph automated evidence — auditor review required. "
+                "This pack is a first-pass artifact mapping identity findings "
+                "to framework controls; it does not replace independent audit testing."
+            ),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _log(db, 'auditor_pack_generated', f'Auditor Pack generated for {framework_code.upper()}',
+             {'framework': framework_code, 'total_findings': total_findings,
+              'controls_with_findings': result['summary']['controls_with_findings']})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 def get_activity():
     """Get activity log entries with optional filtering, org-scoped."""
     db = _db()
@@ -4953,6 +5168,11 @@ def _identity_list_select():
             i.secret_expiry_status,
             COALESCE(i.federated_cred_count, 0) as federated_cred_count,
             i.owner_resolved,
+            -- AG-G follow-up (2026-05-31): risk_factors JSONB needed for
+            -- severity-MAX CVSS rollup. Without it the list endpoint falls
+            -- back to legacy points→CVSS curve which can disagree with the
+            -- per-identity severity badge.
+            i.risk_factors as risk_factors_jsonb,
             -- Humans enrichment (AG-160)
             i.mfa_status,
             i.mfa_methods,
@@ -5106,7 +5326,13 @@ def _map_identity_row(row):
         "owner_display_name": row.get('owner_display_name'),
         "owner_count": int(row.get('owner_count') or 0),
         "risk_score": int(row.get('risk_score') or 0),
-        "risk_score_cvss": _points_to_cvss_safe(int(row.get('risk_score') or 0)),  # AG-G
+        # Industry-standard CVSS-aligned score: MAX of factor severities (CVSS asset rollup).
+        # Falls back to legacy points→CVSS curve when factors list is empty.
+        # `risk_score` (internal) kept only for backward-compat — never rendered to users.
+        "risk_score_cvss": _identity_cvss_safe(
+            row.get('risk_factors_jsonb') or row.get('risk_factors') or [],
+            fallback_points=int(row.get('risk_score') or 0)
+        ),
         "api_permission_count": int(row.get('api_permission_count') or 0),
         "app_role_count": int(row.get('app_role_count') or 0),
         "graph_max_risk": row.get('graph_max_risk') or "info",

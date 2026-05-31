@@ -255,6 +255,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               const freshCsrf = getCsrfToken();
               if (freshCsrf) retryHeaders.set('X-CSRF-Token', freshCsrf);
               response = await origFetch(resolvedInput, { ...init, headers: retryHeaders });
+            } else {
+              // Safety net (2026-05-31): if refresh ALSO fails (both csrf_token
+              // AND refresh cookie are stale — e.g. session predates the CSRF
+              // flow shipping), the session is dead. Clear local user state and
+              // bounce to /login so the user gets a fresh session instead of a
+              // confusing "Failed to ... (CSRF token mismatch)" toast they can't
+              // act on. Skip auto-redirect on the login page itself.
+              setUser(null);
+              if (!window.location.pathname.startsWith('/login') &&
+                  !window.location.pathname.startsWith('/admin/login')) {
+                const portal = detectPortal();
+                const target = portal === 'admin' ? '/admin/login' : '/login';
+                window.location.href = `${target}?reason=session_expired`;
+              }
             }
           }
         }

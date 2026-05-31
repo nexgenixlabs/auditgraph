@@ -255,8 +255,8 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
               </svg>
             </div>
             <div>
-              <div className="text-sm font-bold text-gray-900 dark:text-white">Security Copilot</div>
-              <div className="text-[10px] text-gray-500 dark:text-slate-400">AI-powered security assistant</div>
+              <div className="text-sm font-bold text-gray-900 dark:text-white">Argus</div>
+              <div className="text-[10px] text-gray-500 dark:text-slate-400">AuditGraph's AI security analyst · sees what your logs miss</div>
             </div>
           </div>
           <div className="flex items-center gap-1">
@@ -316,9 +316,9 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
               </svg>
             </div>
-            <h3 className="text-base font-bold text-gray-900 dark:text-white mb-1">AI Copilot Add-On</h3>
+            <h3 className="text-base font-bold text-gray-900 dark:text-white mb-1">Argus AI Add-On</h3>
             <p className="text-sm text-gray-500 dark:text-slate-400 mb-2">
-              The AI Security Copilot is available as a paid add-on ($149/mo) or included with the Enterprise plan.
+              Argus (AuditGraph's AI security analyst) is available as a paid add-on ($149/mo) or included with the Enterprise plan.
             </p>
             <p className="text-xs text-gray-400 dark:text-slate-500 mb-4">
               Get AI-powered security analysis, natural language queries, and contextual recommendations using your live AuditGraph data.
@@ -361,7 +361,7 @@ export default function CopilotPanel({ open, onClose }: { open: boolean; onClose
         {/* Not configured warning — platform key missing */}
         {addonEnabled !== false && !configured && messages.length === 0 && (
           <div className="mx-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
-            <div className="text-xs font-medium text-amber-800 dark:text-amber-300">Copilot Unavailable</div>
+            <div className="text-xs font-medium text-amber-800 dark:text-amber-300">Argus Unavailable</div>
             <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
               AI Copilot is not configured by the platform administrator. Please contact support.
             </div>

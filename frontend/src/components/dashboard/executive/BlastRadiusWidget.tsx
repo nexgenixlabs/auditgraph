@@ -165,10 +165,14 @@ export function BlastRadiusWidget({ identities, blastRadius, subscriptionCount }
                 </div>
               </div>
 
-              {/* Risk score */}
-              <div style={{ textAlign: 'right' as const, flexShrink: 0 }}>
-                <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>Risk</div>
-                <div style={{ fontSize: 13, fontWeight: 700, fontFamily: FONT.mono, color: riskColor(id.risk_score) }}>{id.risk_score}</div>
+              {/* CVSS-aligned 0-10 (industry standard, FIRST.org CVSS 3.1). Proprietary score never shown (2026-05-31). */}
+              <div style={{ textAlign: 'right' as const, flexShrink: 0 }} title="CVSS-aligned 0-10 severity">
+                <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: FONT.ui }}>CVSS</div>
+                <div style={{ fontSize: 13, fontWeight: 700, fontFamily: FONT.mono, color: riskColor(id.risk_score) }}>
+                  {typeof (id as any).risk_score_cvss === 'number'
+                    ? (id as any).risk_score_cvss.toFixed(1)
+                    : '—'}
+                </div>
               </div>
             </div>
           );

@@ -233,10 +233,14 @@ export default function AIInvestigateDrawer({ identityId, onClose }: AIInvestiga
                     <p className="text-[9px] text-slate-600 mt-0.5">CVSS v3.1 band</p>
                   </div>
                 </div>
-                {/* Legacy scores — kept visible as a footnote for users who knew the old numbers */}
-                <p className="text-[9px] text-slate-600 italic">
-                  Legacy scores · platform risk: {data.summary.risk_score} · dimensional AI score: {(data.permissions?.ai_risk_score ?? 0).toFixed(1)}
-                </p>
+                {/* Proprietary scores removed 2026-05-31 per founder directive —
+                    only CVSS-aligned (industry standard) shown to users. AI score
+                    retained because it's already on the 0-10 scale, but relabeled. */}
+                {(data.permissions?.ai_risk_score ?? 0) > 0 && (
+                  <p className="text-[9px] text-slate-600 italic">
+                    AI-permission dimensional score: {(data.permissions?.ai_risk_score ?? 0).toFixed(1)} / 10
+                  </p>
+                )}
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div>
                     <span className="text-slate-500">Category: </span>

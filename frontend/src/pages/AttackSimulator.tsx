@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { riskDisplay } from '../utils/riskDisplay';
 import { ReactFlow, Controls, Background, MiniMap, Handle, Position, type Node, type Edge, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useCopilot } from '../contexts/CopilotContext';
@@ -364,7 +365,8 @@ export default function AttackSimulator() {
                       <div className="text-[10px] text-slate-500 mt-0.5">{ident.identity_category} · {ident.cloud}</div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {ident.risk_score > 0 && <span className="text-[10px] font-mono text-slate-400">{ident.risk_score}</span>}
+                      {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                      {riskDisplay(ident) && <span className="text-[10px] font-mono text-slate-400 tabular-nums" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">{riskDisplay(ident)}</span>}
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[ident.risk_level] || 'bg-slate-700 text-slate-400'}`}>
                         {ident.risk_level || 'info'}
                       </span>

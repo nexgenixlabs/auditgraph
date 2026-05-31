@@ -1,20 +1,32 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { generateReport, generateExecutiveReport, generateComplianceReport } from '../utils/pdfGenerator';
+import { generateReport, generateExecutiveReport, generateComplianceReport, generateAuditorPack } from '../utils/pdfGenerator';
 import { useToast } from '../components/ToastProvider';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { EXPORT_SCHEMA_VERSION } from '../utils/exportUtils';
 import ReportsExportsTabs from '../components/ui/ReportsExportsTabs';
 
-type ReportType = 'full' | 'executive' | 'compliance';
+type ReportType = 'full' | 'executive' | 'compliance' | 'auditor_pack';
 
 const TYPE_MAP: Record<string, ReportType> = {
   executive: 'executive',
   audit: 'full',
   full: 'full',
   compliance: 'compliance',
+  auditor_pack: 'auditor_pack',
+  auditor: 'auditor_pack',
   scheduled: 'full', // scheduled tab defaults to full, handled below
+};
+
+// AG-Hero-5: Auditor Pack framework options
+type AuditorFramework = 'soc2' | 'hipaa' | 'pci' | 'iso27001' | 'cis';
+const AUDITOR_FRAMEWORK_LABELS: Record<AuditorFramework, string> = {
+  soc2:     'SOC 2 (Trust Services CC6)',
+  hipaa:    'HIPAA Security Rule',
+  pci:      'PCI DSS v4.0',
+  iso27001: 'ISO/IEC 27001:2022',
+  cis:      'CIS Azure Foundations v2.1',
 };
 
 interface SnapshotInfo {
@@ -37,6 +49,8 @@ export default function Reports() {
   const [reportType, setReportType] = useState<ReportType>(
     TYPE_MAP[typeParam || ''] || 'full'
   );
+  // AG-Hero-5: framework selector for Auditor Pack
+  const [auditorFramework, setAuditorFramework] = useState<AuditorFramework>('soc2');
 
   const orgId = activeOrgId ?? user?.organization_id ?? null;
   const orgName = activeOrgName ?? user?.org_name ?? null;
@@ -69,6 +83,19 @@ export default function Reports() {
     setLoading(true);
     setError(null);
     try {
+      // AG-Hero-5: Auditor Pack has its own backend endpoint with framework param
+      if (reportType === 'auditor_pack') {
+        const url = withConnection(`/api/reports/auditor-pack?framework=${auditorFramework}`);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        const apData = await res.json();
+        setPreviewData(apData);
+        generateAuditorPack(apData, clientName || undefined);
+        setLastGenerated(new Date().toLocaleString());
+        addToast(`${AUDITOR_FRAMEWORK_LABELS[auditorFramework]} Auditor Pack generated`, 'success');
+        return;
+      }
+
       const res = await fetch(withConnection('/api/reports/data'));
       if (!res.ok) throw new Error(`API error: ${res.status}`);
       const data = await res.json();
@@ -135,7 +162,47 @@ export default function Reports() {
         >
           Compliance Report
         </button>
+        {/* AG-Hero-5 (2026-05-31): Auditor Pack tab */}
+        <button
+          onClick={() => setReportType('auditor_pack')}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+            reportType === 'auditor_pack' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          }`}
+          title="Framework-mapped findings for SOC 2, HIPAA, PCI, ISO 27001 or CIS audit evidence"
+        >
+          Auditor Pack
+          <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 align-middle">New</span>
+        </button>
       </div>
+
+      {/* AG-Hero-5: framework dropdown — only shown when Auditor Pack tab is selected */}
+      {reportType === 'auditor_pack' && (
+        <div className="border border-blue-200 bg-blue-50/30 rounded-lg p-4 space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Auditor Pack</h3>
+              <p className="text-xs text-gray-600 mt-0.5">
+                One-click framework-mapped evidence — every identity finding is mapped to the relevant control(s) for your chosen framework via its CIS/MITRE tags.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs font-medium text-gray-700">Framework:</label>
+            <select
+              value={auditorFramework}
+              onChange={(e) => setAuditorFramework(e.target.value as AuditorFramework)}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              {(Object.keys(AUDITOR_FRAMEWORK_LABELS) as AuditorFramework[]).map(fw => (
+                <option key={fw} value={fw}>{AUDITOR_FRAMEWORK_LABELS[fw]}</option>
+              ))}
+            </select>
+          </div>
+          <p className="text-[10px] text-gray-500">
+            The pack includes a cover page, per-control finding tables, and an auditor sign-off page. CISO can hand this directly to their auditor or use it as first-pass evidence.
+          </p>
+        </div>
+      )}
 
       {/* Export Metadata Strip */}
       <div className="flex items-center gap-4 text-[10px] text-gray-500 border border-gray-200 rounded-lg px-3 py-1.5 bg-gray-50">

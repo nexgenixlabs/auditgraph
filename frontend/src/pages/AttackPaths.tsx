@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { riskDisplay } from '../utils/riskDisplay';
 
 interface AttackPath {
   id: number;
@@ -214,7 +215,8 @@ export default function AttackPaths() {
                       {p.severity}
                     </span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--text-primary)' }}>{p.risk_score}</td>
+                  {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                  <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--text-primary)' }} title="CVSS-aligned 0-10 severity (FIRST.org CVSS 3.1)">{riskDisplay(p) ?? '—'}</td>
                   <td className="px-4 py-3">
                     <span className="text-xs font-mono" style={{ color: 'var(--text-secondary)' }}>
                       {p.affected_resource_count > 0 ? `${p.affected_resource_count} resources` : '-'}

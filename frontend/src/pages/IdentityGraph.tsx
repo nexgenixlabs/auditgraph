@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useConnection } from '../contexts/ConnectionContext';
+import { riskDisplay } from '../utils/riskDisplay';
 import { useAuth } from '../contexts/AuthContext';
 import AIInvestigateDrawer from '../components/AIInvestigateDrawer';
 
@@ -784,7 +785,8 @@ const IdentityGraph: React.FC = () => {
           <div className="text-slate-400 text-[10px]">{t.identity_type || ntype.replace(/_/g, ' ')}</div>
           <div className="flex items-center gap-2 text-[10px]">
             <span className={`px-1.5 py-0.5 rounded ${RISK_BADGE[node.risk_level] || RISK_BADGE.low} border`}>{node.risk_level}</span>
-            <span className="text-slate-400">Score: {t.risk_score}</span>
+            {/* CVSS-aligned 0-10 only (2026-05-31) */}
+            <span className="text-slate-400" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">CVSS: {riskDisplay(t) ?? '—'}</span>
             <span className="text-slate-400">{t.activity_status}</span>
           </div>
           {t.roles.length > 0 && (
@@ -1049,7 +1051,8 @@ const IdentityGraph: React.FC = () => {
                                   {PATH_TYPE_LABEL[path.path_type] || path.path_type.replace(/_/g, ' ')}
                                 </span>
                                 <span className="text-[10px] font-mono text-slate-500">
-                                  Score: {path.risk_score}
+                                  {/* CVSS-aligned 0-10 only */}
+                                  CVSS: {riskDisplay(path) ?? '—'}
                                 </span>
                               </div>
                               <p className="text-sm text-white font-medium mt-1.5 truncate">{path.description}</p>
@@ -1534,7 +1537,8 @@ const IdentityGraph: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2">
                   <div className="bg-slate-900/50 rounded p-2">
                     <p className="text-xs text-slate-400">Risk Score</p>
-                    <p className="text-lg font-semibold text-white">{selectedDetail.risk_score}</p>
+                    {/* CVSS-aligned 0-10 only (2026-05-31) */}
+                    <p className="text-lg font-semibold text-white tabular-nums" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">{riskDisplay(selectedDetail) ?? '—'}</p>
                   </div>
                   <div className="bg-slate-900/50 rounded p-2">
                     <p className="text-xs text-slate-400">Credentials</p>
