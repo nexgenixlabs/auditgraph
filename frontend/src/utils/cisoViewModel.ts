@@ -141,6 +141,7 @@ export interface PostureV31Response {
     identity_id: number | string | null;
     created_at: string | null;
   }>;
+  anomalies_unresolved_count?: number;
   business_impact?: {
     inactive_admin_count: number;
     disabled_live_rbac_count: number;

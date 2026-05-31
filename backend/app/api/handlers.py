@@ -172,6 +172,15 @@ def _scalar(cursor, default=None):
     return val if val is not None else default
 
 
+def _points_to_cvss_safe(points):
+    """AG-G: convert proprietary risk points to CVSS-aligned 0-10. Safe wrapper."""
+    try:
+        from app.engines.risk_catalog import points_to_cvss
+        return points_to_cvss(int(points or 0))
+    except Exception:
+        return 0.0
+
+
 def _get_pillar_filter_sql(pillar: str) -> str:
     """Return SQL AND clause matching the attack-surface-score engine's
     pillar counting logic.  This ensures ?contributing_pillar=X returns
@@ -1727,6 +1736,7 @@ def get_identity_details(identity_id: str):
             "owner_count": int(row[23] or 0),
             # Risk scoring fields
             "risk_score": int(row[24] or 0),
+            "risk_score_cvss": _points_to_cvss_safe(int(row[24] or 0)),  # AG-G: CVSS-aligned 0-10
             "api_permission_count": int(row[25] or 0),
             "app_role_count": int(row[26] or 0),
             "ca_coverage_status": row[27] or None,
@@ -5096,6 +5106,7 @@ def _map_identity_row(row):
         "owner_display_name": row.get('owner_display_name'),
         "owner_count": int(row.get('owner_count') or 0),
         "risk_score": int(row.get('risk_score') or 0),
+        "risk_score_cvss": _points_to_cvss_safe(int(row.get('risk_score') or 0)),  # AG-G
         "api_permission_count": int(row.get('api_permission_count') or 0),
         "app_role_count": int(row.get('app_role_count') or 0),
         "graph_max_risk": row.get('graph_max_risk') or "info",
@@ -8784,6 +8795,56 @@ def get_dashboard_posture():
             except Exception:
                 pass
 
+        # AG-A: Unify posture_anomalies with the persistent `anomalies` table.
+        # Previously only drift-derived anomalies were surfaced — leaving
+        # thousands of AnomalyDetector findings (ghost_identity, risk_score_spike,
+        # permission_escalation, credential_surge, dormant_reactivation) invisible
+        # to the Executive Posture widget. Merge both sources, dedupe by
+        # (type, identity_id), prefer the persistent record's id so the widget
+        # links navigate correctly. Also expose unresolved_count so the badge
+        # reflects the TRUE total, not just the truncated top-25 array length.
+        anomalies_unresolved_total = len(posture_anomalies)
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) FROM anomalies
+                WHERE organization_id = %s AND resolved = false
+            """, (org_id,))
+            anomalies_unresolved_total = (cursor.fetchone()[0] or 0) + len(posture_anomalies)
+            cursor.execute("""
+                SELECT id, anomaly_type, severity, identity_id, identity_name, created_at
+                FROM anomalies
+                WHERE organization_id = %s AND resolved = false
+                ORDER BY
+                    CASE severity
+                        WHEN 'critical' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3
+                        WHEN 'low' THEN 4
+                        ELSE 5
+                    END,
+                    created_at DESC
+                LIMIT 25
+            """, (org_id,))
+            _seen_keys = {(a.get('type'), a.get('identity_id')) for a in posture_anomalies}
+            for _r in cursor.fetchall():
+                _key = (_r[1], _r[3])
+                if _key in _seen_keys:
+                    continue
+                _seen_keys.add(_key)
+                posture_anomalies.append({
+                    "id": _r[0],
+                    "type": _r[1],
+                    "severity": _r[2],
+                    "identity_id": _r[3],
+                    "identity_name": _r[4] or 'Unknown',
+                    "created_at": _r[5].isoformat() if _r[5] else None,
+                })
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
         # A3: Score trend delta
         score_trend = None
         if previous_posture_score and previous_posture_score > 0:
@@ -8840,6 +8901,7 @@ def get_dashboard_posture():
             "attack_path_total": _attack_path_total,
             "attack_path_source_count": _attack_path_source_count,
             "anomalies": posture_anomalies,
+            "anomalies_unresolved_count": anomalies_unresolved_total,
             "drift": drift,
             "p2_enabled": db.get_setting('p2_telemetry_enabled', 'false', organization_id=org_id) == 'true',
             # AG-43/44: flat aliases for frontend trend rendering
@@ -10181,6 +10243,43 @@ def get_identity_pim_data(identity_id):
 
         identity_db_id = row[0]
         pim_data = db.get_pim_data(identity_db_id)
+
+        # AG-PIM-FALLBACK (2026-05-30): When the dedicated
+        # `pim_eligible_assignments` table has no rows for this identity but
+        # `identities.access_paths.pim_eligible` does (which drives the
+        # "6 PIM" count in the access-depth strip), surface those entries so
+        # the PIM tab is consistent with the count. The dedicated-table
+        # backfill is a separate discovery-side investigation; this fallback
+        # is what unblocks the user-visible inconsistency today.
+        if not pim_data.get("eligible_assignments"):
+            cursor.execute("""
+                SELECT COALESCE(access_paths->'pim_eligible', '[]'::jsonb)
+                FROM identities WHERE id = %s
+            """, (identity_db_id,))
+            ap_row = cursor.fetchone()
+            ap_pim = ap_row[0] if ap_row else []
+            if ap_pim:
+                # If the snapshot was taken after the access_paths enrichment
+                # (assignment_type, member_type, end_datetime keys present),
+                # use the real values; otherwise default sensibly so the row
+                # still renders rather than crashing the table.
+                pim_data["eligible_assignments"] = [
+                    {
+                        "role_name": e.get("role", ""),
+                        "directory_scope": e.get("scope", "/"),
+                        "assignment_type": e.get("assignment_type") or "time_bound_eligible",
+                        "member_type": e.get("member_type") or "Direct",
+                        "start_datetime": None,
+                        "end_datetime": e.get("end_datetime"),
+                        "role_definition_id": e.get("role_definition_id"),
+                        "_source": "access_paths_fallback",
+                    }
+                    for e in ap_pim
+                ]
+                logging.getLogger(__name__).info(
+                    "[PIM_FALLBACK] identity_id=%s synthesized %d eligible from access_paths",
+                    identity_id, len(ap_pim)
+                )
 
         # Serialize datetimes
         for item in pim_data["eligible_assignments"]:

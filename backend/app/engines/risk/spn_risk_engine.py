@@ -588,20 +588,44 @@ class WorkloadExposureEngine:
                 else:
                     active_secrets += 1
 
+        # AG-D: Federated workload identity is the modern, recommended auth
+        # pattern (GitHub OIDC, AKS workload identity, Terraform Cloud).
+        # When an SPN authenticates via federated identity, attached client
+        # secrets/certs that have expired or aged out are not on the active
+        # auth path — flagging them as CRITICAL is a false positive that
+        # erodes operator trust. Downgrade to LOW informational + reword.
+        # Matches Wiz / Permiso / Defender for Cloud behavior.
         if expired_creds:
-            score += 15
-            findings.append({
-                'finding_type': 'expired_credentials',
-                'severity': 'critical',
-                'title': f'{len(expired_creds)} expired credential(s) still attached',
-                'description': 'Expired credentials indicate abandoned or poorly maintained workload identity.',
-                'evidence': {'count': len(expired_creds)},
-                'remediation': 'Remove expired credentials immediately. Investigate if SPN is still needed.',
-                'component': 'credential_risk',
-                'score_impact': 15,
-            })
+            if has_federated:
+                score += 2  # informational — federated auth means secret is dormant
+                findings.append({
+                    'finding_type': 'expired_credentials_with_federated',
+                    'severity': 'low',
+                    'title': f'{len(expired_creds)} expired secret(s) retained — federated auth in use',
+                    'description': (
+                        'Expired client secrets are attached but this SPN authenticates via '
+                        'federated workload identity (OIDC). The expired secret is not on the '
+                        'active auth path; cleanup is hygiene, not a critical risk.'
+                    ),
+                    'evidence': {'count': len(expired_creds), 'federated_active': True},
+                    'remediation': 'Remove the unused expired secret to reduce attack surface and confusion.',
+                    'component': 'credential_risk',
+                    'score_impact': 2,
+                })
+            else:
+                score += 15
+                findings.append({
+                    'finding_type': 'expired_credentials',
+                    'severity': 'critical',
+                    'title': f'{len(expired_creds)} expired credential(s) still attached',
+                    'description': 'Expired credentials indicate abandoned or poorly maintained workload identity.',
+                    'evidence': {'count': len(expired_creds)},
+                    'remediation': 'Remove expired credentials immediately. Investigate if SPN is still needed.',
+                    'component': 'credential_risk',
+                    'score_impact': 15,
+                })
 
-        if old_creds:
+        if old_creds and not has_federated:
             score += 10
             findings.append({
                 'finding_type': 'old_credentials',

@@ -6175,6 +6175,11 @@ class AzureDiscoveryEngine:
                 })
 
         # 3. PIM-eligible principals
+        # AG-PIM-FALLBACK enrichment (2026-05-30): also store assignment_type,
+        # member_type, and end_datetime so the PIM tab fallback can render
+        # real Time-Bound/Permanent + Direct/Group distinctions. Previously
+        # only role+scope were captured, which forced the fallback to show
+        # "Time-Bound · Direct · No expiry" placeholders regardless of truth.
         for pid, pim_data in pim_map.items():
             eligible = pim_data.get('eligible', [])
             if eligible:
@@ -6183,6 +6188,10 @@ class AzureDiscoveryEngine:
                     access_paths[pid]['pim_eligible'].append({
                         'role': e.get('role_name', ''),
                         'scope': e.get('directory_scope', '/'),
+                        'assignment_type': e.get('assignment_type'),
+                        'member_type': e.get('member_type'),
+                        'end_datetime': e.get('end_datetime'),
+                        'role_definition_id': e.get('role_definition_id'),
                     })
 
         # 4. Group members from role-bearing groups

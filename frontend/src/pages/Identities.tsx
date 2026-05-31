@@ -562,7 +562,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | 'direct_access' | 'group_inherited' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | 'direct_access' | 'group_inherited' | 'direct_rbac' | 'direct_entra' | 'pim_eligible' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
     orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
@@ -1726,6 +1726,10 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
       !i.has_direct_rbac_path && !i.has_direct_entra_path && !i.has_pim_eligible_path
       && i.has_group_inherited_path
     );
+    // AG-B: sub-chips inside the direct breakdown — each is independently filterable
+    if (signalChip === 'direct_rbac') result = result.filter(i => i.has_direct_rbac_path);
+    if (signalChip === 'direct_entra') result = result.filter(i => i.has_direct_entra_path);
+    if (signalChip === 'pim_eligible') result = result.filter(i => i.has_pim_eligible_path);
 
     // AG-162: Column-level filters
     for (const [field, vals] of Object.entries(columnFilters)) {
@@ -2848,9 +2852,39 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                   >
                     {directHumans.length} direct
                   </button>
-                  <span className="text-slate-600">
-                    ({directRbacCount} RBAC{directEntraCount > 0 ? ` · ${directEntraCount} Entra` : ''}{pimCount > 0 ? ` · ${pimCount} PIM` : ''})
-                  </span>
+                  <span className="text-slate-600">(</span>
+                  <button
+                    onClick={() => setSignalChip(s => s === 'direct_rbac' ? null : 'direct_rbac' as any)}
+                    className={`px-1.5 py-0.5 rounded-md transition-colors ${signalChip === 'direct_rbac' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-400'}`}
+                    title="Filter to identities with a direct Azure RBAC role assignment"
+                  >
+                    {directRbacCount} RBAC
+                  </button>
+                  {directEntraCount > 0 && (
+                    <>
+                      <span className="text-slate-700">·</span>
+                      <button
+                        onClick={() => setSignalChip(s => s === 'direct_entra' ? null : 'direct_entra' as any)}
+                        className={`px-1.5 py-0.5 rounded-md transition-colors ${signalChip === 'direct_entra' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-400'}`}
+                        title="Filter to identities with a direct Entra directory role (Global Admin, etc.)"
+                      >
+                        {directEntraCount} Entra
+                      </button>
+                    </>
+                  )}
+                  {pimCount > 0 && (
+                    <>
+                      <span className="text-slate-700">·</span>
+                      <button
+                        onClick={() => setSignalChip(s => s === 'pim_eligible' ? null : 'pim_eligible' as any)}
+                        className={`px-1.5 py-0.5 rounded-md transition-colors ${signalChip === 'pim_eligible' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-400'}`}
+                        title="Filter to identities with PIM-eligible role assignments (just-in-time access)"
+                      >
+                        {pimCount} PIM
+                      </button>
+                    </>
+                  )}
+                  <span className="text-slate-600">)</span>
                   <span className="text-slate-700">·</span>
                   <button
                     onClick={() => setSignalChip(s => s === 'group_inherited' ? null : 'group_inherited' as any)}

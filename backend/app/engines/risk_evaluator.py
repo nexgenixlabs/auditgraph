@@ -171,15 +171,27 @@ def _eval_spn_owner(self, run_id, connection_id, rule):
 
 @_register('expired_spn_secret')
 def _eval_expired_spn_secret(self, run_id, connection_id, rule):
-    """Service principals with expired credentials."""
+    """Service principals with expired credentials.
+
+    AG-D: Suppress the finding when the SPN has active federated credentials —
+    federated workload identity (GitHub OIDC, AKS workload identity, Terraform
+    Cloud, etc.) is the modern recommended pattern and means the expired
+    client secret is not actually in use. Reporting it as CRITICAL is a
+    high-noise false positive that erodes trust. Wiz, Permiso, Defender
+    for Cloud all downgrade this case.
+    """
     from psycopg2.extras import RealDictCursor
     cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("""
-        SELECT i.id, i.display_name, i.identity_id
+        SELECT i.id, i.display_name, i.identity_id,
+               COALESCE(i.federated_cred_count, 0) AS fic_count,
+               COALESCE(i.is_federated, FALSE)     AS is_federated
         FROM identities i
         WHERE i.discovery_run_id = %s
           AND i.identity_category = 'service_principal'
           AND i.credential_status = 'expired'
+          AND COALESCE(i.federated_cred_count, 0) = 0
+          AND COALESCE(i.is_federated, FALSE) = FALSE
     """, (run_id,))
     rows = cursor.fetchall()
     cursor.close()
@@ -195,7 +207,12 @@ def _eval_expired_spn_secret(self, run_id, connection_id, rule):
 
 @_register('spn_secret_expiring')
 def _eval_spn_secret_expiring(self, run_id, connection_id, rule):
-    """Service principals with credentials expiring within 30 days."""
+    """Service principals with credentials expiring within 30 days.
+
+    AG-D: Same federated-suppression as `expired_spn_secret` — if the SPN
+    is using federated workload identity, the soon-to-expire client secret
+    is not on the active auth path.
+    """
     from psycopg2.extras import RealDictCursor
     cursor = self.db.conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("""
@@ -205,6 +222,8 @@ def _eval_spn_secret_expiring(self, run_id, connection_id, rule):
           AND i.identity_category = 'service_principal'
           AND i.credential_expiration < NOW() + INTERVAL '30 days'
           AND i.credential_status != 'expired'
+          AND COALESCE(i.federated_cred_count, 0) = 0
+          AND COALESCE(i.is_federated, FALSE) = FALSE
     """, (run_id,))
     rows = cursor.fetchall()
     cursor.close()

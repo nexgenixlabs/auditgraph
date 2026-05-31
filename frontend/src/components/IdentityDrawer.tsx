@@ -172,13 +172,20 @@ function relativeTime(d?: string | null): string {
   } catch { return ''; }
 }
 
-function RiskBadge({ level, score }: { level?: string; score?: number }) {
+function RiskBadge({ level, score, cvss }: { level?: string; score?: number; cvss?: number }) {
   const risk = safeLower(level);
   return (
     <div className="flex items-center gap-1">
       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
         {risk || '?'}
       </span>
+      {/* AG-G: CVSS-aligned 0-10 normalization (industry standard severity number) */}
+      {typeof cvss === 'number' && cvss > 0 && (
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-100 text-slate-700"
+              title={`CVSS-aligned 0–10 normalized severity (proprietary score: ${score ?? '?'})`}>
+          {cvss.toFixed(1)}
+        </span>
+      )}
     </div>
   );
 }
@@ -285,7 +292,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
             <h3 className="text-sm font-bold text-gray-900 truncate max-w-[280px]">
               {detail?.display_name || 'Loading…'}
             </h3>
-            {detail && <RiskBadge level={detail.risk_level} score={detail.risk_score} />}
+            {detail && <RiskBadge level={detail.risk_level} score={detail.risk_score} cvss={(detail as any).risk_score_cvss} />}
           </div>
           <p className="text-[10px] text-gray-400 font-mono mt-0.5">{identityId.substring(0, 24)}…</p>
         </div>
@@ -1243,13 +1250,13 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
   const structuredFactors = detail.risk_factors || [];
   const reasons = detail.risk_reasons || [];
 
-  type FactorCard = { id: number; code: string; description: string; points: number; severity: string; evidence: string; category: string };
+  type FactorCard = { id: number; code: string; description: string; points: number; severity: string; evidence: string; category: string; cis?: string[]; mitre?: string[]; cvss?: number };
 
   let factors: FactorCard[];
 
   if (structuredFactors.length > 0) {
     // V2 structured factors
-    factors = structuredFactors.map((f, idx) => ({
+    factors = structuredFactors.map((f: any, idx: number) => ({
       id: idx,
       code: f.code,
       description: f.description,
@@ -1257,6 +1264,9 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       severity: f.severity,
       evidence: f.evidence || '',
       category: f.category || 'unknown',
+      cis: f.cis || [],     // AG-E: CIS Azure/AWS/GCP control IDs
+      mitre: f.mitre || [], // AG-E: MITRE ATT&CK Cloud technique IDs
+      cvss: typeof f.cvss === 'number' ? f.cvss : undefined,  // AG-G
     }));
   } else {
     // Legacy: parse risk_reasons strings
@@ -1268,7 +1278,7 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       if (points >= 300) severity = 'critical';
       else if (points >= 200) severity = 'high';
       else if (points >= 100) severity = 'medium';
-      return { id: idx, code: '', description, points, severity, evidence: '', category: '' };
+      return { id: idx, code: '', description, points, severity, evidence: '', category: '', cis: [], mitre: [] };
     });
   }
 
@@ -1296,7 +1306,7 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[10px] text-gray-500 uppercase font-semibold">Risk Factors ({factors.length})</h4>
-        <RiskBadge level={detail.risk_level} score={detail.risk_score} />
+        <RiskBadge level={detail.risk_level} score={detail.risk_score} cvss={(detail as any).risk_score_cvss} />
       </div>
 
       {factors.map(f => {
@@ -1312,6 +1322,25 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
             </div>
             <p className="text-xs text-gray-700 mt-1">{f.description}</p>
             {f.evidence && <p className="text-[10px] text-gray-400 mt-0.5 font-mono">{f.evidence}</p>}
+            {/* AG-E: framework chips — CIS Azure/AWS/GCP + MITRE ATT&CK Cloud */}
+            {((f as any).cis?.length > 0 || (f as any).mitre?.length > 0) && (
+              <div className="flex flex-wrap items-center gap-1 mt-2">
+                {((f as any).cis || []).map((c: string) => (
+                  <span key={`cis-${c}`}
+                        className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                        title={`Aligned to ${c} — CIS Foundations Benchmark`}>
+                    {c}
+                  </span>
+                ))}
+                {((f as any).mitre || []).map((m: string) => (
+                  <span key={`mitre-${m}`}
+                        className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200"
+                        title={`MITRE ATT&CK technique ${m} — Cloud Matrix`}>
+                    {m}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}

@@ -567,9 +567,15 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [id]);
 
-  // Lazy-load PIM data when tab is selected
+  // Lazy-load PIM data when tab is selected.
+  // BUGFIX (2026-05-30): removed `pimLoading` from deps. Including it caused
+  // a self-cancellation race: setPimLoading(true) ↑ retriggers effect ↑
+  // cleanup sets cancelled=true ↑ in-flight fetch's .finally is skipped ↑
+  // pimLoading stuck true → skeleton renders forever even though the API
+  // returned a successful response. The pimData truthy check is enough to
+  // prevent duplicate fetches.
   useEffect(() => {
-    if (activeTab !== 'pim' || pimData || pimLoading || !id) return;
+    if (activeTab !== 'pim' || pimData || !id) return;
     let cancelled = false;
     setPimLoading(true);
     fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/pim`))
@@ -578,7 +584,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setPimData({ eligible_assignments: [], activations: [], overuse_metrics: { activation_frequency_30d: 0, always_active_pattern: false, total_active_hours_30d: 0 } }); })
       .finally(() => { if (!cancelled) setPimLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, pimData, pimLoading]);
+  }, [activeTab, id, pimData]);
 
   // Lazy-load Remediation data + action statuses when tab is selected
   useEffect(() => {
@@ -603,7 +609,7 @@ export default function IdentityDetail() {
       .finally(() => { if (!cancelled) setRemediationLoading(false); });
 
     return () => { cancelled = true; };
-  }, [activeTab, id, remediationData, remediationLoading]);
+  }, [activeTab, id, remediationData]); // BUGFIX (2026-05-30): remediationLoading intentionally excluded — including it causes self-cancellation race, see effective_access effect comment
 
   // Lazy-load Lifecycle data when tab is selected
   useEffect(() => {
@@ -616,7 +622,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setLifecycleData({ events: [], summary: { total_runs_observed: 0, first_seen: null, last_seen: null, risk_changes: 0, credential_events: 0, access_changes: 0, status_changes: 0 }, total_events: 0 }); })
       .finally(() => { if (!cancelled) setLifecycleLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, lifecycleData, lifecycleLoading]);
+  }, [activeTab, id, lifecycleData]); // BUGFIX (2026-05-30): lifecycleLoading intentionally excluded — self-cancellation race, see effective_access effect
 
   // Lazy-load Anomaly data when tab is selected
   useEffect(() => {
@@ -629,7 +635,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setAnomalyData({ anomalies: [], count: 0 }); })
       .finally(() => { if (!cancelled) setAnomalyLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, anomalyData, anomalyLoading]);
+  }, [activeTab, id, anomalyData]); // BUGFIX (2026-05-30): anomalyLoading intentionally excluded — self-cancellation race, see effective_access effect
 
   // Lazy-load Effective Access data when tab is selected
   useEffect(() => {

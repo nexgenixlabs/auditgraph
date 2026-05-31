@@ -20303,11 +20303,12 @@ class Database:
         return bool(result[0]) if result else False
 
     def update_role_last_used_from_arm(self, org_id: int, updates: list):
-        """Scope-aware batch-update of role_assignments.last_used_at from ARM events.
+        """Scope+role-aware batch-update of role_assignments.last_used_at from ARM events.
 
         An ARM event at resource_id proves usage of roles whose scope is an
         ancestor of that resource_id (exact, parent RG, parent subscription,
-        or tenant/root). Sibling/unrelated scopes are NOT updated.
+        or tenant/root) AND whose role definition plausibly grants the
+        operation that fired the event.
 
         Scope hierarchy (child proves parent):
             /subscriptions/X/resourceGroups/Y/providers/Z  (event)
@@ -20320,6 +20321,16 @@ class Database:
                 /subscriptions/X/resourceGroups/OTHER
                 /subscriptions/OTHER/...
 
+        AG-F (2026-05-30): Role-name aware attribution. Previously a single
+        ARM event would stamp last_used_at on every role the principal held
+        at the matching scope — so a Key Vault read would mark Storage Blob
+        Reader, Reader, Owner, Network Contributor etc. all as "used today".
+        Now an event is only attributed to roles whose names plausibly grant
+        the operation (Owner/Contributor always match; "Key Vault Reader"
+        only matches Microsoft.KeyVault/*/read operations; etc.). Unknown
+        role names fall back to the legacy scope-only semantics so we never
+        under-attribute when the heuristic doesn't know a role.
+
         Args:
             org_id: Organization ID
             updates: List of dicts with keys: principal_id, subscription_id,
@@ -20327,6 +20338,7 @@ class Database:
         """
         if not updates:
             return 0
+        from app.engines.role_permission_matcher import role_matches_operation
         cursor = self.conn.cursor()
         count = 0
         for u in updates:
@@ -20335,24 +20347,31 @@ class Database:
                 continue
 
             # Build list of ancestor scope prefixes from the event resource_id.
-            # E.g. /subscriptions/X/resourceGroups/Y/providers/Z →
-            #   ['/subscriptions/x/resourcegroups/y/providers/z',
-            #    '/subscriptions/x/resourcegroups/y',
-            #    '/subscriptions/x',
-            #    '/']
             ancestor_scopes = [event_resource]
             parts = event_resource.strip('/').split('/')
-            # Walk up: subscriptions/X/resourceGroups/Y/providers/... → sub/X/rg/Y → sub/X → root
             if len(parts) >= 4 and parts[2].lower() == 'resourcegroups':
-                # Add resource group scope
                 ancestor_scopes.append('/' + '/'.join(parts[:4]))
             if len(parts) >= 2 and parts[0].lower() == 'subscriptions':
-                # Add subscription scope
                 ancestor_scopes.append('/' + '/'.join(parts[:2]))
-            # Root scope always matches
             ancestor_scopes.append('/')
 
-            # Update only roles whose scope matches an ancestor of the event
+            # AG-F: first pull candidate roles at matching scopes, then filter
+            # by whether the role plausibly grants this operation. Two-step
+            # rather than one big UPDATE so we can apply the Python heuristic.
+            cursor.execute("""
+                SELECT id, role_name FROM role_assignments
+                WHERE organization_id = %s
+                  AND principal_id = %s
+                  AND LOWER(scope) = ANY(%s)
+            """, (org_id, u['principal_id'], ancestor_scopes))
+            candidate_rows = cursor.fetchall()
+            matching_ids = [
+                row[0] for row in candidate_rows
+                if role_matches_operation(row[1], u.get('last_used_operation'))
+            ]
+            if not matching_ids:
+                continue
+
             cursor.execute("""
                 UPDATE role_assignments SET
                     last_used_at = GREATEST(last_used_at, %s),
@@ -20365,17 +20384,13 @@ class Database:
                         WHEN %s > NOW() - INTERVAL '90 days' THEN 'dormant'
                         ELSE COALESCE(usage_status, 'stale')
                     END
-                WHERE organization_id = %s
-                  AND principal_id = %s
-                  AND LOWER(scope) = ANY(%s)
+                WHERE id = ANY(%s)
             """, (
                 u['last_used_at'],
                 u['last_used_at'], u['last_used_operation'],
                 u['last_used_at'],
                 u['last_used_at'],
-                org_id,
-                u['principal_id'],
-                ancestor_scopes,
+                matching_ids,
             ))
             count += cursor.rowcount
         self._commit()

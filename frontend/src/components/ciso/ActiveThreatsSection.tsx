@@ -87,18 +87,22 @@ export function AnomalyWidgetV31({ data }: { data: PostureV31Response }) {
     );
   }
 
+  // Prefer the server-reported true total over array length — the array is
+  // a top-N sample (default 25), but there may be thousands of unresolved
+  // anomalies in the `anomalies` table.
+  const totalUnresolved = data.anomalies_unresolved_count ?? anomalies.length;
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0"
-         title={anomalies.length > 0 ? `${anomalies.length} anomalies detected` : 'No anomalies detected'}>
+         title={totalUnresolved > 0 ? `${totalUnresolved} unresolved anomalies — showing top ${anomalies.length}` : 'No anomalies detected'}>
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">Anomalies</span>
-        {anomalies.length > 0 && (
+        {totalUnresolved > 0 && (
           <span className="text-xs font-mono font-semibold px-1.5 py-0.5 rounded bg-[rgba(232,70,90,0.15)] text-[#e8465a]">
-            {anomalies.length}
+            {totalUnresolved}
           </span>
         )}
       </div>
-      {anomalies.length === 0 ? (
+      {totalUnresolved === 0 ? (
         <div className="flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
           <span className="text-xs text-emerald-400 font-medium">No anomalies detected</span>
