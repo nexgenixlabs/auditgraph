@@ -163,18 +163,51 @@ When providing answers:
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY', '')
         self.model = DEFAULT_MODEL
         self.client = None
+        # AG-Argus-OSS (2026-05-31): provider routing — 'anthropic' (default,
+        # production) or 'ollama' (free local LLM for dev/test/demo). See
+        # [[ollama-copilot-plan]] memory for design rationale.
+        self.provider = os.getenv('COPILOT_PROVIDER', 'anthropic').lower().strip()
 
     def _get_client(self):
+        """Return an Anthropic-shaped LLM client. Provider determined by
+        COPILOT_PROVIDER env var (anthropic | ollama). Both expose the same
+        `.messages.create(model, max_tokens, system, messages)` surface so
+        all downstream call sites work unchanged."""
         if self.client is None:
-            try:
-                import anthropic
-                self.client = anthropic.Anthropic(
-                    api_key=self.api_key,
-                    timeout=30.0,
-                    max_retries=2,  # Built-in SDK retry with backoff
-                )
-            except ImportError:
-                raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
+            if self.provider == 'ollama':
+                # Local Ollama — fail fast with helpful guidance if daemon
+                # not running, instead of hanging the user's first prompt.
+                from app.services.llm_providers.ollama_adapter import OllamaAnthropicAdapter
+                if not OllamaAnthropicAdapter.is_available():
+                    raise RuntimeError(
+                        "Ollama provider selected (COPILOT_PROVIDER=ollama) but the "
+                        "Ollama daemon is not reachable at "
+                        f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}. "
+                        "Start it with `ollama serve` (or `brew services start ollama`), "
+                        "then pull a model: `ollama pull llama3.1:8b`."
+                    )
+                self.client = OllamaAnthropicAdapter()
+                # Override the Claude model name so call sites' `model=...`
+                # arg gets remapped to the configured Ollama model by the
+                # adapter's _MessagesAPI.create() — see ollama_adapter.py
+                self.model = os.getenv('OLLAMA_MODEL', 'llama3.1:8b')
+            else:
+                # Default — real Anthropic API
+                if not self.api_key:
+                    raise RuntimeError(
+                        "Anthropic API key not configured. Set ANTHROPIC_API_KEY in "
+                        "env, OR switch to local LLM with COPILOT_PROVIDER=ollama "
+                        "(see ollama_copilot_plan memory for setup)."
+                    )
+                try:
+                    import anthropic
+                    self.client = anthropic.Anthropic(
+                        api_key=self.api_key,
+                        timeout=30.0,
+                        max_retries=2,  # Built-in SDK retry with backoff
+                    )
+                except ImportError:
+                    raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
 
         # Circuit breaker check — block if LLM API is repeatedly failing
         from app.resilience import get_circuit_breaker, CircuitBreakerOpenError
