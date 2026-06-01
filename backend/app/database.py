@@ -18895,6 +18895,9 @@ class Database:
     def _ensure_copilot_tables(self):
         if Database._copilot_ensured:
             return
+        if not self._can_ddl():
+            Database._copilot_ensured = True
+            return
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS copilot_conversations (

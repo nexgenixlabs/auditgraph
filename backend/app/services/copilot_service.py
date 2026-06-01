@@ -27,21 +27,31 @@ DEFAULT_MODEL = os.getenv('LLM_MODEL', 'claude-sonnet-4-5-20250514')
 def get_platform_copilot_service():
     """Return a CopilotService using the platform-managed config, or (None, error_msg).
 
-    AG-Argus-OSS (2026-05-31): honors `COPILOT_PROVIDER=ollama` to allow
-    Argus to run on a local open-source LLM without an Anthropic API key.
-    See ollama_copilot_plan memory for setup.
+    Provider routing (COPILOT_PROVIDER env var):
+      anthropic (default) — requires ANTHROPIC_API_KEY
+      openai              — requires OPENAI_API_KEY (placeholder; add key when ready)
+      ollama              — local LLM; heavy on Mac RAM, prefer for demos only
     """
     provider = os.getenv('COPILOT_PROVIDER', 'anthropic').lower().strip()
-    api_key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     if provider == 'ollama':
-        # No API key required — CopilotService routes to OllamaAnthropicAdapter
-        # at first request, with helpful errors if the daemon isn't running.
-        return CopilotService(api_key or 'ollama-no-key-needed'), None
+        # No API key required — adapter routes to local daemon
+        return CopilotService('ollama-no-key-needed'), None
+    if provider == 'openai':
+        oa_key = os.getenv('OPENAI_API_KEY', '').strip()
+        if not oa_key:
+            return None, (
+                'AI Copilot is not configured. COPILOT_PROVIDER=openai is '
+                'set but OPENAI_API_KEY is missing. Add it to .env.local '
+                '(or switch to COPILOT_PROVIDER=anthropic).'
+            )
+        return CopilotService(oa_key), None
+    # default: anthropic
+    api_key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     if not api_key:
         return None, (
-            'AI Copilot is not configured. Set ANTHROPIC_API_KEY for '
-            'production, OR COPILOT_PROVIDER=ollama for a local open-source '
-            'LLM (see ollama_copilot_plan memory for setup).'
+            'AI Copilot is not configured. Set one of: ANTHROPIC_API_KEY '
+            '(production), OPENAI_API_KEY + COPILOT_PROVIDER=openai (fallback), '
+            'or COPILOT_PROVIDER=ollama (local; needs ~8GB RAM headroom).'
         )
     return CopilotService(api_key), None
 
@@ -184,13 +194,11 @@ When providing answers:
 
     def _get_client(self):
         """Return an Anthropic-shaped LLM client. Provider determined by
-        COPILOT_PROVIDER env var (anthropic | ollama). Both expose the same
-        `.messages.create(model, max_tokens, system, messages)` surface so
-        all downstream call sites work unchanged."""
+        COPILOT_PROVIDER env var (anthropic | openai | ollama). All three
+        expose the same `.messages.create(model, max_tokens, system, messages)`
+        surface so downstream call sites work unchanged."""
         if self.client is None:
             if self.provider == 'ollama':
-                # Local Ollama — fail fast with helpful guidance if daemon
-                # not running, instead of hanging the user's first prompt.
                 from app.services.llm_providers.ollama_adapter import OllamaAnthropicAdapter
                 if not OllamaAnthropicAdapter.is_available():
                     raise RuntimeError(
@@ -201,24 +209,31 @@ When providing answers:
                         "then pull a model: `ollama pull llama3.1:8b`."
                     )
                 self.client = OllamaAnthropicAdapter()
-                # Override the Claude model name so call sites' `model=...`
-                # arg gets remapped to the configured Ollama model by the
-                # adapter's _MessagesAPI.create() — see ollama_adapter.py
                 self.model = os.getenv('OLLAMA_MODEL', 'llama3.1:8b')
+            elif self.provider == 'openai':
+                from app.services.llm_providers.openai_adapter import OpenAIAnthropicAdapter
+                if not OpenAIAnthropicAdapter.is_available():
+                    raise RuntimeError(
+                        "OpenAI provider selected (COPILOT_PROVIDER=openai) but "
+                        "OPENAI_API_KEY is missing. Add it to .env.local, or "
+                        "switch to COPILOT_PROVIDER=anthropic."
+                    )
+                self.client = OpenAIAnthropicAdapter()
+                self.model = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
             else:
                 # Default — real Anthropic API
                 if not self.api_key:
                     raise RuntimeError(
                         "Anthropic API key not configured. Set ANTHROPIC_API_KEY in "
-                        "env, OR switch to local LLM with COPILOT_PROVIDER=ollama "
-                        "(see ollama_copilot_plan memory for setup)."
+                        "env, OR set COPILOT_PROVIDER=openai with OPENAI_API_KEY, "
+                        "OR COPILOT_PROVIDER=ollama for a local LLM."
                     )
                 try:
                     import anthropic
                     self.client = anthropic.Anthropic(
                         api_key=self.api_key,
                         timeout=30.0,
-                        max_retries=2,  # Built-in SDK retry with backoff
+                        max_retries=2,
                     )
                 except ImportError:
                     raise RuntimeError("anthropic package not installed. Run: pip install anthropic")

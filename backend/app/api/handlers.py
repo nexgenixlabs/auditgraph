@@ -462,17 +462,22 @@ def get_ai_audit_log_handler():
 
 
 def _get_org_plan(db, org_id):
-    """Fetch the billing plan tier for an organization. Returns 'free' as default."""
+    """Fetch the billing plan tier for an organization. Returns 'free' as default.
+
+    Uses db._rollback() (not bare conn.rollback) on error so the RLS
+    session context is re-applied after rollback. Otherwise downstream
+    writes lose tenant context and fail RLS.
+    """
     if not org_id or org_id == -1:
         return 'free'
     try:
         cursor = db.conn.cursor()
-        cursor.execute("SELECT plan FROM tenants WHERE id = %s", (org_id,))
+        cursor.execute("SELECT plan FROM organizations WHERE id = %s", (org_id,))
         row = cursor.fetchone()
         cursor.close()
         return (row[0] if row and row[0] else 'free')
     except Exception:
-        try: db.conn.rollback()
+        try: db._rollback()
         except Exception: pass
         return 'free'
 
@@ -24069,15 +24074,32 @@ def copilot_chat():
         try:
             response_text = service.ask(message, messages_history, db, org_id=org_id)
         except Exception as e:
-            try: db.conn.rollback()
-            except Exception: pass
             logger.error(f"AI copilot service error: {e}", exc_info=True)
-            try:
-                db._rollback()
+            try: db._rollback()
             except Exception:
                 try: db.conn.rollback()
                 except Exception: pass
-                pass
+            # Treat known "needs API credits / invalid key" failures as a
+            # configuration issue, not a runtime error. Surfaces a clean
+            # placeholder bubble in the UI instead of raw SDK error text.
+            err_text = str(e).lower()
+            cfg_markers = (
+                'credit balance', 'insufficient_quota', 'invalid_api_key',
+                'invalid api key', 'authentication', 'unauthorized',
+                'incorrect api key', 'no_api_key',
+            )
+            if any(m in err_text for m in cfg_markers):
+                return jsonify({
+                    'error': 'not_configured',
+                    'response': (
+                        'AuditGraph Argus is in placeholder mode — no AI '
+                        'credentials are wired up yet. Add ANTHROPIC_API_KEY '
+                        '(or OPENAI_API_KEY with COPILOT_PROVIDER=openai) to '
+                        '.env.local and restart the backend to activate.'
+                    ),
+                    'conversation_id': None,
+                    'suggestions': [],
+                })
             return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
 
         # Save conversation
