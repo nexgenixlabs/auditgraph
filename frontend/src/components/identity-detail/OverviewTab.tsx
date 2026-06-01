@@ -26,6 +26,22 @@ import StatusBadge from '../ui/StatusBadge';
 import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../../constants/activitySignals';
 import { COLORS } from '../../constants/ciso';
 
+// IPv6-aware IP formatting. The old "slice(0,20)+…" approach turned
+// 2603:80a0:2140:23d:5cab:eecc:7989:9aa2 into "2603:80a0:2140:23d:5…"
+// which looks like garbage data — the trailing hextets are the
+// distinguishing part. Show first 2 + last 2 hextets so each IP stays
+// uniquely recognizable at a glance.
+function formatIpDisplay(ip: string): string {
+  if (!ip) return '—';
+  if (ip.includes(':') && ip.length > 24) {
+    const parts = ip.split(':').filter(Boolean);
+    if (parts.length >= 4) {
+      return `${parts.slice(0, 2).join(':')}…${parts.slice(-2).join(':')}`;
+    }
+  }
+  return ip;
+}
+
 // Feature D (humans variant). AuditGraph's "no P2 telemetry required" angle
 // applies here: directory_audit_log already carries the initiator's IP for
 // any admin operation, so we get a real "last seen from" signal on free/P1
@@ -77,7 +93,13 @@ function SourceIpIntelBanner({
       {hasLast && (
         <div className="flex items-center gap-2 flex-wrap text-xs mb-2">
           <span style={{ color: COLORS.textSecondary }}>Last observed from</span>
-          <span className="font-mono font-medium" style={{ color: COLORS.text }}>{intel.last_observed_ip}</span>
+          <span
+            className="font-mono font-medium"
+            style={{ color: COLORS.text }}
+            title={intel.last_observed_ip || ''}
+          >
+            {formatIpDisplay(intel.last_observed_ip || '')}
+          </span>
           {srcLabel && (
             <span
               className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide"
@@ -110,7 +132,13 @@ function SourceIpIntelBanner({
               <div className="space-y-0.5">
                 {ips.slice(0, 4).map((ip, i) => (
                   <div key={i} className="flex items-center justify-between gap-2 text-xs">
-                    <span className="font-mono truncate" style={{ color: COLORS.text }}>{ip.ip}</span>
+                    <span
+                      className="font-mono"
+                      style={{ color: COLORS.text }}
+                      title={ip.ip}
+                    >
+                      {formatIpDisplay(ip.ip)}
+                    </span>
                     <span className="tabular-nums" style={{ color: COLORS.textSecondary }}>
                       {(ip.count || 0).toLocaleString()}
                     </span>
@@ -1203,12 +1231,8 @@ export default function OverviewTab({
                               </span>
                             )}
                           </td>
-                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]" title={c.caller_ip_address || ''}>
-                            {c.caller_ip_address
-                              ? c.caller_ip_address.length > 22
-                                ? c.caller_ip_address.slice(0, 20) + '\u2026'
-                                : c.caller_ip_address
-                              : '\u2014'}
+                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px] whitespace-nowrap" title={c.caller_ip_address || ''}>
+                            {formatIpDisplay(c.caller_ip_address || '')}
                           </td>
                           <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.resource_name || c.operation_short}</td>
                           <td className="py-1.5 text-gray-600 whitespace-nowrap" title={ts?.full}>{ts?.relative || '\u2014'}</td>
