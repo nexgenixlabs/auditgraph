@@ -1336,6 +1336,21 @@ class AzureDiscoveryEngine:
             except Exception:
                 pass
 
+        # Step 9.8: Entra directory audit attribution (AG-E Phase 2, no P2 required).
+        # Microsoft offers no per-Entra-role exercise log. We infer last-used by
+        # bulk-pulling auditLogs/directoryAudits and attributing each event to
+        # whichever of the principal's standing Entra roles could have authorized
+        # it (category → roles map). Wiz-grade least-privilege evidence on the
+        # Entra side without depending on P2 telemetry.
+        try:
+            self._collect_entra_audit_activity(run_id)
+        except Exception as e:
+            logger.warning("Entra audit activity collection error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
         # MUST run before exposure scoring so fresh sign-in data is available
         p2_enabled = False
@@ -9724,6 +9739,147 @@ class AzureDiscoveryEngine:
         elapsed = _time.monotonic() - phase_start
         logger.info("[arm_activity] COMPLETE: %d events, %d role updates, %.1fs",
                     len(all_events), len(role_updates), elapsed)
+
+    def _collect_entra_audit_activity(self, run_id: int) -> None:
+        """AG-E Phase 2: per-Entra-role last-used inference from
+        /auditLogs/directoryAudits.
+
+        Microsoft provides no per-Entra-role exercise log. We bulk-pull
+        directory audit events for the last 90 days, group by initiator,
+        and attribute each event's category to whichever of the principal's
+        Entra roles could have authorized it (see entra_role_matches_audit_category).
+
+        Time-bounded: 90s soft budget — directoryAudits supports $top=999
+        which is usually enough for tenants <10k events/day; large tenants
+        will see partial coverage which still beats today's 0%.
+
+        Tenant requirements: AuditLog.Read.All Graph permission (already
+        granted for IP enrichment). 403 → graceful skip with a log line.
+        """
+        import os
+        import time as _time
+        from urllib.parse import quote
+        import requests
+
+        if os.environ.get('DISABLE_ENTRA_AUDIT_ACTIVITY', 'false').lower() == 'true':
+            logger.info("[entra_activity] SKIPPED via env flag")
+            return
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('ENTRA_ACTIVITY_MAX_SECONDS', '90'))
+        lookback_days = int(os.environ.get('ENTRA_AUDIT_LOOKBACK_DAYS', '90'))
+        cutoff_iso = (datetime.utcnow() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # Get Graph token
+        try:
+            graph_token = self.credential.get_token("https://graph.microsoft.com/.default")
+        except Exception as e:
+            logger.warning("[entra_activity] Graph token acquisition failed: %s", e)
+            return
+        headers = {"Authorization": f"Bearer {graph_token.token}"}
+
+        # Bulk-fetch with $top=999 + nextLink pagination
+        filter_str = f"activityDateTime ge {cutoff_iso}"
+        url = (
+            f"https://graph.microsoft.com/v1.0/auditLogs/directoryAudits"
+            f"?$filter={quote(filter_str)}"
+            f"&$top=999"
+            f"&$select=activityDateTime,category,activityDisplayName,initiatedBy,result"
+        )
+
+        events_seen = 0
+        updates: list[dict] = []
+        # De-duplicate per (user_id, category) — keep only the most recent.
+        # We have N×M attributions to do (events × candidate roles); shrinking
+        # at this stage keeps the DB update loop tractable.
+        per_user_category: dict[tuple[str, str], dict] = {}
+
+        page = 0
+        try:
+            while url:
+                page += 1
+                if _time.monotonic() - phase_start > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[entra_activity] TIME BUDGET %ds exceeded at page=%d events=%d — stopping",
+                        MAX_PHASE_SECONDS, page, events_seen,
+                    )
+                    break
+                try:
+                    resp = requests.get(url, headers=headers, timeout=20)
+                except requests.RequestException as e:
+                    logger.warning("[entra_activity] page=%d request error: %s", page, e)
+                    break
+                if resp.status_code == 403:
+                    logger.warning("[entra_activity] PERMISSION DENIED — AuditLog.Read.All required, skipping")
+                    return
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get('Retry-After', '5'))
+                    logger.info("[entra_activity] 429 throttled, sleeping %ds", min(retry_after, 30))
+                    _time.sleep(min(retry_after, 30))
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("[entra_activity] page=%d HTTP %s — %s",
+                                   page, resp.status_code, resp.text[:200])
+                    break
+
+                data = resp.json()
+                for evt in data.get('value', []):
+                    events_seen += 1
+                    initiated_by = evt.get('initiatedBy') or {}
+                    user_block = initiated_by.get('user') or {}
+                    user_id = (user_block.get('id') or '').strip()
+                    if not user_id:
+                        # initiatedBy.app — not a user; skip for Entra role attribution.
+                        # App-attributed events are SPN actions which are tracked via
+                        # ARM Activity Log + sign-in events, not directory roles.
+                        continue
+                    activity_at_str = evt.get('activityDateTime')
+                    if not activity_at_str:
+                        continue
+                    try:
+                        activity_at = datetime.fromisoformat(
+                            activity_at_str.replace('Z', '+00:00')
+                        )
+                    except Exception:
+                        continue
+                    category = evt.get('category') or ''
+                    op_name = evt.get('activityDisplayName') or ''
+                    key = (user_id.lower(), category)
+                    prior = per_user_category.get(key)
+                    if prior is None or activity_at > prior['activity_at']:
+                        per_user_category[key] = {
+                            'principal_user_id': user_id,
+                            'activity_at': activity_at,
+                            'category': category,
+                            'activity_display_name': op_name,
+                        }
+
+                url = data.get('@odata.nextLink')
+        except Exception as e:
+            logger.warning("[entra_activity] Bulk fetch error after %d events: %s",
+                           events_seen, e)
+
+        updates = list(per_user_category.values())
+        if not updates:
+            elapsed = _time.monotonic() - phase_start
+            logger.info("[entra_activity] No events (or 0 user-initiated) after %.1fs", elapsed)
+            return
+
+        try:
+            updated = self.db.update_role_last_used_from_entra_audits(
+                self.db_org_id, updates,
+            )
+            elapsed = _time.monotonic() - phase_start
+            logger.info(
+                "[entra_activity] COMPLETE: %d events, %d (user,category) keys, %d entra roles updated, %.1fs",
+                events_seen, len(updates), updated, elapsed,
+            )
+        except Exception as e:
+            logger.warning("[entra_activity] DB update failed: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
 
     async def _fetch_last_observed_ips(self, identities: List[Dict]) -> None:
         """Fetch last observed IP from ARM Activity Log for all identities.

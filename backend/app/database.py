@@ -20509,6 +20509,80 @@ class Database:
             _db_logger.info("AG-E propagated last_activity to %d identity_subscription_access rows for org=%s", propagated, org_id)
         return count
 
+    def update_role_last_used_from_entra_audits(self, org_id: int, updates: list) -> int:
+        """AG-E Phase 2: attribute /auditLogs/directoryAudits events to the
+        Entra directory roles that could have authorized them. The Wiz-grade
+        moat — Microsoft has no per-role exercise log, so we infer from
+        category attribution.
+
+        Args:
+            org_id: Organization ID
+            updates: List of dicts with keys:
+                principal_user_id  — initiatedBy.user.id from the audit event
+                activity_at        — activityDateTime (datetime)
+                category           — audit category (UserManagement, RoleManagement, ...)
+                activity_display_name — specific operation (for last_used_operation)
+
+        Returns: number of entra_role_assignments rows updated.
+        """
+        if not updates:
+            return 0
+        from app.engines.role_permission_matcher import entra_role_matches_audit_category
+        cursor = self.conn.cursor()
+        updated = 0
+        for u in updates:
+            principal_id = (u.get('principal_user_id') or '').strip()
+            activity_at = u.get('activity_at')
+            category = u.get('category') or ''
+            op_name = u.get('activity_display_name') or ''
+            if not principal_id or not activity_at:
+                continue
+
+            # Candidate roles: every Entra role this principal currently holds.
+            # Entra roles are tenant-scoped — no scope hierarchy to walk.
+            cursor.execute("""
+                SELECT era.id, era.role_name
+                  FROM entra_role_assignments era
+                  JOIN identities i ON i.id = era.identity_db_id
+                 WHERE i.organization_id = %s
+                   AND LOWER(i.object_id) = LOWER(%s)
+            """, (org_id, principal_id))
+            candidates = cursor.fetchall() or []
+            matching_ids = [
+                rid for rid, role_name in candidates
+                if entra_role_matches_audit_category(role_name, category)
+            ]
+            if not matching_ids:
+                continue
+            cursor.execute("""
+                UPDATE entra_role_assignments SET
+                    last_used_at = GREATEST(last_used_at, %s),
+                    last_used_operation = CASE
+                        WHEN last_used_at IS NULL OR %s > last_used_at THEN %s
+                        ELSE last_used_operation
+                    END,
+                    usage_status = CASE
+                        WHEN %s > NOW() - INTERVAL '30 days' THEN 'active'
+                        WHEN %s > NOW() - INTERVAL '90 days' THEN 'dormant'
+                        ELSE COALESCE(usage_status, 'stale')
+                    END
+                 WHERE id = ANY(%s)
+            """, (
+                activity_at,
+                activity_at, op_name,
+                activity_at, activity_at,
+                matching_ids,
+            ))
+            updated += cursor.rowcount
+        self._commit()
+        cursor.close()
+        if updated:
+            _db_logger.info(
+                "AG-E Phase 2: attributed %d entra_role_assignments rows from %d directoryAudits events for org=%s",
+                updated, len(updates), org_id,
+            )
+        return updated
+
     # ── Connector Permission Tracking ─────────────────────────────────────
 
     def _ensure_connector_permissions_table(self):
