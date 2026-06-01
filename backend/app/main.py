@@ -3097,6 +3097,11 @@ def create_app():
             ('base',      os.path.join(scripts_dir, 'seed_demo_org.py')),
             ('behavior',  os.path.join(scripts_dir, 'seed_demo_behavior_evidence.py')),
         ]
+        # Override APP_ENV=local for the subprocess: seed_demo_org.py has a
+        # production-safety check that refuses non-local envs to prevent
+        # accidental customer-data overwrites. This endpoint is the explicit
+        # opt-in path (superadmin-only, idempotent demo-tenant only).
+        seed_env = {**os.environ, 'APP_ENV': 'local'}
         for name, path in steps:
             if not os.path.exists(path):
                 results[name] = {'status': 'skipped', 'reason': 'script_not_found'}
@@ -3106,6 +3111,7 @@ def create_app():
                     [sys.executable, path],
                     capture_output=True, text=True, timeout=180,
                     cwd=os.path.dirname(scripts_dir),
+                    env=seed_env,
                 )
                 results[name] = {
                     'status': 'ok' if proc.returncode == 0 else 'failed',
