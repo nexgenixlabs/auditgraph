@@ -86,6 +86,19 @@ RISK_FACTOR_CATALOG: Dict[str, Dict] = {
         "cis": ["CIS Azure 1.23"],
         "mitre": ["T1213.002"],      # Data from Information Repositories: SharePoint
     },
+    # AG-E Phase 2 (2026-06-01): Entra privileged role held as a standing
+    # assignment with no observed usage in 90 days. Combines with
+    # STANDING_PRIVILEGED_NO_PIM (UI panel) to give the full Wiz-grade
+    # "remove this role" story: not only is it standing (best-practice
+    # violation), the data also shows the user isn't actually using it.
+    "STANDING_ENTRA_ROLE_UNUSED_90D": {
+        "description": "Privileged Entra role with no observed usage in 90 days — remove or convert to PIM-eligible",
+        "severity": "high",
+        "points": 220,
+        "category": "pim_hygiene",
+        "cis": ["CIS Azure 1.22", "CIS Azure 1.23"],
+        "mitre": ["T1078.004"],      # Valid Accounts: Cloud Accounts
+    },
 
     # ── Azure RBAC roles ───────────────────────────────────────────
     "SUBSCRIPTION_OWNER": {

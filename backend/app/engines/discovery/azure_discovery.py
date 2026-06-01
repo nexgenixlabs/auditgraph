@@ -8544,6 +8544,22 @@ class AzureDiscoveryEngine:
             # Initialize V2 scoring
             risk_factors = []
 
+            # AG-E Phase 2 (2026-06-01): track which Entra roles have observed
+            # usage in the last 90 days so we can emit the "unused" finding.
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            _PRIVILEGED_ENTRA_NAMES = {
+                'global administrator', 'privileged role administrator',
+                'application administrator', 'cloud application administrator',
+                'user administrator', 'security administrator',
+                'authentication administrator', 'privileged authentication administrator',
+                'conditional access administrator', 'hybrid identity administrator',
+                'helpdesk administrator', 'exchange administrator',
+                'sharepoint administrator', 'teams administrator',
+                'intune administrator', 'compliance administrator',
+            }
+            _ninety_days_ago = _dt.now(_tz.utc) - _td(days=90)
+            _unused_priv_entra = []  # collected for the post-loop finding emit
+
             # ============================================================
             # 1. Entra ID Directory Roles (highest privilege)
             # ============================================================
@@ -8563,6 +8579,25 @@ class AzureDiscoveryEngine:
                     risk_factors.append(make_factor("EXCHANGE_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'sharepoint administrator' in role_name_lower:
                     risk_factors.append(make_factor("SHAREPOINT_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
+
+                # AG-E Phase 2: collect privileged-but-unused candidates for
+                # the post-loop STANDING_ENTRA_ROLE_UNUSED_90D emit. We check
+                # against last_used_at populated by _collect_entra_audit_activity
+                # (or NULL if directoryAudits never observed the role being used).
+                if role_name_lower in _PRIVILEGED_ENTRA_NAMES:
+                    _lu = entra_role.get('last_used_at')
+                    if _lu is None or (
+                        hasattr(_lu, 'tzinfo') and _lu < _ninety_days_ago
+                    ):
+                        _unused_priv_entra.append(entra_role['role_name'])
+
+            # Emit a single STANDING_ENTRA_ROLE_UNUSED_90D finding per identity
+            # with the list of unused privileged Entra roles as evidence.
+            if _unused_priv_entra:
+                evidence = "unused 90d: " + ", ".join(_unused_priv_entra[:5])
+                if len(_unused_priv_entra) > 5:
+                    evidence += f" (+{len(_unused_priv_entra) - 5} more)"
+                risk_factors.append(make_factor("STANDING_ENTRA_ROLE_UNUSED_90D", evidence))
 
             # ============================================================
             # 2. Azure RBAC Roles
