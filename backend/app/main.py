@@ -3076,6 +3076,126 @@ def create_app():
     def admin_cleanup_inactive():
         return cleanup_inactive_connections_handler()
 
+    @app.post("/api/admin/seed-demo-org")
+    @require_superadmin()
+    def admin_seed_demo_org():
+        """Re-seed the AuditGraph Demo organization (org_id=9) with full
+        feature-coverage data: identities, classifications, AI agents,
+        behavior-evidence (Feature D + E), PIM hygiene, anomalies, and
+        a backfilled snapshot_job that drives the Progressive Scan modal.
+
+        Idempotent — each seeder clears its own rows before re-writing.
+        Superadmin-only because it touches another tenant's data by design.
+        Designed to run in-cluster (VNet → cloud DB) where direct
+        psycopg2 from a laptop can't reach. Roughly 60s to complete.
+        """
+        from flask import jsonify
+        import subprocess, sys, os, traceback, json
+        results = {}
+        scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts')
+        steps = [
+            ('base',      os.path.join(scripts_dir, 'seed_demo_org.py')),
+            ('behavior',  os.path.join(scripts_dir, 'seed_demo_behavior_evidence.py')),
+        ]
+        for name, path in steps:
+            if not os.path.exists(path):
+                results[name] = {'status': 'skipped', 'reason': 'script_not_found'}
+                continue
+            try:
+                proc = subprocess.run(
+                    [sys.executable, path],
+                    capture_output=True, text=True, timeout=180,
+                    cwd=os.path.dirname(scripts_dir),
+                )
+                results[name] = {
+                    'status': 'ok' if proc.returncode == 0 else 'failed',
+                    'returncode': proc.returncode,
+                    'stdout_tail': (proc.stdout or '')[-2000:],
+                    'stderr_tail': (proc.stderr or '')[-2000:],
+                }
+            except subprocess.TimeoutExpired:
+                results[name] = {'status': 'timeout'}
+            except Exception as e:
+                results[name] = {'status': 'error', 'error': f'{type(e).__name__}: {e}'}
+
+        # Step 3 — backfill snapshot_job row with real risk counts + top
+        # findings so the Progressive Scan modal renders even when the demo
+        # has no live scan in flight. Inline (no subprocess) so we can use
+        # the existing DB connection pool.
+        try:
+            from app.database import Database
+            from datetime import datetime, timezone
+            db = Database(_admin_reason='seed-demo-org snapshot_job backfill')
+            cur = db.conn.cursor()
+            cur.execute("""SELECT id, cloud_connection_id, started_at, completed_at
+                             FROM discovery_runs WHERE organization_id=9 AND status='completed'
+                             ORDER BY id DESC LIMIT 1""")
+            row = cur.fetchone()
+            if row:
+                run_id, conn_id, started, completed = row
+                cur.execute("""SELECT risk_level, count(*) FROM identities
+                                WHERE organization_id=9 AND discovery_run_id=%s
+                                GROUP BY risk_level""", (run_id,))
+                counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+                for rl, c in cur.fetchall():
+                    if rl in counts:
+                        counts[rl] = c
+                cur.execute("SELECT count(*) FROM identities WHERE discovery_run_id=%s", (run_id,))
+                total_ids = cur.fetchone()[0]
+                cur.execute("""SELECT identity_id, display_name, identity_type, risk_level, risk_factors
+                                 FROM identities
+                                WHERE organization_id=9 AND discovery_run_id=%s
+                                  AND risk_level IN ('critical','high')
+                                ORDER BY CASE risk_level WHEN 'critical' THEN 4 ELSE 3 END DESC,
+                                         risk_score DESC NULLS LAST
+                                LIMIT 8""", (run_id,))
+                findings = []
+                for i, (iid, name, itype, rl, rf) in enumerate(cur.fetchall()):
+                    headline = None
+                    if rf and isinstance(rf, list) and rf:
+                        f0 = rf[0]
+                        if isinstance(f0, dict):
+                            headline = f0.get('description') or f0.get('code')
+                    findings.append({
+                        'identity_id': iid, 'display_name': name,
+                        'identity_type': itype, 'risk_level': rl,
+                        'headline': headline or 'High-risk identity detected',
+                        'discovered_at_offset_s': 15 + i * 4,
+                    })
+                # Clear existing demo snapshot_jobs (idempotent)
+                cur.execute("DELETE FROM snapshot_jobs WHERE organization_id=9 AND started_by='demoadmin'")
+                cur.execute("""
+                    INSERT INTO snapshot_jobs
+                      (organization_id, cloud_connection_id, discovery_run_id, scan_mode,
+                       status, stage, progress,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       started_at, completed_at, duration_seconds,
+                       critical_count, high_count, medium_count, low_count, live_findings,
+                       created_at, started_by)
+                    VALUES (9, %s, %s, 'manual', 'completed', 'finalizing', 100,
+                            %s, 0, 3, %s, %s, %s,
+                            %s, %s, %s, %s, %s::jsonb, NOW(), 'demoadmin')
+                """, (conn_id, run_id, total_ids,
+                      started or datetime.now(timezone.utc),
+                      completed or datetime.now(timezone.utc),
+                      int((completed - started).total_seconds()) if (completed and started) else 90,
+                      counts['critical'], counts['high'], counts['medium'], counts['low'],
+                      json.dumps(findings)))
+                db._commit()
+                results['snapshot_job_backfill'] = {
+                    'status': 'ok', 'counts': counts, 'findings': len(findings),
+                }
+            else:
+                results['snapshot_job_backfill'] = {'status': 'skipped',
+                                                    'reason': 'no_completed_run'}
+            cur.close()
+        except Exception as e:
+            results['snapshot_job_backfill'] = {'status': 'error',
+                                                'error': f'{type(e).__name__}: {e}',
+                                                'traceback': traceback.format_exc()[-1500:]}
+
+        return jsonify({'results': results}), 200
+
     @app.post("/api/client/connections/test")
     @require_role('admin', 'security_admin')
     def client_connections_test():
