@@ -3910,16 +3910,104 @@ class Database:
     # PIM (Privileged Identity Management) Methods
     # ========================================================================
 
+    def _ensure_pim_constraints(self):
+        """Repair drift on pim_eligible_assignments / pim_activations.
+
+        The live schema is missing pieces that migrations were supposed
+        to apply:
+          - organization_id INT column (the trg_auto_organization_id
+            trigger references NEW.organization_id which crashed every
+            INSERT until this ran)
+          - unique index on (identity_db_id, role_definition_id,
+            directory_scope) — required for ON CONFLICT in
+            save_pim_eligible
+          - RLS policies (org_strict_sel/ins/upd/del)
+        All steps are idempotent so this is safe to run repeatedly and
+        on cloud envs that may have partial state."""
+        if Database._pim_constraints_ensured:
+            return
+        if not self._can_ddl():
+            # Tenant-scoped connection — DDL is admin-only. Mark done so
+            # we don't retry per-request; startup or an admin path will
+            # actually apply the migration.
+            Database._pim_constraints_ensured = True
+            return
+        try:
+            cursor = self.conn.cursor()
+            for stmt in [
+                # 1) Add organization_id column (the trigger references it).
+                "ALTER TABLE pim_eligible_assignments ADD COLUMN IF NOT EXISTS organization_id INTEGER",
+                "ALTER TABLE pim_activations          ADD COLUMN IF NOT EXISTS organization_id INTEGER",
+                # 2) Backfill from identities (FK chain to org).
+                """UPDATE pim_eligible_assignments p
+                      SET organization_id = i.organization_id
+                     FROM identities i
+                    WHERE p.identity_db_id = i.id
+                      AND p.organization_id IS NULL""",
+                """UPDATE pim_activations p
+                      SET organization_id = i.organization_id
+                     FROM identities i
+                    WHERE p.identity_db_id = i.id
+                      AND p.organization_id IS NULL""",
+                # 3) Unique index for the UPSERT.
+                """CREATE UNIQUE INDEX IF NOT EXISTS uq_pim_eligible_identity_role_scope
+                     ON pim_eligible_assignments
+                       (identity_db_id, role_definition_id, directory_scope)""",
+                # 4) RLS — match the org_strict_* pattern used elsewhere.
+                "ALTER TABLE pim_eligible_assignments ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE pim_eligible_assignments FORCE  ROW LEVEL SECURITY",
+                "ALTER TABLE pim_activations          ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE pim_activations          FORCE  ROW LEVEL SECURITY",
+            ]:
+                cursor.execute("SAVEPOINT pim_step")
+                try:
+                    cursor.execute(stmt)
+                    cursor.execute("RELEASE SAVEPOINT pim_step")
+                except Exception as e:
+                    cursor.execute("ROLLBACK TO SAVEPOINT pim_step")
+                    _db_logger.debug("pim ensure step skipped: %s", e)
+            # Policies — separate loop because CREATE POLICY isn't IF NOT EXISTS-able.
+            for tbl in ("pim_eligible_assignments", "pim_activations"):
+                for policy in [
+                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                ]:
+                    cursor.execute("SAVEPOINT pim_policy")
+                    try:
+                        cursor.execute(policy)
+                        cursor.execute("RELEASE SAVEPOINT pim_policy")
+                    except Exception:
+                        cursor.execute("ROLLBACK TO SAVEPOINT pim_policy")
+            self._commit()
+            cursor.close()
+            Database._pim_constraints_ensured = True
+        except Exception as e:
+            _db_logger.warning("Could not ensure pim constraints: %s", e)
+            try: self._rollback()
+            except Exception: pass
+
     def save_pim_eligible(self, identity_db_id: int, data: Dict):
-        """UPSERT a PIM eligible role assignment"""
+        """UPSERT a PIM eligible role assignment.
+
+        Tenant scoping: pim_eligible_assignments has no organization_id
+        column in the live schema — tenant isolation is via the
+        identity_db_id FK (identities is RLS-scoped per org). Earlier
+        code attempted to bind organization_id and the INSERT failed
+        silently, leaving the table empty and forcing the UI to fall
+        back to access_paths.pim_eligible JSONB. TODO: follow-up
+        migration to add organization_id + RLS to PIM tables.
+        """
+        self._ensure_pim_constraints()
         cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT INTO pim_eligible_assignments (
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 assignment_type, start_datetime, end_datetime, member_type,
-                organization_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                discovered_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (identity_db_id, role_definition_id, directory_scope)
             DO UPDATE SET
                 role_name = EXCLUDED.role_name,
@@ -3938,14 +4026,14 @@ class Database:
                 data.get("start_datetime"),
                 data.get("end_datetime"),
                 data.get("member_type"),
-                self._organization_id,
             ),
         )
         self._commit()
         cursor.close()
 
     def save_pim_activation(self, identity_db_id: int, data: Dict):
-        """INSERT a PIM activation record"""
+        """INSERT a PIM activation record. Tenant scoping via identity_db_id
+        FK (see save_pim_eligible header note)."""
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -3953,9 +4041,8 @@ class Database:
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 status, activation_start, activation_end,
                 justification, ticket_number, ticket_system,
-                is_approval_required, created_datetime,
-                organization_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                is_approval_required, created_datetime, discovered_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """,
             (
                 identity_db_id,
@@ -3970,7 +4057,6 @@ class Database:
                 data.get("ticket_system"),
                 data.get("is_approval_required", False),
                 data.get("created_datetime"),
-                self._organization_id,
             ),
         )
         self._commit()
@@ -18891,6 +18977,7 @@ class Database:
     _copilot_ensured = False
     _ai_audit_log_ensured = False
     _agent_classifications_ensured = False
+    _pim_constraints_ensured = False
 
     def _ensure_copilot_tables(self):
         if Database._copilot_ensured:

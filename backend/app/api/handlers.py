@@ -28427,6 +28427,20 @@ def get_workload_detail(workload_id):
                 result['anomalies'] = anomalies_list
             if p2_enabled and recent_signins:
                 result['recent_signins'] = recent_signins
+            # Feature D — aggregated sign-in source-IP intelligence.
+            # Surface the already-collected signin_ips / signin_locations /
+            # signin_resources_accessed / signin_client_apps JSONB columns
+            # as a structured object the UI can render. Each list entry is
+            # {ip|city|country|name, classification?, count}.
+            result['signin_intelligence'] = {
+                'ips': _parse_jsonb(identity.get('signin_ips')),
+                'locations': _parse_jsonb(identity.get('signin_locations')),
+                'resources_accessed': _parse_jsonb(identity.get('signin_resources_accessed')),
+                'client_apps': _parse_jsonb(identity.get('signin_client_apps')),
+                'failure_count_30d': identity.get('signin_failure_count_30d'),
+                'success_count_30d': identity.get('signin_success_count_30d'),
+                'total_events_30d': identity.get('signin_total_events_30d'),
+            }
             return jsonify(result)
     finally:
         db.close()
