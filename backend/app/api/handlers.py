@@ -17564,6 +17564,66 @@ def get_onboarding_status():
         db.close()
 
 
+def get_onboarding_first_finding():
+    """GET /api/onboarding/first-finding — the "magical moment" deep-link.
+
+    After the wizard kicks off the first scan + the live-finding modal
+    completes, the frontend calls this to find the single highest-risk
+    identity from that run and deep-links to /identities/<id>. Turns
+    "your scan completed" into "your first critical finding is HERE".
+
+    Returns:
+      200 {identity_id, display_name, risk_level, risk_score_cvss}
+      200 {identity_id: null}  — when no critical/high identity exists
+                                (caller falls through to /dashboard)
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'identity_id': None, 'reason': 'no_completed_run'})
+        # Pick the single most-critical identity from the latest run.
+        # Prefer risk_score_cvss (when populated) for the rank within
+        # severity, fall back to legacy risk_score. Skip Microsoft-
+        # managed identities — they aren't actionable findings for a
+        # CISO and surfacing one as the "first finding" would be a
+        # demo own-goal.
+        cursor.execute("""
+            SELECT identity_id, display_name, risk_level, risk_score
+              FROM identities
+             WHERE discovery_run_id = ANY(%s)
+               AND organization_id = %s
+               AND risk_level IN ('critical', 'high')
+               AND COALESCE(is_microsoft_system, false) = false
+             ORDER BY CASE risk_level
+                        WHEN 'critical' THEN 4
+                        WHEN 'high' THEN 3
+                        ELSE 0 END DESC,
+                      COALESCE(risk_score, 0) DESC NULLS LAST
+             LIMIT 1
+        """, (run_ids, org_id))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'identity_id': None, 'reason': 'no_critical_or_high'})
+        return jsonify({
+            'identity_id': row[0],
+            'display_name': row[1],
+            'risk_level': row[2],
+            'risk_score': int(row[3] or 0),
+        })
+    except Exception as e:
+        logger.warning("get_onboarding_first_finding error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'identity_id': None, 'reason': 'error'})
+    finally:
+        db.close()
+
+
 def test_azure_connection():
     """Test Azure credentials without saving. Returns subscription list on success."""
     data = request.get_json()

@@ -159,6 +159,7 @@ from app.api.handlers import (
     get_cross_org_trends,
     get_login_sessions,
     get_onboarding_status,
+    get_onboarding_first_finding,
     test_azure_connection,
     simulate_risk,
     get_organization_by_slug_public,
@@ -2610,6 +2611,10 @@ def create_app():
     @app.get("/api/onboarding/status")
     def onboarding_status():
         return get_onboarding_status()
+
+    @app.get("/api/onboarding/first-finding")
+    def onboarding_first_finding():
+        return get_onboarding_first_finding()
 
     @app.post("/api/onboarding/test-connection")
     @require_role('admin', 'security_admin')
