@@ -25,10 +25,24 @@ DEFAULT_MODEL = os.getenv('LLM_MODEL', 'claude-sonnet-4-5-20250514')
 
 
 def get_platform_copilot_service():
-    """Return a CopilotService using the platform-managed API key, or (None, error_msg)."""
+    """Return a CopilotService using the platform-managed config, or (None, error_msg).
+
+    AG-Argus-OSS (2026-05-31): honors `COPILOT_PROVIDER=ollama` to allow
+    Argus to run on a local open-source LLM without an Anthropic API key.
+    See ollama_copilot_plan memory for setup.
+    """
+    provider = os.getenv('COPILOT_PROVIDER', 'anthropic').lower().strip()
     api_key = os.getenv('ANTHROPIC_API_KEY', '').strip()
+    if provider == 'ollama':
+        # No API key required — CopilotService routes to OllamaAnthropicAdapter
+        # at first request, with helpful errors if the daemon isn't running.
+        return CopilotService(api_key or 'ollama-no-key-needed'), None
     if not api_key:
-        return None, 'AI Copilot is not configured by the platform administrator.'
+        return None, (
+            'AI Copilot is not configured. Set ANTHROPIC_API_KEY for '
+            'production, OR COPILOT_PROVIDER=ollama for a local open-source '
+            'LLM (see ollama_copilot_plan memory for setup).'
+        )
     return CopilotService(api_key), None
 
 # Finding-type specific remediation knowledge
