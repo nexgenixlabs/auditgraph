@@ -281,6 +281,21 @@ export interface PimActivation {
   created_datetime?: string | null;
 }
 
+export interface PimShouldBePimFinding {
+  role_name: string;
+  scope: string;
+  scope_type: string;
+  kind: 'entra' | 'azure';
+  has_pim_alt: boolean;
+  severity: string;
+  recommendation: string;
+  frameworks?: {
+    cis?: string[];
+    nist?: string[];
+    mitre?: string[];
+  };
+}
+
 export interface PimData {
   eligible_assignments: PimEligible[];
   activations: PimActivation[];
@@ -289,6 +304,11 @@ export interface PimData {
     always_active_pattern: boolean;
     total_active_hours_30d: number;
   };
+  // Standing privileged assignments that Microsoft best practice says
+  // should be PIM-eligible (just-in-time, time-bound). Computed at
+  // API time from identity_subscription_access + entra_role_assignments
+  // joined against access_paths.pim_eligible.
+  should_be_pim?: PimShouldBePimFinding[];
 }
 
 // ─── Utility Functions ──────────────────────────────────────────────

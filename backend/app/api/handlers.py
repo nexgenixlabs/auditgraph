@@ -10450,10 +10450,154 @@ def get_identity_keyvault_access(identity_id):
         db.close()
 
 
+# ── PIM hygiene: standing-privileged-without-PIM detector ─────────────────
+#
+# Microsoft Zero Trust + NIST AC-6 + CIS Azure 1.22/1.23 all say privileged
+# roles should be PIM-eligible (just-in-time, time-bound, approval-gated)
+# rather than standing/permanent assignments. This list defines the roles
+# we flag when held as standing — sourced from Microsoft's privileged-roles
+# documentation + the existing T0/T1 classification in azure_discovery.py.
+
+_PRIV_ENTRA_ROLES_FOR_PIM = {
+    'global administrator', 'privileged role administrator',
+    'privileged authentication administrator', 'security administrator',
+    'user administrator', 'application administrator',
+    'cloud application administrator', 'hybrid identity administrator',
+    'authentication administrator', 'conditional access administrator',
+    'exchange administrator', 'sharepoint administrator',
+    'teams administrator', 'intune administrator',
+    'helpdesk administrator', 'domain name administrator',
+    'external identity provider administrator', 'compliance administrator',
+    'security operator', 'global reader',
+}
+_PRIV_ARM_ROLES_FOR_PIM = {
+    'owner', 'user access administrator', 'contributor',
+    'role based access control administrator',
+    'key vault administrator', 'key vault secrets officer',
+    'key vault crypto officer', 'storage blob data owner',
+    'storage account contributor', 'network contributor',
+    'security admin',
+}
+
+
+def _scope_type_from_path(scope: str) -> str:
+    """Derive scope_type from an Azure RBAC scope path."""
+    if not scope or scope == '/':
+        return 'directory'
+    parts = [p for p in scope.split('/') if p]
+    lower = [p.lower() for p in parts]
+    if 'resourcegroups' in lower:
+        i = lower.index('resourcegroups')
+        return 'resource_group' if len(parts) == i + 2 else 'resource'
+    if lower and lower[0] == 'subscriptions' and len(parts) == 2:
+        return 'subscription'
+    return 'other'
+
+
+def _compute_should_be_pim(cursor, identity_db_id, pim_eligible_list):
+    """Identify standing privileged role assignments that Microsoft best
+    practice recommends be PIM-eligible (just-in-time, time-bound).
+
+    Standing roles come from two tables:
+      - entra_role_assignments        (directory roles, e.g. Global Admin)
+      - identity_subscription_access  (ARM RBAC at sub/RG/resource scope)
+    PIM-eligible alt comes from identities.access_paths.pim_eligible JSONB
+    (the SSOT until pim_eligible_assignments backfill ships).
+
+    Returns list of findings; each is a dict with role, scope, kind,
+    has_pim_alt, severity, recommendation, frameworks. Empty if none —
+    caller renders nothing.
+    """
+    standing = []  # rows of (role_name, scope, role_type_label)
+
+    # Entra directory standing assignments
+    try:
+        cursor.execute("""
+            SELECT role_name, COALESCE(directory_scope, '/'), 'entra'
+              FROM entra_role_assignments
+             WHERE identity_db_id = %s
+        """, (identity_db_id,))
+        standing.extend(cursor.fetchall() or [])
+    except Exception:
+        pass
+
+    # ARM RBAC standing assignments
+    try:
+        cursor.execute("""
+            SELECT rbac_role, COALESCE(scope, '/'), 'azure'
+              FROM identity_subscription_access
+             WHERE identity_db_id = %s
+        """, (identity_db_id,))
+        standing.extend(cursor.fetchall() or [])
+    except Exception:
+        pass
+
+    pim_alt_roles = {
+        ((e.get('role') or '').lower().strip())
+        for e in (pim_eligible_list or [])
+    }
+
+    findings = []
+    seen = set()  # dedupe (role, scope) so inherited+direct don't double-list
+    for role_name, scope, role_type in standing:
+        rn = (role_name or '').lower().strip()
+        rt = (role_type or '').lower()
+        scope_type = _scope_type_from_path(scope)
+        is_priv = False
+        if rt == 'entra' and rn in _PRIV_ENTRA_ROLES_FOR_PIM:
+            is_priv = True
+        elif rt == 'azure' and rn in _PRIV_ARM_ROLES_FOR_PIM:
+            # Contributor is huge at sub/RG, modest at resource scope —
+            # only flag at sub/RG (resource-scoped contributor is common
+            # and PIM doesn't always make sense there).
+            if rn == 'contributor' and scope_type not in ('subscription', 'resource_group'):
+                continue
+            is_priv = True
+        if not is_priv:
+            continue
+        key = (rn, scope)
+        if key in seen:
+            continue
+        seen.add(key)
+        has_pim_alt = rn in pim_alt_roles
+        findings.append({
+            'role_name': role_name,
+            'scope': scope,
+            'scope_type': scope_type,
+            'kind': 'entra' if rt == 'entra' else 'azure',
+            'has_pim_alt': has_pim_alt,
+            'severity': 'high',
+            'recommendation': (
+                'Remove this redundant standing assignment — a PIM-eligible '
+                'equivalent already exists for the same role. Standing access '
+                'bypasses the PIM activation/approval workflow and defeats '
+                'the purpose of having PIM configured.'
+            ) if has_pim_alt else (
+                'Convert this standing assignment to PIM-eligible. '
+                'Microsoft best practice (Zero Trust) and NIST AC-6 require '
+                'privileged roles to use just-in-time activation with '
+                'time-bound access (≤8h) and approval. Configure in '
+                'Entra admin center → Identity Governance → '
+                'Privileged Identity Management.'
+            ),
+            'frameworks': {
+                'cis': (
+                    ['CIS Azure 1.23'] if rt == 'entra'
+                    else ['CIS Azure 1.22']
+                ),
+                'nist': ['AC-6 (Least Privilege)', 'AC-2 (Account Management)'],
+                'mitre': ['T1078.004', 'T1098.003'],
+            },
+        })
+    return findings
+
+
 def get_identity_pim_data(identity_id):
     """
     Get PIM (Privileged Identity Management) data for an identity.
-    Returns eligible assignments, activation history, and overuse metrics.
+    Returns eligible assignments, activation history, overuse metrics, and
+    the should_be_pim list (standing privileged assignments that violate
+    Microsoft's PIM best-practice guidance).
     """
     db = _db()
     cursor = db.conn.cursor()
@@ -10522,6 +10666,24 @@ def get_identity_pim_data(identity_id):
             for key in ("activation_start", "activation_end", "created_datetime"):
                 if item.get(key) and hasattr(item[key], "isoformat"):
                     item[key] = item[key].isoformat()
+
+        # PIM hygiene: standing privileged assignments that should be PIM-eligible.
+        # Computed at API time from identity_roles + access_paths.pim_eligible
+        # so it stays fresh against re-scans without a schema migration.
+        try:
+            cursor.execute("""
+                SELECT COALESCE(access_paths->'pim_eligible', '[]'::jsonb)
+                  FROM identities WHERE id = %s
+            """, (identity_db_id,))
+            ap_row = cursor.fetchone()
+            pim_alt = ap_row[0] if ap_row else []
+            pim_data["should_be_pim"] = _compute_should_be_pim(
+                cursor, identity_db_id, pim_alt
+            )
+        except Exception:
+            # Fail-soft: missing identity_roles / access_paths shouldn't 500
+            # the PIM tab. Surface an empty array; existing UI handles it.
+            pim_data["should_be_pim"] = []
 
         return jsonify(pim_data)
 

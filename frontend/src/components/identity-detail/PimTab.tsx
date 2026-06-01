@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   type PimData,
+  type PimShouldBePimFinding,
   type IdentityDetailsResponse,
   formatDate,
   DataSource,
@@ -16,7 +17,107 @@ interface PimTabProps {
   identityCategory?: string;
 }
 
+// Standing privileged assignments that should be PIM-eligible.
+// Microsoft Zero Trust / NIST AC-6 / CIS Azure 1.22-1.23 best-practice panel.
+function ShouldBePimPanel({ findings }: { findings: PimShouldBePimFinding[] }) {
+  if (!findings || findings.length === 0) return null;
+  const redundant = findings.filter(f => f.has_pim_alt).length;
+  const convertable = findings.length - redundant;
+  return (
+    <div className="border border-red-200 bg-gradient-to-r from-red-50 to-amber-50 rounded-xl p-5 mb-4">
+      <div className="flex items-start gap-3">
+        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+          <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z"/>
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="text-sm font-semibold text-red-900">
+              Standing Privileged Roles — Should Be PIM-Eligible
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+              {findings.length} finding{findings.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="text-xs text-red-700 mt-1">
+            Microsoft best practice (Zero Trust) and NIST AC-6 require privileged roles to use
+            just-in-time activation with time-bound access — not standing/permanent assignments.
+          </div>
+          {(convertable > 0 || redundant > 0) && (
+            <div className="text-xs text-gray-700 mt-2 space-x-3">
+              {convertable > 0 && (
+                <span><span className="font-semibold text-red-700">{convertable}</span> to convert to PIM-eligible</span>
+              )}
+              {redundant > 0 && (
+                <span><span className="font-semibold text-amber-700">{redundant}</span> redundant (PIM-alt already exists)</span>
+              )}
+            </div>
+          )}
+          <div className="mt-3 overflow-x-auto">
+            <table className="min-w-full text-xs">
+              <thead>
+                <tr className="border-b border-red-200 text-red-900">
+                  <th className="text-left py-1.5 pr-3 font-semibold">Role</th>
+                  <th className="text-left py-1.5 pr-3 font-semibold">Scope</th>
+                  <th className="text-left py-1.5 pr-3 font-semibold">Source</th>
+                  <th className="text-left py-1.5 pr-3 font-semibold">Status</th>
+                  <th className="text-left py-1.5 font-semibold">Recommendation</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-red-100">
+                {findings.map((f, idx) => (
+                  <tr key={idx} className="align-top">
+                    <td className="py-2 pr-3 font-medium text-gray-900">{f.role_name}</td>
+                    <td className="py-2 pr-3 text-gray-700">
+                      <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 text-[10px] uppercase tracking-wide">{f.scope_type}</span>
+                      <div className="text-[10px] font-mono text-gray-500 truncate max-w-[260px]" title={f.scope}>{f.scope}</div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
+                        f.kind === 'entra' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                      }`}>{f.kind === 'entra' ? 'Entra' : 'Azure RBAC'}</span>
+                    </td>
+                    <td className="py-2 pr-3">
+                      {f.has_pim_alt ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">Redundant</span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-700">Standing</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-gray-700 max-w-[420px]">
+                      <div className="text-[11px] leading-relaxed">{f.recommendation}</div>
+                      {f.frameworks && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {(f.frameworks.cis || []).map(c => (
+                            <span key={c} className="px-1 py-0.5 rounded text-[9px] bg-blue-50 text-blue-700 border border-blue-200">{c}</span>
+                          ))}
+                          {(f.frameworks.nist || []).map(c => (
+                            <span key={c} className="px-1 py-0.5 rounded text-[9px] bg-emerald-50 text-emerald-700 border border-emerald-200">NIST {c}</span>
+                          ))}
+                          {(f.frameworks.mitre || []).map(c => (
+                            <span key={c} className="px-1 py-0.5 rounded text-[9px] bg-rose-50 text-rose-700 border border-rose-200">MITRE {c}</span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-[11px] text-gray-600 mt-3">
+            Configure PIM in <span className="font-mono">Entra admin center → Identity Governance → Privileged Identity Management</span>.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PimTab({ pimData, pimLoading, data, identity, riskLevel, identityCategory }: PimTabProps) {
+  const shouldBePim = pimData?.should_be_pim || [];
   return (
     <div className="space-y-6">
       {pimLoading ? (
@@ -24,7 +125,7 @@ export function PimTab({ pimData, pimLoading, data, identity, riskLevel, identit
           <div className="h-20 bg-gray-100 rounded-xl" />
           <div className="h-40 bg-gray-100 rounded-xl" />
         </div>
-      ) : !pimData || (pimData.eligible_assignments.length === 0 && pimData.activations.length === 0) ? (
+      ) : !pimData || (pimData.eligible_assignments.length === 0 && pimData.activations.length === 0 && shouldBePim.length === 0) ? (
         <div className="py-8 space-y-4 px-4">
           <div className="text-center">
             <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -54,6 +155,10 @@ export function PimTab({ pimData, pimLoading, data, identity, riskLevel, identit
         </div>
       ) : (
         <>
+          {/* PIM hygiene — standing privileged that should be PIM-eligible.
+              Rendered first so it's the lead message when present. */}
+          <ShouldBePimPanel findings={shouldBePim} />
+
           {/* Overuse Metrics */}
           <div>
             <div className="text-sm font-semibold text-gray-900 mb-3">Overuse Metrics (Last 30 Days)</div>
