@@ -132,6 +132,8 @@ from app.api.handlers import (
     get_identity_anomalies_handler,
     get_dashboard_anomalies,
     get_dashboard_jml_snapshot,
+    list_consent_grants_handler,
+    get_dashboard_connected_app_risk,
     get_trends_velocity,
     get_identity_risk_history,
     get_batch_risk_history,
@@ -1125,6 +1127,7 @@ def create_app():
             ('ai_audit_log', lambda: _db_init._ensure_ai_audit_log_table()),
             ('sa_attestations', lambda: _db_init._ensure_sa_attestations_table()),
             ('ai_governance_exceptions', lambda: _db_init._ensure_ai_governance_exceptions_table()),
+            ('consent_grants', lambda: _db_init._ensure_consent_grants_table()),
             ('governance_decisions', lambda: _db_init._ensure_governance_decisions_table()),
             ('billing_events', lambda: _db_init._ensure_billing_events_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
@@ -2841,6 +2844,15 @@ def create_app():
     @app.get("/api/dashboard/jml-snapshot")
     def dashboard_jml_snapshot():
         return get_dashboard_jml_snapshot()
+
+    # AG-81: OAuth Consent Grant Inventory & Risk Scoring
+    @app.get("/api/consent-grants")
+    def consent_grants_list():
+        return list_consent_grants_handler()
+
+    @app.get("/api/dashboard/connected-app-risk")
+    def dashboard_connected_app_risk():
+        return get_dashboard_connected_app_risk()
 
     # -----------------------
     # Anomaly Detection (Phase 40)

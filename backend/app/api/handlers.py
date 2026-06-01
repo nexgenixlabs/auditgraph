@@ -16217,6 +16217,69 @@ def get_dashboard_jml_snapshot():
         db.close()
 
 
+# ──────────────────────────────────────────────────────────────────
+# AG-81: OAuth Consent Grant Inventory & Risk Scoring
+# ──────────────────────────────────────────────────────────────────
+
+def list_consent_grants_handler():
+    """GET /api/consent-grants — list consent grants for the current org.
+
+    Query params: risk_level, grant_type, client_app_id, limit, offset.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        risk_level = (request.args.get('risk_level') or '').strip().lower() or None
+        grant_type = (request.args.get('grant_type') or '').strip().lower() or None
+        client_app_id = (request.args.get('client_app_id') or '').strip() or None
+        limit = _safe_query_int('limit', 100, 500)
+        offset = _safe_query_int('offset', 0, 100000)
+        grants = db.list_consent_grants(
+            org_id,
+            risk_level=risk_level if risk_level in ('critical','high','medium','low') else None,
+            grant_type=grant_type if grant_type in ('delegated','application') else None,
+            client_app_id=client_app_id,
+            limit=limit, offset=offset,
+        )
+        return jsonify({'grants': grants, 'count': len(grants)})
+    finally:
+        db.close()
+
+
+def get_dashboard_connected_app_risk():
+    """GET /api/dashboard/connected-app-risk — CISO tile summary.
+
+    Returns severity breakdown + admin-vs-user split + age stats +
+    top risky apps. The visual story is "Who said yes to what, when,
+    and is it still necessary?" — the exact Vercel-breach question.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        summary = db.get_connected_app_risk_summary(org_id)
+        top = db.list_top_risky_connected_apps(org_id, limit=5)
+        # Cross-link a representative grant per top app so the UI can
+        # deep-link to /identities/<client_app_id> or the consent detail.
+        return jsonify({
+            'summary': summary,
+            'top_risky_apps': top,
+        })
+    except Exception as e:
+        logger.warning("get_dashboard_connected_app_risk error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({
+            'summary': {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0,
+                        'admin_consents': 0, 'user_consents': 0,
+                        'application_grants': 0, 'delegated_grants': 0,
+                        'avg_age_days': 0, 'over_180_days': 0, 'unique_apps': 0},
+            'top_risky_apps': [],
+            'error': 'internal',
+        })
+    finally:
+        db.close()
+
+
 # ── Phase 42: API Key Management ─────────────────────────────────
 
 def get_api_keys_list():

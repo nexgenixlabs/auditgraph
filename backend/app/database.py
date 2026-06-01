@@ -18863,6 +18863,233 @@ class Database:
         cursor.close()
         return count or 0
 
+    # ──────────────────────────────────────────────────────────────────
+    # AG-81: OAuth Consent Grant Inventory & Risk Scoring
+    # ──────────────────────────────────────────────────────────────────
+    # Closes the Vercel-breach response narrative. Surfaces who consented
+    # to what, when, with what scopes. Two data sources from MS Graph:
+    #   - /oauth2PermissionGrants — delegated consents (user OR admin)
+    #   - /servicePrincipals/<id>/appRoleAssignments — application
+    #     permissions (always admin-consented at app level)
+    # Risk score = scope breadth × consent type (admin > user) × age.
+
+    _consent_grants_ensured = False
+
+    def _ensure_consent_grants_table(self):
+        """Create consent_grants table if it doesn't exist (idempotent)."""
+        if Database._consent_grants_ensured:
+            return
+        if not self._can_ddl():
+            Database._consent_grants_ensured = True
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS consent_grants (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL,
+                discovery_run_id INTEGER,
+                grant_type VARCHAR(20) NOT NULL,
+                client_app_id TEXT NOT NULL,
+                client_object_id TEXT,
+                client_display_name TEXT,
+                resource_app_id TEXT,
+                resource_object_id TEXT,
+                resource_display_name TEXT,
+                scopes TEXT[],
+                consent_type VARCHAR(20),
+                principal_id TEXT,
+                principal_display_name TEXT,
+                created_datetime TIMESTAMPTZ,
+                expires_at TIMESTAMPTZ,
+                last_activity_at TIMESTAMPTZ,
+                risk_score INTEGER DEFAULT 0,
+                risk_level VARCHAR(20),
+                high_risk_scopes TEXT[],
+                age_days INTEGER,
+                evidence_source VARCHAR(40),
+                discovered_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        for idx_stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_org ON consent_grants (organization_id)",
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_client ON consent_grants (organization_id, client_app_id)",
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_risk ON consent_grants (organization_id, risk_level)",
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_run ON consent_grants (discovery_run_id)",
+            # Dedup key — one row per (org, client, resource, principal, type) per scan
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_consent_grants_unique ON consent_grants (organization_id, client_app_id, resource_app_id, COALESCE(principal_id, ''), grant_type)",
+        ]:
+            cursor.execute("SAVEPOINT cg_idx")
+            try:
+                cursor.execute(idx_stmt)
+                cursor.execute("RELEASE SAVEPOINT cg_idx")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT cg_idx")
+        self._commit()
+        cursor.close()
+        Database._consent_grants_ensured = True
+
+    @staticmethod
+    def _consent_grant_serialize(row: dict) -> dict:
+        if not row:
+            return row
+        out = dict(row)
+        for ts in ('created_datetime', 'expires_at', 'last_activity_at', 'discovered_at'):
+            v = out.get(ts)
+            if v is not None and hasattr(v, 'isoformat'):
+                out[ts] = v.isoformat()
+        return out
+
+    def upsert_consent_grant(self, org_id: int, run_id: int, grant: dict) -> int:
+        """UPSERT a consent grant for the current scan. Returns id."""
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO consent_grants
+              (organization_id, discovery_run_id, grant_type, client_app_id,
+               client_object_id, client_display_name, resource_app_id,
+               resource_object_id, resource_display_name, scopes,
+               consent_type, principal_id, principal_display_name,
+               created_datetime, expires_at, last_activity_at,
+               risk_score, risk_level, high_risk_scopes, age_days,
+               evidence_source, discovered_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (organization_id, client_app_id, resource_app_id,
+                         COALESCE(principal_id, ''), grant_type)
+            DO UPDATE SET
+                discovery_run_id = EXCLUDED.discovery_run_id,
+                client_object_id = EXCLUDED.client_object_id,
+                client_display_name = EXCLUDED.client_display_name,
+                resource_object_id = EXCLUDED.resource_object_id,
+                resource_display_name = EXCLUDED.resource_display_name,
+                scopes = EXCLUDED.scopes,
+                consent_type = EXCLUDED.consent_type,
+                principal_display_name = EXCLUDED.principal_display_name,
+                created_datetime = COALESCE(consent_grants.created_datetime, EXCLUDED.created_datetime),
+                expires_at = EXCLUDED.expires_at,
+                last_activity_at = EXCLUDED.last_activity_at,
+                risk_score = EXCLUDED.risk_score,
+                risk_level = EXCLUDED.risk_level,
+                high_risk_scopes = EXCLUDED.high_risk_scopes,
+                age_days = EXCLUDED.age_days,
+                discovered_at = NOW()
+            RETURNING id
+        """, (
+            org_id, run_id, grant['grant_type'], grant['client_app_id'],
+            grant.get('client_object_id'), grant.get('client_display_name'),
+            grant.get('resource_app_id'), grant.get('resource_object_id'),
+            grant.get('resource_display_name'), grant.get('scopes', []),
+            grant.get('consent_type'), grant.get('principal_id'),
+            grant.get('principal_display_name'),
+            grant.get('created_datetime'), grant.get('expires_at'),
+            grant.get('last_activity_at'),
+            grant.get('risk_score', 0), grant.get('risk_level'),
+            grant.get('high_risk_scopes', []), grant.get('age_days'),
+            grant.get('evidence_source'),
+        ))
+        new_id = cursor.fetchone()[0]
+        self._commit()
+        cursor.close()
+        return new_id
+
+    def list_consent_grants(self, org_id: int, *, risk_level=None,
+                            grant_type=None, client_app_id=None,
+                            limit: int = 100, offset: int = 0) -> list:
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        clauses = ["organization_id = %s"]
+        params = [org_id]
+        if risk_level:
+            clauses.append("risk_level = %s")
+            params.append(risk_level)
+        if grant_type:
+            clauses.append("grant_type = %s")
+            params.append(grant_type)
+        if client_app_id:
+            clauses.append("client_app_id = %s")
+            params.append(client_app_id)
+        where = " AND ".join(clauses)
+        params.extend([int(limit), int(offset)])
+        cursor.execute(
+            f"""
+            SELECT * FROM consent_grants
+             WHERE {where}
+             ORDER BY risk_score DESC NULLS LAST, created_datetime DESC NULLS LAST
+             LIMIT %s OFFSET %s
+            """,
+            params,
+        )
+        rows = [self._consent_grant_serialize(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_connected_app_risk_summary(self, org_id: int) -> dict:
+        """Aggregate stats for the CISO dashboard 'Connected App Risk' tile."""
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE risk_level = 'critical')                  AS critical,
+              COUNT(*) FILTER (WHERE risk_level = 'high')                      AS high,
+              COUNT(*) FILTER (WHERE risk_level = 'medium')                    AS medium,
+              COUNT(*) FILTER (WHERE risk_level = 'low')                       AS low,
+              COUNT(*) FILTER (WHERE consent_type = 'Principal')               AS user_consents,
+              COUNT(*) FILTER (WHERE consent_type = 'AllPrincipals')           AS admin_consents,
+              COUNT(*) FILTER (WHERE grant_type = 'application')               AS app_perm_grants,
+              COUNT(*) FILTER (WHERE grant_type = 'delegated')                 AS delegated_grants,
+              COALESCE(ROUND(AVG(NULLIF(age_days, 0))), 0)                     AS avg_age_days,
+              COUNT(*) FILTER (WHERE age_days IS NOT NULL AND age_days > 180)  AS over_180d,
+              COUNT(DISTINCT client_app_id)                                    AS unique_apps,
+              COUNT(*)                                                         AS total
+            FROM consent_grants
+            WHERE organization_id = %s
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return {
+            'critical': int(row[0] or 0),
+            'high': int(row[1] or 0),
+            'medium': int(row[2] or 0),
+            'low': int(row[3] or 0),
+            'user_consents': int(row[4] or 0),
+            'admin_consents': int(row[5] or 0),
+            'application_grants': int(row[6] or 0),
+            'delegated_grants': int(row[7] or 0),
+            'avg_age_days': int(row[8] or 0),
+            'over_180_days': int(row[9] or 0),
+            'unique_apps': int(row[10] or 0),
+            'total': int(row[11] or 0),
+        }
+
+    def list_top_risky_connected_apps(self, org_id: int, limit: int = 5) -> list:
+        """Return top N apps ranked by max risk score across their grants."""
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+              client_app_id,
+              MAX(client_display_name) FILTER (WHERE client_display_name IS NOT NULL) AS display_name,
+              MAX(risk_score) AS max_risk_score,
+              MAX(risk_level) FILTER (WHERE risk_level = 'critical') AS has_critical,
+              MAX(risk_level) FILTER (WHERE risk_level = 'high')     AS has_high,
+              COUNT(*) AS grant_count,
+              ARRAY(SELECT DISTINCT unnest(high_risk_scopes) FROM consent_grants cg2
+                     WHERE cg2.organization_id = cg.organization_id
+                       AND cg2.client_app_id = cg.client_app_id) AS top_risky_scopes,
+              MIN(created_datetime) AS oldest_grant_at
+            FROM consent_grants cg
+            WHERE organization_id = %s
+            GROUP BY organization_id, client_app_id
+            ORDER BY MAX(risk_score) DESC NULLS LAST
+            LIMIT %s
+        """, (org_id, int(limit)))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('oldest_grant_at') and hasattr(r['oldest_grant_at'], 'isoformat'):
+                r['oldest_grant_at'] = r['oldest_grant_at'].isoformat()
+        return rows
+
     # ── Identity Governance V2: Decisions Table ──────────────────────
 
     _governance_decisions_ensured = False
