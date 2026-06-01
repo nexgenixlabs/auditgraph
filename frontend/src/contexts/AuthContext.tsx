@@ -255,21 +255,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               const freshCsrf = getCsrfToken();
               if (freshCsrf) retryHeaders.set('X-CSRF-Token', freshCsrf);
               response = await origFetch(resolvedInput, { ...init, headers: retryHeaders });
-            } else {
-              // Safety net (2026-05-31): if refresh ALSO fails (both csrf_token
-              // AND refresh cookie are stale — e.g. session predates the CSRF
-              // flow shipping), the session is dead. Clear local user state and
-              // bounce to /login so the user gets a fresh session instead of a
-              // confusing "Failed to ... (CSRF token mismatch)" toast they can't
-              // act on. Skip auto-redirect on the login page itself.
-              setUser(null);
-              if (!window.location.pathname.startsWith('/login') &&
-                  !window.location.pathname.startsWith('/admin/login')) {
-                const portal = detectPortal();
-                const target = portal === 'admin' ? '/admin/login' : '/login';
-                window.location.href = `${target}?reason=session_expired`;
-              }
             }
+            // HOTFIX 2026-05-31: previous version did
+            //   setUser(null); window.location.href = '/login?reason=session_expired'
+            // when refresh also failed. That created an aggressive page-bounce
+            // loop — any failed mutating request (e.g. Argus chat 500 when
+            // Anthropic key absent) would force a full page reload to /login,
+            // which the router immediately bounced back to /. Removed the auto-
+            // redirect; let the caller's error toast surface naturally so the
+            // user can decide whether to logout themselves. The original 401
+            // refresh path above still calls setUser(null) when warranted.
           }
         }
       }
