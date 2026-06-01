@@ -80,6 +80,12 @@ class AnomalyDetector:
             # ai_attack_scenarios modules so it stays in sync with the
             # AI Security pages.
             ('ai_agent_runaway', self._detect_ai_agent_runaway),
+            # AG-JML-Mover (2026-06-01): when department or job_title
+            # changes across runs AND any privileged roles from the prior
+            # job are still attached, surface as mover_stale_access. The
+            # "M" of JML observability — CIEM detects what IGA misses,
+            # without becoming IGA.
+            ('mover_stale_access', self._detect_mover_stale_access),
         ]
 
         for name, detector in detectors:
@@ -146,6 +152,36 @@ class AnomalyDetector:
         for identity_id, role_name in rows:
             roles.setdefault(identity_id, []).append(role_name)
         return roles
+
+    def _get_run_identity_hr_fields(self, run_id: int) -> Dict[str, Dict]:
+        """Get HR-derived identity fields (department, job_title, manager_upn)
+        per identity for a run. Used by the mover-stale-access detector.
+
+        Returned dict is keyed by identity_id → {department, job_title,
+        manager_upn, display_name}. Missing fields default to empty string
+        so the diff comparison is case-stable.
+        """
+        cursor = self.db.conn.cursor()
+        cursor.execute("""
+            SELECT identity_id, display_name,
+                   COALESCE(department, ''), COALESCE(job_title, ''),
+                   COALESCE(manager_upn, ''), COALESCE(enabled, true)
+              FROM identities
+             WHERE discovery_run_id = %s
+        """, (run_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return {
+            row[0]: {
+                'identity_id': row[0],
+                'display_name': row[1],
+                'department': row[2],
+                'job_title': row[3],
+                'manager_upn': row[4],
+                'enabled': bool(row[5]),
+            }
+            for row in rows
+        }
 
     def _get_run_entra_roles(self, run_id: int) -> Dict[str, List[str]]:
         """Get Entra role assignments per identity for a run."""
@@ -721,4 +757,133 @@ class AnomalyDetector:
             })
 
         cursor.close()
+        return anomalies
+
+    # ── JML Observability: Mover stale-access ─────────────────────────────
+
+    def _detect_mover_stale_access(self, current_run_id: int,
+                                   previous_run_id: int) -> List[Dict]:
+        """Detect identities whose department or job_title changed across
+        runs but whose privileged roles from the prior job are still
+        attached.
+
+        AG-JML (2026-06-01): the "Mover" half of JML observability.
+        AuditGraph doesn't write to HRIS / Workday / AD (that would be
+        IGA territory — SailPoint/Saviynt) — we just SURFACE the
+        observability gap: "Bharath moved Sales → Engineering 60 days
+        ago and still has Salesforce Sales Admin." The customer's
+        existing IGA (or manual offboarding) decides what to do.
+
+        The signal that makes this a real anomaly (vs noise) is the
+        INTERSECTION: roles that existed BEFORE the job change AND still
+        exist AFTER. A role granted post-move is the user's new job;
+        a role from the old job that lingered is the stale-access risk.
+        We only flag privileged roles to keep signal-to-noise high.
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            return anomalies
+
+        try:
+            prev_hr = self._get_run_identity_hr_fields(previous_run_id)
+            curr_hr = self._get_run_identity_hr_fields(current_run_id)
+        except Exception as e:
+            logger.warning("[mover_stale_access] HR field fetch failed: %s", e)
+            return anomalies
+
+        # Movers: identities present in both runs with any HR field change.
+        movers: Dict[str, Dict] = {}
+        for ident_id, curr in curr_hr.items():
+            prev = prev_hr.get(ident_id)
+            if not prev:
+                continue
+            dept_changed = (prev['department'] or '').strip().lower() != (curr['department'] or '').strip().lower()
+            title_changed = (prev['job_title'] or '').strip().lower() != (curr['job_title'] or '').strip().lower()
+            manager_changed = (prev['manager_upn'] or '').strip().lower() != (curr['manager_upn'] or '').strip().lower()
+            if not (dept_changed or title_changed or manager_changed):
+                continue
+            movers[ident_id] = {
+                'prev': prev,
+                'curr': curr,
+                'dept_changed': dept_changed,
+                'title_changed': title_changed,
+                'manager_changed': manager_changed,
+            }
+
+        if not movers:
+            return anomalies
+
+        # Only compare roles for the movers (small set; faster than fetching
+        # all run roles when only a few percent of identities moved).
+        prev_rbac = self._get_run_roles(previous_run_id)
+        curr_rbac = self._get_run_roles(current_run_id)
+        prev_entra = self._get_run_entra_roles(previous_run_id)
+        curr_entra = self._get_run_entra_roles(current_run_id)
+
+        for ident_id, mv in movers.items():
+            prev_roles = set(prev_rbac.get(ident_id, [])) | set(prev_entra.get(ident_id, []))
+            curr_roles = set(curr_rbac.get(ident_id, [])) | set(curr_entra.get(ident_id, []))
+            # Stale = present BEFORE and STILL present AFTER (intersection).
+            stale = prev_roles & curr_roles
+            # Filter to privileged only (CRITICAL_ROLES + HIGH_RISK_ROLES
+            # define what a CISO actually cares about for a movers query).
+            stale_priv = sorted(stale & (CRITICAL_ROLES | HIGH_RISK_ROLES))
+            if not stale_priv:
+                continue
+
+            # Severity: critical if any CRITICAL_ROLES survived the move,
+            # else high. This is the classic mover risk pattern.
+            sev = 'critical' if (stale & CRITICAL_ROLES) else 'high'
+
+            change_parts = []
+            if mv['dept_changed']:
+                change_parts.append(
+                    f"department: \"{mv['prev']['department'] or '(empty)'}\" → "
+                    f"\"{mv['curr']['department'] or '(empty)'}\""
+                )
+            if mv['title_changed']:
+                change_parts.append(
+                    f"title: \"{mv['prev']['job_title'] or '(empty)'}\" → "
+                    f"\"{mv['curr']['job_title'] or '(empty)'}\""
+                )
+            if mv['manager_changed']:
+                change_parts.append(
+                    f"manager: \"{mv['prev']['manager_upn'] or '(empty)'}\" → "
+                    f"\"{mv['curr']['manager_upn'] or '(empty)'}\""
+                )
+            change_summary = '; '.join(change_parts)
+
+            anomalies.append({
+                'anomaly_type': 'mover_stale_access',
+                'severity': sev,
+                'identity_id': ident_id,
+                'identity_name': mv['curr']['display_name'],
+                'title': f"Mover with stale access: {mv['curr']['display_name']}",
+                'description': (
+                    f"Identity moved ({change_summary}) since the prior scan, "
+                    f"but {len(stale_priv)} privileged role(s) from the prior "
+                    f"job are still attached: {', '.join(stale_priv[:5])}"
+                    + (f" (+{len(stale_priv) - 5} more)" if len(stale_priv) > 5 else "")
+                    + ". Review whether the user still needs these roles in "
+                    "their new role; remove or convert to PIM-eligible."
+                ),
+                'details': {
+                    'department_changed': mv['dept_changed'],
+                    'title_changed': mv['title_changed'],
+                    'manager_changed': mv['manager_changed'],
+                    'prev_department': mv['prev']['department'],
+                    'curr_department': mv['curr']['department'],
+                    'prev_job_title': mv['prev']['job_title'],
+                    'curr_job_title': mv['curr']['job_title'],
+                    'prev_manager_upn': mv['prev']['manager_upn'],
+                    'curr_manager_upn': mv['curr']['manager_upn'],
+                    'stale_privileged_roles': stale_priv,
+                    'frameworks': {
+                        'nist': ['AC-2 (Account Management)', 'AC-6 (Least Privilege)'],
+                        'cis': ['CIS Azure 1.22', 'CIS Azure 1.23'],
+                        'mitre': ['T1078.004'],
+                    },
+                },
+            })
+
         return anomalies

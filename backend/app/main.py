@@ -131,6 +131,7 @@ from app.api.handlers import (
     resolve_anomaly_handler,
     get_identity_anomalies_handler,
     get_dashboard_anomalies,
+    get_dashboard_jml_snapshot,
     get_trends_velocity,
     get_identity_risk_history,
     get_batch_risk_history,
@@ -2836,6 +2837,10 @@ def create_app():
     @app.get("/api/dashboard/anomalies")
     def dashboard_anomalies():
         return get_dashboard_anomalies()
+
+    @app.get("/api/dashboard/jml-snapshot")
+    def dashboard_jml_snapshot():
+        return get_dashboard_jml_snapshot()
 
     # -----------------------
     # Anomaly Detection (Phase 40)

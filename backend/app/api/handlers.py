@@ -16077,6 +16077,146 @@ def get_dashboard_anomalies():
         db.close()
 
 
+def get_dashboard_jml_snapshot():
+    """GET /api/dashboard/jml-snapshot — Joiner / Mover / Leaver counts.
+
+    AG-JML (2026-06-01): CIEM-style observability of the JML lifecycle
+    WITHOUT becoming an IGA tool. Composes existing signals (no new
+    detection beyond mover_stale_access) into the joiner/mover/leaver
+    framing every auditor recognizes:
+
+      - Joiners: identities created in the last 30 days with privileged
+        role assignments (the "joiner-with-Owner" risk pattern).
+      - Movers: open mover_stale_access anomalies (department/title
+        changed AND prior privileged roles still attached).
+      - Leavers: ghost_identity anomalies (disabled in cloud, role
+        assignments retained) — pure leaver tail.
+
+    Returns counts + top-N samples per bucket so a dashboard tile can
+    render "12 joiners · 3 movers · 5 leavers" with deep-links into
+    /identities filtered views.
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'joiners': {'count': 0, 'top': []},
+                'movers':  {'count': 0, 'top': []},
+                'leavers': {'count': 0, 'top': []},
+                'reason': 'no_completed_run',
+            })
+
+        # Joiners: created in last 30 days with critical/high risk
+        # (i.e. they came in with elevated access — joiner-risk pattern).
+        cursor.execute("""
+            SELECT identity_id, display_name, risk_level, created_datetime
+              FROM identities
+             WHERE discovery_run_id = ANY(%s)
+               AND organization_id = %s
+               AND created_datetime >= NOW() - INTERVAL '30 days'
+               AND risk_level IN ('critical', 'high')
+               AND COALESCE(is_microsoft_system, false) = false
+             ORDER BY created_datetime DESC NULLS LAST
+             LIMIT 5
+        """, (run_ids, org_id))
+        joiner_top = [
+            {
+                'identity_id': r[0],
+                'display_name': r[1],
+                'risk_level': r[2],
+                'created_at': r[3].isoformat() if r[3] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT count(*) FROM identities
+             WHERE discovery_run_id = ANY(%s) AND organization_id = %s
+               AND created_datetime >= NOW() - INTERVAL '30 days'
+               AND risk_level IN ('critical', 'high')
+               AND COALESCE(is_microsoft_system, false) = false
+        """, (run_ids, org_id))
+        joiner_count = int(cursor.fetchone()[0] or 0)
+
+        # Movers: open (unresolved) mover_stale_access anomalies for this org
+        cursor.execute("""
+            SELECT identity_id, identity_name, severity, title, created_at
+              FROM anomalies
+             WHERE organization_id = %s
+               AND anomaly_type = 'mover_stale_access'
+               AND resolved = false
+             ORDER BY created_at DESC NULLS LAST
+             LIMIT 5
+        """, (org_id,))
+        mover_top = [
+            {
+                'identity_id': r[0],
+                'display_name': r[1],
+                'severity': r[2],
+                'title': r[3],
+                'detected_at': r[4].isoformat() if r[4] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT count(*) FROM anomalies
+             WHERE organization_id = %s
+               AND anomaly_type = 'mover_stale_access'
+               AND resolved = false
+        """, (org_id,))
+        mover_count = int(cursor.fetchone()[0] or 0)
+
+        # Leavers: open ghost_identity anomalies (disabled + still privileged)
+        cursor.execute("""
+            SELECT identity_id, identity_name, severity, title, created_at
+              FROM anomalies
+             WHERE organization_id = %s
+               AND anomaly_type = 'ghost_identity'
+               AND resolved = false
+             ORDER BY created_at DESC NULLS LAST
+             LIMIT 5
+        """, (org_id,))
+        leaver_top = [
+            {
+                'identity_id': r[0],
+                'display_name': r[1],
+                'severity': r[2],
+                'title': r[3],
+                'detected_at': r[4].isoformat() if r[4] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT count(*) FROM anomalies
+             WHERE organization_id = %s
+               AND anomaly_type = 'ghost_identity'
+               AND resolved = false
+        """, (org_id,))
+        leaver_count = int(cursor.fetchone()[0] or 0)
+
+        cursor.close()
+        return jsonify({
+            'joiners': {'count': joiner_count, 'top': joiner_top},
+            'movers':  {'count': mover_count,  'top': mover_top},
+            'leavers': {'count': leaver_count, 'top': leaver_top},
+        })
+    except Exception as e:
+        logger.warning("get_dashboard_jml_snapshot error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({
+            'joiners': {'count': 0, 'top': []},
+            'movers':  {'count': 0, 'top': []},
+            'leavers': {'count': 0, 'top': []},
+            'error': 'internal',
+        })
+    finally:
+        db.close()
+
+
 # ── Phase 42: API Key Management ─────────────────────────────────
 
 def get_api_keys_list():
