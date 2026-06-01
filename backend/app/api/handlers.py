@@ -2741,6 +2741,58 @@ def get_identity_details(identity_id: str):
             except Exception:
                 pass
 
+        # Feature D variant for humans — surface last_observed_ip + source
+        # from directory_audit_log enrichment. This is the AuditGraph moat:
+        # we don't wait for P2 telemetry; we read what audit logs already
+        # carry (free/P1 retention, no premium license needed). When P2 is
+        # enabled the same envelope carries the aggregated buckets too.
+        signin_intel = {
+            'last_observed_ip': None,
+            'last_observed_ip_source': None,
+            'last_observed_ip_date': None,
+            'ips': [],
+            'locations': [],
+            'resources_accessed': [],
+            'client_apps': [],
+            'failure_count_30d': None,
+            'success_count_30d': None,
+            'total_events_30d': None,
+        }
+        try:
+            cursor.execute("SAVEPOINT id_signin_intel")
+            cursor.execute("""
+                SELECT last_observed_ip, last_observed_ip_source,
+                       last_observed_ip_date, last_observed_operation,
+                       signin_ips, signin_locations,
+                       signin_resources_accessed, signin_client_apps,
+                       signin_failure_count_30d, signin_success_count_30d,
+                       signin_total_events_30d
+                  FROM identities WHERE id = %s
+            """, (identity_db_id,))
+            srow = cursor.fetchone()
+            if srow:
+                signin_intel['last_observed_ip'] = srow[0]
+                signin_intel['last_observed_ip_source'] = srow[1]
+                signin_intel['last_observed_ip_date'] = (
+                    srow[2].isoformat() if srow[2] and hasattr(srow[2], 'isoformat') else srow[2]
+                )
+                signin_intel['last_observed_operation'] = srow[3]
+                signin_intel['ips'] = _parse_jsonb(srow[4]) or []
+                signin_intel['locations'] = _parse_jsonb(srow[5]) or []
+                signin_intel['resources_accessed'] = _parse_jsonb(srow[6]) or []
+                signin_intel['client_apps'] = _parse_jsonb(srow[7]) or []
+                signin_intel['failure_count_30d'] = srow[8]
+                signin_intel['success_count_30d'] = srow[9]
+                signin_intel['total_events_30d'] = srow[10]
+            cursor.execute("RELEASE SAVEPOINT id_signin_intel")
+        except Exception as e:
+            logger.debug("Identity signin_intelligence fetch skipped: %s", e)
+            try: cursor.execute("ROLLBACK TO SAVEPOINT id_signin_intel")
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+        identity['signin_intelligence'] = signin_intel
+
         return jsonify(
             {
                 "identity": identity,

@@ -24,6 +24,137 @@ import { OWNER_STATUS_CONFIG, TIME_MS } from '../../constants/metrics';
 import { normalizeScore } from '../../utils/identityRiskScore';
 import StatusBadge from '../ui/StatusBadge';
 import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../../constants/activitySignals';
+import { COLORS } from '../../constants/ciso';
+
+// Feature D (humans variant). AuditGraph's "no P2 telemetry required" angle
+// applies here: directory_audit_log already carries the initiator's IP for
+// any admin operation, so we get a real "last seen from" signal on free/P1
+// tenants. When P2 is enabled the same envelope carries the aggregated
+// bucket arrays (ips / locations / etc) — both render in this panel.
+function SourceIpIntelBanner({
+  intel,
+}: {
+  intel?: NonNullable<IdentityDetailsResponse['identity']['signin_intelligence']>;
+}) {
+  if (!intel) return null;
+  const hasLast = !!intel.last_observed_ip;
+  const ips = (intel.ips || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  const locations = (intel.locations || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  if (!hasLast && ips.length === 0 && locations.length === 0) return null;
+
+  const sourceLabel: Record<string, string> = {
+    directory_audit_log: 'directory audit log',
+    arm_activity_log: 'ARM Activity Log',
+  };
+  const src = intel.last_observed_ip_source || '';
+  const srcLabel = sourceLabel[src] || src;
+
+  return (
+    <div
+      className="rounded-xl p-4 mb-2"
+      style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}` }}
+    >
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <svg className="w-4 h-4" fill="none" stroke={COLORS.purple} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <span className="text-sm font-semibold" style={{ color: COLORS.text }}>
+            Source IP Intelligence
+          </span>
+          <span className="text-[10px]" style={{ color: COLORS.textMuted }}>
+            behavior-evidence · no P2 required
+          </span>
+        </div>
+        {typeof intel.total_events_30d === 'number' && intel.total_events_30d > 0 && (
+          <span className="text-[11px]" style={{ color: COLORS.textSecondary }}>
+            {intel.total_events_30d.toLocaleString()} events / 30d
+          </span>
+        )}
+      </div>
+
+      {hasLast && (
+        <div className="flex items-center gap-2 flex-wrap text-xs mb-2">
+          <span style={{ color: COLORS.textSecondary }}>Last observed from</span>
+          <span className="font-mono font-medium" style={{ color: COLORS.text }}>{intel.last_observed_ip}</span>
+          {srcLabel && (
+            <span
+              className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide"
+              style={{ background: 'rgba(139,92,246,0.12)', color: COLORS.purple, border: `1px solid ${COLORS.purple}33` }}
+            >
+              {srcLabel}
+            </span>
+          )}
+          {intel.last_observed_ip_date && (
+            <span style={{ color: COLORS.textMuted }}>
+              · {new Date(intel.last_observed_ip_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+            </span>
+          )}
+          {intel.last_observed_operation && (
+            <span style={{ color: COLORS.textMuted }}>
+              · {intel.last_observed_operation}
+            </span>
+          )}
+        </div>
+      )}
+
+      {(ips.length > 0 || locations.length > 0) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 pt-2"
+             style={{ borderTop: `1px solid ${COLORS.border}` }}>
+          {ips.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: COLORS.textMuted }}>
+                Top IPs ({ips.length})
+              </div>
+              <div className="space-y-0.5">
+                {ips.slice(0, 4).map((ip, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-mono truncate" style={{ color: COLORS.text }}>{ip.ip}</span>
+                    <span className="tabular-nums" style={{ color: COLORS.textSecondary }}>
+                      {(ip.count || 0).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+                {ips.length > 4 && (
+                  <div className="text-[10px]" style={{ color: COLORS.textMuted }}>+{ips.length - 4} more</div>
+                )}
+              </div>
+            </div>
+          )}
+          {locations.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: COLORS.textMuted }}>
+                Locations ({locations.length})
+              </div>
+              <div className="space-y-0.5">
+                {locations.slice(0, 4).map((loc, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate" style={{ color: COLORS.text }}>
+                      {[loc.city, loc.country].filter(Boolean).join(', ') || '—'}
+                    </span>
+                    <span className="tabular-nums" style={{ color: COLORS.textSecondary }}>
+                      {(loc.count || 0).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+                {locations.length > 4 && (
+                  <div className="text-[10px]" style={{ color: COLORS.textMuted }}>+{locations.length - 4} more</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!hasLast && ips.length === 0 && locations.length === 0 && (
+        <div className="text-[11px]" style={{ color: COLORS.textMuted }}>
+          No sign-in or audit-log evidence captured yet — runs on next discovery cycle.
+        </div>
+      )}
+    </div>
+  );
+}
 
 export interface CorrelatedAccount {
   id: number;
@@ -512,6 +643,12 @@ export default function OverviewTab({
   const [showAllSections, setShowAllSections] = useState(false);
   return (
     <div className="space-y-6">
+      {/* Feature D — Source IP Intelligence (banner; renders only when
+          last_observed_ip OR aggregated buckets have data). Sits near the
+          top so the "where is this identity authenticating from" answer is
+          immediate, not buried below ten sections. */}
+      <SourceIpIntelBanner intel={identity.signin_intelligence} />
+
       {/* Correlated Accounts / Zombie Warning */}
       {correlatedAccounts && correlatedAccounts.accounts.length > 1 && (
         <div>
