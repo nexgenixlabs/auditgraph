@@ -86,6 +86,7 @@ import AcceptInvitation from './pages/AcceptInvitation';
 import OrganizationUsers from './pages/OrganizationUsers';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
+import Trust from './pages/Trust';
 import Documentation from './pages/Documentation';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -265,6 +266,7 @@ function AppContent() {
         {/* Phase 5: Public legal & documentation pages */}
         <Route path="/privacy" element={<PrivacyPolicy />} />
         <Route path="/terms" element={<TermsOfService />} />
+        <Route path="/trust" element={<Trust />} />
         <Route path="/docs" element={<Documentation />} />
 
         {/* Onboarding route - no nav bar, protected */}

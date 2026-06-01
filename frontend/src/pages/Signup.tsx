@@ -260,6 +260,12 @@ export default function Signup() {
             <Link to="/terms" className="text-slate-500 hover:text-slate-400 hover:opacity-80">Terms of Service</Link>
             {' '}and{' '}
             <Link to="/privacy" className="text-slate-500 hover:text-slate-400 hover:opacity-80">Privacy Policy</Link>
+            .
+          </p>
+          <p className="mt-2 text-center text-[11px] text-slate-600">
+            See our{' '}
+            <Link to="/trust" className="text-slate-500 hover:text-slate-400 hover:opacity-80">Trust Center</Link>
+            {' '}for compliance posture, security architecture, and audit-document requests.
           </p>
         </div>
       </div>

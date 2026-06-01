@@ -474,6 +474,14 @@ export default function Login() {
           </button>
         </div>
 
+        <div className="flex items-center justify-center gap-4 mt-4 text-[11px] text-gray-400">
+          <a href="/trust" className="hover:text-gray-600 dark:hover:text-gray-200 transition">Trust</a>
+          <span className="text-gray-300 dark:text-gray-700">·</span>
+          <a href="/privacy" className="hover:text-gray-600 dark:hover:text-gray-200 transition">Privacy</a>
+          <span className="text-gray-300 dark:text-gray-700">·</span>
+          <a href="/terms" className="hover:text-gray-600 dark:hover:text-gray-200 transition">Terms</a>
+        </div>
+
         <p className="text-center text-xs text-gray-400 mt-3">
           Powered by AuditGraph
         </p>
