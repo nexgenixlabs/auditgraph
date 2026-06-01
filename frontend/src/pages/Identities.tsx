@@ -450,13 +450,47 @@ function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
 
 function LifecycleLabel({ state }: { state?: string | null }) {
   const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Unknown') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Unknown;
-  const isDisabled = state === 'Disabled';
+  const s = state || 'Unknown';
+  // Disabled is a security signal (revoked, dormant after offboarding, etc.) — give it
+  // a chip that pops on the dark theme. Other states stay subtle so the eye
+  // tracks to outliers (Disabled / Stale).
+  const styleByState: Record<string, React.CSSProperties> = {
+    Disabled: { background: 'rgba(220,38,38,0.16)', color: '#fca5a5', border: '1px solid rgba(220,38,38,0.45)' },
+    Dormant:  { background: 'rgba(245,158,11,0.15)', color: '#fcd34d', border: '1px solid rgba(245,158,11,0.40)' },
+    Stale:    { background: 'rgba(245,158,11,0.10)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.30)' },
+  };
+  const chipStyle = styleByState[s];
+  if (chipStyle) {
+    return (
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '2px 7px',
+          borderRadius: 6,
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: 0.2,
+          ...chipStyle,
+        }}
+        title={cfg.tooltip}
+      >
+        <span style={{
+          width: 5, height: 5, borderRadius: '50%',
+          background: s === 'Disabled' ? '#ef4444' : '#f59e0b',
+          flexShrink: 0,
+        }} />
+        {cfg.label}
+      </span>
+    );
+  }
   return (
     <span style={{
       fontSize: '11px',
-      color: isDisabled ? 'var(--text-tertiary, #6b7280)' : 'var(--text-secondary, #9ca3af)',
-      fontWeight: isDisabled ? 500 : 400,
-      opacity: isDisabled ? 0.7 : 0.85,
+      color: 'var(--text-secondary, #9ca3af)',
+      fontWeight: 400,
+      opacity: 0.85,
     }} title={cfg.tooltip}>
       {cfg.label}
     </span>
