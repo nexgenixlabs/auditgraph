@@ -1934,21 +1934,31 @@ def main():
 
 
 if __name__ == "__main__":
-    # AG-105: Production guard — refuse to seed in production environments
+    # AG-105: Production guard — refuse to seed in production environments.
+    # Word-boundary 'prod' match so 'nonprod' / 'cus-ag-nonprod-pg' don't
+    # trip the guard. The non-prod cloud env is an explicit allow target
+    # for the demo-tenant seed endpoint (superadmin-gated, scoped to org=9).
+    import re as _re
     _APP_ENV = os.environ.get('APP_ENV', 'production')
     _DB_HOST = os.environ.get('DB_HOST', '')
-    if _APP_ENV == 'production' or 'prod' in _DB_HOST.lower():
+    _host_prod = bool(_re.search(r'(?<![a-z])prod(?!\w)', _DB_HOST.lower()))
+    if _APP_ENV == 'production' or _host_prod:
         print("ERROR: Refusing to run seed script in production.")
         print(f"  APP_ENV={_APP_ENV}")
         print(f"  DB_HOST={_DB_HOST}")
         print("Set APP_ENV=local to run seed scripts.")
         sys.exit(1)
-    _confirm = input(
-        f"Seeding DB at {_DB_HOST} (APP_ENV={_APP_ENV}). "
-        "Type 'yes' to continue: "
-    )
-    if _confirm.strip().lower() != 'yes':
-        print("Aborted.")
-        sys.exit(0)
+    # Skip interactive confirmation when stdin isn't a TTY (subprocess /
+    # CI invocation). External access control already gates this path.
+    if sys.stdin.isatty():
+        _confirm = input(
+            f"Seeding DB at {_DB_HOST} (APP_ENV={_APP_ENV}). "
+            "Type 'yes' to continue: "
+        )
+        if _confirm.strip().lower() != 'yes':
+            print("Aborted.")
+            sys.exit(0)
+    else:
+        print(f"Non-interactive run; seeding {_DB_HOST} (APP_ENV={_APP_ENV})")
 
     main()
