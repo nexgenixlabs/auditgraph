@@ -496,6 +496,130 @@ class AzureDiscoveryEngine:
         except Exception:
             pass
 
+    # ── AG-PS (2026-06-01) Progressive Scan hooks ──────────────────────────
+    # Surface real findings mid-scan so the modal turns from a spinner into
+    # a live ticker. Columns added idempotently on first call so we don't
+    # need a migration ahead of cloud deploy.
+
+    _progressive_scan_columns_ensured = False
+
+    def _ensure_progressive_scan_columns(self):
+        if self.__class__._progressive_scan_columns_ensured:
+            return
+        try:
+            cur = self.db.conn.cursor()
+            for stmt in [
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS critical_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS high_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS medium_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS low_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS live_findings JSONB",
+            ]:
+                cur.execute("SAVEPOINT ps_col")
+                try:
+                    cur.execute(stmt)
+                    cur.execute("RELEASE SAVEPOINT ps_col")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT ps_col")
+            self.db._commit()
+            cur.close()
+            self.__class__._progressive_scan_columns_ensured = True
+        except Exception as e:
+            logger.debug("Could not ensure progressive scan columns: %s", e)
+            try: self.db._rollback()
+            except Exception: pass
+
+    def _update_job_risk_counts(self, identities):
+        """Update critical/high/medium/low identity counts on the snapshot job
+        so the progress modal can show a live risk breakdown as identities are
+        classified. Called from _save_identities after risk scoring."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id or not identities:
+            return
+        self._ensure_progressive_scan_columns()
+        counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        for ident in identities:
+            rl = (ident.get('risk_level') or '').lower()
+            if rl in counts:
+                counts[rl] += 1
+        try:
+            cur = self.db.conn.cursor()
+            cur.execute("""
+                UPDATE snapshot_jobs
+                   SET critical_count = %s,
+                       high_count = %s,
+                       medium_count = %s,
+                       low_count = %s
+                 WHERE id = %s
+            """, (counts['critical'], counts['high'], counts['medium'],
+                  counts['low'], job_id))
+            self.db._commit()
+            cur.close()
+        except Exception as e:
+            logger.debug("Job risk-count update failed: %s", e)
+            try: self.db._rollback()
+            except Exception: pass
+
+    def _stream_live_findings(self, identities, top_n: int = 8):
+        """Pick the top N highest-risk identities and stream them as live
+        findings into snapshot_jobs.live_findings. The frontend modal renders
+        these as the cinematic ticker — actual scan data, no fakes."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id or not identities:
+            return
+        self._ensure_progressive_scan_columns()
+        # Sort: critical first, then by risk_score desc — surface the most
+        # demo-worthy findings (Owner-on-sub, no-owner SPN, etc.).
+        rank = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1}
+        ordered = sorted(
+            identities,
+            key=lambda i: (
+                rank.get((i.get('risk_level') or '').lower(), 0),
+                int(i.get('risk_score') or 0),
+            ),
+            reverse=True,
+        )[:top_n]
+        findings = []
+        for ident in ordered:
+            # Primary risk factor → demo-worthy headline (e.g. "Owner on
+            # Subscription"). Falls back to risk reasons / identity type.
+            factors = ident.get('risk_factors') or []
+            headline = None
+            if factors:
+                f0 = factors[0]
+                if isinstance(f0, dict):
+                    headline = f0.get('description') or f0.get('code')
+            if not headline:
+                rr = ident.get('risk_reasons')
+                if isinstance(rr, list) and rr:
+                    headline = rr[0]
+                elif isinstance(rr, str) and rr:
+                    headline = rr
+            findings.append({
+                'identity_id': ident.get('identity_id'),
+                'display_name': ident.get('display_name'),
+                'identity_type': ident.get('identity_type'),
+                'risk_level': ident.get('risk_level'),
+                'risk_score_cvss': ident.get('risk_score_cvss'),
+                'headline': headline or 'High-risk identity detected',
+                'discovered_at_offset_s': int(
+                    (datetime.now(timezone.utc) - self._scan_started_at).total_seconds()
+                ) if getattr(self, '_scan_started_at', None) else 0,
+            })
+        try:
+            import json as _json
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "UPDATE snapshot_jobs SET live_findings = %s::jsonb WHERE id = %s",
+                (_json.dumps(findings, default=str), job_id),
+            )
+            self.db._commit()
+            cur.close()
+        except Exception as e:
+            logger.debug("Live findings update failed: %s", e)
+            try: self.db._rollback()
+            except Exception: pass
+
     def _get_monitored_subscription_ids(self) -> Optional[Set[str]]:
         """Query cloud_subscriptions for activated (monitored=true) subscription IDs.
 
@@ -572,6 +696,9 @@ class AzureDiscoveryEngine:
         Returns:
             DiscoveryResult or None on completion
         """
+        # AG-PS: stamp scan-start timestamp so live findings can compute
+        # offset-from-start ("Found at 12s into the scan…").
+        self._scan_started_at = datetime.now(timezone.utc)
         try:
             loop = asyncio.get_event_loop()
             if loop.is_closed():
@@ -10696,6 +10823,15 @@ class AzureDiscoveryEngine:
                                     self.db_org_id, plan, len(identities), max_ids or 'unlimited')
             except Exception as e:
                 logger.error("Entitlement check failed, proceeding without limit: %s", e)
+
+        # AG-PS: surface risk-level breakdown + top findings mid-scan so the
+        # Discovery modal renders the cinematic ticker. Real data only —
+        # everything sourced from identities[].risk_level + risk_factors.
+        try:
+            self._update_job_risk_counts(identities)
+            self._stream_live_findings(identities, top_n=8)
+        except Exception as e:
+            logger.debug("Progressive scan hooks soft-failed: %s", e)
 
         # Ensure clean transaction state before identity save loop.
         # Prior operations (job progress/metrics) may have left a poisoned

@@ -12326,7 +12326,9 @@ class Database:
                        retry_count, duration_seconds,
                        identities_discovered, resources_discovered, subscriptions_discovered,
                        created_at, started_at, completed_at, last_heartbeat_at,
-                       stage_timings, estimated_remaining_seconds
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
                 FROM snapshot_jobs
                 WHERE cloud_connection_id = %s AND organization_id = %s
                   AND status IN ('queued', 'running')
@@ -12341,7 +12343,9 @@ class Database:
                        retry_count, duration_seconds,
                        identities_discovered, resources_discovered, subscriptions_discovered,
                        created_at, started_at, completed_at, last_heartbeat_at,
-                       stage_timings, estimated_remaining_seconds
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
                 FROM snapshot_jobs
                 WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
                   AND created_at > NOW() - INTERVAL '90 minutes'
@@ -12376,7 +12380,9 @@ class Database:
                        retry_count, duration_seconds,
                        identities_discovered, resources_discovered, subscriptions_discovered,
                        created_at, started_at, completed_at, last_heartbeat_at,
-                       stage_timings, estimated_remaining_seconds
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
                 FROM snapshot_jobs
                 WHERE cloud_connection_id = %s AND organization_id = %s
                 ORDER BY created_at DESC LIMIT 1
@@ -12388,7 +12394,9 @@ class Database:
                        retry_count, duration_seconds,
                        identities_discovered, resources_discovered, subscriptions_discovered,
                        created_at, started_at, completed_at, last_heartbeat_at,
-                       stage_timings, estimated_remaining_seconds
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
                 FROM snapshot_jobs
                 WHERE cloud_connection_id = %s
                 ORDER BY created_at DESC LIMIT 1

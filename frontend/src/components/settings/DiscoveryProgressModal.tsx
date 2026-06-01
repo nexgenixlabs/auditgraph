@@ -5,6 +5,16 @@ interface StageTimingEntry {
   elapsed: number;
 }
 
+interface LiveFinding {
+  identity_id?: string;
+  display_name?: string;
+  identity_type?: string;
+  risk_level?: 'critical' | 'high' | 'medium' | 'low' | string;
+  risk_score_cvss?: number;
+  headline?: string;
+  discovered_at_offset_s?: number;
+}
+
 interface SnapshotJob {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -22,6 +32,14 @@ interface SnapshotJob {
   connection_cloud?: string;
   stage_timings?: Record<string, StageTimingEntry>;
   estimated_remaining_seconds?: number | null;
+  // AG-PS — Progressive Scan: real-time risk breakdown + top findings
+  // streamed from the scan engine as identities classify. Updated at
+  // ~60% mark (post-risk-analysis). When empty the panel doesn't render.
+  critical_count?: number;
+  high_count?: number;
+  medium_count?: number;
+  low_count?: number;
+  live_findings?: LiveFinding[];
 }
 
 interface Props {
@@ -272,6 +290,73 @@ export function DiscoveryProgressModal({
                   </span>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* AG-PS — Progressive Scan: live risk breakdown chips. Appears as
+            soon as the engine writes risk counts (around the 60% mark);
+            stays visible through completion. Real counts from this scan. */}
+        {((job?.critical_count || 0) + (job?.high_count || 0) + (job?.medium_count || 0) + (job?.low_count || 0)) > 0 && (
+          <div className="px-6 pb-3">
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              {(job?.critical_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 font-medium">
+                  {job?.critical_count} critical
+                </span>
+              )}
+              {(job?.high_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 font-medium">
+                  {job?.high_count} high
+                </span>
+              )}
+              {(job?.medium_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 font-medium">
+                  {job?.medium_count} medium
+                </span>
+              )}
+              {(job?.low_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 font-medium">
+                  {job?.low_count} low
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* AG-PS — Live findings ticker: top critical+high identities as they
+            classify. Sourced from real scan data (identity.risk_factors[0]
+            description). Renders nothing pre-classification. */}
+        {(job?.live_findings && job.live_findings.length > 0) && (
+          <div className="px-6 pb-3">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
+              <svg className="w-3 h-3 text-red-500" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" /></svg>
+              Live findings — top {job.live_findings.length} highest-risk
+            </div>
+            <div className="space-y-1 max-h-44 overflow-y-auto">
+              {job.live_findings.map((f, i) => {
+                const sevColor =
+                  f.risk_level === 'critical' ? 'bg-red-500' :
+                  f.risk_level === 'high'     ? 'bg-orange-500' :
+                  f.risk_level === 'medium'   ? 'bg-amber-500' :
+                  'bg-emerald-500';
+                return (
+                  <div key={i} className="flex items-center gap-2 text-[11px]">
+                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${sevColor}`} />
+                    {typeof f.discovered_at_offset_s === 'number' && (
+                      <span className="font-mono text-gray-400 dark:text-slate-500 tabular-nums w-9 flex-shrink-0 text-right">
+                        +{f.discovered_at_offset_s}s
+                      </span>
+                    )}
+                    <span className="text-gray-700 dark:text-slate-200 truncate flex-1" title={f.display_name || ''}>
+                      {f.display_name || f.identity_id}
+                    </span>
+                    <span className="text-gray-500 dark:text-slate-400 truncate max-w-[180px]" title={f.headline || ''}>
+                      {f.headline}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
