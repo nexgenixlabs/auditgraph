@@ -1478,6 +1478,21 @@ class AzureDiscoveryEngine:
             except Exception:
                 pass
 
+        # Step 9.9: OAuth Consent Grant discovery (AG-81, no P2 required).
+        # Bulk-pull /oauth2PermissionGrants (delegated) + per-SP iterate
+        # /servicePrincipals/{id}/appRoleAssignments (application). Each
+        # grant gets a CVSS-aligned risk score via compute_consent_risk().
+        # The Vercel-breach response narrative: "Who said yes, when, with
+        # what scopes, and is it still necessary?"
+        try:
+            self._discover_consent_grants(run_id)
+        except Exception as e:
+            logger.warning("OAuth consent grant discovery error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
         # Step 9a: P2 Telemetry Ingestion FIRST (if enabled)
         # MUST run before exposure scoring so fresh sign-in data is available
         p2_enabled = False
@@ -10042,6 +10057,261 @@ class AzureDiscoveryEngine:
                 self.db._rollback()
             except Exception:
                 pass
+
+    def _discover_consent_grants(self, run_id: int) -> None:
+        """AG-81: discover OAuth consent grants for the tenant.
+
+        Two Graph endpoints:
+          - /oauth2PermissionGrants — delegated consents (user OR admin
+            consented). Bulk fetch with $top pagination.
+          - /servicePrincipals/{id}/appRoleAssignments — application
+            permissions (always admin-consented). Per-SP iteration; we
+            only query SPs we already discovered to keep API budget tight.
+
+        Each grant gets CVSS-aligned risk via compute_consent_risk() then
+        UPSERTed via db.upsert_consent_grant(). Graceful 403 if scopes
+        not yet consented; entire path no-ops with a warning so the scan
+        completes.
+
+        Time-bounded (default 90s soft budget). Required Graph scopes
+        (already requested at connector setup): Directory.Read.All,
+        Application.Read.All.
+        """
+        import os
+        import time as _time
+        from urllib.parse import quote
+        import requests
+
+        if os.environ.get('DISABLE_CONSENT_GRANT_DISCOVERY', 'false').lower() == 'true':
+            logger.info("[consent_grants] SKIPPED via env flag")
+            return
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('CONSENT_GRANTS_MAX_SECONDS', '90'))
+
+        # Late-import — risk scorer lives in constants/
+        from app.constants.consent_risk import compute_consent_risk
+
+        try:
+            graph_token = self.credential.get_token("https://graph.microsoft.com/.default")
+        except Exception as e:
+            logger.warning("[consent_grants] Graph token acquisition failed: %s", e)
+            return
+        headers = {"Authorization": f"Bearer {graph_token.token}"}
+
+        # ── Build SPN object_id → display_name map from THIS run's identities ──
+        # Resource SP lookup needs display names for the "resource_display_name"
+        # column. Saves an N+1 Graph call.
+        sp_name_by_object_id: dict[str, str] = {}
+        sp_name_by_app_id: dict[str, str] = {}
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                SELECT object_id, app_id, display_name
+                  FROM identities
+                 WHERE discovery_run_id = %s
+                   AND identity_type IN ('service_principal', 'managed_identity_user',
+                                          'managed_identity_system', 'app_registration')
+            """, (run_id,))
+            for obj_id, app_id, display_name in cursor.fetchall():
+                if obj_id and display_name:
+                    sp_name_by_object_id[str(obj_id).lower()] = display_name
+                if app_id and display_name:
+                    sp_name_by_app_id[str(app_id).lower()] = display_name
+            cursor.close()
+        except Exception:
+            pass
+
+        def _name_for_resource(resource_id: str, resource_app_id: str = None) -> str | None:
+            """Look up the resource API's display name by either ID."""
+            if resource_id and resource_id.lower() in sp_name_by_object_id:
+                return sp_name_by_object_id[resource_id.lower()]
+            if resource_app_id and resource_app_id.lower() in sp_name_by_app_id:
+                return sp_name_by_app_id[resource_app_id.lower()]
+            # Known fallbacks for Microsoft first-party resources
+            mapping = {
+                '00000003-0000-0000-c000-000000000000': 'Microsoft Graph',
+                '00000002-0000-0000-c000-000000000000': 'Azure AD Graph',
+                '00000003-0000-0ff1-ce00-000000000000': 'Office 365 SharePoint Online',
+                '00000002-0000-0ff1-ce00-000000000000': 'Office 365 Exchange Online',
+                'fc780465-2017-40d4-a0c5-307022471b92': 'Windows Azure Active Directory',
+            }
+            return mapping.get((resource_app_id or resource_id or '').lower())
+
+        upserted = 0
+        events_seen = 0
+
+        # ── (1) Delegated grants — bulk fetch ──
+        url = ("https://graph.microsoft.com/v1.0/oauth2PermissionGrants"
+               "?$top=999"
+               "&$select=id,clientId,consentType,principalId,resourceId,scope,startTime,expiryTime")
+        page = 0
+        try:
+            while url:
+                page += 1
+                if _time.monotonic() - phase_start > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[consent_grants] TIME BUDGET %ds exceeded at delegated page=%d events=%d",
+                        MAX_PHASE_SECONDS, page, events_seen,
+                    )
+                    break
+                try:
+                    resp = requests.get(url, headers=headers, timeout=20)
+                except requests.RequestException as e:
+                    logger.warning("[consent_grants] delegated page=%d request err: %s", page, e)
+                    break
+                if resp.status_code == 403:
+                    logger.warning("[consent_grants] PERMISSION DENIED on oauth2PermissionGrants — Directory.Read.All required")
+                    return
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get('Retry-After', '5'))
+                    _time.sleep(min(retry_after, 30))
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("[consent_grants] delegated page=%d HTTP %s — %s",
+                                   page, resp.status_code, resp.text[:200])
+                    break
+
+                data = resp.json()
+                for evt in data.get('value', []):
+                    events_seen += 1
+                    client_object_id = (evt.get('clientId') or '').strip()
+                    resource_object_id = (evt.get('resourceId') or '').strip()
+                    scopes_str = (evt.get('scope') or '').strip()
+                    scopes = [s for s in scopes_str.split(' ') if s] if scopes_str else []
+                    if not client_object_id or not scopes:
+                        continue
+                    # Created datetime — startTime is the consent time
+                    created_at = None
+                    try:
+                        st = evt.get('startTime')
+                        if st:
+                            from datetime import datetime as _dt
+                            created_at = _dt.fromisoformat(st.replace('Z', '+00:00'))
+                    except Exception:
+                        pass
+                    consent_type = evt.get('consentType') or 'Principal'
+                    risk = compute_consent_risk(
+                        scopes=scopes,
+                        consent_type=consent_type,
+                        grant_type='delegated',
+                        created_datetime=created_at,
+                    )
+                    client_name = sp_name_by_object_id.get(client_object_id.lower())
+                    grant = {
+                        'grant_type': 'delegated',
+                        'client_app_id': client_object_id,  # delegated grants don't carry the appId; use obj id
+                        'client_object_id': client_object_id,
+                        'client_display_name': client_name,
+                        'resource_app_id': resource_object_id,
+                        'resource_object_id': resource_object_id,
+                        'resource_display_name': _name_for_resource(resource_object_id),
+                        'scopes': scopes,
+                        'consent_type': consent_type,
+                        'principal_id': evt.get('principalId'),
+                        'principal_display_name': None,
+                        'created_datetime': created_at,
+                        'expires_at': None,
+                        'last_activity_at': None,
+                        'risk_score': risk['risk_score'],
+                        'risk_level': risk['risk_level'],
+                        'high_risk_scopes': risk['high_risk_scopes'],
+                        'age_days': risk['age_days'],
+                        'evidence_source': 'graph_oauth2_grants',
+                    }
+                    try:
+                        self.db.upsert_consent_grant(self.db_org_id, run_id, grant)
+                        upserted += 1
+                    except Exception as e:
+                        logger.debug("[consent_grants] delegated upsert err: %s", e)
+                        try: self.db._rollback()
+                        except Exception: pass
+
+                url = data.get('@odata.nextLink')
+        except Exception as e:
+            logger.warning("[consent_grants] delegated fetch error after %d events: %s", events_seen, e)
+
+        # ── (2) Application grants — per-SP iterate ──
+        # We only query the SPs we already discovered (sp_name_by_object_id),
+        # not the full tenant SP list — keeps the API budget tight on large
+        # tenants where many SPs have zero grants.
+        app_grants_seen = 0
+        for sp_object_id in list(sp_name_by_object_id.keys()):
+            if _time.monotonic() - phase_start > MAX_PHASE_SECONDS:
+                logger.warning("[consent_grants] TIME BUDGET hit during appRoleAssignments iteration")
+                break
+            url = (f"https://graph.microsoft.com/v1.0/servicePrincipals/{quote(sp_object_id)}"
+                   f"/appRoleAssignments?$top=999")
+            try:
+                resp = requests.get(url, headers=headers, timeout=15)
+            except requests.RequestException:
+                continue
+            if resp.status_code == 403:
+                logger.warning("[consent_grants] 403 on appRoleAssignments — Application.Read.All required")
+                break
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            for evt in data.get('value', []):
+                app_grants_seen += 1
+                resource_id = (evt.get('resourceId') or '').strip()
+                resource_app_id = resource_id  # for application grants resourceId IS the SP object_id
+                # appRoleId is a UUID — we don't enumerate AppRole names here
+                # (would require a separate /servicePrincipals/{rid}?$select=appRoles
+                # call per resource). Surface the role UUID as a placeholder scope
+                # so the row is still useful; future enrichment can resolve names.
+                app_role_id = evt.get('appRoleId')
+                scopes = [f"appRole:{app_role_id}"] if app_role_id else ['appRole:unknown']
+                created_at = None
+                try:
+                    from datetime import datetime as _dt
+                    st = evt.get('createdDateTime')
+                    if st:
+                        created_at = _dt.fromisoformat(st.replace('Z', '+00:00'))
+                except Exception:
+                    pass
+                # Risk scoring with empty/placeholder scopes: still surfaces
+                # admin-consent + dormant signals even if scope tier is unknown
+                risk = compute_consent_risk(
+                    scopes=scopes,
+                    consent_type='AllPrincipals',
+                    grant_type='application',
+                    created_datetime=created_at,
+                )
+                grant = {
+                    'grant_type': 'application',
+                    'client_app_id': sp_object_id,
+                    'client_object_id': sp_object_id,
+                    'client_display_name': sp_name_by_object_id.get(sp_object_id),
+                    'resource_app_id': resource_app_id,
+                    'resource_object_id': resource_id,
+                    'resource_display_name': _name_for_resource(resource_id),
+                    'scopes': scopes,
+                    'consent_type': 'AllPrincipals',
+                    'principal_id': None,
+                    'principal_display_name': None,
+                    'created_datetime': created_at,
+                    'expires_at': None,
+                    'last_activity_at': None,
+                    'risk_score': risk['risk_score'],
+                    'risk_level': risk['risk_level'],
+                    'high_risk_scopes': risk['high_risk_scopes'],
+                    'age_days': risk['age_days'],
+                    'evidence_source': 'graph_app_role_assignments',
+                }
+                try:
+                    self.db.upsert_consent_grant(self.db_org_id, run_id, grant)
+                    upserted += 1
+                except Exception as e:
+                    logger.debug("[consent_grants] app upsert err: %s", e)
+                    try: self.db._rollback()
+                    except Exception: pass
+
+        elapsed = _time.monotonic() - phase_start
+        logger.info(
+            "[consent_grants] COMPLETE: delegated=%d appRole=%d upserted=%d %.1fs",
+            events_seen, app_grants_seen, upserted, elapsed,
+        )
 
     async def _fetch_last_observed_ips(self, identities: List[Dict]) -> None:
         """Fetch last observed IP from ARM Activity Log for all identities.
