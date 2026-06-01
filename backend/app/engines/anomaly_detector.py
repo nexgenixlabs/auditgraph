@@ -74,6 +74,12 @@ class AnomalyDetector:
             ('off_hours_pim', self._detect_off_hours_pim),
             ('excessive_pim_usage', self._detect_excessive_pim_usage),
             ('excessive_api_permission', self._detect_excessive_api_permissions),
+            # AG-AI (2026-06-01): runaway AI agent detection — fires when an
+            # AI agent's signal profile triggers any policy violation or
+            # attack scenario. Composes existing ai_risk + ai_governance +
+            # ai_attack_scenarios modules so it stays in sync with the
+            # AI Security pages.
+            ('ai_agent_runaway', self._detect_ai_agent_runaway),
         ]
 
         for name, detector in detectors:
@@ -85,7 +91,7 @@ class AnomalyDetector:
                 except Exception:
                     pass
                 if name in ('off_hours_pim', 'excessive_pim_usage',
-                            'excessive_api_permission'):
+                            'excessive_api_permission', 'ai_agent_runaway'):
                     results = detector(current_run_id, settings)
                 else:
                     results = detector(current_run_id, previous_run_id)
@@ -531,4 +537,155 @@ class AnomalyDetector:
                 },
             })
 
+        return anomalies
+
+    # ── AI Agent Runaway Detection ────────────────────────────────────────
+
+    def _detect_ai_agent_runaway(self, current_run_id: int,
+                                 settings: Optional[Dict] = None) -> List[Dict]:
+        """Detect AI agents whose risk profile indicates 'runaway' behavior.
+
+        AG-AI (2026-06-01): for each AI agent identity in the current run,
+        evaluate the existing ai_risk signals + ai_governance policies +
+        ai_attack_scenarios chains. Emit an anomaly when:
+
+          (a) ANY attack scenario activates (critical → high severity)
+              — e.g. AI_DATA_EXFILTRATION requires sensitive_data_access
+              + unrestricted_egress, both deterministic from RBAC + scope.
+
+          (b) A high/critical policy fires for an agent that's also
+              dormant or ownerless — the "stewardless + powerful" pattern
+              that produces the runaway-agent risk story.
+
+        Composes existing modules (no duplication): same signals/policies/
+        scenarios the AI Security pages already render. This detector
+        promotes them into the standard Anomalies feed so they appear
+        alongside permission-escalation, credential-surge, etc.
+        """
+        from app.constants.ai_risk import detect_signals, aggregate_access_levels, compute_signal_score
+        from app.constants.ai_governance import evaluate_agent_policies
+        from app.constants.ai_attack_scenarios import evaluate_scenarios
+
+        anomalies: List[Dict] = []
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                       i.agent_identity_type, i.owner_display_name,
+                       i.credential_count, i.credential_risk,
+                       i.last_sign_in, i.last_activity_date, i.risk_score
+                  FROM identities i
+                 WHERE i.discovery_run_id = %s
+                   AND i.agent_identity_type IS NOT NULL
+            """, (current_run_id,))
+            agents = cursor.fetchall()
+        except Exception:
+            cursor.close()
+            return anomalies
+
+        for row in agents:
+            db_id, identity_id, display_name, category, agent_type, \
+                owner_name, cred_count, cred_risk, last_signin, last_act, risk_score = row
+
+            # Fetch role assignments for signal computation
+            cursor.execute("""
+                SELECT role_name, scope, scope_type
+                  FROM role_assignments
+                 WHERE identity_db_id = %s
+            """, (db_id,))
+            role_rows = cursor.fetchall()
+            role_assignments = [
+                {'role_name': r[0], 'scope': r[1], 'scope_type': r[2]}
+                for r in role_rows
+            ]
+
+            agent_meta = {
+                'display_name': display_name,
+                'owner_display_name': owner_name,
+                'credential_count': cred_count or 0,
+                'credential_risk': cred_risk,
+                'last_sign_in': last_signin,
+                'last_activity_date': last_act,
+                'detected_platform': '',  # not yet wired
+            }
+            try:
+                access_levels = aggregate_access_levels(role_assignments)
+                fired = detect_signals(agent_meta, role_assignments, access_levels)
+            except Exception:
+                continue
+            if not fired:
+                continue
+
+            fired_keys = {s['key'] for s in fired}
+            try:
+                violations = evaluate_agent_policies(fired_keys)
+                scenarios = evaluate_scenarios(fired_keys)
+            except Exception:
+                continue
+
+            active_scenarios = [s for s in (scenarios or []) if s.get('active')] if scenarios else []
+            if not violations and not active_scenarios:
+                continue
+
+            # Compute composite CVSS score for the anomaly severity tier
+            try:
+                score_info = compute_signal_score(fired)
+                cvss = score_info.get('score') or 0
+            except Exception:
+                cvss = 0
+
+            if active_scenarios:
+                lead = active_scenarios[0]
+                lead_name = lead.get('title') or lead.get('name') or lead.get('key') or lead.get('id')
+                title = f"Runaway AI agent: {display_name} — {lead_name}"
+                severity = lead.get('severity') or 'critical'
+                desc = (
+                    f"AI agent crossed attack scenario \"{lead_name}\". "
+                    f"{lead.get('description', '')} "
+                    f"Composite signal score: {cvss}."
+                )
+            else:
+                top = max(violations, key=lambda v: {'critical': 3, 'high': 2, 'medium': 1, 'low': 0}.get((v.get('severity') or 'medium').lower(), 0))
+                top_name = top.get('name') or top.get('id') or top.get('policy_key')
+                title = f"AI agent policy violation: {display_name} — {top_name}"
+                severity = top.get('severity') or 'high'
+                desc = (
+                    f"AI agent violates governance policy \"{top_name}\". "
+                    f"{top.get('rationale') or top.get('description', '')} "
+                    f"Composite signal score: {cvss}."
+                )
+
+            anomalies.append({
+                'anomaly_type': 'ai_agent_runaway',
+                'severity': severity,
+                'identity_id': identity_id,
+                'identity_name': display_name,
+                'title': title,
+                'description': desc,
+                'details': {
+                    'agent_identity_type': agent_type,
+                    'identity_category': category,
+                    'cvss_score': cvss,
+                    'fired_signals': [
+                        {'key': s['key'], 'evidence': s.get('evidence', '')}
+                        for s in fired
+                    ],
+                    'policy_violations': [
+                        {'policy_id': v.get('id'), 'name': v.get('name'),
+                         'severity': v.get('severity'),
+                         'framework': v.get('framework', []),
+                         'remediation': v.get('remediation')}
+                        for v in (violations or [])
+                    ],
+                    'active_scenarios': [
+                        {'id': s.get('id'), 'name': s.get('name') or s.get('title'),
+                         'severity': s.get('severity'),
+                         'description': s.get('description')}
+                        for s in active_scenarios
+                    ],
+                    'owner_present': bool(owner_name),
+                },
+            })
+
+        cursor.close()
         return anomalies
