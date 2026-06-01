@@ -20483,8 +20483,30 @@ class Database:
                 matching_ids,
             ))
             count += cursor.rowcount
+        # Feature E (AG-E Step 1): propagate ARM last-used into the
+        # denormalized identity_subscription_access view. This is what
+        # the IdentityDetail Roles tab actually reads — until this ran,
+        # the column was always NULL despite role_assignments having
+        # the data. Single SQL join — much faster than per-row updates.
+        # PG UPDATE...FROM: the target alias `isa` is referenced via WHERE
+        # only; FROM tables can't JOIN onto the target table.
+        cursor.execute("""
+            UPDATE identity_subscription_access isa
+               SET last_activity = ra.last_used_at
+              FROM identities i, role_assignments ra
+             WHERE i.id = isa.identity_db_id
+               AND i.organization_id = %s
+               AND LOWER(ra.principal_id) = LOWER(i.object_id)
+               AND LOWER(ra.scope) = LOWER(isa.scope)
+               AND LOWER(ra.role_name) = LOWER(isa.rbac_role)
+               AND ra.last_used_at IS NOT NULL
+               AND (isa.last_activity IS NULL OR ra.last_used_at > isa.last_activity)
+        """, (org_id,))
+        propagated = cursor.rowcount
         self._commit()
         cursor.close()
+        if propagated:
+            _db_logger.info("AG-E propagated last_activity to %d identity_subscription_access rows for org=%s", propagated, org_id)
         return count
 
     # ── Connector Permission Tracking ─────────────────────────────────────

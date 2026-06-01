@@ -26067,6 +26067,11 @@ def get_identity_subscriptions(identity_id):
                 'scope': s['scope'],
                 'scope_type': s['scope_type'],
                 'risk_level': s['risk_level'],
+                # Feature E: per-role last-used. Sourced from ARM Activity
+                # Log via update_role_last_used_from_arm + propagation step.
+                # NULL when the role has never been exercised (or before
+                # ARM lookback completes on a fresh tenant).
+                'last_activity': s.get('last_activity'),
             })
         result = sorted(by_sub.values(), key=lambda x: x['subscription_name'] or '')
         return jsonify({'subscriptions': result, 'count': len(result)})
