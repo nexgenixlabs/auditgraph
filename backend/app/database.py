@@ -18584,6 +18584,285 @@ class Database:
         cursor.close()
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # AI Agent Governance — Exception Workflow
+    # ------------------------------------------------------------------
+
+    _ai_governance_exceptions_ensured = False
+
+    def _ensure_ai_governance_exceptions_table(self):
+        """Create ai_governance_exceptions table if it doesn't exist.
+
+        Tracks risk-accepted exceptions to AI agent governance policies.
+        Each row is one (agent identity, policy) approval with expiry.
+        organization_id scopes the row to a tenant — every query MUST filter
+        by org_id (no RLS policy installed here; isolation is via WHERE clause).
+        """
+        if Database._ai_governance_exceptions_ensured:
+            return
+        if not self._can_ddl():
+            Database._ai_governance_exceptions_ensured = True
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_governance_exceptions (
+                id SERIAL PRIMARY KEY,
+                exception_uuid UUID DEFAULT gen_random_uuid() UNIQUE,
+                organization_id INTEGER NOT NULL,
+                identity_db_id INTEGER NOT NULL REFERENCES identities(id),
+                identity_id TEXT NOT NULL,
+                policy_id VARCHAR(64) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                justification TEXT NOT NULL,
+                business_owner TEXT,
+                requested_by INTEGER REFERENCES users(id),
+                requested_at TIMESTAMPTZ DEFAULT NOW(),
+                approved_by INTEGER REFERENCES users(id),
+                approved_at TIMESTAMPTZ,
+                rejected_by INTEGER REFERENCES users(id),
+                rejected_at TIMESTAMPTZ,
+                rejection_reason TEXT,
+                expires_at TIMESTAMPTZ NOT NULL,
+                revoked_by INTEGER REFERENCES users(id),
+                revoked_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        for idx_stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_ai_excp_org_status ON ai_governance_exceptions (organization_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_excp_identity_policy ON ai_governance_exceptions (identity_id, policy_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_excp_expires ON ai_governance_exceptions (expires_at)",
+        ]:
+            cursor.execute("SAVEPOINT ai_excp_idx")
+            try:
+                cursor.execute(idx_stmt)
+                cursor.execute("RELEASE SAVEPOINT ai_excp_idx")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT ai_excp_idx")
+        self._commit()
+        cursor.close()
+        Database._ai_governance_exceptions_ensured = True
+
+    @staticmethod
+    def _ai_excp_serialize(row: dict) -> dict:
+        """Convert TIMESTAMPTZ/UUID values into JSON-friendly strings."""
+        if not row:
+            return row
+        out = dict(row)
+        for ts in (
+            'requested_at', 'approved_at', 'rejected_at',
+            'revoked_at', 'expires_at', 'created_at',
+        ):
+            v = out.get(ts)
+            if v is not None and hasattr(v, 'isoformat'):
+                out[ts] = v.isoformat()
+        if out.get('exception_uuid') is not None and not isinstance(out['exception_uuid'], str):
+            out['exception_uuid'] = str(out['exception_uuid'])
+        return out
+
+    def list_ai_governance_exceptions(self, org_id, status=None,
+                                      identity_id=None, policy_id=None):
+        """Return all exceptions for an org with optional filters.
+
+        Joins users for requested_by / approved_by / rejected_by / revoked_by
+        display names so the UI can render attribution without extra round-trips.
+        Most-recent-first ordering by created_at.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        sql = """
+            SELECT e.*,
+                   u_req.display_name AS requested_by_name,
+                   u_app.display_name AS approved_by_name,
+                   u_rej.display_name AS rejected_by_name,
+                   u_rev.display_name AS revoked_by_name,
+                   i.display_name     AS identity_display_name
+              FROM ai_governance_exceptions e
+              LEFT JOIN users u_req ON u_req.id = e.requested_by
+              LEFT JOIN users u_app ON u_app.id = e.approved_by
+              LEFT JOIN users u_rej ON u_rej.id = e.rejected_by
+              LEFT JOIN users u_rev ON u_rev.id = e.revoked_by
+              LEFT JOIN identities i ON i.id = e.identity_db_id
+             WHERE e.organization_id = %s
+        """
+        params = [org_id]
+        if status:
+            sql += " AND e.status = %s"
+            params.append(status)
+        if identity_id:
+            sql += " AND e.identity_id = %s"
+            params.append(identity_id)
+        if policy_id:
+            sql += " AND e.policy_id = %s"
+            params.append(policy_id)
+        sql += " ORDER BY e.created_at DESC"
+        cursor.execute(sql, params)
+        rows = [self._ai_excp_serialize(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_ai_governance_exception(self, exc_id, org_id):
+        """Return one exception (with attribution joins) or None.
+
+        Always tenant-scoped — never look up by id alone.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT e.*,
+                   u_req.display_name AS requested_by_name,
+                   u_app.display_name AS approved_by_name,
+                   u_rej.display_name AS rejected_by_name,
+                   u_rev.display_name AS revoked_by_name,
+                   i.display_name     AS identity_display_name
+              FROM ai_governance_exceptions e
+              LEFT JOIN users u_req ON u_req.id = e.requested_by
+              LEFT JOIN users u_app ON u_app.id = e.approved_by
+              LEFT JOIN users u_rej ON u_rej.id = e.rejected_by
+              LEFT JOIN users u_rev ON u_rev.id = e.revoked_by
+              LEFT JOIN identities i ON i.id = e.identity_db_id
+             WHERE e.id = %s AND e.organization_id = %s
+        """, (exc_id, org_id))
+        row = cursor.fetchone()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def create_ai_governance_exception(self, org_id, *, identity_db_id,
+                                       identity_id, policy_id, justification,
+                                       business_owner, requested_by, expires_at):
+        """Insert a new pending exception. Returns the created row."""
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO ai_governance_exceptions
+                (organization_id, identity_db_id, identity_id, policy_id,
+                 status, justification, business_owner, requested_by,
+                 requested_at, expires_at)
+            VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, NOW(), %s)
+            RETURNING *
+        """, (org_id, identity_db_id, identity_id, policy_id,
+              justification, business_owner, requested_by, expires_at))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def approve_ai_governance_exception(self, exc_id, org_id, *, approved_by):
+        """Approve a pending exception. Returns the updated row or None.
+
+        Only transitions rows currently in 'pending' state — protects against
+        double-approval and approve-after-rejected race conditions.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE ai_governance_exceptions
+               SET status      = 'approved',
+                   approved_by = %s,
+                   approved_at = NOW()
+             WHERE id = %s
+               AND organization_id = %s
+               AND status = 'pending'
+             RETURNING *
+        """, (approved_by, exc_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def reject_ai_governance_exception(self, exc_id, org_id, *, rejected_by, reason):
+        """Reject a pending exception. Returns the updated row or None."""
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE ai_governance_exceptions
+               SET status           = 'rejected',
+                   rejected_by      = %s,
+                   rejected_at      = NOW(),
+                   rejection_reason = %s
+             WHERE id = %s
+               AND organization_id = %s
+               AND status = 'pending'
+             RETURNING *
+        """, (rejected_by, reason, exc_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def revoke_ai_governance_exception(self, exc_id, org_id, *, revoked_by):
+        """Revoke an approved exception. Returns the updated row or None.
+
+        Only transitions rows currently in 'approved' state.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE ai_governance_exceptions
+               SET status     = 'revoked',
+                   revoked_by = %s,
+                   revoked_at = NOW()
+             WHERE id = %s
+               AND organization_id = %s
+               AND status = 'approved'
+             RETURNING *
+        """, (revoked_by, exc_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def list_active_ai_governance_exceptions(self, org_id):
+        """Return exceptions that are currently in effect for an org.
+
+        Active = status='approved' AND expires_at > NOW(). Used by the
+        governance + anomaly evaluators to suppress violations for agents
+        with an approved exception in force.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT e.id, e.identity_id, e.policy_id, e.expires_at,
+                   u_app.display_name AS approved_by_name
+              FROM ai_governance_exceptions e
+              LEFT JOIN users u_app ON u_app.id = e.approved_by
+             WHERE e.organization_id = %s
+               AND e.status = 'approved'
+               AND e.expires_at > NOW()
+        """, (org_id,))
+        rows = [self._ai_excp_serialize(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def expire_overdue_ai_governance_exceptions(self, org_id=None):
+        """Bulk-transition approved exceptions whose expires_at has passed.
+
+        If org_id is provided, scope the update to that tenant; otherwise sweep
+        ALL orgs (only safe under the admin connection). Returns the number of
+        rows transitioned.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor()
+        if org_id is not None:
+            cursor.execute("""
+                UPDATE ai_governance_exceptions
+                   SET status = 'expired'
+                 WHERE organization_id = %s
+                   AND status = 'approved'
+                   AND expires_at <= NOW()
+            """, (org_id,))
+        else:
+            cursor.execute("""
+                UPDATE ai_governance_exceptions
+                   SET status = 'expired'
+                 WHERE status = 'approved'
+                   AND expires_at <= NOW()
+            """)
+        count = cursor.rowcount
+        self._commit()
+        cursor.close()
+        return count or 0
+
     # ── Identity Governance V2: Decisions Table ──────────────────────
 
     _governance_decisions_ensured = False

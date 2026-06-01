@@ -4841,6 +4841,74 @@ def mark_overdue_invoices():
         db.close()
 
 
+def expire_ai_governance_exceptions_job():
+    """Transition any approved AI governance exception whose expires_at has
+    passed into 'expired' status.
+
+    Per-org loop so we can write an activity_log row per tenant (auditors care
+    when a risk-accepted exception lapses — the policy is back in violation as
+    of NOW). Runs daily at 02:30 UTC.
+    """
+    from psycopg2.extras import RealDictCursor
+    logger.info("Checking for AI governance exceptions past expiry...")
+    admin_db = Database()
+    try:
+        cursor = admin_db.conn.cursor(cursor_factory=RealDictCursor)
+        # Snapshot rows that will be expired so we can log per-org transitions
+        # BEFORE the bulk UPDATE flips them. Using the admin connection because
+        # we cross organizations.
+        cursor.execute("""
+            SELECT id, organization_id, identity_id, policy_id
+              FROM ai_governance_exceptions
+             WHERE status = 'approved'
+               AND expires_at <= NOW()
+        """)
+        about_to_expire = cursor.fetchall()
+        cursor.close()
+
+        if not about_to_expire:
+            logger.info("No AI governance exceptions to expire")
+            return
+
+        # Bulk update via the admin connection. Returns the number of rows
+        # transitioned for the scheduler log line.
+        total = admin_db.expire_overdue_ai_governance_exceptions(org_id=None)
+        logger.info(f"Expired {total} AI governance exception(s)")
+
+        # Log per-org so each tenant's activity log captures the transitions.
+        # Group rows by org_id and emit a single activity_log row per org.
+        by_org: Dict = {}
+        for r in about_to_expire:
+            by_org.setdefault(r['organization_id'], []).append(r)
+        for org_id, rows in by_org.items():
+            try:
+                tdb = Database(organization_id=org_id)
+                try:
+                    tdb.log_activity(
+                        'ai_governance_exception_expired',
+                        f"{len(rows)} exception(s) expired",
+                        {
+                            'count': len(rows),
+                            'exceptions': [
+                                {'exception_id': r['id'],
+                                 'identity_id': r['identity_id'],
+                                 'policy_id': r['policy_id']}
+                                for r in rows
+                            ],
+                        },
+                        user_id=None,
+                        organization_id=org_id,
+                    )
+                finally:
+                    tdb.close()
+            except Exception as e:
+                logger.warning(f"Failed to log expiry transitions for org {org_id}: {e}")
+    except Exception as e:
+        logger.error(f"AI governance exception expiry sweep failed: {e}")
+    finally:
+        admin_db.close()
+
+
 def run_monthly_billing_snapshots():
     """Phase 3B: Generate billing snapshots for all active organizations.
     Runs on the 1st of each month at 04:00 UTC, snapshotting the previous month."""
@@ -5044,6 +5112,19 @@ def start_scheduler():
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id='mark_overdue_invoices',
         name='Invoice Auto-Overdue (Daily, 02:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # AI governance exception expiry sweep — daily at 02:30 UTC.
+    # Picks up between the invoice sweep and the RLS audit so the daily
+    # 02:00-04:30 maintenance band stays cohesive.
+    scheduler.add_job(
+        func=expire_ai_governance_exceptions_job,
+        trigger=CronTrigger(hour=2, minute=30, timezone="UTC"),
+        id='expire_ai_governance_exceptions',
+        name='AI Governance Exception Expiry (Daily, 02:30 UTC)',
         replace_existing=True,
         max_instances=1,
         coalesce=True

@@ -40917,6 +40917,23 @@ def get_ai_governance():
     db = _db()
     try:
         cursor = db.conn.cursor()
+
+        # Fetch active exceptions ONCE so per-agent eval is just a dict lookup.
+        # Keyed by (identity_id, policy_id) → expires_at ISO string. Approved
+        # + not-yet-expired exceptions suppress matching violations.
+        try:
+            active_excs = db.list_active_ai_governance_exceptions(_org_id())
+        except Exception:
+            active_excs = []
+        active_map = {
+            (e['identity_id'], e['policy_id']): e.get('expires_at')
+            for e in active_excs
+        }
+        exception_approver = {
+            (e['identity_id'], e['policy_id']): e.get('approved_by_name')
+            for e in active_excs
+        }
+
         cursor.execute("""
             SELECT DISTINCT ON (i.identity_id)
                 i.id, i.identity_id, i.display_name, ac.detected_platform,
@@ -40933,10 +40950,15 @@ def get_ai_governance():
         agent_rows = cursor.fetchall()
         agent_db_ids = [r[0] for r in agent_rows]
 
-        # Per-policy accumulators
-        per_policy = {pid: {'violating': [], } for pid in POLICY_ORDER}
+        # Per-policy accumulators — split violating vs exception so the UI can
+        # show "X violating + Y under exception" inline.
+        per_policy = {
+            pid: {'violating': [], 'exception': []}
+            for pid in POLICY_ORDER
+        }
         agents_in_violation = set()
         total_violations = 0
+        exceptions_active = 0
 
         if agent_db_ids:
             cursor.execute("""
@@ -40962,11 +40984,21 @@ def get_ai_governance():
                 agent_violated = False
                 for pid in POLICY_ORDER:
                     if AI_GOVERNANCE_POLICIES[pid]['signal_key'] in fired:
-                        per_policy[pid]['violating'].append({
-                            'identity_id': identity_id, 'display_name': display_name or identity_id,
-                        })
-                        total_violations += 1
-                        agent_violated = True
+                        exc_key = (identity_id, pid)
+                        violator_entry = {
+                            'identity_id': identity_id,
+                            'display_name': display_name or identity_id,
+                        }
+                        if exc_key in active_map:
+                            # Approved exception in force — record under exception bucket
+                            violator_entry['exception_expires_at'] = active_map[exc_key]
+                            violator_entry['approved_by_name'] = exception_approver.get(exc_key)
+                            per_policy[pid]['exception'].append(violator_entry)
+                            exceptions_active += 1
+                        else:
+                            per_policy[pid]['violating'].append(violator_entry)
+                            total_violations += 1
+                            agent_violated = True
                 if agent_violated:
                     agents_in_violation.add(identity_id)
 
@@ -40977,7 +41009,11 @@ def get_ai_governance():
         for pid in POLICY_ORDER:
             pol = AI_GOVERNANCE_POLICIES[pid]
             violators = per_policy[pid]['violating']
+            exception_agents = per_policy[pid]['exception']
             v_count = len(violators)
+            exc_count = len(exception_agents)
+            # Compliance counts an exception-protected agent as compliant for
+            # this policy — it's been formally risk-accepted.
             compliant = max(0, total_agents - v_count)
             compliance_pct = round((compliant / total_agents) * 100, 1) if total_agents else 100.0
             policies_out.append({
@@ -40988,9 +41024,11 @@ def get_ai_governance():
                 'rationale':       pol['rationale'],
                 'remediation':     pol['remediation'],
                 'violating_count': v_count,
+                'exception_count': exc_count,
                 'compliant_count': compliant,
                 'compliance_pct':  compliance_pct,
                 'top_violators':   sorted(violators, key=lambda x: x['display_name'])[:10],
+                'exception_agents': sorted(exception_agents, key=lambda x: x['display_name'])[:10],
             })
         # Sort: most-violated + highest severity first
         policies_out.sort(key=lambda p: (-p['violating_count'], -severity_rank(p['severity'])))
@@ -41003,6 +41041,7 @@ def get_ai_governance():
                 'total_agents':            total_agents,
                 'agents_in_violation':     len(agents_in_violation),
                 'total_violations':        total_violations,
+                'exceptions_active':       exceptions_active,
                 'policy_count':            len(POLICY_ORDER),
                 'overall_compliance_pct':  overall,
             },
@@ -41012,6 +41051,223 @@ def get_ai_governance():
         try: db.conn.rollback()
         except Exception: pass
         logger.error("get_ai_governance failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AI Governance exception workflow — risk-accepted policy waivers
+# ============================================================
+
+# Valid policy IDs accepted on the create endpoint. Cross-checked against the
+# in-process catalog at request time so the catalog stays the single source of truth.
+_AI_EXCEPTION_MAX_EXPIRES_DAYS = 365
+_AI_EXCEPTION_DEFAULT_EXPIRES_DAYS = 90
+
+
+def list_ai_governance_exceptions_handler():
+    """GET /api/ai-security/governance/exceptions — list exceptions for the org.
+
+    Optional query params: status, policy_id, identity_id.
+    Available to any authed user; admin gates are enforced on write endpoints.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    db = _db()
+    try:
+        status = (request.args.get('status') or '').strip() or None
+        policy_id = (request.args.get('policy_id') or '').strip() or None
+        identity_id = (request.args.get('identity_id') or '').strip() or None
+        rows = db.list_ai_governance_exceptions(
+            _org_id(), status=status, policy_id=policy_id, identity_id=identity_id,
+        )
+        return jsonify({'exceptions': rows, 'total': len(rows)})
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("list_ai_governance_exceptions_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def create_ai_governance_exception_handler():
+    """POST /api/ai-security/governance/exceptions — request a new exception.
+
+    Body: identity_id (str), policy_id (str), justification (str ≥20 chars),
+          business_owner (str), expires_in_days (int 1-365, default 90).
+    Status starts as 'pending' — needs admin approval to take effect.
+    Resolves identity_db_id from identity_id + latest run.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    from app.constants.ai_governance import AI_GOVERNANCE_POLICIES
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    body = request.get_json(silent=True) or {}
+    identity_id = (body.get('identity_id') or '').strip()
+    policy_id = (body.get('policy_id') or '').strip()
+    justification = (body.get('justification') or '').strip()
+    business_owner = (body.get('business_owner') or '').strip()
+    try:
+        expires_in_days = int(body.get('expires_in_days', _AI_EXCEPTION_DEFAULT_EXPIRES_DAYS))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'expires_in_days must be an integer'}), 400
+
+    # Validate inputs cheaply before any DB work
+    if not identity_id:
+        return jsonify({'error': 'identity_id required'}), 400
+    if not policy_id or policy_id not in AI_GOVERNANCE_POLICIES:
+        return jsonify({'error': 'invalid policy_id'}), 400
+    if len(justification) < 20:
+        return jsonify({'error': 'justification must be at least 20 characters'}), 400
+    if not business_owner:
+        return jsonify({'error': 'business_owner required'}), 400
+    if expires_in_days < 1 or expires_in_days > _AI_EXCEPTION_MAX_EXPIRES_DAYS:
+        return jsonify({'error': f'expires_in_days must be between 1 and {_AI_EXCEPTION_MAX_EXPIRES_DAYS}'}), 400
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'organization context required'}), 400
+
+        # Resolve identity_db_id from the latest discovery run so the FK
+        # references a current row, not a deleted one. Idempotent — if the
+        # agent has been re-discovered, we pick its newest row.
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'no discovery data — run a scan first'}), 400
+        cursor.execute("""
+            SELECT id FROM identities
+             WHERE identity_id = %s
+               AND discovery_run_id = ANY(%s)
+             ORDER BY discovery_run_id DESC
+             LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'identity not found'}), 404
+        identity_db_id = row[0] if isinstance(row, (tuple, list)) else row.get('id')
+
+        # Compute expires_at using Postgres NOW() so the timestamp matches the
+        # comparison done at expiry sweep time.
+        from datetime import datetime, timedelta, timezone
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+
+        created = db.create_ai_governance_exception(
+            org_id,
+            identity_db_id=identity_db_id,
+            identity_id=identity_id,
+            policy_id=policy_id,
+            justification=justification,
+            business_owner=business_owner,
+            requested_by=_current_user_id(),
+            expires_at=expires_at,
+        )
+        if not created:
+            return jsonify({'error': 'failed to create exception'}), 500
+
+        _log(db, 'ai_governance_exception_requested',
+             f"Exception requested for {identity_id} · policy {policy_id}",
+             metadata={
+                 'exception_id': created.get('id'),
+                 'identity_id': identity_id,
+                 'policy_id': policy_id,
+                 'expires_in_days': expires_in_days,
+             })
+        return jsonify(created), 201
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("create_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def approve_ai_governance_exception_handler(exc_id):
+    """POST /api/ai-security/governance/exceptions/<exc_id>/approve — admin approval."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    db = _db()
+    try:
+        org_id = _org_id()
+        updated = db.approve_ai_governance_exception(
+            exc_id, org_id, approved_by=_current_user_id(),
+        )
+        if not updated:
+            return jsonify({'error': 'exception not found or not pending'}), 404
+        _log(db, 'ai_governance_exception_approved',
+             f"Approved exception {exc_id} for {updated.get('identity_id')} · policy {updated.get('policy_id')}",
+             metadata={'exception_id': exc_id})
+        return jsonify(updated)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("approve_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def reject_ai_governance_exception_handler(exc_id):
+    """POST /api/ai-security/governance/exceptions/<exc_id>/reject — admin denial."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    body = request.get_json(silent=True) or {}
+    reason = (body.get('reason') or '').strip()
+    if not reason:
+        return jsonify({'error': 'reason required'}), 400
+    db = _db()
+    try:
+        org_id = _org_id()
+        updated = db.reject_ai_governance_exception(
+            exc_id, org_id, rejected_by=_current_user_id(), reason=reason,
+        )
+        if not updated:
+            return jsonify({'error': 'exception not found or not pending'}), 404
+        _log(db, 'ai_governance_exception_rejected',
+             f"Rejected exception {exc_id} for {updated.get('identity_id')} · policy {updated.get('policy_id')}",
+             metadata={'exception_id': exc_id, 'reason': reason})
+        return jsonify(updated)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("reject_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def revoke_ai_governance_exception_handler(exc_id):
+    """POST /api/ai-security/governance/exceptions/<exc_id>/revoke — early revocation of approved exception."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    db = _db()
+    try:
+        org_id = _org_id()
+        updated = db.revoke_ai_governance_exception(
+            exc_id, org_id, revoked_by=_current_user_id(),
+        )
+        if not updated:
+            return jsonify({'error': 'exception not found or not approved'}), 404
+        _log(db, 'ai_governance_exception_revoked',
+             f"Revoked exception {exc_id} for {updated.get('identity_id')} · policy {updated.get('policy_id')}",
+             metadata={'exception_id': exc_id})
+        return jsonify(updated)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("revoke_ai_governance_exception_handler failed: %s", e, exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()

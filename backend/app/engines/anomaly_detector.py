@@ -583,6 +583,29 @@ class AnomalyDetector:
             cursor.close()
             return anomalies
 
+        # Pull the run's org_id so we can fetch active exceptions for this
+        # tenant only. Approved + non-expired exceptions suppress matching
+        # policy violations — anomalies must NOT fire for explicitly
+        # risk-accepted agents.
+        run_org_id = None
+        try:
+            cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (current_run_id,))
+            row = cursor.fetchone()
+            if row:
+                run_org_id = row[0] if isinstance(row, (tuple, list)) else row.get('organization_id')
+        except Exception:
+            run_org_id = None
+        active_map: Dict = {}
+        if run_org_id is not None:
+            try:
+                active_excs = self.db.list_active_ai_governance_exceptions(run_org_id)
+                active_map = {
+                    (e['identity_id'], e['policy_id']): e.get('expires_at')
+                    for e in active_excs
+                }
+            except Exception:
+                active_map = {}
+
         for row in agents:
             db_id, identity_id, display_name, category, agent_type, \
                 owner_name, cred_count, cred_risk, last_signin, last_act, risk_score = row
@@ -618,10 +641,20 @@ class AnomalyDetector:
 
             fired_keys = {s['key'] for s in fired}
             try:
-                violations = evaluate_agent_policies(fired_keys)
+                violations = evaluate_agent_policies(
+                    fired_keys,
+                    identity_id=identity_id,
+                    active_exceptions=active_map,
+                )
                 scenarios = evaluate_scenarios(fired_keys)
             except Exception:
                 continue
+
+            # Drop suppressed violations — an approved exception means this
+            # policy fire is intentionally risk-accepted; anomalies should not
+            # surface it. Scenarios still fire because they may chain on signals
+            # unrelated to the policy under exception.
+            violations = [v for v in (violations or []) if not v.get('suppressed_by_exception')]
 
             active_scenarios = [s for s in (scenarios or []) if s.get('active')] if scenarios else []
             if not violations and not active_scenarios:

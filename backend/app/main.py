@@ -498,6 +498,12 @@ from app.api.handlers import (
     get_ai_inventory_graph,  # AG-163: AI Inventory clustered graph
     get_ai_agent_actual_access,  # AG-167: Actual endpoint reach (AI Runtime Phase 1)
     get_ai_governance,  # AI Governance pillar — policy compliance
+    # AI Governance exception workflow — risk-accepted policy waivers
+    list_ai_governance_exceptions_handler,
+    create_ai_governance_exception_handler,
+    approve_ai_governance_exception_handler,
+    reject_ai_governance_exception_handler,
+    revoke_ai_governance_exception_handler,
     get_ai_risk_scenarios,  # AI Risk pillar — attack scenarios
     get_ai_runtime_fleet,  # AI Runtime pillar — fleet view
     admin_restart_workers,
@@ -1116,6 +1122,7 @@ def create_app():
             ('copilot', lambda: _db_init._ensure_copilot_tables()),
             ('ai_audit_log', lambda: _db_init._ensure_ai_audit_log_table()),
             ('sa_attestations', lambda: _db_init._ensure_sa_attestations_table()),
+            ('ai_governance_exceptions', lambda: _db_init._ensure_ai_governance_exceptions_table()),
             ('governance_decisions', lambda: _db_init._ensure_governance_decisions_table()),
             ('billing_events', lambda: _db_init._ensure_billing_events_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
@@ -2111,6 +2118,32 @@ def create_app():
     @app.get("/api/ai-security/governance")
     def ai_governance_route():
         return get_ai_governance()
+
+    # AI Governance exception workflow — risk-accepted policy waivers
+    @app.get("/api/ai-security/governance/exceptions")
+    @require_role('admin', 'security_admin', 'security_analyst', 'reader', 'compliance', 'owner')
+    def ai_security_exceptions_list():
+        return list_ai_governance_exceptions_handler()
+
+    @app.post("/api/ai-security/governance/exceptions")
+    @require_role('admin', 'security_admin', 'security_analyst', 'owner')
+    def ai_security_exceptions_create():
+        return create_ai_governance_exception_handler()
+
+    @app.post("/api/ai-security/governance/exceptions/<int:exc_id>/approve")
+    @require_role('admin', 'owner')
+    def ai_security_exceptions_approve(exc_id):
+        return approve_ai_governance_exception_handler(exc_id)
+
+    @app.post("/api/ai-security/governance/exceptions/<int:exc_id>/reject")
+    @require_role('admin', 'owner')
+    def ai_security_exceptions_reject(exc_id):
+        return reject_ai_governance_exception_handler(exc_id)
+
+    @app.post("/api/ai-security/governance/exceptions/<int:exc_id>/revoke")
+    @require_role('admin', 'security_admin', 'owner')
+    def ai_security_exceptions_revoke(exc_id):
+        return revoke_ai_governance_exception_handler(exc_id)
 
     # AI Risk pillar — attack scenarios across all AI agents
     @app.get("/api/ai-security/risk")

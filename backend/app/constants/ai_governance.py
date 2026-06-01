@@ -14,6 +14,8 @@ set-membership check — no extra Azure calls.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 
 # Each policy:
 #   id            stable key
@@ -110,19 +112,42 @@ POLICY_ORDER = [
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
 
-def evaluate_agent_policies(fired_signal_keys: set) -> list[dict]:
+def evaluate_agent_policies(
+    fired_signal_keys: set,
+    *,
+    identity_id: Optional[str] = None,
+    active_exceptions: Optional[dict] = None,
+) -> list[dict]:
     """Given the set of risk-signal keys that fired for an agent, return the
-    list of policy violations (one dict per failed policy)."""
+    list of policy violations (one dict per failed policy).
+
+    Args:
+        fired_signal_keys: signal keys that fired for this agent.
+        identity_id: the agent's identity_id (UUID/external ID), used to look up
+            active exceptions.
+        active_exceptions: dict keyed by (identity_id, policy_id) → expires_at
+            ISO string. When a violation matches an active exception, the
+            violation is RETAINED in the list but flagged as suppressed so the
+            UI can render the exception inline ("Exception · expires X").
+            Callers that need to act on violations (anomalies, alerts) should
+            filter out suppressed_by_exception=True themselves.
+    """
     violations = []
+    excs = active_exceptions or {}
     for pid in POLICY_ORDER:
         pol = AI_GOVERNANCE_POLICIES[pid]
         if pol["signal_key"] in fired_signal_keys:
+            exc_key = (identity_id, pid) if identity_id is not None else None
+            suppressed = bool(exc_key and exc_key in excs)
+            expires_at = excs.get(exc_key) if suppressed else None
             violations.append({
                 "policy_id":   pid,
                 "name":        pol["name"],
                 "severity":    pol["severity"],
                 "framework":   pol["framework"],
                 "remediation": pol["remediation"],
+                "suppressed_by_exception": suppressed,
+                "exception_expires_at":    expires_at,
             })
     return violations
 
