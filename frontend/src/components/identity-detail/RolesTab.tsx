@@ -17,6 +17,72 @@ interface RolesTabProps {
   groupedRoles: { azure: any[]; entra: any[] };
   intelByRole: Record<string, RoleIntelligence>;
   setActiveTab: (tab: TabId) => void;
+  // AG-118: when present, lets each role card show PIM eligibility /
+  // active status alongside the role name. Optional so the tab can
+  // render before the PIM API call completes.
+  pimData?: {
+    eligible_assignments?: Array<{ role_name: string; scope?: string; assignment_type?: string; end_datetime?: string | null }>;
+    activations?: Array<{ role_name: string; end_datetime?: string | null }>;
+  } | null;
+}
+
+// AG-118: build a quick lookup keyed by lowercased role_name so the
+// RoleCard render can answer "is this role PIM-eligible / currently
+// active?" in O(1). Active wins over Eligible when both are present.
+function buildPimStatusMap(
+  pimData?: RolesTabProps['pimData'],
+): Record<string, { status: 'active' | 'eligible'; until?: string | null }> {
+  const out: Record<string, { status: 'active' | 'eligible'; until?: string | null }> = {};
+  if (!pimData) return out;
+  for (const e of pimData.eligible_assignments || []) {
+    const k = (e.role_name || '').toLowerCase();
+    if (!k) continue;
+    if (!out[k]) out[k] = { status: 'eligible', until: e.end_datetime || null };
+  }
+  for (const a of pimData.activations || []) {
+    const k = (a.role_name || '').toLowerCase();
+    if (!k) continue;
+    out[k] = { status: 'active', until: a.end_datetime || null };
+  }
+  return out;
+}
+
+function PimBadge({ entry }: { entry?: { status: 'active' | 'eligible'; until?: string | null } }) {
+  if (!entry) {
+    // No PIM record for this role → permanent standing assignment.
+    return (
+      <span
+        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-gray-100 text-gray-600 border border-gray-200"
+        title="Permanent — no PIM eligibility; standing privileged assignment. Consider converting to PIM-eligible for just-in-time access."
+      >
+        Permanent
+      </span>
+    );
+  }
+  if (entry.status === 'active') {
+    let untilLabel = '';
+    if (entry.until) {
+      const d = new Date(entry.until);
+      const mins = Math.max(0, Math.round((d.getTime() - Date.now()) / 60000));
+      untilLabel = mins > 60 ? ` ${Math.round(mins / 60)}h` : ` ${mins}m`;
+    }
+    return (
+      <span
+        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-red-100 text-red-700 border border-red-200"
+        title="PIM-activated — currently elevated"
+      >
+        PIM Active{untilLabel}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-emerald-100 text-emerald-700 border border-emerald-200"
+      title="PIM-eligible — not currently activated; requires JIT elevation"
+    >
+      PIM Eligible
+    </span>
+  );
 }
 
 function usageNoteFor(roleName: string, roleUsage?: Record<string, RoleUsageEntry>): string {
@@ -94,16 +160,23 @@ Write-Host "Removed ${r.role_name} from ${identityName}" -ForegroundColor Green
 Write-Host "Run a new AuditGraph scan to verify."`;
 }
 
-function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScript, roleUsage }: {
+function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScript, roleUsage, pimStatus }: {
   r: any; intel?: RoleIntelligence; setActiveTab: (tab: TabId) => void;
   identityName: string; identityId: string; onShowScript: (script: string) => void;
   roleUsage?: Record<string, RoleUsageEntry>;
+  // AG-118: per-role PIM lookup. Card renders Permanent / PIM Eligible /
+  // PIM Active chip based on the matched entry; absent = Permanent.
+  pimStatus?: Record<string, { status: 'active' | 'eligible'; until?: string | null }>;
 }) {
+  const pimEntry = pimStatus
+    ? pimStatus[(r.role_name || r.display_name || '').toLowerCase()]
+    : undefined;
   return (
     <div className={`border rounded-xl p-4 ${r.is_removable ? 'border-orange-200 bg-orange-50/30' : ''}`}>
       <div className="flex items-center justify-between gap-2">
         <div className="font-semibold text-gray-900 text-sm">{r.role_name}</div>
         <div className="flex items-center gap-1">
+          {pimStatus && <PimBadge entry={pimEntry} />}
           {r.is_removable && (
             <button
               onClick={() => onShowScript(generateRoleScript(identityName, identityId, r, roleUsage))}
@@ -219,12 +292,16 @@ function RoleCard({ r, intel, setActiveTab, identityName, identityId, onShowScri
   );
 }
 
-export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveTab }: RolesTabProps) {
+export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveTab, pimData }: RolesTabProps) {
   const [copied, setCopied] = useState(false);
   const [roleScript, setRoleScript] = useState<string | null>(null);
   const [roleScriptCopied, setRoleScriptCopied] = useState(false);
 
   const roleUsage = (data as any)?.role_usage as Record<string, RoleUsageEntry> | undefined;
+  // AG-118: build pim_status lookup once per render. When pimData hasn't
+  // loaded yet (still fetching), pass undefined so the RoleCard skips the
+  // chip — beats showing Permanent before the data is in.
+  const pimStatus = useMemo(() => (pimData ? buildPimStatusMap(pimData) : undefined), [pimData]);
   const allRoles = useMemo(() => [...groupedRoles.azure, ...groupedRoles.entra], [groupedRoles]);
   const removableCount = useMemo(() => allRoles.filter((r: any) => r.is_removable).length, [allRoles]);
 
@@ -343,7 +420,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               {groupedRoles.azure.map((r: any, idx: number) => (
                 <RoleCard key={idx} r={r} intel={intelByRole[r.role_name]} setActiveTab={setActiveTab}
                   identityName={identity.display_name || ''} identityId={identity.identity_id || ''}
-                  onShowScript={setRoleScript} roleUsage={roleUsage} />
+                  onShowScript={setRoleScript} roleUsage={roleUsage} pimStatus={pimStatus} />
               ))}
             </div>
           )}
@@ -369,7 +446,7 @@ export function RolesTab({ identity, data, groupedRoles, intelByRole, setActiveT
               {groupedRoles.entra.map((r: any, idx: number) => (
                 <RoleCard key={idx} r={r} intel={intelByRole[r.role_name]} setActiveTab={setActiveTab}
                   identityName={identity.display_name || ''} identityId={identity.identity_id || ''}
-                  onShowScript={setRoleScript} roleUsage={roleUsage} />
+                  onShowScript={setRoleScript} roleUsage={roleUsage} pimStatus={pimStatus} />
               ))}
             </div>
           )}

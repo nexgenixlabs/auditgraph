@@ -576,7 +576,9 @@ export default function IdentityDetail() {
   // returned a successful response. The pimData truthy check is enough to
   // prevent duplicate fetches.
   useEffect(() => {
-    if (activeTab !== 'pim' || pimData || !id) return;
+    // AG-118: also fetch on Roles tab so per-role PIM badges render
+    // without forcing the user to visit Pim tab first.
+    if (!['pim', 'roles'].includes(activeTab) || pimData || !id) return;
     let cancelled = false;
     setPimLoading(true);
     fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/pim`))
@@ -1208,6 +1210,7 @@ export default function IdentityDetail() {
                   groupedRoles={groupedRoles}
                   intelByRole={intelByRole}
                   setActiveTab={setActiveTab}
+                  pimData={pimData}
                 />
               )}
 
