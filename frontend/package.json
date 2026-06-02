@@ -13,7 +13,7 @@
     "@types/node": "^16.18.126",
     "@types/react": "^19.2.9",
     "@types/react-dom": "^19.2.3",
-    "@xyflow/react": "^12.10.0",
+    "@xyflow/react": "^12.11.0",
     "axios": "^1.13.2",
     "dompurify": "^3.3.3",
     "express": "^5.2.1",
