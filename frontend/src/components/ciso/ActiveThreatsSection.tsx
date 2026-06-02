@@ -21,6 +21,8 @@ function anomalyInsight(vm: CISOViewModel): string {
       : top.type === 'ghost_identity' ? 'disabled but still privileged'
       : top.type === 'ai_agent_runaway' ? 'AI-agent runaway risk'
       : top.type === 'new_ai_agent_behavior' ? 'started behaving as an AI agent'
+      : top.type === 'new_oauth_grant' ? 'granted new OAuth consent'
+      : top.type === 'new_high_risk_identity' ? 'appeared high-risk on day one'
       : 'flagged';
     return `${top.identity_name} ${verb}`;
   }

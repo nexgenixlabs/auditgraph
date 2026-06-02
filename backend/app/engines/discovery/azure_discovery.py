@@ -5545,10 +5545,14 @@ class AzureDiscoveryEngine:
             bulk_entries = bulk_by_principal.get(sp_object_id, [])
             if bulk_entries:
                 already = {(p.get('permission_id'), p.get('resource_name')) for p in permissions}
+                _bulk_added = 0
+                _bulk_resolved_empty = 0
+                _bulk_dedup_skipped = 0
                 for be in bulk_entries:
                     rid = be['resource_id']
                     arid = be['app_role_id']
                     if (arid, be['resource_name']) in already:
+                        _bulk_dedup_skipped += 1
                         continue
                     perm_name, resource_name = await self._resolve_app_role_name(rid, arid)
                     if perm_name:
@@ -5562,6 +5566,21 @@ class AzureDiscoveryEngine:
                         })
                         app_perm_total += 1
                         already.add((arid, resource_name))
+                        _bulk_added += 1
+                    else:
+                        _bulk_resolved_empty += 1
+                # Debug log only for the connector SPN so we see exactly what
+                # happens to its 10 bulk-fetched entries.
+                if sp.get('is_discovery_connector'):
+                    logger.info(
+                        "[_discover_permissions] CONNECTOR BULK MERGE "
+                        "sp_obj=%s bulk_entries=%d added=%d dedup_skipped=%d resolved_empty=%d "
+                        "sample_resource=%s sample_app_role=%s",
+                        sp_object_id, len(bulk_entries), _bulk_added,
+                        _bulk_dedup_skipped, _bulk_resolved_empty,
+                        bulk_entries[0].get('resource_id') if bulk_entries else None,
+                        bulk_entries[0].get('app_role_id') if bulk_entries else None,
+                    )
 
             # ── Delegated permissions (oauth2PermissionGrants) ──
             try:

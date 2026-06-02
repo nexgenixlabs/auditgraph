@@ -93,6 +93,15 @@ class AnomalyDetector:
             # Services 6 days ago." Cross-run delta over the static
             # classifier output already written by services/agent_classifier.
             ('new_ai_agent_behavior', self._detect_new_ai_agent_behavior),
+            # AG-83 (2026-06-02): Continuous Trust Drift alerting.
+            # The Vercel post's pointed line: "Whether anyone is watching
+            # AFTER the approval happens." Surfaces new OAuth consent grants
+            # appearing between scans — the canonical signal that a tenant's
+            # trust surface has expanded since last review.
+            ('new_oauth_grant', self._detect_new_oauth_grant),
+            # AG-83: identity first appears in current run AND lands on
+            # critical/high — the day-zero risk pattern.
+            ('new_high_risk_identity', self._detect_new_high_risk_identity),
         ]
 
         for name, detector in detectors:
@@ -1033,3 +1042,214 @@ class AnomalyDetector:
 
         cursor.close()
         return anomalies
+
+    def _detect_new_oauth_grant(self, current_run_id: int,
+                                 previous_run_id: int) -> List[Dict]:
+        """Surface OAuth consent grants that appeared between scans.
+
+        AG-83 (2026-06-02): the Vercel/Context.ai watching-after-approval
+        signal. AG-81 inventories consent_grants; AG-85 scores them by
+        publisher trust; this detector fires when a grant appears that
+        wasn't visible in the prior scan. That's the "someone granted
+        consent and nobody told the CISO" pattern.
+
+        Strategy: consent_grants is UPSERTed across runs (same natural key
+        gets touched each scan with discovery_run_id = latest), so a
+        simple "rows with discovery_run_id = current AND NOT in previous"
+        query won't work. Instead use created_datetime > previous_run.
+        completed_at as the boundary — any grant created after the prior
+        scan completed is one that wasn't in last snapshot's view.
+
+        Severity inherits from the consent_grant's own risk_level (which
+        compute_consent_risk already computed using scope tier + admin
+        consent + publisher trust + dormancy). Low-risk grants skipped
+        (would be noise — most low-risk grants are openid / profile /
+        email and shouldn't page anyone).
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT started_at, completed_at, organization_id
+                  FROM discovery_runs WHERE id = %s
+            """, (previous_run_id,))
+            prev_row = cursor.fetchone()
+            if not prev_row:
+                cursor.close()
+                return anomalies
+            prev_started, prev_completed, prev_org_id = prev_row
+            boundary = prev_completed or prev_started
+            if not boundary:
+                cursor.close()
+                return anomalies
+
+            cursor.execute("""
+                SELECT id, client_app_id, client_display_name,
+                       resource_app_id, resource_display_name, grant_type,
+                       consent_type, scopes, high_risk_scopes,
+                       risk_level, risk_score, created_datetime,
+                       publisher_name, verified_publisher
+                  FROM consent_grants
+                 WHERE organization_id = %s
+                   AND created_datetime IS NOT NULL
+                   AND created_datetime > %s
+                 ORDER BY created_datetime DESC
+            """, (prev_org_id, boundary))
+            new_grants = cursor.fetchall()
+        except Exception as e:
+            logger.warning("[new_oauth_grant] fetch failed: %s", e)
+            cursor.close()
+            return anomalies
+
+        for row in new_grants:
+            (cg_id, client_app_id, client_name, resource_app_id,
+             resource_name, grant_type, consent_type, scopes, hrs,
+             risk_level, risk_score, created_dt, pub_name, verified) = row
+
+            sev = (risk_level or '').lower()
+            if sev not in ('critical', 'high', 'medium'):
+                continue  # noise floor
+
+            client_label = client_name or client_app_id or 'unknown app'
+            resource_label = resource_name or 'unknown API'
+            scope_summary = ', '.join((hrs or [])[:3]) if hrs else (
+                ', '.join((scopes or [])[:3]) if scopes else 'no scopes recorded'
+            )
+            is_admin = consent_type == 'AllPrincipals' or grant_type == 'application'
+            consent_phrase = 'admin-consented (tenant-wide)' if is_admin else 'user-consented'
+
+            pub_phrase = ''
+            if pub_name and (pub_name or '').lower().startswith('microsoft'):
+                pub_phrase = ' Microsoft-published.'
+            elif verified is True:
+                pub_phrase = f' Verified publisher: {pub_name or "attested"}.'
+            elif verified is False:
+                pub_phrase = ' UNVERIFIED publisher — consent-phishing signature.'
+
+            title = (
+                f"New OAuth grant: {client_label} → {resource_label} "
+                f"({consent_phrase})"
+            )
+            description = (
+                f"A consent grant created after the previous scan was "
+                f"discovered this run. Scopes: {scope_summary}. "
+                f"Risk: {risk_level} (score {risk_score}/100).{pub_phrase}"
+            )
+            anomalies.append({
+                'discovery_run_id': current_run_id,
+                'anomaly_type': 'new_oauth_grant',
+                'severity': sev,
+                'identity_id': client_app_id,
+                'identity_name': client_label,
+                'title': title,
+                'description': description,
+                'details': {
+                    'consent_grant_id': cg_id,
+                    'client_app_id': client_app_id,
+                    'resource_app_id': resource_app_id,
+                    'resource_display_name': resource_label,
+                    'grant_type': grant_type,
+                    'consent_type': consent_type,
+                    'scopes': scopes or [],
+                    'high_risk_scopes': hrs or [],
+                    'risk_score': risk_score,
+                    'publisher_name': pub_name,
+                    'verified_publisher': verified,
+                    'created_datetime': created_dt.isoformat() if hasattr(created_dt, 'isoformat') else (str(created_dt) if created_dt else None),
+                    'frameworks': {
+                        'nist': ['AC-4 (Information Flow)', 'AC-6 (Least Privilege)',
+                                 'AU-2 (Audit Events)'],
+                        'cis': ['CIS Azure 5.1.1'],
+                        'mitre': ['T1550.001 (Application Access Token)',
+                                  'T1078.004 (Cloud Accounts)'],
+                    },
+                },
+            })
+
+        cursor.close()
+        return anomalies
+
+    def _detect_new_high_risk_identity(self, current_run_id: int,
+                                        previous_run_id: int) -> List[Dict]:
+        """Identity first appears in this run AND lands on critical/high.
+
+        AG-83: the "day-zero over-permissioning" pattern. A new SPN /
+        managed identity / human appearing already-privileged is a
+        provisioning signal — either a misconfigured intake or a bypass
+        of the change-control process.
+
+        Skips Microsoft-system identities (Microsoft adds + removes these
+        regularly; the noise would drown the real signal).
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT identity_id FROM identities WHERE discovery_run_id = %s
+            """, (previous_run_id,))
+            prev_ids = {r[0] for r in cursor.fetchall()}
+
+            cursor.execute("""
+                SELECT identity_id, display_name, identity_category,
+                       risk_level, risk_score, created_datetime,
+                       agent_identity_type
+                  FROM identities
+                 WHERE discovery_run_id = %s
+                   AND COALESCE(is_microsoft_system, false) = false
+                   AND risk_level IN ('critical', 'high')
+            """, (current_run_id,))
+            curr_rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning("[new_high_risk_identity] fetch failed: %s", e)
+            cursor.close()
+            return anomalies
+
+        for row in curr_rows:
+            (identity_id, display_name, category, risk_level, risk_score,
+             created_dt, agent_type) = row
+            if identity_id in prev_ids:
+                continue
+            sev = (risk_level or '').lower()
+            label = display_name or identity_id or 'unknown identity'
+            agent_phrase = (f' Classified as {agent_type}.' if agent_type
+                            and agent_type != 'unknown' else '')
+            title = f"New {sev}-risk identity: {label}"
+            description = (
+                f"Identity first appeared in this scan and landed at "
+                f"{sev} risk (score {risk_score}/100). Category: "
+                f"{category or 'unknown'}.{agent_phrase} A new identity "
+                f"should not be critical or high on day one — verify the "
+                f"provisioning path."
+            )
+            anomalies.append({
+                'discovery_run_id': current_run_id,
+                'anomaly_type': 'new_high_risk_identity',
+                'severity': sev,
+                'identity_id': identity_id,
+                'identity_name': label,
+                'title': title,
+                'description': description,
+                'details': {
+                    'risk_level': risk_level,
+                    'risk_score': risk_score,
+                    'identity_category': category,
+                    'agent_identity_type': agent_type,
+                    'created_datetime': created_dt.isoformat() if hasattr(created_dt, 'isoformat') else (str(created_dt) if created_dt else None),
+                    'frameworks': {
+                        'nist': ['AC-2 (Account Management)',
+                                 'CM-3 (Configuration Change Control)'],
+                        'cis': ['CIS Azure 1.21'],
+                        'mitre': ['T1136.003 (Create Account: Cloud Account)'],
+                    },
+                },
+            })
+
+        cursor.close()
+        return anomalies
+

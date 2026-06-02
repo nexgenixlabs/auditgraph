@@ -52,6 +52,8 @@ export function AnomaliesTab({ anomalyData, anomalyLoading, data }: AnomaliesTab
             ai_agent_runaway: 'AI Agent — Runaway',
             new_ai_agent_behavior: 'AI Agent — New Behavior',
             excessive_api_permission: 'Excessive API Permission',
+            new_oauth_grant: 'New OAuth Grant',
+            new_high_risk_identity: 'New High-Risk Identity',
           };
           return (
             <div
