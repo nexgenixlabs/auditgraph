@@ -1820,13 +1820,17 @@ def seed_entra_groups(conn, org_id, run_id, identity_map):
             db_id = identity_map.get(member_iid)
             if not db_id:
                 continue
+            # AG-DEMOSEED: column is member_object_id (varchar), not
+            # member_identity_id (the seeder was passing the integer db_id
+            # into a varchar column with a non-existent name). For demo
+            # data the iteration key IS the directory identifier.
             member_type = "user" if "@" in member_iid else "servicePrincipal"
             cur.execute("""
                 INSERT INTO entra_group_memberships
-                    (group_db_id, member_identity_id, member_type,
+                    (group_db_id, member_object_id, member_type, member_display_name,
                      organization_id, discovery_run_id)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (grp_db_id, db_id, member_type, org_id, run_id))
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (grp_db_id, member_iid, member_type, member_iid, org_id, run_id))
             membership_count += 1
 
     conn.commit()
