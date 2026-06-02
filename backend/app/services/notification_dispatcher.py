@@ -62,8 +62,16 @@ class NotificationDispatcher:
             }]
         }
 
+        # AG-102: SSRF guard — block private/reserved IPs (Azure IMDS, RFC1918).
         try:
-            resp = requests.post(webhook_url, json=slack_payload, timeout=10)
+            from app.services.webhook_guard import assert_webhook_safe, WebhookGuardError
+            assert_webhook_safe(webhook_url)
+        except WebhookGuardError as ssrf_err:
+            logger.warning("[AG-102] Slack webhook blocked by SSRF guard: %s", ssrf_err)
+            return False
+
+        try:
+            resp = requests.post(webhook_url, json=slack_payload, timeout=10, allow_redirects=False)
             if resp.status_code == 200:
                 logger.info(f"Slack notification sent: {payload.get('title')}")
                 return True
@@ -121,8 +129,16 @@ class NotificationDispatcher:
             }]
         }
 
+        # AG-102: SSRF guard
         try:
-            resp = requests.post(webhook_url, json=card, timeout=10)
+            from app.services.webhook_guard import assert_webhook_safe, WebhookGuardError
+            assert_webhook_safe(webhook_url)
+        except WebhookGuardError as ssrf_err:
+            logger.warning("[AG-102] Teams webhook blocked by SSRF guard: %s", ssrf_err)
+            return False
+
+        try:
+            resp = requests.post(webhook_url, json=card, timeout=10, allow_redirects=False)
             if resp.status_code in (200, 202):
                 logger.info(f"Teams notification sent: {payload.get('title')}")
                 return True

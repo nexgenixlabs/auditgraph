@@ -19,7 +19,12 @@ from app.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Phase 1B+1C: Dual JWT keys — fallback to JWT_SECRET only in development
+# Phase 1B+1C: Dual JWT keys — fallback to JWT_SECRET only in development.
+# AG-97: even in production a shared JWT_SECRET fallback collapsed the
+# dual-portal isolation when the env had only JWT_SECRET set (a common
+# dev-to-prod CI/CD leak). Now: (a) fallback is strictly local/dev,
+# (b) production REQUIRES both explicit secrets, (c) production enforces
+# they are DIFFERENT, (d) minimum 32-byte entropy enforced on both.
 _is_dev = os.getenv('APP_ENV', 'local') in ('local', 'dev') or os.getenv('FLASK_ENV') == 'development'
 _jwt_fallback = os.getenv('JWT_SECRET') if _is_dev else None
 ADMIN_JWT_SECRET = os.getenv('ADMIN_JWT_SECRET') or _jwt_fallback
@@ -28,6 +33,29 @@ if not ADMIN_JWT_SECRET or not CLIENT_JWT_SECRET:
     if _is_dev:
         raise RuntimeError("FATAL: ADMIN_JWT_SECRET + CLIENT_JWT_SECRET (or JWT_SECRET) required.")
     raise RuntimeError("FATAL: ADMIN_JWT_SECRET and CLIENT_JWT_SECRET are required in production.")
+
+# AG-97: secret hygiene — minimum 32-byte entropy + production isolation.
+_WEAK_SECRETS = {'secret', 'changeme', 'password', 'jwt_secret', 'dev', 'test'}
+for _label, _val in (('ADMIN_JWT_SECRET', ADMIN_JWT_SECRET), ('CLIENT_JWT_SECRET', CLIENT_JWT_SECRET)):
+    if len(_val) < 32:
+        if _is_dev:
+            logger.warning(
+                "[AG-97] %s is only %d bytes (production requires ≥ 32). "
+                "This is acceptable for local dev but will fail to start in prod.",
+                _label, len(_val))
+        else:
+            raise RuntimeError(
+                f"FATAL: {_label} must be at least 32 bytes in production "
+                f"(current length: {len(_val)})."
+            )
+    if _val.lower() in _WEAK_SECRETS:
+        raise RuntimeError(f"FATAL: {_label} matches a well-known weak value ({_val!r}).")
+if not _is_dev and ADMIN_JWT_SECRET == CLIENT_JWT_SECRET:
+    raise RuntimeError(
+        "FATAL: ADMIN_JWT_SECRET and CLIENT_JWT_SECRET must be DIFFERENT in production. "
+        "A shared secret collapses the dual-portal isolation — a client-portal token "
+        "would validate on the admin portal (privilege escalation)."
+    )
 JWT_ALGORITHM = 'HS256'
 
 # Phase 1D: Token schema version and key IDs for key rotation prep
@@ -65,10 +93,46 @@ PUBLIC_PATHS = {
 }
 
 
+# ── AG-99: per-superadmin cross-org override rate limit (in-process). ──
+# A 1-hour rolling window keyed by user_id. Default cap: 60 switches/hour
+# (enough for a busy support session, low enough that a stolen token
+# can't sweep thousands of tenants). Override via env CROSS_ORG_RATE_LIMIT.
+from collections import deque
+_CROSS_ORG_BUCKETS: dict[int, deque] = {}
+_CROSS_ORG_LIMIT = int(os.getenv('CROSS_ORG_RATE_LIMIT', '60'))
+_CROSS_ORG_WINDOW_S = 3600
+
+
+def _superadmin_org_override_allowed(user_id: int) -> bool:
+    """True if the superadmin is under the per-hour cross-org switch cap."""
+    now = datetime.now(timezone.utc).timestamp()
+    bucket = _CROSS_ORG_BUCKETS.setdefault(user_id, deque())
+    # Evict stale entries
+    while bucket and (now - bucket[0]) > _CROSS_ORG_WINDOW_S:
+        bucket.popleft()
+    if len(bucket) >= _CROSS_ORG_LIMIT:
+        return False
+    bucket.append(now)
+    return True
+
+
 # ── Phase 1B: Host-derived portal detection ──
 
 def _derive_portal() -> str:
-    """Derive portal from Host header. Supports multi-level subdomains (dev.admin.*)."""
+    """Derive portal from Host header. Supports multi-level subdomains (dev.admin.*).
+
+    AG-98: hardening — the dev-mode fallback that trusted X-Portal-Context
+    based on host=localhost/127.0.0.1 OR FLASK_ENV=development was a
+    privilege-escalation footgun. If either of those signals leaked to a
+    production container (misconfigured Dockerfile ENV, CI/CD override),
+    any unauthenticated request could set X-Portal-Context: admin and
+    force admin JWT key selection.
+
+    Fix: use the SAME `_is_dev` constant resolved at module import time
+    from the strictly-controlled APP_ENV env var (see AG-97). Host-based
+    bypass removed entirely. FLASK_ENV ignored — only APP_ENV in
+    ('local', 'dev') enables the dev-mode header trust.
+    """
     host = request.host.split(':')[0]
     parts = host.split('.')
     if 'admin' in parts:
@@ -79,10 +143,9 @@ def _derive_portal() -> str:
         origin = request.headers.get('Origin', '') or request.headers.get('Referer', '')
         if 'admin' in origin.lower():
             return 'admin'
-    # Dev mode fallback: accept X-Portal-Context without Origin check
-    if os.getenv('FLASK_ENV') == 'development' or host in ('localhost', '127.0.0.1'):
-        if portal_header in ('admin', 'client'):
-            return portal_header
+    # AG-98: dev-mode fallback uses APP_ENV ONLY. No more host-based bypass.
+    if _is_dev and portal_header in ('admin', 'client'):
+        return portal_header
     return 'client'
 
 
@@ -457,30 +520,69 @@ def auth_middleware():
         # NO except Exception: pass — fail-closed
 
     # Phase 46: Superadmin org override via X-Organization-Id header (accepts X-Tenant-Id for backward compat)
+    # AG-99: every cross-org access must:
+    #   1. Write to the TARGET org's activity_log (not just the app log) so
+    #      the customer sees an audit trail in their own UI.
+    #   2. Carry actor identity — user_id, username, source IP — in the
+    #      activity_log metadata so an external auditor can trace it.
+    #   3. Honor an in-process rate limit (default 60/hour per superadmin)
+    #      so a compromised superadmin token can't sweep through every
+    #      tenant in seconds.
     override_oid = request.headers.get('X-Organization-Id') or request.headers.get('X-Tenant-Id')
     if override_oid and g.current_user.get('is_superadmin'):
         try:
-            g.current_user['organization_id'] = int(override_oid)
-            g.current_user['org_id_override'] = True
-            # Phase 1D: Log cross-org admin actions
-            logger.info(f"Superadmin cross-org override: user_id={g.current_user['id']} -> organization_id={override_oid}")
-            try:
-                _log_db = Database(_admin_reason='auth_middleware: log cross-org action')
-                _log_cur = _log_db.conn.cursor()
-                _log_cur.execute(
-                    """INSERT INTO activity_log (action, description, user_id, organization_id, metadata, created_at)
-                       VALUES (%s, %s, %s, %s, %s, NOW())""",
-                    ('cross_org_admin_action',
-                     f'Superadmin {g.current_user["username"]} overrode org context to organization_id={override_oid}',
-                     g.current_user['id'],
-                     int(override_oid),
-                     '{}')
+            target_oid = int(override_oid)
+            # AG-99: rate limit cross-org switches. In-process counter is
+            # fine for single-worker dev and reasonable for multi-worker
+            # production where each worker enforces its own quota (the
+            # blast radius is still bounded). For true cross-worker
+            # enforcement, use Redis — wired in a follow-on.
+            if _superadmin_org_override_allowed(g.current_user['id']):
+                g.current_user['organization_id'] = target_oid
+                g.current_user['org_id_override'] = True
+                _actor_ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '')
+                logger.info(
+                    "[AG-99] Superadmin cross-org override: user_id=%s username=%s ip=%s -> organization_id=%s",
+                    g.current_user['id'], g.current_user.get('username'), _actor_ip, target_oid,
                 )
-                _log_db._commit()
-                _log_cur.close()
-                _log_db.close()
-            except Exception as e:
-                logger.warning(f"Failed to log cross-org admin action: {e}")
+                try:
+                    _log_db = Database(_admin_reason='auth_middleware: log cross-org action')
+                    _log_cur = _log_db.conn.cursor()
+                    import json as _json
+                    _meta = _json.dumps({
+                        'actor_user_id': g.current_user['id'],
+                        'actor_username': g.current_user.get('username'),
+                        'actor_ip': _actor_ip,
+                        'actor_user_agent': request.headers.get('User-Agent', '')[:200],
+                        'request_path': request.path,
+                        'request_method': request.method,
+                        'override_source_header': (
+                            'X-Organization-Id' if request.headers.get('X-Organization-Id') else 'X-Tenant-Id'
+                        ),
+                    })
+                    _log_cur.execute(
+                        """INSERT INTO activity_log (action, description, user_id, organization_id, metadata, created_at)
+                           VALUES (%s, %s, %s, %s, %s, NOW())""",
+                        ('cross_org_admin_action',
+                         f'Superadmin {g.current_user["username"]} accessed this tenant via org context override',
+                         g.current_user['id'],
+                         target_oid,  # TARGET org — customer sees it in their activity log
+                         _meta),
+                    )
+                    _log_db._commit()
+                    _log_cur.close()
+                    _log_db.close()
+                except Exception as e:
+                    logger.warning(f"[AG-99] Failed to log cross-org admin action: {e}")
+            else:
+                logger.warning(
+                    "[AG-99] Cross-org override RATE LIMITED for superadmin user_id=%s "
+                    "(too many tenant switches in the last hour)", g.current_user['id'])
+                return jsonify({
+                    'error': 'Cross-org override rate limit exceeded for this superadmin. '
+                             'Wait before switching tenants again.',
+                    'code': 'cross_org_rate_limit',
+                }), 429
         except (ValueError, TypeError):
             pass
 

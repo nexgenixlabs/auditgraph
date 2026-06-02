@@ -86,12 +86,29 @@ class WebhookService:
         if webhook.get('headers') and isinstance(webhook['headers'], dict):
             headers.update(webhook['headers'])
 
+        # AG-102: SSRF guard — re-resolve and re-check the webhook URL
+        # right before sending. Catches DNS rebinding attacks against URLs
+        # registered before the guard existed, and IP-literal payloads.
+        try:
+            from app.services.webhook_guard import assert_webhook_safe, WebhookGuardError
+            assert_webhook_safe(webhook['url'])
+        except WebhookGuardError as ssrf_err:
+            db.update_webhook_delivery(
+                delivery_id, 'failed', None, f'SSRF guard rejected URL: {ssrf_err}'[:500]
+            )
+            logger.warning(
+                "[AG-102] Webhook #%s blocked by SSRF guard: %s",
+                webhook['id'], ssrf_err,
+            )
+            return
+
         try:
             resp = requests.post(
                 webhook['url'],
                 data=body,
                 headers=headers,
                 timeout=10,
+                allow_redirects=False,  # AG-102: don't chase redirects into private IPs
             )
             status = 'delivered' if resp.ok else 'failed'
             db.update_webhook_delivery(
