@@ -52,13 +52,20 @@ def main():
     cname, image, env = meta["n"], meta["i"], (meta.get("e") or [])
     print(f"  job image: {image}")
 
-    # Pipe the SQL via a heredoc into psql; ON_ERROR_STOP so failures surface.
+    # Base64-encode the SQL so NOTHING inside it is touched by the shell.
+    # Earlier version used a single-quoted heredoc, but Azure's REST/JSON
+    # pipeline turned `DO $$ BEGIN` into `DO $ BEGIN` (the shell still
+    # expanded `$$` to PID even though the heredoc was meant to be quoted).
+    # Base64 sidesteps it: we decode to a temp file, then `psql -f`.
+    import base64 as _b64
+    encoded = _b64.b64encode(sql.encode('utf-8')).decode('ascii')
     bash = (
         'set -e; '
         'export DB_PORT="${DB_PORT:-5432}" DB_SSLMODE="${DB_SSLMODE:-require}"; '
+        f'echo {encoded} | base64 -d > /tmp/agmig.sql; '
         'PGPASSWORD="$DB_ADMIN_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" '
         '-U "$DB_ADMIN_USER" -d "$DB_NAME" --set ON_ERROR_STOP=1 --no-psqlrc '
-        "<<'AGMIGEOF'\n" + sql + "\nAGMIGEOF\n"
+        '-f /tmp/agmig.sql; '
         'echo MIGRATION_APPLIED_OK'
     )
 
