@@ -71,7 +71,7 @@ export function ConnectedAppRiskCard() {
   // Shell — same container classes as the other intel-row peer cards so the
   // five tiles read as one visual system.
   const Shell = ({ children }: { children: React.ReactNode }) => (
-    <DN navigateTo="/identities?identity_type=service_principal">
+    <DN navigateTo="/connected-apps">
       <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition cursor-pointer">
         <span className="text-xs text-gray-400 uppercase tracking-wider font-medium mb-1">
           Connected App Risk

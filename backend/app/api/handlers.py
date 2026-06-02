@@ -36591,6 +36591,25 @@ def create_invitation_handler():
 
     db = Database(organization_id=org_id)
     try:
+        # AG-USERMGMT: enforce per-org allowed_email_domains whitelist if the
+        # org has configured one. Stored as a list under organizations.settings
+        # JSONB. Empty list / unset = no restriction (open invitations).
+        # Superadmins bypass this check (cross-org admin).
+        if not g.current_user.get('is_superadmin'):
+            org_settings = db.get_organization_settings(org_id) or {}
+            allowed = org_settings.get('allowed_email_domains') or []
+            allowed = [str(d).strip().lower().lstrip('@') for d in allowed if d]
+            if allowed:
+                email_domain = email.rsplit('@', 1)[-1].lower()
+                if email_domain not in allowed:
+                    return jsonify({
+                        'error': (
+                            f'Email domain "{email_domain}" is not allowed for this organization. '
+                            f'Permitted: {", ".join(allowed)}'
+                        ),
+                        'code': 'email_domain_not_allowed',
+                    }), 400
+
         # Check if user already exists
         existing = db.get_user_by_username(email)
         if existing:

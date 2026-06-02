@@ -241,6 +241,33 @@ export default function AIAgents() {
       <td className="px-2 py-2">
         <span className="text-xs text-slate-300">{formatPlatform(row.detected_platform)}</span>
       </td>
+      <td className="px-2 py-2">
+        {/* AG-AI-RBAC: show RBAC role chips alongside model provider so the
+            row tells both stories — "this is an Azure OpenAI agent AND it
+            holds Contributor on prod-rg." */}
+        {(row.role_names && row.role_names.length > 0) ? (
+          <div className="flex flex-wrap gap-1 max-w-[160px]">
+            {row.role_names.slice(0, 2).map(rn => (
+              <span
+                key={rn}
+                className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-800/70 text-slate-300 border border-slate-700 truncate max-w-[140px]"
+                title={rn}
+              >
+                {rn}
+              </span>
+            ))}
+            {row.role_names.length > 2 && (
+              <span className="text-[10px] text-slate-500" title={row.role_names.slice(2).join(', ')}>
+                +{row.role_names.length - 2}
+              </span>
+            )}
+          </div>
+        ) : row.role_count > 0 ? (
+          <span className="text-[10px] text-slate-500">{row.role_count} role{row.role_count !== 1 ? 's' : ''}</span>
+        ) : (
+          <span className="text-[10px] text-slate-600">—</span>
+        )}
+      </td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.model_access} /></td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.key_vault_access} /></td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.data_access} /></td>
@@ -294,6 +321,7 @@ export default function AIAgents() {
           Identity <SortIcon col="display_name" />
         </th>
         <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-28">AI Service</th>
+        <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-40">RBAC Roles</th>
         <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-20" onClick={() => handleSort('model_access')}>
           Model <SortIcon col="model_access" />
         </th>

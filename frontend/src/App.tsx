@@ -24,6 +24,8 @@ import {
 import Dashboard from './pages/Dashboard';
 import Identities from './pages/Identities';
 import IdentityDetail from './pages/IdentityDetail';
+import LifecycleJml from './pages/LifecycleJml';
+import ConnectedApps from './pages/ConnectedApps';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
@@ -340,6 +342,9 @@ function AppContent() {
                   <Route path="/identities" element={<Navigate to="/identity-explorer/all" replace />} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
+                  {/* AG-173 / AG-85 narrative pages — CISO tile drill-downs */}
+                  <Route path="/lifecycle" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><LifecycleJml /></ErrorBoundary>} />
+                  <Route path="/connected-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ConnectedApps /></ErrorBoundary>} />
                   {/* AG-161: 5-pillar AI Security IA. Legacy routes below redirect into new pillars. */}
                   <Route path="/ai-inventory" element={<Navigate to="/ai-inventory/graph" replace />} />
                   <Route path="/ai-inventory/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIInventory /></ErrorBoundary>} />

@@ -17745,6 +17745,20 @@ class Database:
             result['discount_pct'] = float(result['discount_pct'])
         return result
 
+    def get_organization_settings(self, organization_id) -> dict:
+        """Return the organizations.settings JSONB blob (always a dict).
+
+        Used by handlers that need to read org-level configuration such as
+        allowed_email_domains (invitation whitelist), default views, etc.
+        Returns {} when the org doesn't exist or settings is null — callers
+        should treat both as "no preference set."
+        """
+        org = self.get_organization_by_id(organization_id)
+        if not org:
+            return {}
+        s = org.get('settings')
+        return s if isinstance(s, dict) else {}
+
     def get_organization_config(self, organization_id):
         """Get cloud provider and add-on configuration for an organization."""
         org = self.get_organization_by_id(organization_id)

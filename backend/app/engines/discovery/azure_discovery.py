@@ -5372,7 +5372,12 @@ class AzureDiscoveryEngine:
         Returns:
             Dictionary mapping identity_id to list of permissions
         """
-        # AG-74 Phase 1: Skip Microsoft system SPNs — permissions are Microsoft-managed
+        # AG-74 Phase 1: Skip Microsoft system SPNs — permissions are Microsoft-managed.
+        # AG-PERMFIX: keep a reference to the FULL list before filtering so the bulk
+        # appRoleAssignedTo pre-fetch can still find resource SPs like Microsoft Graph
+        # (which IS flagged is_microsoft_system but is exactly the resource we need
+        # to query for everyone's Application permissions).
+        all_service_principals = service_principals
         customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
         logger.info("[_discover_permissions] processing %s/%s customer SPNs (skipping %s MS system)",
                     len(customer_sps), len(service_principals),
@@ -5385,6 +5390,87 @@ class AzureDiscoveryEngine:
         error_count = 0
 
         logger.info("Discovering API Permissions...")
+
+        # ── AG-PERMFIX (2026-06-01): bulk-fetch Application permissions via
+        # appRoleAssignedTo on well-known resource SPs. The per-SP
+        # `appRoleAssignments` call below returns 0 for some SPNs even when
+        # the portal shows granted permissions (observed on the discovery
+        # connector itself in the Lantern tenant — the call succeeds with
+        # HTTP 200 but `value` is empty). Pulling from the resource side
+        # is the canonical source and catches everything in O(R) bulk
+        # calls where R = number of well-known resource SPs (≤6) instead
+        # of O(N) per-SP calls.
+        bulk_by_principal: Dict[str, List[Dict[str, str]]] = {}
+        try:
+            # Build a map of well-known resource SP object_ids by appId from
+            # already-discovered identities.
+            well_known_app_ids = {
+                '00000003-0000-0000-c000-000000000000': 'Microsoft Graph',
+                '00000002-0000-0000-c000-000000000000': 'Azure AD Graph',
+                '00000003-0000-0ff1-ce00-000000000000': 'Office 365 SharePoint Online',
+                '00000002-0000-0ff1-ce00-000000000000': 'Office 365 Exchange Online',
+                'fc780465-2017-40d4-a0c5-307022471b92': 'Windows Azure Active Directory',
+                '797f4846-ba00-4fd7-ba43-dac1f8f63013': 'Windows Azure Service Management API',
+            }
+            resource_sps: List[Dict[str, str]] = []
+            for sp_iter in all_service_principals:
+                app_id_lo = (sp_iter.get('app_id') or '').lower()
+                if app_id_lo in well_known_app_ids and sp_iter.get('object_id'):
+                    resource_sps.append({
+                        'object_id': sp_iter['object_id'],
+                        'app_id': sp_iter['app_id'],
+                        'display_name': well_known_app_ids[app_id_lo],
+                    })
+            logger.info("[_discover_permissions] bulk-fetching appRoleAssignedTo from %d resource SPs",
+                        len(resource_sps))
+            for rsp in resource_sps:
+                rsp_obj_id = rsp['object_id']
+                try:
+                    page = await asyncio.wait_for(
+                        self.graph_client.service_principals.by_service_principal_id(
+                            rsp_obj_id
+                        ).app_role_assigned_to.get(),
+                        timeout=GRAPH_SDK_TIMEOUT,
+                    )
+                    n_paged = 0
+                    while page and getattr(page, 'value', None):
+                        for ar in page.value:
+                            principal_id = str(ar.principal_id) if ar.principal_id else ''
+                            if not principal_id:
+                                continue
+                            app_role_id = str(ar.app_role_id) if ar.app_role_id else ''
+                            principal_type = str(ar.principal_type) if ar.principal_type else ''
+                            # Daemon-app perms live on principal_type == ServicePrincipal;
+                            # human/group assignments use User/Group and aren't
+                            # Application permissions in the consent sense.
+                            if principal_type and principal_type != 'ServicePrincipal':
+                                continue
+                            bulk_by_principal.setdefault(principal_id, []).append({
+                                'resource_id': rsp_obj_id,
+                                'resource_name': rsp['display_name'],
+                                'app_role_id': app_role_id,
+                            })
+                            n_paged += 1
+                        # Paginate if odata.nextLink present (Kiota exposes
+                        # this differently across versions; bail when missing).
+                        next_link = getattr(page, 'odata_next_link', None)
+                        if not next_link:
+                            break
+                        # SDK doesn't expose a clean "next page" call here;
+                        # we'd need the request adapter to follow it. Skipping
+                        # pagination for now keeps the call simple; large
+                        # tenants may miss long tails (logged for visibility).
+                        logger.warning("[_discover_permissions] %s appRoleAssignedTo has more "
+                                       "pages; bulk path skipping continuation", rsp['display_name'])
+                        break
+                    logger.info("[_discover_permissions] bulk %s: %d assignments collected",
+                                rsp['display_name'], n_paged)
+                except Exception as bulk_err:
+                    logger.warning("[_discover_permissions] bulk %s appRoleAssignedTo failed: %s",
+                                   rsp['display_name'], bulk_err)
+        except Exception as outer:
+            logger.warning("[_discover_permissions] bulk pre-fetch outer error: %s", outer)
+        # ── end bulk pre-fetch ──
 
         for sp in service_principals:
             sp_object_id = sp.get('object_id')
@@ -5420,6 +5506,32 @@ class AzureDiscoveryEngine:
                 logger.warning("appRoleAssignments failed for %s (%s): %s",
                                sp.get('display_name', '?'), sp_object_id, e)
                 error_count += 1
+
+            # ── AG-PERMFIX: merge bulk-fetched Application permissions for this
+            # SP (covers SPs whose per-SP appRoleAssignments call returns empty —
+            # observed on the discovery connector itself). Dedup by (resource_id,
+            # app_role_id) so we don't double-count if both paths returned the
+            # same assignment.
+            bulk_entries = bulk_by_principal.get(sp_object_id, [])
+            if bulk_entries:
+                already = {(p.get('permission_id'), p.get('resource_name')) for p in permissions}
+                for be in bulk_entries:
+                    rid = be['resource_id']
+                    arid = be['app_role_id']
+                    if (arid, be['resource_name']) in already:
+                        continue
+                    perm_name, resource_name = await self._resolve_app_role_name(rid, arid)
+                    if perm_name:
+                        permissions.append({
+                            'name': perm_name,
+                            'description': f"{resource_name}: {perm_name}",
+                            'resource_name': resource_name,
+                            'permission_type': 'Application',
+                            'permission_id': arid,
+                            'consent_type': 'Admin',
+                        })
+                        app_perm_total += 1
+                        already.add((arid, resource_name))
 
             # ── Delegated permissions (oauth2PermissionGrants) ──
             try:
