@@ -29,6 +29,11 @@ interface ConnectedAppRiskSummary {
   avg_age_days: number;
   over_180_days: number;
   unique_apps: number;
+  // AG-85 publisher trust
+  verified_publisher_grants?: number;
+  unverified_publisher_grants?: number;
+  unverified_high_risk_grants?: number;
+  publisher_unknown_grants?: number;
 }
 
 interface TopRiskyApp {
@@ -107,11 +112,13 @@ export function ConnectedAppRiskCard() {
     );
   }
 
-  // Pick primary risk by priority: critical scopes → admin-consented → dormant
+  // Pick primary risk by priority: critical scopes → unverified-publisher-
+  // high-risk (consent phishing signature, AG-85) → admin-consented → dormant
   const rows = [
-    { label: 'Grants with critical scopes', count: s.critical, key: 'critical' },
-    { label: 'Admin-consented grants', count: s.admin_consents, key: 'admin' },
-    { label: 'Dormant — >180 days old', count: s.over_180_days, key: 'dormant' },
+    { label: 'Grants with critical scopes',          count: s.critical, key: 'critical' },
+    { label: 'Unverified publisher + high-risk scope', count: s.unverified_high_risk_grants || 0, key: 'unverified' },
+    { label: 'Admin-consented grants',                count: s.admin_consents, key: 'admin' },
+    { label: 'Dormant — >180 days old',               count: s.over_180_days, key: 'dormant' },
   ].filter(r => r.count > 0).sort((a, b) => b.count - a.count);
 
   if (rows.length === 0) {

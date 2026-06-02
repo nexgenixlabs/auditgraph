@@ -123,6 +123,8 @@ def compute_consent_risk(
     grant_type: Optional[str] = None,
     created_datetime: Optional[datetime] = None,
     last_activity_at: Optional[datetime] = None,
+    verified_publisher: Optional[bool] = None,
+    publisher_name: Optional[str] = None,
 ) -> dict:
     """Compute CVSS-aligned risk for a single consent grant.
 
@@ -132,6 +134,11 @@ def compute_consent_risk(
       grant_type: 'application' (always admin) or 'delegated' (user/admin)
       created_datetime: when the grant was created
       last_activity_at: most recent observed sign-in for this client app
+      verified_publisher: bool from MS Graph
+        verifiedPublisher.isPublisherVerified. None = not enriched yet.
+        Unverified + high-risk scope is the consent-phishing signature.
+      publisher_name: publisher display name (used to recognize Microsoft
+        and avoid double-counting trust).
 
     Returns: {
       'risk_score': int (0-10 × 10 for sort granularity),
@@ -140,6 +147,7 @@ def compute_consent_risk(
       'high_risk_scopes': [scope, ...]  (subset that's high/critical),
       'age_days': int | None,
       'dormant': bool  (no activity in 90+ days),
+      'publisher_trust': 'microsoft' | 'verified' | 'unverified' | 'unknown',
       'reasons': [str, ...]  (human-readable evidence lines),
     }
     """
@@ -215,6 +223,34 @@ def compute_consent_risk(
         base += 0.4
         reasons.append("Dormant — no observed activity in 90+ days, high-risk scope still active")
 
+    # Publisher trust modifier — AG-85. MS Graph exposes
+    # verifiedPublisher.isPublisherVerified on every Application/SP.
+    # Microsoft-published apps are explicitly trusted (publisher_name
+    # starts with "Microsoft"). Verified third parties get a small
+    # trust bump. Unverified apps with high-risk scope match the
+    # consent-phishing signature so we surcharge them.
+    pname = (publisher_name or '').strip()
+    pname_l = pname.lower()
+    if pname and (pname_l == 'microsoft' or pname_l.startswith('microsoft ')):
+        publisher_trust = 'microsoft'
+        # Microsoft first-party — known and trusted, no modifier.
+    elif verified_publisher is True:
+        publisher_trust = 'verified'
+        base -= 0.3
+        if max_tier in ('critical', 'high'):
+            reasons.append(f"Verified publisher: {pname or 'attested via MS Graph'}")
+    elif verified_publisher is False:
+        publisher_trust = 'unverified'
+        if max_tier in ('critical', 'high'):
+            base += 0.5
+            reasons.append(
+                "Unverified publisher with high-risk scope — consent-phishing signature"
+            )
+        else:
+            base += 0.2
+    else:
+        publisher_trust = 'unknown'  # enrichment not yet run
+
     cvss = max(0.0, min(10.0, round(base, 1)))
 
     # Severity label follows CVSS 3.1 bands so the column stays auditor-defensible.
@@ -234,5 +270,6 @@ def compute_consent_risk(
         'high_risk_scopes': high_risk_scopes,
         'age_days': age_days,
         'dormant': dormant,
+        'publisher_trust': publisher_trust,
         'reasons': reasons,
     }

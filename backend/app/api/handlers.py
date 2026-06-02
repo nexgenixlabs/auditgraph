@@ -16271,6 +16271,8 @@ def get_dashboard_connected_app_risk():
         return jsonify({
             'summary': {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0,
                         'admin_consents': 0, 'user_consents': 0,
+                        'verified_publisher_grants': 0, 'unverified_publisher_grants': 0,
+                        'unverified_high_risk_grants': 0, 'publisher_unknown_grants': 0,
                         'application_grants': 0, 'delegated_grants': 0,
                         'avg_age_days': 0, 'over_180_days': 0, 'unique_apps': 0},
             'top_risky_apps': [],

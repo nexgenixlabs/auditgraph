@@ -1468,12 +1468,41 @@ function ConsentGrantsPanel({ clientLookupIds }: { clientLookupIds: string[] }) 
     return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${cls}`}>{lvl}</span>;
   };
 
+  // AG-85: publisher trust banner — derive from the consent grants themselves
+  // (publisher_name / verified_publisher are denormalised onto each grant
+  // at discovery time so we don't need a separate API call).
+  const firstWithPub = sorted.find(g => g.publisher_name || g.verified_publisher !== null);
+  const publisherName: string | null = firstWithPub?.publisher_name || null;
+  const isMicrosoft = (publisherName || '').toLowerCase().startsWith('microsoft');
+  const verifiedRaw = firstWithPub?.verified_publisher;
+  const verified: boolean | null = isMicrosoft ? true : (verifiedRaw === true ? true : verifiedRaw === false ? false : null);
+  const trustBadge = isMicrosoft
+    ? { tone: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300', label: 'Microsoft', why: 'First-party Microsoft publisher.' }
+    : verified === true
+      ? { tone: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300', label: 'Verified publisher', why: 'Publisher attested via MS Verified Publisher.' }
+      : verified === false
+        ? { tone: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300', label: 'Unverified publisher', why: 'Publisher not verified by Microsoft — high-risk consent grants are consent-phishing indicators.' }
+        : { tone: 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-300', label: 'Publisher unknown', why: 'Publisher trust not yet enriched. Re-run discovery to populate.' };
+
   return (
     <div className="space-y-3 p-4">
       <div className="text-xs text-gray-500 dark:text-slate-400">
         {sorted.length} grant{sorted.length !== 1 ? 's' : ''} —
         {' '}{sorted.filter(g => g.grant_type === 'application').length} application,
         {' '}{sorted.filter(g => g.grant_type === 'delegated').length} delegated
+      </div>
+
+      {/* AG-85 publisher trust banner */}
+      <div className="flex items-center gap-2 text-xs">
+        <span className={`px-2 py-0.5 rounded font-semibold uppercase tracking-wide ${trustBadge.tone}`}>
+          {trustBadge.label}
+        </span>
+        {publisherName && (
+          <span className="text-gray-600 dark:text-slate-300">
+            {publisherName}
+          </span>
+        )}
+        <span className="text-gray-500 dark:text-slate-500 truncate">{trustBadge.why}</span>
       </div>
 
       <div className="overflow-x-auto border border-gray-200 dark:border-slate-700 rounded-lg">

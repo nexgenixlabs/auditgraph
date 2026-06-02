@@ -2087,7 +2087,7 @@ class AzureDiscoveryEngine:
             select_fields = ','.join([
                 'id', 'appId', 'displayName', 'accountEnabled', 'createdDateTime',
                 'servicePrincipalType', 'alternativeNames', 'appOwnerOrganizationId',
-                'publisherName', 'signInActivity',
+                'publisherName', 'verifiedPublisher', 'signInActivity',
                 'servicePrincipalNames', 'tags', 'passwordCredentials', 'keyCredentials',
             ])
             url = (
@@ -2214,6 +2214,9 @@ class AzureDiscoveryEngine:
                             'app_owner_organization_id': owner_org_str,
                             'app_owner_org_id': owner_org_str,
                             'publisher_name': sp.get('publisherName'),
+                            # AG-85: SP-level verifiedPublisher mirrors the
+                            # parent App Registration's verification status.
+                            'verified_publisher': bool((sp.get('verifiedPublisher') or {}).get('verifiedPublisherId')),
                             'service_principal_names': sp.get('servicePrincipalNames', []),
                             'tags': sp.get('tags', []),
                             'password_credentials': sp.get('passwordCredentials', []),
@@ -2368,7 +2371,7 @@ class AzureDiscoveryEngine:
             token = self.credential.get_token("https://graph.microsoft.com/.default")
             headers = {"Authorization": f"Bearer {token.token}"}
 
-            select_fields = 'id,appId,displayName,appOwnerOrganizationId,publisherDomain,signInAudience,identifierUris,notes,description,web,requiredResourceAccess'
+            select_fields = 'id,appId,displayName,appOwnerOrganizationId,publisherDomain,signInAudience,identifierUris,notes,description,web,requiredResourceAccess,verifiedPublisher'
             url: str | None = (
                 f"https://graph.microsoft.com/v1.0/applications"
                 f"?$select={select_fields}&$top=999"
@@ -2391,12 +2394,19 @@ class AzureDiscoveryEngine:
                     for app in data.get('value', []):
                         app_id = app.get('appId')
                         if app_id:
+                            # AG-85: verifiedPublisher is an object with
+                            # verifiedPublisherId, displayName, addedDateTime
+                            # when verified — empty object/null when not.
+                            vp = app.get('verifiedPublisher') or {}
+                            verified = bool(vp.get('verifiedPublisherId'))
                             lookup[app_id] = {
                                 'object_id': app.get('id'),
                                 'display_name': app.get('displayName'),
                                 'app_owner_organization_id': app.get('appOwnerOrganizationId'),
                                 'publisher_domain': app.get('publisherDomain'),
                                 'sign_in_audience': app.get('signInAudience'),
+                                'verified_publisher': verified,
+                                'verified_publisher_display_name': vp.get('displayName'),
                                 'owner_display_name': None,
                                 'owner_id': None,
                                 # Metadata fields for signal extraction
@@ -2471,6 +2481,12 @@ class AzureDiscoveryEngine:
                 sp['app_reg_sign_in_audience'] = app_reg.get('sign_in_audience')
                 sp['app_reg_owner_display_name'] = app_reg.get('owner_display_name')
                 sp['app_reg_owner_id'] = app_reg.get('owner_id')
+                # AG-85: prefer app-reg verified_publisher when SP-level
+                # was empty/None (the app registration is the source of truth
+                # for publisher verification; SP mirrors it).
+                if app_reg.get('verified_publisher') is not None:
+                    if not sp.get('verified_publisher'):
+                        sp['verified_publisher'] = app_reg['verified_publisher']
 
                 owner_org = app_reg.get('app_owner_organization_id')
                 is_ext = bool(owner_org and str(owner_org).lower() != self.azure_directory_id.lower())
@@ -10102,22 +10118,33 @@ class AzureDiscoveryEngine:
         # ── Build SPN object_id → display_name map from THIS run's identities ──
         # Resource SP lookup needs display names for the "resource_display_name"
         # column. Saves an N+1 Graph call.
+        # AG-85: same SELECT also pulls publisher_name + verified_publisher
+        # + app_reg_publisher_domain so each consent grant gets enriched
+        # with publisher trust at discovery time.
         sp_name_by_object_id: dict[str, str] = {}
         sp_name_by_app_id: dict[str, str] = {}
+        sp_publisher_by_object_id: dict[str, dict] = {}  # AG-85
         try:
             cursor = self.db.conn.cursor()
             cursor.execute("""
-                SELECT object_id, app_id, display_name
+                SELECT object_id, app_id, display_name,
+                       publisher_name, verified_publisher, app_reg_publisher_domain
                   FROM identities
                  WHERE discovery_run_id = %s
                    AND identity_type IN ('service_principal', 'managed_identity_user',
                                           'managed_identity_system', 'app_registration')
             """, (run_id,))
-            for obj_id, app_id, display_name in cursor.fetchall():
+            for obj_id, app_id, display_name, pub_name, verified, pub_dom in cursor.fetchall():
                 if obj_id and display_name:
                     sp_name_by_object_id[str(obj_id).lower()] = display_name
                 if app_id and display_name:
                     sp_name_by_app_id[str(app_id).lower()] = display_name
+                if obj_id and (pub_name or verified is not None or pub_dom):
+                    sp_publisher_by_object_id[str(obj_id).lower()] = {
+                        'publisher_name': pub_name,
+                        'verified_publisher': verified,
+                        'publisher_domain': pub_dom,
+                    }
             cursor.close()
         except Exception:
             pass
@@ -10191,11 +10218,15 @@ class AzureDiscoveryEngine:
                     except Exception:
                         pass
                     consent_type = evt.get('consentType') or 'Principal'
+                    # AG-85: enrich risk + grant with publisher trust
+                    pub = sp_publisher_by_object_id.get(client_object_id.lower(), {})
                     risk = compute_consent_risk(
                         scopes=scopes,
                         consent_type=consent_type,
                         grant_type='delegated',
                         created_datetime=created_at,
+                        verified_publisher=pub.get('verified_publisher'),
+                        publisher_name=pub.get('publisher_name'),
                     )
                     client_name = sp_name_by_object_id.get(client_object_id.lower())
                     grant = {
@@ -10218,6 +10249,10 @@ class AzureDiscoveryEngine:
                         'high_risk_scopes': risk['high_risk_scopes'],
                         'age_days': risk['age_days'],
                         'evidence_source': 'graph_oauth2_grants',
+                        'publisher_name': pub.get('publisher_name'),
+                        'verified_publisher': pub.get('verified_publisher'),
+                        'publisher_domain': pub.get('publisher_domain'),
+                        'publisher_enriched_at': datetime.utcnow() if pub else None,
                     }
                     try:
                         self.db.upsert_consent_grant(self.db_org_id, run_id, grant)
@@ -10272,11 +10307,15 @@ class AzureDiscoveryEngine:
                     pass
                 # Risk scoring with empty/placeholder scopes: still surfaces
                 # admin-consent + dormant signals even if scope tier is unknown
+                # AG-85: enrich risk + grant with publisher trust
+                pub = sp_publisher_by_object_id.get(sp_object_id.lower(), {})
                 risk = compute_consent_risk(
                     scopes=scopes,
                     consent_type='AllPrincipals',
                     grant_type='application',
                     created_datetime=created_at,
+                    verified_publisher=pub.get('verified_publisher'),
+                    publisher_name=pub.get('publisher_name'),
                 )
                 grant = {
                     'grant_type': 'application',
@@ -10298,6 +10337,10 @@ class AzureDiscoveryEngine:
                     'high_risk_scopes': risk['high_risk_scopes'],
                     'age_days': risk['age_days'],
                     'evidence_source': 'graph_app_role_assignments',
+                    'publisher_name': pub.get('publisher_name'),
+                    'verified_publisher': pub.get('verified_publisher'),
+                    'publisher_domain': pub.get('publisher_domain'),
+                    'publisher_enriched_at': datetime.utcnow() if pub else None,
                 }
                 try:
                     self.db.upsert_consent_grant(self.db_org_id, run_id, grant)

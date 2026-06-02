@@ -2070,6 +2070,11 @@ class Database:
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_object_id VARCHAR(255)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_name VARCHAR(500)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_external_app BOOLEAN DEFAULT FALSE")
+            # AG-85: MS Graph verifiedPublisher (post-MSA verified publisher
+            # program). True = publisher attested by Microsoft; False =
+            # unverified (matches consent-phishing signature for high-risk
+            # scopes); NULL = not yet enriched.
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verified_publisher BOOLEAN")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_publisher_domain VARCHAR(255)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_sign_in_audience VARCHAR(100)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_owner_display_name VARCHAR(255)")
@@ -2675,6 +2680,7 @@ class Database:
                 app_registration_object_id,
                 app_registration_name,
                 is_external_app,
+                verified_publisher,
                 app_reg_publisher_domain,
                 app_reg_sign_in_audience,
                 app_reg_owner_display_name,
@@ -2801,7 +2807,7 @@ class Database:
                 %s,
                 %s, %s, %s, %s, %s, %s, %s,
                 %s,
-                %s, %s, %s,
+                %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
@@ -2890,6 +2896,7 @@ class Database:
                 app_registration_object_id = EXCLUDED.app_registration_object_id,
                 app_registration_name = EXCLUDED.app_registration_name,
                 is_external_app = EXCLUDED.is_external_app,
+                verified_publisher = COALESCE(EXCLUDED.verified_publisher, identities.verified_publisher),
                 app_reg_publisher_domain = EXCLUDED.app_reg_publisher_domain,
                 app_reg_sign_in_audience = EXCLUDED.app_reg_sign_in_audience,
                 app_reg_owner_display_name = EXCLUDED.app_reg_owner_display_name,
@@ -3062,6 +3069,7 @@ class Database:
                 identity_data.get("app_registration_object_id"),
                 identity_data.get("app_registration_name"),
                 identity_data.get("is_external_app", False),
+                identity_data.get("verified_publisher"),
                 identity_data.get("app_reg_publisher_domain"),
                 identity_data.get("app_reg_sign_in_audience"),
                 identity_data.get("app_reg_owner_display_name"),
@@ -18924,6 +18932,21 @@ class Database:
                 cursor.execute("RELEASE SAVEPOINT cg_idx")
             except Exception:
                 cursor.execute("ROLLBACK TO SAVEPOINT cg_idx")
+        # AG-85 publisher trust columns — additive ALTERs so existing rows
+        # survive. NULL means "not yet enriched"; risk scoring treats
+        # unknown publisher as untrusted.
+        for alter_stmt in [
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS publisher_name TEXT",
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS publisher_domain TEXT",
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS verified_publisher BOOLEAN",
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS publisher_enriched_at TIMESTAMPTZ",
+        ]:
+            cursor.execute("SAVEPOINT cg_alt")
+            try:
+                cursor.execute(alter_stmt)
+                cursor.execute("RELEASE SAVEPOINT cg_alt")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT cg_alt")
         self._commit()
         cursor.close()
         Database._consent_grants_ensured = True
@@ -18933,7 +18956,7 @@ class Database:
         if not row:
             return row
         out = dict(row)
-        for ts in ('created_datetime', 'expires_at', 'last_activity_at', 'discovered_at'):
+        for ts in ('created_datetime', 'expires_at', 'last_activity_at', 'discovered_at', 'publisher_enriched_at'):
             v = out.get(ts)
             if v is not None and hasattr(v, 'isoformat'):
                 out[ts] = v.isoformat()
@@ -18951,9 +18974,12 @@ class Database:
                consent_type, principal_id, principal_display_name,
                created_datetime, expires_at, last_activity_at,
                risk_score, risk_level, high_risk_scopes, age_days,
-               evidence_source, discovered_at)
+               evidence_source, discovered_at,
+               publisher_name, publisher_domain, verified_publisher,
+               publisher_enriched_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    %s, %s, %s, %s, %s, %s, %s, %s, NOW(),
+                    %s, %s, %s, %s)
             ON CONFLICT (organization_id, client_app_id, resource_app_id,
                          COALESCE(principal_id, ''), grant_type)
             DO UPDATE SET
@@ -18972,7 +18998,11 @@ class Database:
                 risk_level = EXCLUDED.risk_level,
                 high_risk_scopes = EXCLUDED.high_risk_scopes,
                 age_days = EXCLUDED.age_days,
-                discovered_at = NOW()
+                discovered_at = NOW(),
+                publisher_name = COALESCE(EXCLUDED.publisher_name, consent_grants.publisher_name),
+                publisher_domain = COALESCE(EXCLUDED.publisher_domain, consent_grants.publisher_domain),
+                verified_publisher = COALESCE(EXCLUDED.verified_publisher, consent_grants.verified_publisher),
+                publisher_enriched_at = COALESCE(EXCLUDED.publisher_enriched_at, consent_grants.publisher_enriched_at)
             RETURNING id
         """, (
             org_id, run_id, grant['grant_type'], grant['client_app_id'],
@@ -18986,6 +19016,8 @@ class Database:
             grant.get('risk_score', 0), grant.get('risk_level'),
             grant.get('high_risk_scopes', []), grant.get('age_days'),
             grant.get('evidence_source'),
+            grant.get('publisher_name'), grant.get('publisher_domain'),
+            grant.get('verified_publisher'), grant.get('publisher_enriched_at'),
         ))
         new_id = cursor.fetchone()[0]
         self._commit()
@@ -19040,7 +19072,14 @@ class Database:
               COALESCE(ROUND(AVG(NULLIF(age_days, 0))), 0)                     AS avg_age_days,
               COUNT(*) FILTER (WHERE age_days IS NOT NULL AND age_days > 180)  AS over_180d,
               COUNT(DISTINCT client_app_id)                                    AS unique_apps,
-              COUNT(*)                                                         AS total
+              COUNT(*)                                                         AS total,
+              -- AG-85: publisher trust breakdown
+              COUNT(*) FILTER (WHERE verified_publisher IS TRUE)               AS verified_pub_grants,
+              COUNT(*) FILTER (WHERE verified_publisher IS FALSE)              AS unverified_pub_grants,
+              COUNT(*) FILTER (WHERE verified_publisher IS FALSE
+                                 AND risk_level IN ('critical', 'high'))       AS unverified_high_risk,
+              COUNT(*) FILTER (WHERE verified_publisher IS NULL
+                                 AND publisher_name IS NULL)                   AS publisher_unknown
             FROM consent_grants
             WHERE organization_id = %s
         """, (org_id,))
@@ -19059,6 +19098,10 @@ class Database:
             'over_180_days': int(row[9] or 0),
             'unique_apps': int(row[10] or 0),
             'total': int(row[11] or 0),
+            'verified_publisher_grants': int(row[12] or 0),
+            'unverified_publisher_grants': int(row[13] or 0),
+            'unverified_high_risk_grants': int(row[14] or 0),
+            'publisher_unknown_grants': int(row[15] or 0),
         }
 
     def list_top_risky_connected_apps(self, org_id: int, limit: int = 5) -> list:
@@ -19076,7 +19119,11 @@ class Database:
               ARRAY(SELECT DISTINCT unnest(high_risk_scopes) FROM consent_grants cg2
                      WHERE cg2.organization_id = cg.organization_id
                        AND cg2.client_app_id = cg.client_app_id) AS top_risky_scopes,
-              MIN(created_datetime) AS oldest_grant_at
+              MIN(created_datetime) AS oldest_grant_at,
+              -- AG-85: publisher trust per-app (mode aggregation)
+              MAX(publisher_name) FILTER (WHERE publisher_name IS NOT NULL) AS publisher_name,
+              BOOL_AND(verified_publisher) FILTER (WHERE verified_publisher IS NOT NULL) AS verified_publisher,
+              MAX(publisher_domain) FILTER (WHERE publisher_domain IS NOT NULL) AS publisher_domain
             FROM consent_grants cg
             WHERE organization_id = %s
             GROUP BY organization_id, client_app_id
