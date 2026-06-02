@@ -3628,10 +3628,68 @@ class Database:
             return 'medium'
         return 'low'
 
+    # AG-DBFIX guard: migration 100_full_schema.sql defined
+    # graph_api_permissions + sp_app_roles WITHOUT primary keys, sequence
+    # defaults, or unique constraints — every store_graph_permissions()
+    # call was silently failing (NOT NULL on id + ON CONFLICT with no
+    # matching UNIQUE). Self-heal at first write so deploys don't lose
+    # SPN permissions for any identity.
+    _perm_tables_ensured = False
+
+    def _ensure_perm_tables_constraints(self):
+        """Restore PK + UNIQUE + id sequence on graph_api_permissions and
+        sp_app_roles if migration 100 lost them. Idempotent.
+        """
+        if Database._perm_tables_ensured:
+            return
+        if not self._can_ddl():
+            Database._perm_tables_ensured = True
+            return
+        cursor = self.conn.cursor()
+        for table, unique_cols, unique_name in [
+            ('graph_api_permissions', ['identity_db_id', 'permission_name'],
+             'graph_api_permissions_identity_perm_key'),
+            ('sp_app_roles', ['identity_db_id', 'app_role_id', 'resource_id'],
+             'sp_app_roles_identity_role_resource_key'),
+        ]:
+            seq = f"{table}_id_seq"
+            for stmt in [
+                f"CREATE SEQUENCE IF NOT EXISTS {seq} AS BIGINT OWNED BY {table}.id",
+                f"SELECT setval('{seq}', COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)",
+                f"ALTER TABLE {table} ALTER COLUMN id SET DEFAULT nextval('{seq}')",
+                # PK and UNIQUE need conditional DO blocks (ADD CONSTRAINT
+                # has no IF NOT EXISTS in PG <16).
+                f"""DO $$ BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                                  WHERE conrelid='{table}'::regclass AND contype='p') THEN
+                    ALTER TABLE {table} ADD CONSTRAINT {table}_pkey PRIMARY KEY (id);
+                  END IF;
+                END$$""",
+                f"""DO $$ BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                                  WHERE conrelid='{table}'::regclass
+                                    AND contype='u' AND conname='{unique_name}') THEN
+                    ALTER TABLE {table} ADD CONSTRAINT {unique_name} UNIQUE ({', '.join(unique_cols)});
+                  END IF;
+                END$$""",
+            ]:
+                cursor.execute("SAVEPOINT perm_fix")
+                try:
+                    cursor.execute(stmt)
+                    cursor.execute("RELEASE SAVEPOINT perm_fix")
+                except Exception:
+                    # Likely cause: duplicate rows blocking the UNIQUE add.
+                    # Keep going so other tables aren't held hostage.
+                    cursor.execute("ROLLBACK TO SAVEPOINT perm_fix")
+        self._commit()
+        cursor.close()
+        Database._perm_tables_ensured = True
+
     def store_graph_permissions(self, identity_db_id: int, permissions: list):
         """Store Graph API permissions for an identity"""
         if not permissions:
             return
+        self._ensure_perm_tables_constraints()
         cursor = self.conn.cursor()
 
         for perm in permissions:
@@ -3671,6 +3729,7 @@ class Database:
         if not app_roles:
             return
 
+        self._ensure_perm_tables_constraints()
         cursor = self.conn.cursor()
 
         for role in app_roles:
