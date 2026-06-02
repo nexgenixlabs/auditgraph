@@ -35,6 +35,7 @@ import { NarrativeBanner, PostureScoreHero } from '../components/ciso/ExecutiveS
 import { BlastRadiusCardV31, AttackPathCardV31, IdentityRiskCardV31 } from '../components/ciso/BlastRadiusSection';
 import { AIIdentityRiskCard } from '../components/ciso/AIIdentityRiskCard';
 import { ConnectedAppRiskCard } from '../components/ciso/ConnectedAppRiskCard';
+import { JmlSnapshotCard } from '../components/ciso/JmlSnapshotCard';
 import { AnomalyWidgetV31 } from '../components/ciso/ActiveThreatsSection';
 import { BusinessImpactWidgetV31 } from '../components/ciso/BusinessImpactSection';
 import { DriftWidgetV31 } from '../components/ciso/ActivityDriftSection';
@@ -524,16 +525,18 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
           </div>
         </div>
 
-        {/* ━━━ ROW 2 — Block 3 (Intel Row) — 5 peer tiles in a sub-grid.
+        {/* ━━━ ROW 2 — Block 3 (Intel Row) — 6 peer tiles in a sub-grid.
             AI Identity Risk + Connected App Risk surface the OAuth/agent
             trust-chain narrative alongside the classic Blast/Attack/Identity
-            trio. Right rail (col-span-3, row-span-2) is preserved. ━━━ */}
-        <div className="col-span-9 grid grid-cols-5 gap-3">
+            trio. JML Snapshot adds CIEM-style lifecycle observability.
+            Right rail (col-span-3, row-span-2) is preserved. ━━━ */}
+        <div className="col-span-9 grid grid-cols-6 gap-3">
           <BlastRadiusCardV31 data={data} />
           <AttackPathCardV31 data={data} />
           <IdentityRiskCardV31 data={data} />
           <AIIdentityRiskCard />
           <ConnectedAppRiskCard />
+          <JmlSnapshotCard />
         </div>
 
         {/* Right Rail — spans row 2 + row 3 */}

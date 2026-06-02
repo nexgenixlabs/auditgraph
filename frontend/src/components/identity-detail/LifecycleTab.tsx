@@ -5,6 +5,96 @@ import {
   DataSource,
 } from './types';
 
+// ─── JML classification (AG-JML Day 3) ──────────────────────────────
+// CIEM-style framing: classify the identity into Joiner / Mover / Leaver
+// from signals already on the page — no extra fetches, no new detection.
+//
+//   Joiner  — created_datetime within last 30d
+//   Mover   — lifecycle event categories include 'access' or 'access_changes'
+//             counted by the summary; reflects role/permission delta since
+//             prior snapshot
+//   Leaver  — enabled === false AND still has role assignments (ghost
+//             identity — same pattern the org-level JML tile flags)
+//   Stable  — none of the above
+//
+// Returned as { key, label, tone, why } so the banner can render colour +
+// one-line rationale and stay honest about WHICH signal fired.
+
+type JmlKey = 'joiner' | 'mover' | 'leaver' | 'stable';
+
+interface JmlClassification {
+  key: JmlKey;
+  label: string;
+  tone: string;        // hex chip background
+  pillBg: string;      // tailwind utility for banner bg
+  pillText: string;    // tailwind utility for banner text
+  why: string;         // one-line rationale
+}
+
+function classifyJml(
+  data: IdentityDetailsResponse,
+  lifecycleData: any,
+): JmlClassification {
+  const ident: any = data?.identity || {};
+  const enabled = ident.enabled !== false;          // default true if unknown
+  const rolesCount = Number(ident.roles_count ?? ident.role_count ?? 0);
+  const created = ident.created_datetime as string | null | undefined;
+
+  // Leaver wins over Joiner if both fire — a disabled-but-still-privileged
+  // account is a higher-severity finding than a new joiner.
+  if (!enabled && rolesCount > 0) {
+    return {
+      key: 'leaver',
+      label: 'Leaver',
+      tone: '#ef4444',
+      pillBg: 'bg-red-50',
+      pillText: 'text-red-700',
+      why: `Account disabled but ${rolesCount} role assignment${rolesCount !== 1 ? 's' : ''} retained — ghost identity pattern.`,
+    };
+  }
+
+  if (created) {
+    const ageMs = Date.parse(created);
+    if (!Number.isNaN(ageMs)) {
+      const days = (Date.now() - ageMs) / (1000 * 60 * 60 * 24);
+      if (days <= 30) {
+        return {
+          key: 'joiner',
+          label: 'Joiner',
+          tone: '#f59e0b',
+          pillBg: 'bg-amber-50',
+          pillText: 'text-amber-700',
+          why: `Created ${Math.max(0, Math.round(days))} day${Math.round(days) !== 1 ? 's' : ''} ago — recent onboarding window.`,
+        };
+      }
+    }
+  }
+
+  // Mover — recent access change events from snapshot diff (re-uses the
+  // categories the LifecycleEngine already exposes). Only counts if there's
+  // an access-class event in the most recent run window.
+  const accessChanges = Number(lifecycleData?.summary?.access_changes ?? 0);
+  if (accessChanges > 0) {
+    return {
+      key: 'mover',
+      label: 'Mover',
+      tone: '#f97316',
+      pillBg: 'bg-orange-50',
+      pillText: 'text-orange-700',
+      why: `${accessChanges} access change${accessChanges !== 1 ? 's' : ''} observed across recent snapshots — role/permission delta.`,
+    };
+  }
+
+  return {
+    key: 'stable',
+    label: 'Stable',
+    tone: '#10b981',
+    pillBg: 'bg-emerald-50',
+    pillText: 'text-emerald-700',
+    why: 'No joiner / mover / leaver signals in the current window.',
+  };
+}
+
 // ─── Props ──────────────────────────────────────────────────────────
 
 interface LifecycleTabProps {
@@ -41,6 +131,30 @@ export function LifecycleTab({
         </div>
       ) : (
         <>
+          {/* JML classification banner — CIEM observability framing.
+              Classifies this identity into J/M/L from existing signals
+              so auditors get the familiar lifecycle vocabulary alongside
+              the raw event timeline. No new fetches, no new detection. */}
+          {(() => {
+            const cls = classifyJml(data, lifecycleData);
+            return (
+              <div className={`rounded-xl px-4 py-3 ${cls.pillBg} border border-transparent flex items-center gap-3`}>
+                <span
+                  className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider text-white"
+                  style={{ backgroundColor: cls.tone }}
+                >
+                  {cls.label}
+                </span>
+                <div className={`text-xs font-medium ${cls.pillText} flex-1 min-w-0`}>
+                  <span className="font-semibold">Lifecycle stage:</span> {cls.why}
+                </div>
+                <span className="text-[10px] text-gray-500 hidden md:inline">
+                  Joiner · Mover · Leaver
+                </span>
+              </div>
+            );
+          })()}
+
           {/* Summary bar */}
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
             <div className="bg-gray-50 rounded-xl p-3 text-center">
