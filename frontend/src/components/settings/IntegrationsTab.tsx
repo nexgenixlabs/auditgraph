@@ -30,11 +30,22 @@ export function IntegrationsTab({
   handleP2TelemetrySave,
 }: IntegrationsTabProps) {
   const [p2Capable, setP2Capable] = useState<boolean | null>(null);
+  // AG-117: split P2 into three states for the badge.
+  //   capable=true  + consent=true  → green "P2 License Detected"
+  //   capable=true  + consent=false → amber "P2 License — Consent Required"
+  //   capable=false                 → gray "P2 License Not Detected"
+  const [p2ConsentGranted, setP2ConsentGranted] = useState<boolean | null>(null);
+  const [p2ConsentUrl, setP2ConsentUrl] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/connections/p2-status')
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setP2Capable(d.p2_capable); })
+      .then(d => {
+        if (!d) return;
+        setP2Capable(d.p2_capable);
+        setP2ConsentGranted(d.p2_consent_granted ?? null);
+        setP2ConsentUrl(d.consent_url ?? null);
+      })
       .catch(() => {});
   }, []);
 
@@ -52,10 +63,16 @@ export function IntegrationsTab({
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-base font-semibold text-gray-900 dark:text-white">Enhanced Behavioral Intelligence</h3>
-              {p2Capable === true && (
+              {p2Capable === true && p2ConsentGranted === true && (
                 <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 px-2 py-0.5 rounded-full">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  P2 License Detected
+                  P2 License Detected · Consent Granted
+                </span>
+              )}
+              {p2Capable === true && p2ConsentGranted === false && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  P2 License Detected — Consent Required
                 </span>
               )}
               {p2Capable === false && (
@@ -69,6 +86,26 @@ export function IntegrationsTab({
               Connect activity logs to confirm identity verdicts and detect behavioral anomalies.
               Requires <code className="px-1 py-0.5 rounded bg-gray-100 dark:bg-slate-800 text-[10px]">AuditLog.Read.All</code> on your registered app.
             </p>
+            {/* AG-117: when license exists but consent hasn't been granted
+                yet, surface a one-click admin-consent link. The URL points
+                to login.microsoftonline.com/{tenant}/adminconsent so a
+                Global Admin can click → review → grant in one flow. */}
+            {p2Capable === true && p2ConsentGranted === false && p2ConsentUrl && (
+              <div className="mt-2 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-xs text-amber-900 dark:text-amber-200">
+                <p className="font-medium">Action required: grant admin consent for AuditLog.Read.All</p>
+                <p className="mt-0.5">
+                  Without consent, AuditGraph can't read sign-in logs — behavioural intelligence falls back to ARM activity + heuristics.
+                </p>
+                <a
+                  href={p2ConsentUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 mt-1.5 text-amber-800 dark:text-amber-200 font-medium underline hover:no-underline"
+                >
+                  Grant admin consent in Azure portal →
+                </a>
+              </div>
+            )}
           </div>
           <button
             onClick={() => setP2Telemetry(prev => ({ ...prev, p2_telemetry_enabled: prev.p2_telemetry_enabled === 'true' ? 'false' : 'true' }))}

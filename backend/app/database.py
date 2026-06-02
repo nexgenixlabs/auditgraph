@@ -19779,6 +19779,21 @@ class Database:
             cursor.execute("RELEASE SAVEPOINT add_p2_col")
         except Exception:
             cursor.execute("ROLLBACK TO SAVEPOINT add_p2_col")
+        # AG-117: track whether the AuditLog.Read.All admin consent has
+        # been granted yet. null = never tested; true = last sign-in API
+        # call succeeded; false = last call returned 403. The Settings
+        # UI splits has_p2_license + p2_consent_granted into the three
+        # demoable states (green / amber-needs-consent / gray-no-license).
+        for alter in [
+            "ALTER TABLE cloud_connections ADD COLUMN IF NOT EXISTS p2_consent_granted BOOLEAN",
+            "ALTER TABLE cloud_connections ADD COLUMN IF NOT EXISTS p2_consent_checked_at TIMESTAMPTZ",
+        ]:
+            cursor.execute("SAVEPOINT add_p2_consent_col")
+            try:
+                cursor.execute(alter)
+                cursor.execute("RELEASE SAVEPOINT add_p2_consent_col")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT add_p2_consent_col")
         # RLS policies for organization isolation (idempotent)
         cursor.execute("ALTER TABLE cloud_connections ENABLE ROW LEVEL SECURITY")
         cursor.execute("ALTER TABLE cloud_connections FORCE ROW LEVEL SECURITY")

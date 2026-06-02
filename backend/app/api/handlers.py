@@ -43335,9 +43335,21 @@ def get_start_here_summary():
 def get_p2_status():
     """P2 telemetry status for the current org's connections.
 
+    AG-117 (2026-06-02): split the single 'p2_capable' boolean into TWO
+    states so the Settings UI can tell users:
+      - License detected AND consent granted        → green (working)
+      - License detected, consent NOT granted yet   → amber (action req)
+      - License absent                              → gray (n/a)
+
     Returns:
-        p2_capable: true if any connection has_p2_license=true
-        p2_enabled: true if p2_telemetry_enabled setting is 'true'
+        p2_capable:        true if any connection has_p2_license=true
+        p2_consent_granted: true if any connection has_p2_license=true AND
+                             its last sign-in API call succeeded; false if
+                             license exists but every call returned 403;
+                             null if license absent (no consent to grant).
+        consent_url:       direct link to the Azure consent page for the
+                             primary connector — paste-able for the admin.
+        p2_enabled:        true if p2_telemetry_enabled setting is 'true'
     """
     db = _db()
     org = _org_id()
@@ -43347,16 +43359,54 @@ def get_p2_status():
     try:
         cursor = db.conn.cursor()
         cursor.execute(
-            "SELECT COALESCE(bool_or(has_p2_license), false) FROM cloud_connections WHERE organization_id = %s",
+            """
+            SELECT COALESCE(bool_or(has_p2_license), false),
+                   COALESCE(bool_or(p2_consent_granted), false),
+                   COALESCE(bool_or(has_p2_license), false) AND
+                   NOT COALESCE(bool_or(p2_consent_granted), false) AS needs_consent
+              FROM cloud_connections WHERE organization_id = %s
+            """,
             (org,)
         )
-        p2_capable = bool(cursor.fetchone()[0])
+        row = cursor.fetchone()
+        p2_capable = bool(row[0])
+        # consent_granted is only meaningful when license exists. If no
+        # license, return null (the UI uses null vs true/false to choose
+        # between "n/a" and the amber/green states).
+        if not p2_capable:
+            p2_consent_granted = None
+            consent_url = None
+        else:
+            # bool_or returns false if ALL rows are false/null. When the
+            # column doesn't exist yet (pre-migration) this defaults to
+            # false → "needs consent" UI. After the next discovery scan
+            # touches the column it'll flip to true.
+            p2_consent_granted = bool(row[1])
+            cursor.execute(
+                """
+                SELECT azure_directory_id, client_id
+                  FROM cloud_connections
+                 WHERE organization_id = %s AND has_p2_license = true
+                 ORDER BY id LIMIT 1
+                """,
+                (org,)
+            )
+            primary = cursor.fetchone()
+            if primary and primary[0] and primary[1]:
+                consent_url = (
+                    f"https://login.microsoftonline.com/{primary[0]}/adminconsent"
+                    f"?client_id={primary[1]}"
+                )
+            else:
+                consent_url = None
         cursor.close()
 
         p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=org) == 'true'
 
         return jsonify({
             'p2_capable': p2_capable,
+            'p2_consent_granted': p2_consent_granted,
+            'consent_url': consent_url,
             'p2_enabled': p2_enabled,
         })
     finally:

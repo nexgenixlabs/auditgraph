@@ -2297,18 +2297,32 @@ class AzureDiscoveryEngine:
                         len(identities), page, sign_in_available)
             if sign_in_available:
                 self._persist_permission('p2_signin_activity', 'granted')
-            # Persist P2 license availability on the cloud connection
+            # Persist P2 license availability on the cloud connection.
+            # AG-117: sign_in_available is the AuditLog.Read.All / signInActivity
+            # consent signal. true on this call = consent granted; false = the
+            # 403 retry path was taken. Mirror to p2_consent_granted so the
+            # Settings UI can show "needs consent" amber state without
+            # re-checking the discovery log.
             try:
                 cur = self.db.conn.cursor()
                 cur.execute(
-                    "UPDATE cloud_connections SET has_p2_license = %s WHERE id = %s",
-                    (sign_in_available, self.cloud_connection_id)
+                    """
+                    UPDATE cloud_connections
+                       SET has_p2_license = %s,
+                           p2_consent_granted = %s,
+                           p2_consent_checked_at = NOW()
+                     WHERE id = %s
+                    """,
+                    (sign_in_available, sign_in_available, self.cloud_connection_id)
                 )
                 self.db.conn.commit()
                 cur.close()
-                logger.info("Persisted has_p2_license=%s for connection %s", sign_in_available, self.cloud_connection_id)
+                logger.info(
+                    "Persisted has_p2_license=%s p2_consent_granted=%s for connection %s",
+                    sign_in_available, sign_in_available, self.cloud_connection_id,
+                )
             except Exception as e:
-                logger.warning("Failed to persist has_p2_license: %s", e)
+                logger.warning("Failed to persist P2 status: %s", e)
             return identities
         except Exception as e:
             logger.error("[_discover_service_principals] FAILED org=%s error=%s", self.db_org_id, e)
