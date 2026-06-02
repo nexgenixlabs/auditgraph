@@ -33,6 +33,10 @@ const TYPE_LABELS: Record<string, string> = {
   off_hours_pim: 'Off-Hours PIM',
   excessive_pim_usage: 'Excessive PIM',
   ghost_identity: 'Ghost Identity',
+  mover_stale_access: 'Mover — Stale Access',
+  ai_agent_runaway: 'AI Agent — Runaway',
+  new_ai_agent_behavior: 'AI Agent — New Behavior',
+  excessive_api_permission: 'Excessive API Permission',
 };
 
 function timeAgo(dateStr: string): string {

@@ -5485,6 +5485,23 @@ class AzureDiscoveryEngine:
             logger.warning("[_discover_permissions] bulk pre-fetch outer error: %s", outer)
         # ── end bulk pre-fetch ──
 
+        # AG-PERMFIX debug: surface the connector's bulk-lookup count so we can
+        # tell whether the issue is bulk-fetch coverage vs the per-SP merge step.
+        try:
+            _conn_sp = next((sp for sp in all_service_principals
+                             if sp.get('is_discovery_connector')), None)
+            if _conn_sp and _conn_sp.get('object_id'):
+                _conn_obj = _conn_sp['object_id']
+                _conn_hits = len(bulk_by_principal.get(_conn_obj, []))
+                _conn_hits_lower = len(bulk_by_principal.get(_conn_obj.lower(), []))
+                _all_keys = list(bulk_by_principal.keys())[:5]
+                logger.info("[_discover_permissions] CONNECTOR BULK CHECK obj_id=%s "
+                            "exact_hits=%d lower_hits=%d total_principals=%d sample_keys=%s",
+                            _conn_obj, _conn_hits, _conn_hits_lower,
+                            len(bulk_by_principal), _all_keys)
+        except Exception as _dbg_err:
+            logger.debug("[_discover_permissions] connector debug log failed: %s", _dbg_err)
+
         for sp in service_principals:
             sp_object_id = sp.get('object_id')
             sp_identity_id = sp.get('identity_id')

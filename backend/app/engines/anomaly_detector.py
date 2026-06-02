@@ -86,6 +86,13 @@ class AnomalyDetector:
             # "M" of JML observability — CIEM detects what IGA misses,
             # without becoming IGA.
             ('mover_stale_access', self._detect_mover_stale_access),
+            # AG-44 (2026-06-02): when an identity's agent_classification
+            # transitions from None/unknown to ai_agent or possible_ai_agent
+            # between scans, surface it as "new AI agent behavior". Demo
+            # story Step 1 — "This SPN started calling Azure Cognitive
+            # Services 6 days ago." Cross-run delta over the static
+            # classifier output already written by services/agent_classifier.
+            ('new_ai_agent_behavior', self._detect_new_ai_agent_behavior),
         ]
 
         for name, detector in detectors:
@@ -886,4 +893,143 @@ class AnomalyDetector:
                 },
             })
 
+        return anomalies
+
+    def _detect_new_ai_agent_behavior(self, current_run_id: int,
+                                       previous_run_id: int) -> List[Dict]:
+        """Detect identities that flipped from non-AI to AI between scans.
+
+        AG-44 (2026-06-02): the temporal companion to the static
+        agent_classifier. The static classifier writes per-run snapshots
+        to agent_classifications (identity_db_id, discovery_run_id) →
+        (agent_identity_type, detected_platform, confidence, reason). This
+        detector compares the LATEST classification per identity_id across
+        the two runs and surfaces transitions:
+
+          previous: None / 'unknown'
+          current:  'ai_agent' or 'possible_ai_agent'
+
+        Why temporal: a SPN that was a vanilla automation account last
+        scan and now triggers ai_agent classification means SOMETHING
+        CHANGED — new role on Cognitive Services, new app_id match, new
+        AI workload binding. The demo narration is "This SPN started
+        calling Azure Cognitive Services 6 days ago", which is exactly
+        this transition.
+
+        Severity: critical when the new classification is high-confidence
+        ai_agent AND the identity holds any privileged role; else high
+        for ai_agent transitions; medium for possible_ai_agent.
+
+        NIST / CIS / MITRE framework refs included on the anomaly so the
+        compliance tab can map the finding to controls.
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            # First scan in the org's history — no baseline to compare
+            # against; static classifier output is the whole story.
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT identity_id, agent_identity_type, detected_platform,
+                       classification_confidence, classification_reason
+                  FROM agent_classifications
+                 WHERE discovery_run_id = %s
+            """, (previous_run_id,))
+            prev_map = {
+                r[0]: {
+                    'agent_identity_type': r[1],
+                    'detected_platform': r[2],
+                    'classification_confidence': float(r[3]) if r[3] is not None else 0.0,
+                    'classification_reason': r[4],
+                }
+                for r in cursor.fetchall()
+            }
+
+            cursor.execute("""
+                SELECT i.id, ac.identity_id, ac.agent_identity_type,
+                       ac.detected_platform, ac.classification_confidence,
+                       ac.classification_reason, i.display_name,
+                       i.identity_category, i.risk_level
+                  FROM agent_classifications ac
+                  JOIN identities i ON i.id = ac.identity_db_id
+                 WHERE ac.discovery_run_id = %s
+            """, (current_run_id,))
+            current_rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning("[new_ai_agent_behavior] fetch failed: %s", e)
+            cursor.close()
+            return anomalies
+
+        for row in current_rows:
+            (identity_db_id, identity_id, curr_type, curr_platform,
+             curr_conf, curr_reason, display_name, identity_category,
+             risk_level) = row
+            curr_type = (curr_type or '').lower()
+            if curr_type not in ('ai_agent', 'possible_ai_agent'):
+                continue
+
+            prev = prev_map.get(identity_id)
+            prev_type = (prev.get('agent_identity_type') if prev else None) or 'unknown'
+            prev_type = prev_type.lower()
+            # Only fire on TRANSITIONS — already-classified agents are
+            # the static classifier's job, not the temporal detector's.
+            if prev_type in ('ai_agent', 'possible_ai_agent'):
+                continue
+            # Also skip humans — ai_privileged_human is a different story.
+            if identity_category == 'human_user':
+                continue
+
+            # Severity:
+            #   critical = confirmed ai_agent + privileged risk + high confidence
+            #   high     = ai_agent (any other condition)
+            #   medium   = possible_ai_agent
+            risk_norm = (risk_level or '').lower()
+            curr_conf_f = float(curr_conf) if curr_conf is not None else 0.0
+            if curr_type == 'ai_agent' and curr_conf_f >= 0.8 and risk_norm in ('critical', 'high'):
+                sev = 'critical'
+            elif curr_type == 'ai_agent':
+                sev = 'high'
+            else:
+                sev = 'medium'
+
+            platform_phrase = (
+                f' on platform {curr_platform}' if curr_platform else ''
+            )
+            title = (
+                f"AI agent behavior emerged: {display_name or identity_id} "
+                f"(was {prev_type}, now {curr_type}{platform_phrase})"
+            )
+            description = (
+                f"Between the previous and current discovery, this identity "
+                f"transitioned from {prev_type} to {curr_type}{platform_phrase}. "
+                f"Classifier rationale: {curr_reason or 'no reason recorded'}."
+            )
+            anomalies.append({
+                'discovery_run_id': current_run_id,
+                'anomaly_type': 'new_ai_agent_behavior',
+                'severity': sev,
+                'identity_id': identity_id,
+                'identity_name': display_name,
+                'title': title,
+                'description': description,
+                'details': {
+                    'previous_agent_identity_type': prev_type,
+                    'current_agent_identity_type': curr_type,
+                    'current_classification_confidence': curr_conf_f,
+                    'current_classification_reason': curr_reason,
+                    'detected_platform': curr_platform,
+                    'previous_run_id': previous_run_id,
+                    'risk_level_at_emergence': risk_norm or None,
+                    'frameworks': {
+                        'nist': ['AC-2 (Account Management)', 'AC-6 (Least Privilege)',
+                                 'CM-3 (Configuration Change Control)'],
+                        'cis': ['CIS Azure 1.21'],
+                        'mitre': ['T1078.004 (Cloud Accounts)', 'T1098.001 (Additional Cloud Credentials)'],
+                    },
+                },
+            })
+
+        cursor.close()
         return anomalies

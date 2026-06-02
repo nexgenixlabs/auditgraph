@@ -17,6 +17,10 @@ function anomalyInsight(vm: CISOViewModel): string {
       : top.type === 'credential_surge' ? 'added new credentials'
       : top.type === 'off_hours_pim' ? 'activated PIM off-hours'
       : top.type === 'risk_score_spike' ? 'risk score spiked'
+      : top.type === 'mover_stale_access' ? 'kept stale privileged access after move'
+      : top.type === 'ghost_identity' ? 'disabled but still privileged'
+      : top.type === 'ai_agent_runaway' ? 'AI-agent runaway risk'
+      : top.type === 'new_ai_agent_behavior' ? 'started behaving as an AI agent'
       : 'flagged';
     return `${top.identity_name} ${verb}`;
   }
