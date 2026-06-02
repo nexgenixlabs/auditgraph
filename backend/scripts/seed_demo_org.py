@@ -732,7 +732,8 @@ def seed_identities(conn, org_id, run_id):
 def seed_credentials(conn, identity_map, run_id):
     cur = conn.cursor()
     count = 0
-    cred_id = 1
+    # AG-DEMOSEED: don't pass explicit id — collides with existing rows on
+    # cloud DBs (credentials_pkey violation). Let the sequence default fill it.
     spn_names = OWNED_SPNS + ORPHANED_SPNS + OVERPERM_SPNS
 
     for i, sp_name in enumerate(spn_names):
@@ -753,12 +754,11 @@ def seed_credentials(conn, identity_map, run_id):
 
             cur.execute("""
                 INSERT INTO credentials
-                    (id, identity_db_id, credential_type, key_id, display_name,
+                    (identity_db_id, credential_type, key_id, display_name,
                      start_datetime, end_datetime, discovered_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-            """, (cred_id, db_id, cred_type, _uuid(),
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            """, (db_id, cred_type, _uuid(),
                   f"{sp_name} {cred_type.title()} #{j+1}", start, end))
-            cred_id += 1
             count += 1
 
     conn.commit()
@@ -1446,8 +1446,8 @@ def seed_lineage_verdicts(conn, identity_map, run_id, org_id):
 def seed_sp_ownership(conn, identity_map, org_id):
     cur = conn.cursor()
     count = 0
-    own_id = 1
 
+    # AG-DEMOSEED: don't pass explicit id — sequence default handles it.
     # Owned SPNs get owners from admin users
     for i, sp_name in enumerate(OWNED_SPNS):
         db_id = identity_map.get(sp_name)
@@ -1456,14 +1456,13 @@ def seed_sp_ownership(conn, identity_map, org_id):
         owner_uname, owner_dname = ADMIN_USERS[i % len(ADMIN_USERS)]
         cur.execute("""
             INSERT INTO sp_ownership
-                (id, identity_db_id, owner_object_id, owner_display_name,
+                (identity_db_id, owner_object_id, owner_display_name,
                  owner_upn, owner_type, ownership_type, is_primary_owner,
                  discovered_at)
-            VALUES (%s, %s, %s, %s, %s, 'user', 'application', true, NOW())
+            VALUES (%s, %s, %s, %s, 'user', 'application', true, NOW())
             ON CONFLICT DO NOTHING
-        """, (own_id, db_id, _uuid(), owner_dname, f"{owner_uname}@{DOMAIN}"))
+        """, (db_id, _uuid(), owner_dname, f"{owner_uname}@{DOMAIN}"))
         count += 1
-        own_id += 1
 
     # Some overpermissive SPNs have owners too (first 10)
     for i, sp_name in enumerate(OVERPERM_SPNS[:10]):
@@ -1475,12 +1474,12 @@ def seed_sp_ownership(conn, identity_map, org_id):
         owner_uname, owner_dname = ADMIN_USERS[(i + 5) % len(ADMIN_USERS)]
         cur.execute("""
             INSERT INTO sp_ownership
-                (id, identity_db_id, owner_object_id, owner_display_name,
+                (identity_db_id, owner_object_id, owner_display_name,
                  owner_upn, owner_type, ownership_type, is_primary_owner,
                  discovered_at)
-            VALUES (%s, %s, %s, %s, %s, 'user', 'application', true, NOW())
+            VALUES (%s, %s, %s, %s, 'user', 'application', true, NOW())
             ON CONFLICT DO NOTHING
-        """, (own_id, db_id, _uuid(), owner_dname, f"{owner_uname}@{DOMAIN}"))
+        """, (db_id, _uuid(), owner_dname, f"{owner_uname}@{DOMAIN}"))
         count += 1
 
     conn.commit()
@@ -1495,7 +1494,8 @@ def seed_sp_ownership(conn, identity_map, org_id):
 def seed_graph_api_permissions(conn, identity_map):
     cur = conn.cursor()
     count = 0
-    perm_id = 1
+    # AG-DEMOSEED: sequence default handles id; ON CONFLICT now works after
+    # migration 116 restored the UNIQUE constraint on (identity_db_id, permission_name).
 
     perms = {
         "User.ReadWrite.All": ("Read and write all users' full profiles", "high"),
@@ -1517,12 +1517,14 @@ def seed_graph_api_permissions(conn, identity_map):
                                                       random.randint(2, 5)):
             cur.execute("""
                 INSERT INTO graph_api_permissions
-                    (id, identity_db_id, permission_name, permission_description,
+                    (identity_db_id, permission_name, permission_description,
                      resource_name, risk_level, discovered_at)
-                VALUES (%s, %s, %s, %s, 'Microsoft Graph', %s, NOW())
-                ON CONFLICT DO NOTHING
-            """, (perm_id, db_id, perm_name, desc, risk))
-            perm_id += 1
+                VALUES (%s, %s, %s, 'Microsoft Graph', %s, NOW())
+                ON CONFLICT (identity_db_id, permission_name) DO UPDATE
+                  SET permission_description = EXCLUDED.permission_description,
+                      risk_level = EXCLUDED.risk_level,
+                      discovered_at = NOW()
+            """, (db_id, perm_name, desc, risk))
             count += 1
 
     conn.commit()
