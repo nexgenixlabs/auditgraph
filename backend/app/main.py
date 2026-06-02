@@ -766,20 +766,59 @@ def create_app():
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB request size limit
 
-    allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-    if not allowed_origins:
+    # AG-96 CORS hardening:
+    #   1. Validate every ALLOWED_ORIGINS entry at startup. Wildcards (*) are
+    #      always rejected when combined with supports_credentials=True
+    #      (browsers reject this anyway, but we fail-fast so the error is
+    #      obvious instead of intermittent CORS failures at request time).
+    #      Production requires https:// scheme; localhost http:// is allowed
+    #      for dev.
+    #   2. Remove X-API-Key and X-Organization-Id from CORS allow_headers.
+    #      X-API-Key is for server-to-server use (CLI, CI, integrations) and
+    #      has no business in a browser CORS preflight — browsers shouldn't
+    #      be sending API keys anyway. X-Organization-Id is a superadmin
+    #      tenant-switch header that only the admin portal sends from the
+    #      SAME origin; cross-origin requests have no reason to override
+    #      tenant context.
+    from urllib.parse import urlparse as _urlparse
+    _IS_PROD = (os.getenv('APP_ENV', '').lower() == 'production'
+                or os.getenv('FLASK_ENV', '').lower() == 'production')
+    allowed_origins_raw = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    if not allowed_origins_raw:
         raise RuntimeError(
             "ALLOWED_ORIGINS env var is required and must not be empty. "
             "Example: ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173"
         )
+    allowed_origins: list[str] = []
+    for _o in allowed_origins_raw:
+        if _o == '*':
+            raise RuntimeError(
+                "ALLOWED_ORIGINS contains '*' which is incompatible with "
+                "supports_credentials=True. Specify explicit origins."
+            )
+        _p = _urlparse(_o)
+        if _p.scheme not in ('http', 'https') or not _p.netloc:
+            raise RuntimeError(f"ALLOWED_ORIGINS entry is not a valid URL: {_o!r}")
+        if _IS_PROD and _p.scheme != 'https':
+            raise RuntimeError(
+                f"ALLOWED_ORIGINS entry must use https:// in production: {_o!r}"
+            )
+        # Strip any trailing slash so Flask-CORS string comparison matches
+        # the browser's Origin header (no trailing slash).
+        allowed_origins.append(_o.rstrip('/'))
+
     CORS(app, resources={r"/*": {
         "origins": allowed_origins,
+        # AG-96: X-API-Key + X-Organization-Id removed — server-to-server /
+        # admin-portal-same-origin only. Browsers cross-origin should not
+        # send these. Idempotency-Key + X-CSRF-Token remain since they're
+        # legitimate browser-issued headers.
         "allow_headers": ["Content-Type", "Authorization", "X-Portal-Context",
-                          "X-Organization-Id", "X-API-Key", "Idempotency-Key",
-                          "X-CSRF-Token", "X-Tenant-ID"],
+                          "Idempotency-Key", "X-CSRF-Token", "X-Tenant-ID"],
         "expose_headers": ["Content-Type", "X-Idempotency-Key", "X-Idempotent-Replayed", "X-Export-Total-Count"],
         "supports_credentials": True,
     }})
+    logger.info("[CORS] allowed_origins=%s prod=%s", allowed_origins, _IS_PROD)
 
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
