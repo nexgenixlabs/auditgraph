@@ -12,7 +12,7 @@ azure-mgmt-authorization==4.0.0
 azure-mgmt-core==1.6.0
 azure-mgmt-msi==7.0.0
 azure-mgmt-resource==23.0.1
-azure-mgmt-storage>=21.0.0
+azure-mgmt-storage>=25.0.0
 azure-mgmt-keyvault>=10.0.0
 azure-mgmt-monitor>=6.0.0
 azure-mgmt-resourcegraph>=8.0.0
