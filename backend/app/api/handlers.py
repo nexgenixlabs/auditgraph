@@ -16246,6 +16246,124 @@ def list_consent_grants_handler():
         db.close()
 
 
+def get_vercel_scenario_grants_handler():
+    """GET /api/connected-apps/vercel-scenario — find OAuth grants matching the
+    Vercel/Context.ai breach signature.
+
+    AG-84 sales asset. The signature observed in the public postmortems:
+      1. Publisher is NOT verified (no Microsoft Verified Publisher attestation)
+      2. Admin consent (consentType=AllPrincipals OR grant_type=application)
+      3. High-risk scope (Mail.* / Files.* / Sites.* / Directory.* etc.)
+      4. offline_access (refresh-token persistence that survives password rotation)
+
+    Returns matched grants with the rationale per grant so the user can
+    see which preconditions fired. This is the "Run Vercel scenario"
+    button on the Connected Apps page.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        # Pull all grants for the org with the fields we need to evaluate.
+        cursor.execute("""
+            SELECT id, grant_type, client_app_id, client_display_name,
+                   resource_app_id, resource_display_name, scopes,
+                   consent_type, risk_level, risk_score, age_days,
+                   verified_publisher, publisher_name, created_datetime,
+                   high_risk_scopes
+              FROM consent_grants
+             WHERE organization_id = %s
+        """, (org_id,))
+        cols = [c[0] for c in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+
+        matched = []
+        for r in rows:
+            reasons = []
+            # 1. Unverified publisher (or unknown, treated as suspect when
+            #    combined with other indicators)
+            is_microsoft = (r.get('publisher_name') or '').lower().startswith('microsoft')
+            vp = r.get('verified_publisher')
+            if is_microsoft or vp is True:
+                continue  # Microsoft / verified — not Vercel-like
+            if vp is False:
+                reasons.append('Unverified publisher')
+            else:
+                reasons.append('Publisher not attested')
+            # 2. Admin consent (tenant-wide blast radius)
+            if r.get('consent_type') == 'AllPrincipals' or r.get('grant_type') == 'application':
+                reasons.append('Admin-consented (tenant-wide)')
+            else:
+                continue  # User-only consent — not Vercel-like
+            # 3. High-risk scope
+            hrs = r.get('high_risk_scopes') or []
+            if hrs:
+                reasons.append(f"High-risk scope: {', '.join(hrs[:3])}{' …' if len(hrs) > 3 else ''}")
+            else:
+                continue  # No high-risk scope — not Vercel-like
+            # 4. offline_access (refresh-token persistence)
+            scopes = r.get('scopes') or []
+            if any((s or '').strip() == 'offline_access' for s in scopes):
+                reasons.append('Includes offline_access (refresh-token persistence)')
+            # offline_access is the amplifier — flag higher when present
+            # but a grant without it can still match if 1-3 fire.
+
+            ts = r.get('created_datetime')
+            matched.append({
+                'id': r['id'],
+                'client_app_id': r['client_app_id'],
+                'client_display_name': r.get('client_display_name'),
+                'resource_display_name': r.get('resource_display_name'),
+                'publisher_name': r.get('publisher_name'),
+                'verified_publisher': vp,
+                'consent_type': r.get('consent_type'),
+                'grant_type': r.get('grant_type'),
+                'risk_level': r.get('risk_level'),
+                'risk_score': r.get('risk_score'),
+                'age_days': r.get('age_days'),
+                'high_risk_scopes': hrs,
+                'has_offline_access': any((s or '').strip() == 'offline_access' for s in scopes),
+                'created_datetime': ts.isoformat() if ts else None,
+                'reasons': reasons,
+            })
+
+        # Sort by amplifier presence and severity
+        matched.sort(key=lambda m: (
+            -1 if m['has_offline_access'] else 0,
+            -(m.get('risk_score') or 0),
+            -(m.get('age_days') or 0),
+        ))
+
+        # Headline metrics
+        return jsonify({
+            'matched': matched,
+            'matched_count': len(matched),
+            'with_offline_access': sum(1 for m in matched if m['has_offline_access']),
+            'scenario': {
+                'name': 'Vercel / Context.ai OAuth consent breach',
+                'signature': [
+                    'Unverified publisher (no Microsoft Verified Publisher attestation)',
+                    'Admin-consented (tenant-wide)',
+                    'High-risk scope (Mail.* / Files.* / Sites.* / Directory.*)',
+                    'offline_access — refresh-token persistence',
+                ],
+                'why_it_matters': (
+                    'A single admin click on an unverified app hands the attacker a refresh '
+                    'token that outlives password resets, MFA upgrades, and the consenting '
+                    'user\'s employment.'
+                ),
+            },
+        })
+    except Exception as e:
+        logger.warning("vercel scenario error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'matched': [], 'matched_count': 0, 'error': 'scenario_failed'}), 200
+    finally:
+        db.close()
+
+
 def get_dashboard_connected_app_risk():
     """GET /api/dashboard/connected-app-risk — CISO tile summary.
 

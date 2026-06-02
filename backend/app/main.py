@@ -133,6 +133,7 @@ from app.api.handlers import (
     get_dashboard_anomalies,
     get_dashboard_jml_snapshot,
     list_consent_grants_handler,
+    get_vercel_scenario_grants_handler,
     get_dashboard_connected_app_risk,
     get_trends_velocity,
     get_identity_risk_history,
@@ -2910,6 +2911,12 @@ def create_app():
     @app.get("/api/dashboard/connected-app-risk")
     def dashboard_connected_app_risk():
         return get_dashboard_connected_app_risk()
+
+    # AG-84: Vercel/Context.ai breach scenario — finds grants matching the
+    # consent-phishing signature for sales-narrative demos.
+    @app.get("/api/connected-apps/vercel-scenario")
+    def connected_apps_vercel_scenario():
+        return get_vercel_scenario_grants_handler()
 
     # -----------------------
     # Anomaly Detection (Phase 40)

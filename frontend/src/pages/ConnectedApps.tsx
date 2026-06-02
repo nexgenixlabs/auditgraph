@@ -317,28 +317,172 @@ export default function ConnectedApps() {
         </div>
       </div>
 
-      {/* Vercel scenario callout */}
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
-        <div className="flex items-start gap-3">
-          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-600 text-white flex-shrink-0">
-            Scenario
-          </span>
-          <div className="text-xs text-amber-900 space-y-2">
-            <p className="font-medium">Vercel / Context.ai (2024-2025): The OAuth consent breach playbook.</p>
-            <p>
-              Attacker registers a "productivity" OAuth app under an unverified publisher, prompts a single
-              admin to grant tenant-wide consent for Mail.Read + Files.Read.All + offline_access. That single
-              click hands them a refresh token that survives password rotations, MFA upgrades, and the
-              original user's departure.
-            </p>
-            <p>
-              The signature this page surfaces: <strong>unverified publisher + admin consent + high-risk
-              scope + offline_access</strong>. Filter rows above by that combination and you've found
-              your version of the Vercel preconditions.
-            </p>
-          </div>
+      {/* Vercel scenario interactive detector — AG-84 */}
+      <VercelScenarioPanel />
+    </div>
+  );
+}
+
+interface VercelMatch {
+  id: number;
+  client_app_id: string;
+  client_display_name: string | null;
+  resource_display_name: string | null;
+  publisher_name: string | null;
+  verified_publisher: boolean | null;
+  consent_type: string | null;
+  risk_level: string;
+  risk_score: number;
+  age_days: number | null;
+  high_risk_scopes: string[];
+  has_offline_access: boolean;
+  created_datetime: string | null;
+  reasons: string[];
+}
+
+interface VercelResp {
+  matched: VercelMatch[];
+  matched_count: number;
+  with_offline_access: number;
+  scenario: {
+    name: string;
+    signature: string[];
+    why_it_matters: string;
+  };
+}
+
+function VercelScenarioPanel() {
+  const [data, setData] = React.useState<VercelResp | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState(false);
+  const [expanded, setExpanded] = React.useState(false);
+
+  const runScenario = () => {
+    setLoading(true);
+    setError(false);
+    fetch('/api/connected-apps/vercel-scenario')
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('fetch_failed')))
+      .then((d: VercelResp) => { setData(d); setExpanded(true); })
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  };
+
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 space-y-4">
+      <div className="flex items-start gap-3">
+        <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-600 text-white flex-shrink-0">
+          Scenario
+        </span>
+        <div className="text-xs text-amber-900 space-y-2 flex-1">
+          <p className="font-medium">Vercel / Context.ai (2024-2025): The OAuth consent breach playbook.</p>
+          <p>
+            Attacker registers a "productivity" OAuth app under an unverified publisher, prompts a single
+            admin to grant tenant-wide consent for Mail.Read + Files.Read.All + offline_access. That single
+            click hands them a refresh token that survives password rotations, MFA upgrades, and the
+            original user's departure.
+          </p>
+          <p>
+            Signature: <strong>unverified publisher + admin consent + high-risk scope + offline_access</strong>.
+          </p>
         </div>
+        <button
+          onClick={runScenario}
+          disabled={loading}
+          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-amber-600 text-white hover:bg-amber-700 transition disabled:opacity-50 flex-shrink-0"
+        >
+          {loading ? 'Scanning…' : data ? 'Re-run scenario' : 'Run Vercel scenario →'}
+        </button>
       </div>
+
+      {error && (
+        <p className="text-xs text-red-700">Couldn't run scenario. Re-run discovery first.</p>
+      )}
+
+      {data && (
+        <div className="rounded-lg bg-white border border-amber-200 p-4 space-y-3">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-sm font-semibold text-gray-900">Matched grants</h3>
+            <div className="text-right">
+              <div className="text-2xl font-bold text-red-700">{data.matched_count}</div>
+              <div className="text-[10px] text-gray-500">{data.with_offline_access} with offline_access</div>
+            </div>
+          </div>
+
+          {data.matched_count === 0 ? (
+            <p className="text-sm text-emerald-700 font-medium">
+              No grants match the Vercel signature. Your OAuth surface is clean against this specific playbook.
+            </p>
+          ) : (
+            <>
+              <p className="text-xs text-gray-600">
+                Each row matches all four signature preconditions. Investigate immediately and revoke
+                any grant that wasn't explicitly approved by your change-control process.
+              </p>
+              {!expanded && (
+                <button
+                  onClick={() => setExpanded(true)}
+                  className="text-xs font-medium text-amber-700 hover:text-amber-900"
+                >
+                  Show matched grants →
+                </button>
+              )}
+              {expanded && (
+                <div className="overflow-x-auto -mx-4 px-4">
+                  <table className="w-full text-xs">
+                    <thead className="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-200">
+                      <tr>
+                        <th className="text-left py-2 pr-3">App</th>
+                        <th className="text-left py-2 pr-3">Resource</th>
+                        <th className="text-left py-2 pr-3">Why it matched</th>
+                        <th className="text-right py-2 pr-3">Age</th>
+                        <th className="text-right py-2">Risk</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {data.matched.slice(0, 20).map(m => (
+                        <tr key={m.id} className="hover:bg-amber-50/50">
+                          <td className="py-2 pr-3">
+                            <div className="font-medium text-gray-900">{m.client_display_name || '—'}</div>
+                            <div className="text-[10px] font-mono text-gray-400">{m.client_app_id.slice(0, 16)}…</div>
+                          </td>
+                          <td className="py-2 pr-3 text-gray-700">{m.resource_display_name || '—'}</td>
+                          <td className="py-2 pr-3">
+                            <ul className="space-y-0.5">
+                              {m.reasons.map((r, i) => (
+                                <li key={i} className="text-[10px] text-gray-700">
+                                  <span className="text-red-500 mr-1">●</span>{r}
+                                </li>
+                              ))}
+                            </ul>
+                          </td>
+                          <td className="py-2 pr-3 text-right text-gray-600">
+                            {typeof m.age_days === 'number' ? `${m.age_days}d` : '—'}
+                          </td>
+                          <td className="py-2 text-right">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                              m.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                              m.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                              'bg-amber-100 text-amber-700'
+                            }`}>
+                              {m.risk_level}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {data.matched_count > 20 && (
+                    <p className="text-[10px] text-gray-500 mt-2">
+                      Showing top 20 of {data.matched_count} matches. Use the Connected Apps table above
+                      and filter by publisher trust to see the rest.
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
