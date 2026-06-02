@@ -561,6 +561,8 @@ from app.api.handlers import (
     list_invitations_handler,
     create_invitation_handler,
     revoke_invitation_handler,
+    get_org_admin_settings_handler,
+    update_org_admin_settings_handler,
     validate_invitation_handler,
     accept_invitation_handler,
     # Phase 2A: Entra Group Scanner
@@ -2524,6 +2526,22 @@ def create_app():
     @app.post("/api/auth/accept-invitation")
     def accept_invitation_route():
         return accept_invitation_handler()
+
+    # -----------------------
+    # AG-USERMGMT: org-admin can read/update a safe-listed subset of
+    # organization.settings (allowed_email_domains for invitation
+    # whitelist, more to come). Distinct from the superadmin-only
+    # /api/organizations/<id> endpoint.
+    # -----------------------
+    @app.get("/api/organization/settings")
+    @require_role('admin')
+    def org_settings_get():
+        return get_org_admin_settings_handler()
+
+    @app.put("/api/organization/settings")
+    @require_role('admin')
+    def org_settings_update():
+        return update_org_admin_settings_handler()
 
     # -----------------------
     # Service Account Governance (Phase 63)

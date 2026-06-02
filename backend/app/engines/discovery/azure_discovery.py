@@ -5423,51 +5423,64 @@ class AzureDiscoveryEngine:
                     })
             logger.info("[_discover_permissions] bulk-fetching appRoleAssignedTo from %d resource SPs",
                         len(resource_sps))
-            for rsp in resource_sps:
-                rsp_obj_id = rsp['object_id']
-                try:
-                    page = await asyncio.wait_for(
-                        self.graph_client.service_principals.by_service_principal_id(
-                            rsp_obj_id
-                        ).app_role_assigned_to.get(),
-                        timeout=GRAPH_SDK_TIMEOUT,
-                    )
+            # Raw HTTP with proper pagination — Microsoft Graph's
+            # appRoleAssignedTo collection routinely exceeds the 100-row
+            # default page size, and the Kiota SDK doesn't expose a clean
+            # "follow nextLink" API uniformly across versions. requests +
+            # @odata.nextLink loop is simpler and reliable.
+            import requests as _requests
+            try:
+                _bulk_token = self.credential.get_token("https://graph.microsoft.com/.default")
+                _bulk_headers = {"Authorization": f"Bearer {_bulk_token.token}"}
+            except Exception as tok_err:
+                logger.warning("[_discover_permissions] bulk token fetch failed: %s", tok_err)
+                _bulk_headers = None
+
+            if _bulk_headers:
+                from urllib.parse import quote
+                MAX_PAGES_PER_RSP = 50  # 50 * 999 = ~50k rows; safety cap
+                for rsp in resource_sps:
+                    rsp_obj_id = rsp['object_id']
                     n_paged = 0
-                    while page and getattr(page, 'value', None):
-                        for ar in page.value:
-                            principal_id = str(ar.principal_id) if ar.principal_id else ''
+                    page_num = 0
+                    url = (f"https://graph.microsoft.com/v1.0/servicePrincipals/{quote(rsp_obj_id)}"
+                           f"/appRoleAssignedTo?$top=999"
+                           f"&$select=id,principalId,principalType,appRoleId,resourceId")
+                    while url and page_num < MAX_PAGES_PER_RSP:
+                        page_num += 1
+                        try:
+                            resp = _requests.get(url, headers=_bulk_headers, timeout=20)
+                        except _requests.RequestException as req_err:
+                            logger.warning("[_discover_permissions] bulk %s page=%d request err: %s",
+                                           rsp['display_name'], page_num, req_err)
+                            break
+                        if resp.status_code == 429:
+                            retry = int(resp.headers.get('Retry-After', '5'))
+                            await asyncio.sleep(min(retry, 30))
+                            continue
+                        if resp.status_code != 200:
+                            logger.warning("[_discover_permissions] bulk %s page=%d HTTP %s",
+                                           rsp['display_name'], page_num, resp.status_code)
+                            break
+                        body = resp.json()
+                        for ar in body.get('value', []):
+                            principal_id = (ar.get('principalId') or '').strip()
                             if not principal_id:
                                 continue
-                            app_role_id = str(ar.app_role_id) if ar.app_role_id else ''
-                            principal_type = str(ar.principal_type) if ar.principal_type else ''
-                            # Daemon-app perms live on principal_type == ServicePrincipal;
-                            # human/group assignments use User/Group and aren't
-                            # Application permissions in the consent sense.
+                            principal_type = (ar.get('principalType') or '').strip()
+                            # Application permissions are SP→SP assignments;
+                            # User/Group assignments aren't Application perms.
                             if principal_type and principal_type != 'ServicePrincipal':
                                 continue
                             bulk_by_principal.setdefault(principal_id, []).append({
                                 'resource_id': rsp_obj_id,
                                 'resource_name': rsp['display_name'],
-                                'app_role_id': app_role_id,
+                                'app_role_id': (ar.get('appRoleId') or '').strip(),
                             })
                             n_paged += 1
-                        # Paginate if odata.nextLink present (Kiota exposes
-                        # this differently across versions; bail when missing).
-                        next_link = getattr(page, 'odata_next_link', None)
-                        if not next_link:
-                            break
-                        # SDK doesn't expose a clean "next page" call here;
-                        # we'd need the request adapter to follow it. Skipping
-                        # pagination for now keeps the call simple; large
-                        # tenants may miss long tails (logged for visibility).
-                        logger.warning("[_discover_permissions] %s appRoleAssignedTo has more "
-                                       "pages; bulk path skipping continuation", rsp['display_name'])
-                        break
-                    logger.info("[_discover_permissions] bulk %s: %d assignments collected",
-                                rsp['display_name'], n_paged)
-                except Exception as bulk_err:
-                    logger.warning("[_discover_permissions] bulk %s appRoleAssignedTo failed: %s",
-                                   rsp['display_name'], bulk_err)
+                        url = body.get('@odata.nextLink')
+                    logger.info("[_discover_permissions] bulk %s: %d assignments collected (pages=%d)",
+                                rsp['display_name'], n_paged, page_num)
         except Exception as outer:
             logger.warning("[_discover_permissions] bulk pre-fetch outer error: %s", outer)
         # ── end bulk pre-fetch ──

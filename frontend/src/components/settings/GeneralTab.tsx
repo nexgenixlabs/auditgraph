@@ -151,6 +151,11 @@ export function GeneralTab({
           </div>
         </div>
 
+        {/* AG-USERMGMT: Team & Invitations — allowed email-domain whitelist */}
+        <div className="pt-3 border-t">
+          <AllowedEmailDomainsSection setError={setError} setSuccess={setSuccess} />
+        </div>
+
         {/* Subscription Info */}
         {currentOrg && (
           <div className="pt-3 border-t space-y-3">
@@ -254,5 +259,123 @@ export function GeneralTab({
         </button>
       </div>
     </>
+  );
+}
+
+// ─── Allowed Email Domains section ────────────────────────────────────
+// Manages organizations.settings.allowed_email_domains[]. The invitation
+// handler rejects emails whose domain isn't in this list. Empty/unset =
+// open invitations (no whitelist). Lives in Org Settings (General tab)
+// so org admins can manage it without superadmin help.
+
+interface AllowedEmailDomainsProps {
+  setError: (error: string) => void;
+  setSuccess: (msg: string) => void;
+}
+
+function AllowedEmailDomainsSection({ setError, setSuccess }: AllowedEmailDomainsProps) {
+  const [domains, setDomains] = React.useState<string[]>([]);
+  const [draft, setDraft] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch('/api/organization/settings')
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('fetch')))
+      .then(d => setDomains(d.settings?.allowed_email_domains || []))
+      .catch(() => { /* leave empty — first-time setup */ })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const save = async (next: string[]) => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/organization/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowed_email_domains: next }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      setDomains(data.settings?.allowed_email_domains || []);
+      setSuccess('Allowed email domains updated.');
+    } catch (e: any) {
+      setError(e.message || 'Could not save allowed email domains.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addDraft = () => {
+    const d = draft.trim().toLowerCase().replace(/^@/, '');
+    if (!d || domains.includes(d)) { setDraft(''); return; }
+    if (!d.includes('.')) { setError('Domain must contain a dot (e.g., acme.com)'); return; }
+    save([...domains, d]);
+    setDraft('');
+  };
+
+  const remove = (d: string) => save(domains.filter(x => x !== d));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">Allowed Email Domains</h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Invitations to Team Members are restricted to these domains. Empty list = no restriction (open invitations).
+          </p>
+        </div>
+        {saving && <span className="text-xs text-gray-500">Saving…</span>}
+      </div>
+
+      {loading ? (
+        <div className="h-10 bg-gray-100 rounded animate-pulse" />
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2 min-h-[2rem]">
+            {domains.length === 0 ? (
+              <span className="text-xs text-gray-400 italic">No restriction set — invitations accept any email domain.</span>
+            ) : (
+              domains.map(d => (
+                <span
+                  key={d}
+                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium bg-blue-50 text-blue-800 border border-blue-200"
+                >
+                  @{d}
+                  <button
+                    type="button"
+                    onClick={() => remove(d)}
+                    disabled={saving}
+                    className="text-blue-500 hover:text-blue-800 disabled:opacity-40"
+                    aria-label={`Remove ${d}`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))
+            )}
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addDraft(); } }}
+              placeholder="acme.com"
+              disabled={saving}
+              className="flex-1 max-w-xs px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={addDraft}
+              disabled={saving || !draft.trim()}
+              className="px-3 py-1.5 rounded-md text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              Add domain
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }

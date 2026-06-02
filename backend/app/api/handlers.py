@@ -36642,6 +36642,81 @@ def create_invitation_handler():
         db.close()
 
 
+# AG-USERMGMT: org-admin endpoints to read/update a safe-listed slice of
+# organization.settings. Currently surfaces allowed_email_domains so admins
+# can manage the invitation whitelist without superadmin privileges.
+# Distinct from update_organization_handler (superadmin-only, whole-org CRUD).
+_ORG_ADMIN_SETTINGS_ALLOWED_KEYS = {
+    'allowed_email_domains',
+}
+
+
+def get_org_admin_settings_handler():
+    """GET /api/organization/settings — current org's admin-editable settings."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    db = Database(organization_id=org_id)
+    try:
+        s = db.get_organization_settings(org_id) or {}
+        out = {k: s.get(k) for k in _ORG_ADMIN_SETTINGS_ALLOWED_KEYS}
+        # Normalize allowed_email_domains to a list of strings
+        domains = out.get('allowed_email_domains')
+        if not isinstance(domains, list):
+            domains = []
+        out['allowed_email_domains'] = [str(d).strip().lower().lstrip('@') for d in domains if d]
+        return jsonify({'settings': out})
+    finally:
+        db.close()
+
+
+def update_org_admin_settings_handler():
+    """PUT /api/organization/settings — update safe-listed org settings."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    data = request.get_json(silent=True) or {}
+    # Validate each provided key
+    parsed: dict = {}
+    if 'allowed_email_domains' in data:
+        raw = data.get('allowed_email_domains')
+        if raw is None:
+            parsed['allowed_email_domains'] = []
+        elif isinstance(raw, list):
+            cleaned = []
+            for d in raw:
+                if not d:
+                    continue
+                s = str(d).strip().lower().lstrip('@')
+                # Reject anything that doesn't look like a bare domain
+                if not s or ' ' in s or '/' in s or '@' in s:
+                    return jsonify({
+                        'error': f'Invalid domain: {d!r}. Use bare domains like "acme.com" (no leading @, no protocol).',
+                    }), 400
+                if s.count('.') < 1:
+                    return jsonify({'error': f'Domain must contain at least one dot: {d!r}'}), 400
+                if s not in cleaned:
+                    cleaned.append(s)
+            parsed['allowed_email_domains'] = cleaned
+        else:
+            return jsonify({'error': 'allowed_email_domains must be a list of strings'}), 400
+
+    if not parsed:
+        return jsonify({'error': 'No supported keys provided'}), 400
+
+    # Use the BYPASSRLS admin role to update organizations (organizations
+    # table has no RLS but the app user lacks write grants on it).
+    admin_db = Database(_admin_reason='org_admin_settings_update')
+    try:
+        existing = admin_db.get_organization_by_id(org_id) or {}
+        merged = {**(existing.get('settings') or {}), **parsed}
+        admin_db.update_organization(org_id, settings=merged)
+        out = {k: merged.get(k) for k in _ORG_ADMIN_SETTINGS_ALLOWED_KEYS}
+        return jsonify({'settings': out})
+    finally:
+        admin_db.close()
+
+
 def revoke_invitation_handler(invitation_id):
     """DELETE /api/invitations/<id> — revoke a pending invitation."""
     org_id = g.current_user.get('organization_id')
