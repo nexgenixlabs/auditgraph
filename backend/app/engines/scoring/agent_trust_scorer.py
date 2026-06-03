@@ -58,19 +58,26 @@ logger = logging.getLogger(__name__)
 # observe diagnostic-settings coverage in v1; the evidence string says
 # "heuristic" so consumers know not to over-index.
 
+# Founder-signed-off thresholds (2026-06-03) — see
+# docs/runbooks/trust_score_thresholds_proposal.md
+# Worst-case (all FAIL) anchors to ~22/100 — the "42/100" demo number
+# corresponds to an agent failing some dimensions and passing others.
 DEFAULTS: dict[str, Any] = {
-    "ownership_penalty_fail":     20,
-    "secrets_penalty_critical":   35,
-    "secrets_penalty_high":       25,
-    "secrets_penalty_medium":     15,
+    "ownership_penalty_fail":     15,   # signed-off
+    "secrets_penalty_critical":   30,   # signed-off
+    "secrets_penalty_high":       22,   # signed-off
+    "secrets_penalty_medium":     12,   # signed-off
     "secrets_penalty_low":         5,
     "secrets_penalty_none":        0,
-    "egress_penalty_fail":        20,
-    "telemetry_penalty_none":      5,
+    "egress_penalty_fail":        18,   # signed-off
+    "telemetry_penalty_none":      5,   # soft penalty; tooltip explains heuristic
     "telemetry_penalty_partial":   2,
     "telemetry_penalty_full":      0,
-    "oversight_penalty_fail":     20,
+    "oversight_penalty_fail":     10,   # signed-off (low because attestation flow is new)
     "telemetry_window_days":      30,
+    # Calibration version — bump when thresholds change. Surfaced in the
+    # API response so audit trails are clear post-recalibration.
+    "calibration_version":     "2026-06-03",
 }
 
 DEFAULTS_JSON_STRING = json.dumps(DEFAULTS)
