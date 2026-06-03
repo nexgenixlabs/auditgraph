@@ -31,7 +31,7 @@ CONSTRAINTS HONORED:
 
 Usage:
   cd backend/
-  ./venv/bin/python scripts/seed_aiag_demo.py --org-id 10
+  ./venv/bin/python scripts/seed_aiag_demo.py --org-id 9
 
 After seeding, validate per docs/runbooks/aiag_localhost_validation.md.
 """
@@ -146,16 +146,33 @@ DRIFT_AGENT_ID = AGENTS[0]["identity_id"]
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 
+# Tenants that hold real customer data. The seeder REFUSES to write here.
+# Add new entries (locally OR cloud) as customer tenants are onboarded.
+FORBIDDEN_ORG_SLUGS = frozenset({
+    'virtuallabs',     # local org=10 — real client data (15,678 identities)
+    'orangeblack',     # cloud-dev real client
+    'azurecredits',    # legacy real client snapshot
+})
+
+
 def _find_org(db, org_id: int) -> int:
     cur = db.conn.cursor()
-    cur.execute("SELECT id FROM organizations WHERE id = %s", (org_id,))
+    cur.execute("SELECT id, name, slug FROM organizations WHERE id = %s", (org_id,))
     row = cur.fetchone()
     if row is None:
         raise RuntimeError(
             f"Organization id={org_id} does not exist locally. "
             "Either pick a different --org-id or create the org first."
         )
-    logger.info("Org found: id=%s", org_id)
+    _id, name, slug = row
+    if (slug or '').lower() in FORBIDDEN_ORG_SLUGS or (name or '').lower() in FORBIDDEN_ORG_SLUGS:
+        raise RuntimeError(
+            f"REFUSING TO SEED: org_id={org_id} (name={name!r}, slug={slug!r}) is a "
+            f"REAL CUSTOMER tenant. This seeder only writes to dedicated demo orgs.\n"
+            f"  Locally, target --org-id 9 (AuditGraph Demo).\n"
+            f"  See memory/feedback_no_org_data_deletion.md for the policy."
+        )
+    logger.info("Org found: id=%s (name=%r, slug=%r) — passes demo-org guard", org_id, name, slug)
     return org_id
 
 
@@ -498,7 +515,7 @@ def _seed_activity_events(db, org_id: int):
 
 def main():
     parser = argparse.ArgumentParser(description="Seed AIAG demo data (localhost only)")
-    parser.add_argument("--org-id", type=int, default=10,
+    parser.add_argument("--org-id", type=int, default=9,
                         help="Organization ID to seed (default 10)")
     parser.add_argument("--no-cleanup", action="store_true",
                         help="Don't remove existing aaa0*-prefixed demo rows first")
