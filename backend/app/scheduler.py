@@ -1144,6 +1144,46 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         except Exception as _sa_err:
             logger.warning("[AG-86] Shadow verdict refresh failed: %s", _sa_err)
 
+        # AG-180 (Tier 2A): Refresh Data Reachability rollup per AI agent.
+        # AG-181 (Tier 2C): AI Lifecycle event detection (J/M/L + drift).
+        # AG-182 (Tier 3A): Refresh behavior baselines + run anomaly detection.
+        # All three are graceful no-ops when there are no AI agents / no events.
+        try:
+            org_id = getattr(db, '_organization_id', None)
+            if org_id:
+                # T2A: classify any new resources first, then compute reachability
+                from app.engines.ai.data_reachability_engine import (
+                    classify_undiscovered_resources,
+                    refresh_data_reachability,
+                )
+                classified = classify_undiscovered_resources(db, current_run_id, org_id)
+                logger.info("[AG-180] Auto-classified %d new resources for run #%s",
+                            classified, current_run_id)
+                dr_result = refresh_data_reachability(db, current_run_id, org_id)
+                logger.info("[AG-180] Data reachability: %s for run #%s",
+                            dr_result, current_run_id)
+
+                # T2C: lifecycle event detection comparing current vs previous run
+                from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+                lifecycle = AILifecycleEngine(db)
+                events = lifecycle.analyze(current_run_id, previous_run_id, org_id)
+                logger.info("[AG-181] AI lifecycle: %d events written for run #%s",
+                            len(events) if events else 0, current_run_id)
+
+                # T3A: behavior baseline refresh + anomaly detection
+                from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+                behavior = AgentBehaviorEngine(db)
+                baseline_result = behavior.refresh_baselines(org_id, window_days=14)
+                logger.info("[AG-182] Baselines: %s for run #%s",
+                            baseline_result, current_run_id)
+                anomalies = behavior.detect_anomalies(org_id, lookback_hours=24)
+                if anomalies:
+                    logger.info("[AG-182] %d behavior anomalies detected for run #%s",
+                                len(anomalies), current_run_id)
+        except Exception as _aiag_err:
+            logger.warning("[AIAG-T2T3] Tier 2/3 engine refresh failed: %s", _aiag_err)
+            logger.exception(_aiag_err)
+
         # ── Tiered Parallel Post-Processing ─────────────────────────
         # Jobs grouped by dependency.  Within each tier, jobs run
         # concurrently in a ThreadPoolExecutor with per-job DB

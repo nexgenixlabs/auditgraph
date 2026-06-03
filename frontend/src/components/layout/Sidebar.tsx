@@ -159,10 +159,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         items: [
           { to: '/ai-inventory',  label: 'AI Inventory',  icon: agentBotIcon },
           { to: '/ai-access',     label: 'AI Access',     icon: effectiveAccessIcon },
+          // AG-180 (Tier 2A): per-agent data classification reachability
+          { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
           { to: '/ai-runtime',    label: 'AI Runtime',    icon: agentBotIcon },
+          // AG-182 (Tier 3A): per-agent forensic timeline + baseline anomalies
+          { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: agentBotIcon },
           { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
           // AG-178 (Tier 1A): AI Identity Attack Paths — the signature demo
           { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
+          // AG-181 (Tier 2C): AI agent J/M/L drift
+          { to: '/ai-lifecycle', label: 'AI Lifecycle', icon: identityIcon },
           { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },
           // AG-179 (Tier 1B): Board-ready scorecard
           { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },

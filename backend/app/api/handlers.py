@@ -42271,6 +42271,312 @@ def get_ai_board_scorecard_history_handler():
 
 
 # ============================================================
+# ============================================================
+# AG-180 (Tier 2A): Data Reachability handlers
+# ============================================================
+
+def get_ai_agent_data_reachability_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/data-reachability
+
+    Returns per-classification rollup of resources this AI agent can reach.
+    No fake data — empty list if the agent has no classified resource access.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({'by_classification': [], 'total_resources': 0, 'total_records': 0})
+
+        cursor.execute("""
+            SELECT id, identity_id, display_name, agent_identity_type
+            FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+              AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id(), run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.ai.data_reachability_engine import get_agent_data_reachability
+        rollups = get_agent_data_reachability(cursor, row['id'], _org_id())
+        total_resources = sum(r.get('resource_count', 0) for r in rollups)
+        total_records = sum(r.get('est_records', 0) or 0 for r in rollups)
+        return jsonify({
+            'identity_id': row['identity_id'],
+            'display_name': row['display_name'],
+            'by_classification': rollups,
+            'total_resources': total_resources,
+            'total_records': total_records if total_records > 0 else None,
+        })
+    except Exception as e:
+        logger.error(f"data-reachability handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_data_security_summary_handler():
+    """GET /api/data-security — aggregate classified-data posture for the org."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({'classifications': [], 'agents_with_reachability': 0, 'total_classified_resources': 0})
+
+        cursor.execute("""
+            SELECT data_classification,
+                   COUNT(*) AS resource_count,
+                   COUNT(*) FILTER (WHERE classification_source = 'tag') AS tag_sourced,
+                   COUNT(*) FILTER (WHERE classification_source = 'name_pattern') AS pattern_sourced,
+                   SUM(record_count_estimate) AS est_records
+            FROM (
+                SELECT data_classification, classification_source, record_count_estimate FROM azure_storage_accounts
+                  WHERE organization_id = %s AND data_classification IS NOT NULL
+                UNION ALL
+                SELECT data_classification, classification_source, record_count_estimate FROM azure_sql_databases
+                  WHERE organization_id = %s AND data_classification IS NOT NULL
+                UNION ALL
+                SELECT data_classification, classification_source, record_count_estimate FROM azure_cosmos_databases
+                  WHERE organization_id = %s AND data_classification IS NOT NULL
+            ) AS all_classified
+            GROUP BY data_classification
+            ORDER BY resource_count DESC
+        """, (_org_id(), _org_id(), _org_id()))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT COUNT(DISTINCT identity_db_id) AS agents_with_reachability
+            FROM agent_data_reachability
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+        """, (_org_id(), run_ids))
+        agg = cursor.fetchone()
+
+        return jsonify({
+            'classifications': rows,
+            'agents_with_reachability': int(agg['agents_with_reachability'] or 0),
+            'total_classified_resources': sum(r['resource_count'] for r in rows),
+        })
+    except Exception as e:
+        logger.error(f"data-security handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def classify_resource_handler(resource_id: str):
+    """POST /api/resources/<resource_id>/classify — admin override.
+    Body: {classification: 'PHI'|'PCI'|...}
+    """
+    payload = request.get_json(silent=True) or {}
+    classification = (payload.get('classification') or '').strip().upper()
+    from app.constants.data_classification import ALL_CLASSES
+    if classification not in ALL_CLASSES:
+        return jsonify({'error': f'Invalid classification; must be one of {ALL_CLASSES}'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        for table in ('azure_storage_accounts', 'azure_sql_databases', 'azure_cosmos_databases'):
+            cursor.execute(f"""
+                UPDATE {table}
+                   SET data_classification = %s,
+                       classification_source = 'override',
+                       classification_confidence = 'high'
+                 WHERE organization_id = %s AND resource_id = %s
+            """, (classification, _org_id(), resource_id))
+        db.conn.commit()
+        _log(db, 'data_classification_override',
+             f'Resource {resource_id} classified as {classification}',
+             {'resource_id': resource_id, 'classification': classification})
+        return jsonify({'ok': True, 'classification': classification})
+    except Exception as e:
+        logger.error(f"classify-resource failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def auto_classify_resources_handler():
+    """POST /api/resources/auto-classify — kick off auto-classifier batch.
+    Walks unclassified storage/SQL/Cosmos and classifies via name + tag patterns.
+    """
+    db = _db()
+    try:
+        from app.engines.ai.data_reachability_engine import classify_undiscovered_resources
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({'classified': 0, 'reason': 'no runs'})
+        updated = classify_undiscovered_resources(db, run_ids[0], _org_id())
+        return jsonify({'classified': updated})
+    except Exception as e:
+        logger.error(f"auto-classify failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-181 (Tier 2C): AI Lifecycle handlers
+# ============================================================
+
+def get_ai_agent_lifecycle_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/lifecycle — event history for one agent."""
+    limit = min(request.args.get('limit', 100, type=int), 500)
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, agent_identity_type FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+        engine = AILifecycleEngine(db)
+        events = engine.get_lifecycle_for_identity(row['id'], _org_id(), limit=limit)
+        return jsonify({'events': events, 'identity_id': identity_id})
+    except Exception as e:
+        logger.error(f"lifecycle handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_agent_drift_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/drift — current-vs-prev run diff."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor)
+        if len(run_ids) < 1:
+            return jsonify({'drift_events': [], 'summary': {'total': 0}})
+        current_run = run_ids[0]
+        prev_run = run_ids[1] if len(run_ids) > 1 else None
+
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+        engine = AILifecycleEngine(db)
+        result = engine.get_drift_for_identity(row['id'], current_run, prev_run, _org_id())
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"drift handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_jml_snapshot_handler():
+    """GET /api/dashboard/ai-jml-snapshot — joiners/movers/leavers for AI agents."""
+    days = min(request.args.get('window_days', 7, type=int), 90)
+    db = _db()
+    try:
+        from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+        engine = AILifecycleEngine(db)
+        result = engine.get_jml_snapshot(_org_id(), window_days=days)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"ai-jml-snapshot failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-182 (Tier 3A): Activity Timeline + Behavior Baseline handlers
+# ============================================================
+
+def get_ai_agent_activity_timeline_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/activity-timeline?hours=24"""
+    hours = min(request.args.get('hours', 24, type=int), 720)
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+        engine = AgentBehaviorEngine(db)
+        events = engine.get_timeline_for_identity(row['id'], _org_id(), hours=hours)
+        return jsonify({'events': events, 'identity_id': identity_id, 'hours': hours})
+    except Exception as e:
+        logger.error(f"activity-timeline failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_agent_baseline_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/baseline"""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+        engine = AgentBehaviorEngine(db)
+        baseline = engine.get_baseline_for_identity(row['id'], _org_id())
+        if not baseline:
+            return jsonify({'baseline': None, 'still_learning': True, 'identity_id': identity_id})
+        return jsonify({'baseline': baseline, 'still_learning': not baseline.get('is_active', False), 'identity_id': identity_id})
+    except Exception as e:
+        logger.error(f"baseline failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_agent_anomalies_handler():
+    """GET /api/ai-agents/activity/anomalies?limit=20"""
+    limit = min(request.args.get('limit', 20, type=int), 100)
+    db = _db()
+    try:
+        from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+        engine = AgentBehaviorEngine(db)
+        anomalies = engine.get_recent_anomalies(_org_id(), limit=limit)
+        return jsonify({'anomalies': anomalies, 'total': len(anomalies)})
+    except Exception as e:
+        logger.error(f"agent anomalies failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
 # AI Governance pillar — policy compliance
 # ============================================================
 

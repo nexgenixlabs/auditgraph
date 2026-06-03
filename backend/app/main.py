@@ -2232,6 +2232,63 @@ def create_app():
         from app.api.handlers import get_ai_board_scorecard_history_handler
         return get_ai_board_scorecard_history_handler()
 
+    # AG-180 (Tier 2A): Data Reachability
+    @app.get("/api/ai-agents/<identity_id>/data-reachability")
+    def ai_agent_data_reachability_route(identity_id):
+        from app.api.handlers import get_ai_agent_data_reachability_handler
+        return get_ai_agent_data_reachability_handler(identity_id)
+
+    @app.get("/api/data-security")
+    def data_security_summary_route():
+        from app.api.handlers import get_data_security_summary_handler
+        return get_data_security_summary_handler()
+
+    @app.post("/api/resources/<path:resource_id>/classify")
+    @require_role('admin', 'owner')
+    def classify_resource_route(resource_id):
+        from app.api.handlers import classify_resource_handler
+        if not resource_id.startswith('/'):
+            resource_id = '/' + resource_id
+        return classify_resource_handler(resource_id)
+
+    @app.post("/api/resources/auto-classify")
+    @require_role('admin', 'owner', 'auditor')
+    def auto_classify_route():
+        from app.api.handlers import auto_classify_resources_handler
+        return auto_classify_resources_handler()
+
+    # AG-181 (Tier 2C): AI Lifecycle + Drift
+    @app.get("/api/ai-agents/<identity_id>/lifecycle")
+    def ai_agent_lifecycle_route(identity_id):
+        from app.api.handlers import get_ai_agent_lifecycle_handler
+        return get_ai_agent_lifecycle_handler(identity_id)
+
+    @app.get("/api/ai-agents/<identity_id>/drift")
+    def ai_agent_drift_route(identity_id):
+        from app.api.handlers import get_ai_agent_drift_handler
+        return get_ai_agent_drift_handler(identity_id)
+
+    @app.get("/api/dashboard/ai-jml-snapshot")
+    def ai_jml_snapshot_route():
+        from app.api.handlers import get_ai_jml_snapshot_handler
+        return get_ai_jml_snapshot_handler()
+
+    # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline
+    @app.get("/api/ai-agents/<identity_id>/activity-timeline")
+    def ai_agent_activity_timeline_route(identity_id):
+        from app.api.handlers import get_ai_agent_activity_timeline_handler
+        return get_ai_agent_activity_timeline_handler(identity_id)
+
+    @app.get("/api/ai-agents/<identity_id>/baseline")
+    def ai_agent_baseline_route(identity_id):
+        from app.api.handlers import get_ai_agent_baseline_handler
+        return get_ai_agent_baseline_handler(identity_id)
+
+    @app.get("/api/ai-agents/activity/anomalies")
+    def ai_agent_anomalies_route():
+        from app.api.handlers import get_ai_agent_anomalies_handler
+        return get_ai_agent_anomalies_handler()
+
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')
     def admin_platform_restart_workers():

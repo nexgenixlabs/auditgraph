@@ -29,6 +29,8 @@ import ConnectedApps from './pages/ConnectedApps';
 import ShadowApps from './pages/ShadowApps';
 import AIAttackPaths from './pages/AIAttackPaths';
 import AIBoardScorecard from './pages/AIBoardScorecard';
+import AILifecycle from './pages/AILifecycle';
+import AIDataReachability from './pages/AIDataReachability';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
@@ -62,6 +64,7 @@ import AIAgents from './pages/AIAgents';
 import AIInventory from './pages/AIInventory';
 import AIAccess from './pages/AIAccess';
 import AIRuntime from './pages/AIRuntime';
+import AgentActivityTimeline from './pages/AgentActivityTimeline';
 import AIRisk from './pages/AIRisk';
 import AIGovernance from './pages/AIGovernance';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
@@ -354,11 +357,17 @@ function AppContent() {
                   <Route path="/ai-risk/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAttackPaths /></ErrorBoundary>} />
                   {/* AG-179: AI Board Scorecard */}
                   <Route path="/board-scorecard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIBoardScorecard /></ErrorBoundary>} />
+                  {/* AG-181: AI Agent Lifecycle (J/M/L) */}
+                  <Route path="/ai-lifecycle" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AILifecycle /></ErrorBoundary>} />
                   {/* AG-161: 5-pillar AI Security IA. Legacy routes below redirect into new pillars. */}
                   <Route path="/ai-inventory" element={<Navigate to="/ai-inventory/graph" replace />} />
                   <Route path="/ai-inventory/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIInventory /></ErrorBoundary>} />
                   <Route path="/ai-access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAccess /></ErrorBoundary>} />
+                  {/* AG-180: Per-agent data reachability (PHI/PCI/PII/Source/HR/Financial/Confidential) */}
+                  <Route path="/ai-access/data-reachability" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIDataReachability /></ErrorBoundary>} />
                   <Route path="/ai-runtime" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRuntime /></ErrorBoundary>} />
+                  {/* AG-182: Per-agent forensic timeline + behavior baseline */}
+                  <Route path="/ai-runtime/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AgentActivityTimeline /></ErrorBoundary>} />
                   <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />
                   <Route path="/ai-governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIGovernance /></ErrorBoundary>} />
                   {/* Legacy redirects — preserve bookmarks from before AG-161 */}
