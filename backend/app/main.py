@@ -842,6 +842,8 @@ def create_app():
         '/api/risk-rules/preview',               # Preview rule match count
         '/api/security/risk-simulation',         # What-if risk simulation
         '/api/security/copilot-query',           # AI copilot (read + activity log)
+        '/api/argus/nl-query',                   # AG-185 Argus L1 NL query (read-only)
+        '/api/argus/investigate-attack-path',    # AG-187 Argus L3 (read-only)
         '/api/attack-paths/analyze',             # Attack path computation
         '/api/graph-attack/analyze',             # Graph attack analysis
         '/api/ai/explain-attack-path',           # AI explanation (stateless)
@@ -2237,6 +2239,47 @@ def create_app():
     def argus_explain_risk_score_route(identity_id):
         from app.api.handlers import get_explain_risk_score_handler
         return get_explain_risk_score_handler(identity_id)
+
+    # AG-186 (Argus Layer 2): Multi-hop Security Reasoner. POST body:
+    #   {question_type, use_cache?}
+    # Runs 3-5 sub-queries against the graph and synthesises a board-ready
+    # narrative with cited evidence. Caches results in argus_reasoning_cache.
+    @app.post("/api/argus/reason")
+    def argus_reason_route():
+        from app.api.handlers import argus_reasoner_handler
+        return argus_reasoner_handler()
+
+    # AG-188 (Argus Layer 4): Board / CISO Advisor — "What should I fix this week?"
+    # Returns the top 5 ranked remediation priorities for the caller's org.
+    @app.get("/api/argus/recommendations")
+    def argus_ciso_advisor_route():
+        from app.api.handlers import argus_ciso_advisor_handler
+        return argus_ciso_advisor_handler()
+
+    # AG-191 (Argus Layer 7): Executive Storytelling — board-ready prose for
+    # "Are our AI agents secure?" / NHI / OAuth / overall posture.
+    # GET ?topic=<ai_agents_secure|nhi_secure|oauth_secure|overall_posture>.
+    @app.get("/api/argus/executive-summary")
+    def argus_executive_summary_route():
+        from app.api.handlers import argus_exec_narrative_handler
+        return argus_exec_narrative_handler()
+
+    # AG-192 (Argus XGRAPH): "Who can reach <classification>?" cross-identity rollup.
+    # GET ?classification=PHI — returns {by_category, common_path, total_records_exposed,
+    # top_resources, confidence}. Honest empty answer when nobody reaches.
+    @app.get("/api/argus/who-can-reach")
+    def argus_who_can_reach_route():
+        from app.api.handlers import argus_cross_graph_handler
+        return argus_cross_graph_handler()
+
+    # AG-190 (Argus Layer 6): What-If Simulator — "What if I remove this role?"
+    # POST body: {identity_id: '<external GUID>', role_assignment_id: <int>}
+    # Returns architectural projection (NOT a mutation) of current vs projected
+    # risk score with the signals + persisted attack-paths that would drop.
+    @app.post("/api/argus/what-if/role-removal")
+    def argus_what_if_role_removal_route():
+        from app.api.handlers import argus_what_if_handler
+        return argus_what_if_handler()
 
     # AG-180 (Tier 2A): Data Reachability
     @app.get("/api/ai-agents/<identity_id>/data-reachability")
@@ -4698,6 +4741,15 @@ def create_app():
     def argus_investigate_attack_path_route():
         from app.api.handlers import argus_investigate_attack_path_handler
         return argus_investigate_attack_path_handler()
+
+    # AG-185 — Argus L1 Natural-Language Query. POST body: {query, limit?, offset?}
+    # Translates plain-English questions into Identity Query Builder filters
+    # and returns the matching identities. Honest empty-state when no intent
+    # or keyword matches.
+    @app.post("/api/argus/nl-query")
+    def argus_nl_query_route():
+        from app.api.handlers import argus_nl_query_handler
+        return argus_nl_query_handler()
 
     @app.get("/api/dashboard/attack-surface")
     def dashboard_attack_surface():

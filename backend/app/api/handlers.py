@@ -34278,6 +34278,407 @@ def argus_investigate_attack_path_handler():
 
 
 # ================================================================
+# AG-185 (Argus Layer 1): Natural-Language Query handler
+# ================================================================
+
+# Allow-list of fields the NL-query handler is permitted to surface back
+# to the query builder. Anything outside this set is either a synthetic
+# field (we expand it in-handler) or an injection attempt (we drop it).
+_NL_REAL_QUERY_FIELDS = frozenset({
+    'display_name', 'identity_type', 'identity_category', 'cloud', 'status',
+    'enabled', 'is_federated', 'risk_level', 'risk_score', 'activity_status',
+    'credential_count', 'credential_status', 'credential_risk',
+    'owner_count', 'api_permission_count', 'app_role_count',
+    'pim_eligible_count', 'has_permanent_assignment', 'ca_coverage_status',
+    'ca_mfa_enforced', 'permission_plane', 'access_tier',
+    'rbac_role_count', 'entra_role_count', 'privilege_tier',
+})
+
+# Fields the NL engine emits that aren't (yet) in QUERY_FIELD_MAP. The
+# handler rewrites these into either an existing real field or a custom
+# SQL fragment before calling _build_advanced_query_where. Keeping the
+# list explicit keeps the engine pure (no DB knowledge) and the handler
+# auditable.
+_NL_SYNTHETIC_FIELD_REWRITE = {
+    'agent_identity_type': "COALESCE(i.agent_identity_type, '')",
+}
+
+
+def _nl_split_filters(filters: list):
+    """Partition NL filters into:
+        - query_conditions  : list of {field, operator, value} for the
+                              advanced query builder
+        - role_filters      : list of {op, value} for has_role_contains
+                              (handler-applied as EXISTS subquery)
+        - sort_field        : optional sort override
+        - meta              : non-filter intent (e.g. posture_drop_reason)
+        - extra_sql_parts   : (sql_fragment, params) tuples for synthetic
+                              real-column fields not in QUERY_FIELD_MAP
+        - unknown_fields    : list[str] of fields we couldn't translate
+    """
+    from app.engines.argus.nl_query import (
+        SYNTHETIC_FIELD_HAS_ROLE_NAME,
+        SYNTHETIC_FIELD_HAS_ROLE_CONTAINS,
+        SYNTHETIC_FIELD_SORT_ORDER,
+        SYNTHETIC_FIELD_META,
+    )
+
+    query_conditions = []
+    role_filters = []
+    sort_field = None
+    meta = None
+    extra_sql_parts = []
+    unknown_fields = []
+
+    for f in filters or []:
+        field = f.get('field')
+        op = f.get('op') or f.get('operator', 'equals')
+        value = f.get('value')
+
+        if field == SYNTHETIC_FIELD_META:
+            meta = value
+            continue
+        if field == SYNTHETIC_FIELD_SORT_ORDER:
+            if isinstance(value, str) and value in QUERY_SORT_ALLOWLIST:
+                sort_field = value
+            continue
+        if field in (SYNTHETIC_FIELD_HAS_ROLE_NAME,
+                     SYNTHETIC_FIELD_HAS_ROLE_CONTAINS):
+            role_filters.append({'op': op, 'value': value,
+                                 'exact': field == SYNTHETIC_FIELD_HAS_ROLE_NAME})
+            continue
+        if field in _NL_REAL_QUERY_FIELDS:
+            query_conditions.append({'field': field, 'operator': op, 'value': value})
+            continue
+        if field in _NL_SYNTHETIC_FIELD_REWRITE:
+            sql_field = _NL_SYNTHETIC_FIELD_REWRITE[field]
+            try:
+                op_sql = QUERY_OPERATORS.get(op)
+                if not op_sql:
+                    unknown_fields.append(field)
+                    continue
+                if op in ('contains', 'not_contains'):
+                    extra_sql_parts.append((op_sql.format(field=sql_field),
+                                            [f"%{str(value).lower()}%"]))
+                elif op in ('in', 'not_in'):
+                    if not isinstance(value, list):
+                        unknown_fields.append(field)
+                        continue
+                    extra_sql_parts.append((op_sql.format(field=sql_field), [list(value)]))
+                elif op in ('is_empty', 'is_not_empty'):
+                    extra_sql_parts.append((op_sql.format(field=sql_field), []))
+                else:
+                    extra_sql_parts.append((op_sql.format(field=sql_field), [value]))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("nl_query: synthetic rewrite failed field=%s: %s", field, exc)
+                unknown_fields.append(field)
+            continue
+
+        unknown_fields.append(field)
+
+    return query_conditions, role_filters, sort_field, meta, extra_sql_parts, unknown_fields
+
+
+def _nl_role_filter_sql(role_filters: list) -> tuple:
+    """Build EXISTS(...) SQL covering both role_assignments and
+    entra_role_assignments for the supplied role-name filters.
+
+    Returns ('', []) when no role filters were supplied. Multiple
+    role_filters are AND-ed (intersect) at the SQL level - within each
+    one the 'in' operator OR-s its values.
+    """
+    if not role_filters:
+        return '', []
+
+    parts = []
+    params = []
+    for rf in role_filters:
+        op = rf.get('op', 'contains')
+        value = rf.get('value')
+        exact = bool(rf.get('exact'))
+
+        if op == 'in':
+            if not isinstance(value, list) or not value:
+                continue
+            placeholders = ', '.join(['%s'] * len(value))
+            patterns = [f"%{str(v).lower()}%" for v in value]
+            # Match either the ARM role table or the Entra role table.
+            sql = f"""(
+                EXISTS (
+                    SELECT 1 FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                      AND LOWER(ra.role_name) LIKE ANY (ARRAY[{placeholders}])
+                )
+                OR EXISTS (
+                    SELECT 1 FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                      AND LOWER(era.role_name) LIKE ANY (ARRAY[{placeholders}])
+                )
+            )"""
+            parts.append(sql)
+            params.extend(patterns)
+            params.extend(patterns)
+            continue
+
+        if value is None:
+            continue
+        val_str = str(value)
+        if exact:
+            sql = """(
+                EXISTS (
+                    SELECT 1 FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                      AND LOWER(ra.role_name) = LOWER(%s)
+                )
+                OR EXISTS (
+                    SELECT 1 FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                      AND LOWER(era.role_name) = LOWER(%s)
+                )
+            )"""
+            parts.append(sql)
+            params.extend([val_str, val_str])
+        else:
+            like = f"%{val_str.lower()}%"
+            sql = """(
+                EXISTS (
+                    SELECT 1 FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                      AND LOWER(ra.role_name) LIKE %s
+                )
+                OR EXISTS (
+                    SELECT 1 FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                      AND LOWER(era.role_name) LIKE %s
+                )
+            )"""
+            parts.append(sql)
+            params.extend([like, like])
+
+    if not parts:
+        return '', []
+    return ' AND ' + ' AND '.join(parts), params
+
+
+def argus_nl_query_handler():
+    """POST /api/argus/nl-query - Argus Layer 1 (AG-185).
+
+    Body: {"query": "<plain English question>", "limit": <int?>, "offset": <int?>}
+
+    Pipeline:
+        1. translate_nl_query() converts text -> filter structure (or None)
+        2. Synthetic fields are expanded into query-builder conditions +
+           a role-name EXISTS clause
+        3. The identity-list SQL is built using the same scaffolding the
+           /api/identities/query handler uses (latest run IDs, subscription
+           filter, hide-microsoft filter)
+        4. Response is {filters_interpreted, identities, count, why}
+
+    Honest empty state: if translate_nl_query returns None the response
+    has filters_interpreted=null and identities=[] - we never run an
+    unscoped query to "guess" what the user meant.
+    """
+    from app.engines.argus.nl_query import translate_nl_query
+
+    data = request.get_json(silent=True) or {}
+    text = data.get('query', '')
+    if not isinstance(text, str):
+        return jsonify({'error': 'query must be a string'}), 400
+    text = text.strip()
+    if not text:
+        return jsonify({'error': 'query is required'}), 400
+    if len(text) > 500:
+        return jsonify({'error': 'query too long (max 500 chars)'}), 400
+
+    try:
+        limit = int(data.get('limit', 100))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'limit must be an integer'}), 400
+    try:
+        offset = int(data.get('offset', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'offset must be an integer'}), 400
+    if limit < 1 or limit > MAX_LIMIT:
+        return jsonify({'error': f'limit must be 1..{MAX_LIMIT}'}), 400
+    if offset < 0:
+        return jsonify({'error': 'offset must be >= 0'}), 400
+
+    translation = translate_nl_query(text)
+
+    # Honest empty-state - we recognised nothing.
+    if translation is None:
+        return jsonify({
+            'query': text,
+            'filters_interpreted': None,
+            'identities': [],
+            'count': 0,
+            'total': 0,
+            'why': (
+                "Argus could not match this question to a known intent or "
+                "keyword. Try one of the suggested shortcuts (e.g. "
+                "'AI agents with KV admin', 'Ownerless AI agents') or use "
+                "the advanced query builder."
+            ),
+            'confidence': None,
+            'intent': None,
+        })
+
+    filters = translation.get('filters', []) or []
+    (query_conditions, role_filters, sort_field,
+     meta, extra_sql_parts, unknown_fields) = _nl_split_filters(filters)
+
+    # Meta-intent - non-filter question routed to another endpoint by
+    # the UI. We don't execute the query builder; we just return the
+    # interpretation so the caller can dispatch correctly.
+    if meta:
+        return jsonify({
+            'query': text,
+            'filters_interpreted': filters,
+            'identities': [],
+            'count': 0,
+            'total': 0,
+            'why': translation.get('description'),
+            'confidence': translation.get('confidence'),
+            'intent': translation.get('intent'),
+            'meta_question': meta,
+            'meta_route': translation.get('meta_route'),
+        })
+
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({
+                'query': text,
+                'filters_interpreted': filters,
+                'identities': [],
+                'count': 0,
+                'total': 0,
+                'why': 'No completed discovery runs in this organization yet.',
+                'confidence': translation.get('confidence'),
+                'intent': translation.get('intent'),
+            })
+
+        # Build base query (identical scaffolding to query_identities())
+        query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"
+        params = [run_ids]
+        query, params = _apply_sub_filter(query, params, cursor,
+                                          _org_id(), _connection_id())
+        query += HIDE_MICROSOFT_SQL
+
+        # Wrap the translated conditions in a single AND-group so the
+        # advanced query helper handles operator dispatch, type
+        # coercion, and the field allow-list check for us.
+        try:
+            if query_conditions:
+                adv_where, adv_params = _build_advanced_query_where(
+                    [{'conditions': query_conditions}])
+                query += adv_where
+                params.extend(adv_params)
+        except ValueError as exc:
+            logger.info("nl_query: query-builder rejected conditions: %s", exc)
+            return jsonify({
+                'query': text,
+                'filters_interpreted': filters,
+                'identities': [],
+                'count': 0,
+                'total': 0,
+                'why': f'Could not translate filter: {exc}',
+                'confidence': 'low',
+                'intent': translation.get('intent'),
+            })
+
+        # Synthetic real-column fields (e.g. agent_identity_type)
+        for sql_part, sql_params in extra_sql_parts:
+            query += ' AND ' + sql_part
+            params.extend(sql_params)
+
+        # Role-name EXISTS clauses
+        role_sql, role_params = _nl_role_filter_sql(role_filters)
+        if role_sql:
+            query += role_sql
+            params.extend(role_params)
+
+        # Total count BEFORE sort/limit so the UI can show "47 results".
+        count_sql = f"SELECT COUNT(*) FROM ({query}) sub"
+        cursor.execute(count_sql, params)
+        total = _scalar(cursor, 0) or 0
+
+        # Sort: explicit override > risk-level desc (default)
+        effective_sort = sort_field if sort_field in QUERY_SORT_ALLOWLIST else None
+        if effective_sort:
+            query += f" ORDER BY {QUERY_SORT_ALLOWLIST[effective_sort]} DESC NULLS LAST, i.display_name"
+        else:
+            query += """ ORDER BY CASE i.risk_level
+                WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
+                i.display_name"""
+
+        query += " LIMIT %s OFFSET %s"
+        params.extend([int(limit), int(offset)])
+        cursor.execute(query, params)
+        rows = rows_as_dicts(cursor)
+        identities = [_map_identity_row(row) for row in rows]
+
+        why_parts = [translation.get('description') or '']
+        if unknown_fields:
+            why_parts.append(
+                f"(skipped unsupported fields: {', '.join(sorted(set(unknown_fields)))})"
+            )
+        why = ' '.join(p for p in why_parts if p).strip()
+
+        # Activity-log the NL query so the auditor pack has a record.
+        try:
+            _log(db, 'argus_nl_query',
+                 f'Argus NL query: {text[:120]}',
+                 {
+                     'query': text,
+                     'intent': translation.get('intent'),
+                     'confidence': translation.get('confidence'),
+                     'total': int(total),
+                     'returned': len(identities),
+                     'unknown_fields': unknown_fields or None,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        return jsonify({
+            'query': text,
+            'filters_interpreted': filters,
+            'identities': identities,
+            'count': len(identities),
+            'total': int(total),
+            'why': why,
+            'confidence': translation.get('confidence'),
+            'intent': translation.get('intent'),
+            'unknown_fields': unknown_fields or None,
+            'limit': limit,
+            'offset': offset,
+            'has_more': (offset + len(identities)) < int(total),
+        })
+    except Exception as exc:
+        logger.warning("argus_nl_query failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'query': text,
+            'filters_interpreted': None,
+            'identities': [],
+            'count': 0,
+            'total': 0,
+            'why': f'NL query failed: {type(exc).__name__}',
+            'confidence': 'low',
+            'intent': None,
+        }), 200
+    finally:
+        try: cursor.close()
+        except Exception: pass
+        db.close()
+
+
+# ================================================================
 # Phase 4: Fix Recommendations
 # ================================================================
 
@@ -42421,6 +42822,458 @@ def get_explain_risk_score_handler(identity_id: str):
         return jsonify(result)
     except Exception as e:
         logger.error("explain-risk-score handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db:
+            db.close()
+
+
+# ================================================================
+# Argus L2 — Security Reasoner (AG-186)
+# ================================================================
+
+def argus_reasoner_handler():
+    """POST /api/argus/reason
+
+    Body: {"question_type": str, "use_cache": bool (optional, default True)}
+
+    Runs a 3-5 sub-query reasoning chain against the canonical AG-180
+    + AG-178 + RBAC + posture tables, then synthesises a board-ready
+    narrative with cited evidence. No LLM, no fake answers — if a sub-query
+    returns 0 the narrative says so explicitly.
+
+    Supported question_types: highest_business_risk, phi_exposure,
+    ownership_gaps, recent_intake_risk, oauth_scope_sprawl, posture_drop.
+
+    Returns HTTP 200 with the result dict (the engine encodes degraded
+    confidence rather than throwing). Validation errors are 400.
+    """
+    from app.engines.argus.reasoner import reason_about, QUESTION_TYPES
+    from psycopg2.extras import RealDictCursor
+
+    data = request.get_json(silent=True) or {}
+    question_type = data.get('question_type')
+    use_cache = data.get('use_cache', True)
+
+    if not isinstance(question_type, str) or not question_type:
+        return jsonify({
+            'error': 'question_type is required',
+            'supported': list(QUESTION_TYPES),
+        }), 400
+    if question_type not in QUESTION_TYPES:
+        return jsonify({
+            'error': f"unsupported question_type '{question_type}'",
+            'supported': list(QUESTION_TYPES),
+        }), 400
+    if not isinstance(use_cache, bool):
+        return jsonify({'error': 'use_cache must be boolean'}), 400
+
+    org_id = _org_id()
+    if org_id is None:
+        # Superadmin without an org context — reasoning is tenant-scoped.
+        return jsonify({
+            'error': 'Organization context required for Argus reasoning',
+        }), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = reason_about(
+                cursor, org_id, question_type,
+                use_cache=use_cache,
+            )
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the reasoning request for the auditor pack.
+        try:
+            _log(db, 'argus_reason',
+                 f"Argus L2 reason: {question_type}",
+                 {
+                     'question_type': question_type,
+                     'use_cache': use_cache,
+                     'cached': bool(result.get('cached')) if isinstance(result, dict) else False,
+                     'confidence': result.get('confidence') if isinstance(result, dict) else None,
+                     'evidence_count': len(result.get('evidence') or []) if isinstance(result, dict) else 0,
+                     'duration_ms': duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_reasoner failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'question': '(error)',
+            'conclusion': (
+                f"Argus could not complete the reasoning request "
+                f"({type(exc).__name__}). The graph may be mid-refresh — "
+                f"try again after the next discovery run."
+            ),
+            'evidence': [],
+            'framework_refs': {'nist': [], 'cis_azure': [], 'mitre': []},
+            'confidence': 'low',
+            'question_type': question_type,
+            'cached': False,
+        }), 200
+    finally:
+        db.close()
+
+
+# ============================================================
+# AG-188 (Argus Layer 4): Board / CISO Advisor — "What should I fix this week?"
+# ============================================================
+
+def argus_ciso_advisor_handler():
+    """GET /api/argus/recommendations
+
+    Returns the top 5 ranked remediation priorities for the caller's
+    organization, computed by :func:`recommend_fixes` from live signal
+    aggregates over the latest discovery run per active cloud connection.
+
+    Shape: see ``app.engines.argus.ciso_advisor.recommend_fixes`` docstring.
+    Honesty contract: when nothing fires the response is ``{priorities: [],
+    message: 'No critical fixes recommended.'}`` — never invented data.
+
+    Errors return HTTP 200 with the healthy-state shape so the UI never sees
+    a malformed payload (matches the pattern set by L3 investigate-attack-path).
+    """
+    from app.engines.argus.ciso_advisor import recommend_fixes
+    from psycopg2.extras import RealDictCursor
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None:
+            # Superadmin without an org override — cannot recommend without
+            # tenant scope. Require X-Tenant-Id (handled upstream) or an
+            # explicit org context.
+            return jsonify({'error': 'Organization context required'}), 400
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = recommend_fixes(cursor, org_id)
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the recommendation pull for the auditor pack.
+        try:
+            priorities = result.get('priorities') if isinstance(result, dict) else []
+            _log(db, 'argus_ciso_advisor',
+                 f'Argus L4 recommendations pulled ({len(priorities)} priorities)',
+                 {
+                     'priority_count': len(priorities),
+                     'top_signal': (priorities[0].get('signal')
+                                    if priorities else None),
+                     'duration_ms': duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_ciso_advisor failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'priorities':       [],
+            'message':          f'Recommendation engine error: {type(exc).__name__}',
+            'method':           'signal_aggregate_ranking',
+            'total_identities': 0,
+            'generated_at':     datetime.now(timezone.utc).isoformat(),
+        }), 200
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# AG-191 (Argus Layer 7): Executive Storytelling handler
+# ============================================================
+
+def argus_exec_narrative_handler():
+    """GET /api/argus/executive-summary?topic=<topic>
+
+    Returns a board-ready, one-paragraph executive narrative for the
+    requested ``topic`` (see :data:`SUPPORTED_TOPICS` in the engine).
+    The engine pulls from the canonical
+    ``ai_board_scorecard_snapshots`` table — no fabricated stats, no
+    hardcoded answer values. Trend over 30 days is included only when
+    at least two snapshots exist in the window; otherwise the
+    ``trend_delta_pct`` keys are omitted entirely.
+
+    Query params:
+        topic (str, required): one of
+            ``ai_agents_secure`` | ``nhi_secure``
+            | ``oauth_secure`` | ``overall_posture``.
+
+    Response: see ``app.engines.argus.exec_narrative`` module docstring.
+    """
+    from app.engines.argus.exec_narrative import (
+        tell_executive_story, SUPPORTED_TOPICS,
+    )
+    from psycopg2.extras import RealDictCursor
+
+    topic = (request.args.get('topic') or '').strip().lower()
+    if not topic:
+        return jsonify({
+            'error': 'topic is required',
+            'supported_topics': list(SUPPORTED_TOPICS),
+        }), 400
+    if topic not in SUPPORTED_TOPICS:
+        return jsonify({
+            'error': f"unsupported topic '{topic}'",
+            'supported_topics': list(SUPPORTED_TOPICS),
+        }), 400
+
+    org_id = _org_id()
+    if org_id is None:
+        # Superadmin without an org override — the narrative must always
+        # name a tenant or it would conflate orgs. Require an explicit
+        # X-Tenant-Id override (handled by the middleware).
+        return jsonify({'error': 'Organization context required'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            result = tell_executive_story(cursor, org_id, topic)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the question for the auditor pack.
+        try:
+            _log(
+                db,
+                'argus_executive_summary',
+                f"Argus L7 executive summary: topic={topic}",
+                {
+                    'topic': topic,
+                    'reason': result.get('reason'),
+                    'score': (result.get('stats') or {}).get('score'),
+                    'total': (result.get('stats') or {}).get('total'),
+                    'has_trend': 'trend_delta_pct' in (result.get('stats') or {}),
+                },
+            )
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_executive_summary failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# AG-192 (Argus XGRAPH): Cross-identity reach analysis
+# ============================================================
+
+def argus_cross_graph_handler():
+    """GET /api/argus/who-can-reach?classification=PHI
+
+    Returns the cohort rollup for "which identities can reach this data
+    classification" — see :func:`app.engines.argus.cross_graph.traverse_for_data_class`
+    for the response shape. Honesty contract: empty cohort returns zeros +
+    ``confidence='low'`` plus a non-null ``why`` reason; ``total_records_exposed``
+    is ``None`` when any contributing resource has unknown record counts.
+
+    Always returns HTTP 200 (the ``confidence`` / ``why`` fields drive the
+    UI's empty state). Validation errors are HTTP 400.
+    """
+    from app.engines.argus.cross_graph import traverse_for_data_class
+    from psycopg2.extras import RealDictCursor
+
+    classification = request.args.get('classification') or ''
+    classification = classification.strip()
+    if not classification:
+        return jsonify({'error': "query parameter 'classification' is required"}), 400
+
+    org_id = _org_id()
+    if org_id is None:
+        # Superadmin without an X-Tenant-Id override — we can't scope.
+        return jsonify({'error': 'Organization context required'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = traverse_for_data_class(cursor, org_id, classification)
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the cross-graph query for the auditor pack.
+        try:
+            _log(db, 'argus_cross_graph',
+                 f"Argus XGRAPH who-can-reach: classification={classification!r}",
+                 {
+                     'classification':        classification,
+                     'total_identities':      (result or {}).get('total_identities', 0),
+                     'resources_in_class':    (result or {}).get('resources_in_class', 0),
+                     'confidence':            (result or {}).get('confidence'),
+                     'duration_ms':           duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_cross_graph failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        # Honest empty response — never invent counts on error.
+        return jsonify({
+            'classification':        classification.upper(),
+            'by_category':           {
+                'human_user':        0,
+                'service_principal': 0,
+                'ai_agent':          0,
+                'oauth_app':         0,
+            },
+            'total_identities':      0,
+            'common_path':           [{'node_type': 'identity', 'label': 'Identity'}],
+            'total_records_exposed': None,
+            'top_resources':         [],
+            'confidence':            'low',
+            'why':                   f'investigation error: {type(exc).__name__}',
+            'resources_in_class':    0,
+        }), 200
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# AG-190 (Argus Layer 6): What-If Simulator handler
+# ============================================================
+
+def argus_what_if_handler():
+    """POST /api/argus/what-if/role-removal
+
+    Body: {identity_id: '<external GUID>', role_assignment_id: <int>}
+
+    Projects the agent's risk score WITHOUT a specified role assignment.
+    The role is NOT deleted — this is a read-only architectural projection
+    against the existing scoring catalog (RISK_SIGNALS + detect_signals).
+
+    Returns the dict produced by :func:`simulate_role_removal`. 404 when
+    the identity or role assignment is not found in the caller's org.
+    Always carries `confidence='projected'` + a `warning` string so the UI
+    can render the "architectural projection" caveat verbatim.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        from app.engines.argus.what_if import simulate_role_removal
+
+        data = request.get_json(silent=True) or {}
+        identity_external_id = data.get('identity_id')
+        role_assignment_id = data.get('role_assignment_id')
+
+        if not isinstance(identity_external_id, str) or not identity_external_id.strip():
+            return jsonify({'error': 'identity_id (string) is required'}), 400
+        try:
+            ra_id = int(role_assignment_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'role_assignment_id (int) is required'}), 400
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        org_id = _org_id()
+        if org_id is None:
+            return jsonify({'error': 'Organization context required'}), 400
+
+        run_ids = _latest_run_ids(cursor, organization_id=org_id)
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        # Resolve external identity_id → identities.id, scoped to org + latest run
+        cursor.execute(
+            """
+            SELECT i.id
+              FROM identities i
+             WHERE i.identity_id = %s
+               AND i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+             ORDER BY i.discovery_run_id DESC
+             LIMIT 1
+            """,
+            (identity_external_id.strip(), org_id, run_ids),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        identity_db_id = int(row['id'] if isinstance(row, dict) else row[0])
+
+        result = simulate_role_removal(
+            cursor=cursor,
+            identity_db_id=identity_db_id,
+            role_assignment_id=ra_id,
+            organization_id=org_id,
+        )
+        if result is None:
+            return jsonify({'error': 'Role assignment not found for this identity'}), 404
+
+        # Activity log — record the what-if for the auditor pack.
+        try:
+            _log(db, 'argus_what_if_role_removal',
+                 f"Argus L6 what-if: remove role_assignment_id={ra_id} "
+                 f"from identity={identity_external_id}",
+                 {
+                     'identity_id':        identity_external_id,
+                     'role_assignment_id': ra_id,
+                     'role_name':          result.get('role_assignment', {}).get('role_name'),
+                     'scope':              result.get('role_assignment', {}).get('scope'),
+                     'current_score':      result.get('current_score'),
+                     'projected_score':    result.get('projected_score'),
+                     'reduction_pct':      result.get('reduction_pct'),
+                     'removed_signals':    [s.get('signal') for s in result.get('removed_signals') or []],
+                     'removed_paths':      len(result.get('removed_paths') or []),
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error("argus_what_if handler failed: %s", e, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         if db:

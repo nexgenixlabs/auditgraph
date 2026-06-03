@@ -2,16 +2,27 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { ExplainRiskWaterfall } from '../components/argus/ExplainRiskWaterfall';
 import { AttackPathInvestigator } from '../components/argus/AttackPathInvestigator';
+import NlQuery from '../components/argus/NlQuery';
+import ReasonChain from '../components/argus/ReasonChain';
+import CisoRecommendations from '../components/argus/CisoRecommendations';
+import WhatIfSimulator from '../components/argus/WhatIfSimulator';
+import ExecutiveSummary from '../components/argus/ExecutiveSummary';
+import WhoCanReach from '../components/argus/WhoCanReach';
 import { useConnection } from '../contexts/ConnectionContext';
 
 /**
  * Argus — AI Identity Security Analyst (AG-184 EPIC root page).
  *
- * Hosts the layer surfaces shipped so far:
- *   - Layer 5 (AG-189): Explain Why — risk-score waterfall
- *   - Layer 3 (AG-187): Attack Path Investigator — natural-language chain query
+ * Hosts the full layer surface:
+ *   - Layer 1 (AG-185): NL Query           — plain-English question → identity list
+ *   - Layer 2 (AG-186): Reasoning Chain    — 3-5 hop synthesised narrative
+ *   - Layer 3 (AG-187): Investigate        — attack-path natural-language query
+ *   - Layer 4 (AG-188): CISO Recommendations — top-5 ranked priorities
+ *   - Layer 5 (AG-189): Explain Why        — risk-score waterfall
+ *   - Layer 6 (AG-190): What-If Simulator  — role-removal projection
+ *   - Layer 7 (AG-191): Executive Summary  — board-ready prose
+ *   - XGRAPH  (AG-192): Who-Can-Reach      — cross-identity data-class reach
  *
- * Layers 1/2/4/6/7/XGRAPH will land in follow-up sessions.
  * Argus is positioned as an analyst, not a chatbot — the chat panel
  * (CopilotPanel) remains the conversational surface; this page is the
  * structured-output home for the layers that benefit from rich UI.
@@ -22,7 +33,32 @@ interface AIAgentOption {
   display_name: string;
 }
 
-type Tab = 'investigate' | 'explain';
+type Tab =
+  | 'nlquery'
+  | 'reason'
+  | 'investigate'
+  | 'recommend'
+  | 'explain'
+  | 'whatif'
+  | 'executive'
+  | 'whoreaches';
+
+interface TabDef {
+  id: Tab;
+  label: string;
+  sublabel: string;
+}
+
+const TABS: TabDef[] = [
+  { id: 'nlquery',     label: 'NL Query',           sublabel: 'Layer 1 — plain English to identities' },
+  { id: 'reason',      label: 'Reasoning Chain',    sublabel: 'Layer 2 — multi-hop board questions' },
+  { id: 'investigate', label: 'Investigate Path',   sublabel: 'Layer 3 — natural-language chain query' },
+  { id: 'recommend',   label: 'What to Fix',        sublabel: 'Layer 4 — top remediation priorities' },
+  { id: 'explain',     label: 'Explain Risk Score', sublabel: 'Layer 5 — contribution waterfall' },
+  { id: 'whatif',      label: 'What-If Simulator',  sublabel: 'Layer 6 — projection without a role' },
+  { id: 'executive',   label: 'Executive Summary',  sublabel: 'Layer 7 — board-ready narrative' },
+  { id: 'whoreaches',  label: 'Who Can Reach',      sublabel: 'XGRAPH — cross-identity data reach' },
+];
 
 export default function Argus() {
   const [tab, setTab] = useState<Tab>('investigate');
@@ -33,7 +69,8 @@ export default function Argus() {
 
   useEffect(() => {
     // Only fetch the agent list when the user is on the Explain tab —
-    // saves a request for the default Investigate landing.
+    // saves a request for the default Investigate landing. Other tabs
+    // that need this list (e.g. What-If) load their own pickers.
     if (tab !== 'explain') return;
     let cancelled = false;
     setOptionsLoading(true);
@@ -82,24 +119,22 @@ export default function Argus() {
         </p>
       </div>
 
-      {/* Tab strip */}
-      <div className="flex gap-2 border-b mb-5" style={{ borderColor: 'var(--border-default)' }}>
-        <TabButton
-          active={tab === 'investigate'}
-          onClick={() => setTab('investigate')}
-          label="Investigate Attack Path"
-          sublabel="Layer 3 — natural-language chain query"
-        />
-        <TabButton
-          active={tab === 'explain'}
-          onClick={() => setTab('explain')}
-          label="Explain Risk Score"
-          sublabel="Layer 5 — auditor-grade contribution waterfall"
-        />
-        <div className="ml-auto flex items-center gap-2 pb-2">
+      {/* Tab strip — horizontal scroll on narrow screens to fit 8 tabs */}
+      <div className="flex gap-2 border-b mb-5 overflow-x-auto"
+           style={{ borderColor: 'var(--border-default)' }}>
+        {TABS.map(t => (
+          <TabButton
+            key={t.id}
+            active={tab === t.id}
+            onClick={() => setTab(t.id)}
+            label={t.label}
+            sublabel={t.sublabel}
+          />
+        ))}
+        <div className="ml-auto flex items-center gap-2 pb-2 flex-shrink-0">
           <Link
             to="/copilot-history"
-            className="text-[10px] uppercase tracking-wider font-medium hover:underline"
+            className="text-[10px] uppercase tracking-wider font-medium hover:underline whitespace-nowrap"
             style={{ color: 'var(--text-tertiary)' }}
             title="Conversational Argus (chat-style) remains in the Copilot panel"
           >
@@ -109,6 +144,36 @@ export default function Argus() {
       </div>
 
       {/* Active tab body */}
+      {tab === 'nlquery' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border p-4"
+               style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              Type any question and Argus translates it to a structured query
+              against the latest discovery. The translator is intent-based — if
+              Argus can't parse it, the result tells you which fields it
+              skipped instead of pretending it understood.
+            </p>
+          </div>
+          <NlQuery />
+        </div>
+      )}
+
+      {tab === 'reason' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border p-4"
+               style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              Pick a board-level question. Argus runs a 3-5 hop SQL chain against
+              the canonical AI / RBAC / posture tables and synthesises a single
+              narrative — every claim is backed by an evidence row.
+              No LLM. No fabricated counts.
+            </p>
+          </div>
+          <ReasonChain />
+        </div>
+      )}
+
       {tab === 'investigate' && (
         <div className="space-y-4">
           <div className="rounded-xl border p-4"
@@ -121,6 +186,21 @@ export default function Argus() {
             </p>
           </div>
           <AttackPathInvestigator />
+        </div>
+      )}
+
+      {tab === 'recommend' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border p-4"
+               style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              Argus ranks the top remediation priorities for this week by{' '}
+              <span className="font-semibold">affected × max blast radius</span>.
+              Every priority maps 1:1 to a fired signal in the same catalog the
+              risk-score waterfall uses, so the two views never disagree.
+            </p>
+          </div>
+          <CisoRecommendations />
         </div>
       )}
 
@@ -186,16 +266,63 @@ export default function Argus() {
         </div>
       )}
 
-      {/* Footer — which Argus layers are live and which are queued */}
+      {tab === 'whatif' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border p-4"
+               style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              Architectural projection of what a remediation would buy you.
+              Argus replays the scoring chain WITHOUT a role you select and
+              shows the new score, the signals that would clear, and which
+              persisted attack paths the removal would invalidate. The role is
+              never deleted — this is a read-only projection.
+            </p>
+          </div>
+          <WhatIfSimulator />
+        </div>
+      )}
+
+      {tab === 'executive' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border p-4"
+               style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              A board-ready one-paragraph narrative pulled from the persisted
+              board scorecard snapshot. Argus only renders the trend chip when
+              two real snapshots exist in the 30-day window — no fabricated
+              deltas.
+            </p>
+          </div>
+          <ExecutiveSummary />
+        </div>
+      )}
+
+      {tab === 'whoreaches' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border p-4"
+               style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              Cross-identity reach analysis. Pick a data classification and
+              Argus reports the human / SP / AI / OAuth cohort that can reach
+              it, the common path, and the estimated record exposure. When
+              counts are unknown Argus reports{' '}
+              <span className="font-mono">—</span>, never a fabricated number.
+            </p>
+          </div>
+          <WhoCanReach />
+        </div>
+      )}
+
+      {/* Footer — all Argus layers live */}
       <div className="mt-8 text-[10px] leading-relaxed" style={{ color: 'var(--text-tertiary)' }}>
         <span className="font-semibold uppercase tracking-wider">Argus layer status:</span>
         {' '}
-        <span style={{ color: '#10b981' }}>✓ L3 (Investigate)</span>
-        {' · '}
-        <span style={{ color: '#10b981' }}>✓ L5 (Explain Why)</span>
-        {' · '}
-        L1 NL Investigation · L2 Reasoning · L4 Board Advisor · L6 What-If · L7 Storytelling · XGRAPH —
-        all queued under AG-184 EPIC.
+        <span style={{ color: '#10b981' }}>
+          ✓ L1 NL · ✓ L2 Reason · ✓ L3 Investigate · ✓ L4 Recommend · ✓ L5 Explain ·
+          ✓ L6 What-If · ✓ L7 Executive · ✓ XGRAPH
+        </span>
+        {' — '}
+        all live under AG-184 EPIC.
       </div>
     </div>
   );
@@ -207,7 +334,7 @@ function TabButton({
   return (
     <button
       onClick={onClick}
-      className={`px-4 py-2 -mb-px border-b-2 transition text-left ${
+      className={`px-4 py-2 -mb-px border-b-2 transition text-left flex-shrink-0 ${
         active ? 'border-violet-500' : 'border-transparent hover:border-violet-500/30'
       }`}
     >
@@ -215,7 +342,7 @@ function TabButton({
            style={{ color: active ? '#a78bfa' : 'var(--text-secondary)' }}>
         {label}
       </div>
-      <div className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+      <div className="text-[10px] whitespace-nowrap" style={{ color: 'var(--text-tertiary)' }}>
         {sublabel}
       </div>
     </button>
