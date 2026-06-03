@@ -176,8 +176,15 @@ function ClassCard({ cls, rollup }: { cls: ClassKey; rollup: ClassificationRollu
         <div
           className="text-[10px] mt-auto pt-2 border-t"
           style={{ color: 'var(--text-tertiary)', borderColor: 'var(--border-subtle)' }}
+          title={
+            `${tagSourced} resources carry an explicit data-classification tag (HIGH confidence — ` +
+            `you applied this label). ${patternSourced} matched a resource-name heuristic ` +
+            `(MEDIUM confidence — suspected, not confirmed). We never inspect data-plane content.`
+          }
         >
-          <span style={{ color }}>{tagSourced}</span> via tag · <span style={{ color }}>{patternSourced}</span> via pattern
+          <span style={{ color }} className="font-semibold">{tagSourced}</span> tagged
+          {' · '}
+          <span style={{ color }} className="font-semibold">{patternSourced}</span> suspected (name)
         </div>
       ) : (
         <div
@@ -311,8 +318,13 @@ export default function AIDataReachability() {
         <div>
           <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>AI Data Reachability</h1>
           <p className="text-sm mt-1 max-w-3xl" style={{ color: 'var(--text-secondary)' }}>
-            For every AI agent in your tenant, which classifications can it reach (PHI / PCI / PII / Source / HR /
-            Financial / Confidential) — derived from RBAC + resource posture. No log dependency, no Purview license.
+            For every AI agent, which resources tagged or named as PHI / PCI / PII / Source / HR /
+            Financial / Confidential they could reach — derived from RBAC + resource posture.
+            <span className="block mt-1 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+              <span className="font-semibold">We never read data-plane content.</span> Classification is
+              based on Azure tags you set and resource-name patterns. We surface the trust signal you
+              applied; we do not look inside the resource.
+            </span>
           </p>
         </div>
         {isAdmin && (
