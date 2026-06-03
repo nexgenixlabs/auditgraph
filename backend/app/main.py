@@ -201,6 +201,13 @@ from app.api.handlers import (
     get_spn_list,
     get_spn_detail,
     get_identity_lineage,
+    get_identity_federated_credentials,
+    list_approved_apps_handler,
+    add_approved_app_handler,
+    delete_approved_app_handler,
+    list_shadow_apps_handler,
+    shadow_apps_stats_handler,
+    approve_shadow_app_handler,
     get_spn_lineage,
     get_storage_stats,
     validate_org_isolation,
@@ -3698,6 +3705,40 @@ def create_app():
     @app.get("/api/identities/<identity_id>/lineage")
     def identity_lineage(identity_id):
         return get_identity_lineage(identity_id)
+
+    # AG-150: Dedicated federated-credentials endpoint for Credentials tab.
+    # Lighter payload than /lineage; per-credential risk posture.
+    @app.get("/api/identities/<identity_id>/federated-credentials")
+    def identity_federated_credentials(identity_id):
+        return get_identity_federated_credentials(identity_id)
+
+    # AG-86: Shadow App Detection
+    @app.get("/api/approved-apps")
+    def approved_apps_list():
+        return list_approved_apps_handler()
+
+    @app.post("/api/approved-apps")
+    @require_role('admin', 'owner')
+    def approved_apps_add():
+        return add_approved_app_handler()
+
+    @app.delete("/api/approved-apps/<int:row_id>")
+    @require_role('admin', 'owner')
+    def approved_apps_delete(row_id):
+        return delete_approved_app_handler(row_id)
+
+    @app.get("/api/shadow-apps")
+    def shadow_apps_list():
+        return list_shadow_apps_handler()
+
+    @app.get("/api/shadow-apps/stats")
+    def shadow_apps_stats():
+        return shadow_apps_stats_handler()
+
+    @app.post("/api/shadow-apps/<identity_id>/approve")
+    @require_role('admin', 'owner')
+    def shadow_apps_approve(identity_id):
+        return approve_shadow_app_handler(identity_id)
 
     # Deprecated alias — old SPN lineage route redirects to unified handler
     @app.get("/api/spn/<path:spn_id>/lineage")

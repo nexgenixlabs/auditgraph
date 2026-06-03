@@ -174,6 +174,9 @@ interface IdentityRow {
   secret_expiry_status?: string | null;
   federated_cred_count?: number;
   owner_resolved?: string | null;
+  // AG-86: Shadow App detection
+  is_shadow_app?: boolean;
+  shadow_reasons?: string[];
   // Humans enrichment (AG-160)
   mfa_status?: string | null;
   mfa_methods?: string[];
@@ -3107,6 +3110,18 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                             )}
                             {!!i.is_discovery_connector && (
                               <span className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0" title="This SPN is the AuditGraph discovery connector">Discovery Connector</span>
+                            )}
+                            {!!i.is_shadow_app && (
+                              <span
+                                className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-red-100 text-red-700 border border-red-300 flex-shrink-0"
+                                title={
+                                  (i.shadow_reasons && i.shadow_reasons.length > 0)
+                                    ? `Shadow App — ${i.shadow_reasons.join('; ')}`
+                                    : 'Shadow App — not in approved registry'
+                                }
+                              >
+                                Shadow
+                              </span>
                             )}
                           </div>
                           <div className="text-[10px] text-gray-400 font-mono truncate">{i.identity_id.substring(0, 12)}…</div>

@@ -1130,6 +1130,20 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 89: Run resource anomaly detection
         _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
 
+        # AG-86: Refresh Shadow App verdicts (per-org allowlist comparison).
+        # Cheap UPDATE-only pass; safe to run after every discovery.
+        try:
+            from app.engines.shadow_app_detector import refresh_shadow_verdicts
+            org_id = getattr(db, '_organization_id', None)
+            if org_id:
+                shadow_counts = refresh_shadow_verdicts(db, current_run_id, org_id)
+                logger.info(
+                    "[AG-86] Shadow verdicts refreshed: %s for run #%s",
+                    shadow_counts, current_run_id,
+                )
+        except Exception as _sa_err:
+            logger.warning("[AG-86] Shadow verdict refresh failed: %s", _sa_err)
+
         # ── Tiered Parallel Post-Processing ─────────────────────────
         # Jobs grouped by dependency.  Within each tier, jobs run
         # concurrently in a ThreadPoolExecutor with per-job DB

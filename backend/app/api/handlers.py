@@ -5243,6 +5243,11 @@ def _identity_list_select():
             i.last_activity_source,
             i.last_activity_confidence,
 
+            -- AG-86: Shadow App verdict so the inventory badge renders
+            -- without a follow-up query.
+            COALESCE(i.is_shadow_app, FALSE) AS is_shadow_app,
+            i.shadow_reasons,
+
             COALESCE(
                 (SELECT wse.created_datetime
                  FROM workload_signin_events wse
@@ -5476,6 +5481,12 @@ def _map_identity_row(row):
         "last_signin_at": _isoformat_safe(row.get('last_signin_at')),
         "last_signin_ip": row.get('last_signin_ip'),
         "auth_source": row.get('auth_source') or "static_analysis_only",
+        # AG-86: Shadow App badge data
+        "is_shadow_app": bool(row.get('is_shadow_app', False)),
+        "shadow_reasons": (
+            row.get('shadow_reasons') if isinstance(row.get('shadow_reasons'), list)
+            else (json.loads(row.get('shadow_reasons')) if isinstance(row.get('shadow_reasons'), str) and row.get('shadow_reasons') else [])
+        ),
     }
 
     # ── Effective last-used & federated activity override ──────────────
@@ -24410,6 +24421,496 @@ def get_identity_lineage(identity_id):
 
 # Backward-compatible alias — old SPN lineage endpoint calls unified handler
 get_spn_lineage = get_identity_lineage
+
+
+# ──────────────────────────────────────────────────────────
+# AG-150: Dedicated federated-credentials endpoint
+# ──────────────────────────────────────────────────────────
+
+# Trust posture for known OIDC issuers. Subject patterns that bypass
+# org/repo/branch pinning are flagged as "permissive".
+_FED_ISSUER_RISK = {
+    'token.actions.githubusercontent.com': {
+        'issuer_type': 'github_actions',
+        'trust_basis': 'OIDC, GitHub-signed JWT bound to a specific repo + ref/environment.',
+        'required_pins': ['repo:<org>/<repo>:ref:refs/heads/<branch>', 'or repo:<org>/<repo>:environment:<env>'],
+        'permissive_patterns': ['repo:*:*', 'repo:<org>/<repo>:*', 'repo:<org>/<repo>:ref:*'],
+    },
+    'app.terraform.io': {
+        'issuer_type': 'terraform_cloud',
+        'trust_basis': 'OIDC, HCP-signed JWT bound to an organization/project/workspace.',
+        'required_pins': ['organization:<org>:project:<proj>:workspace:<ws>:run_phase:<phase>'],
+        'permissive_patterns': ['organization:*', 'organization:<org>:project:*'],
+    },
+    'vstoken.dev.azure.com': {
+        'issuer_type': 'azure_devops',
+        'trust_basis': 'OIDC, ADO-signed JWT bound to a service connection.',
+        'required_pins': ['sc://<org>/<proj>/<service-connection>'],
+        'permissive_patterns': ['sc://<org>/<proj>/*'],
+    },
+}
+
+
+def _classify_federated_risk(issuer: str, subject: str, audiences) -> dict:
+    """Compute risk posture for one federated credential.
+
+    Returns:
+        risk_level: 'low' | 'medium' | 'high' | 'critical'
+        reasons: list[str] — human-readable findings
+        framework_refs: dict — CIS/NIST/MITRE control IDs
+    """
+    issuer = (issuer or '').lower()
+    subject = subject or ''
+    audiences_list = audiences if isinstance(audiences, list) else []
+
+    reasons = []
+    level = 'low'
+
+    # Find which known issuer this matches (substring)
+    known = None
+    for host, meta in _FED_ISSUER_RISK.items():
+        if host in issuer:
+            known = meta
+            break
+
+    if not known:
+        reasons.append(f'Unrecognized issuer ({issuer or "empty"}) — verify this is an approved IdP.')
+        level = 'high'
+    else:
+        # Subject must contain at least one pin token.
+        # The simplest signal: wildcard or empty subject after the prefix.
+        if not subject:
+            reasons.append('Subject is empty — any token from this IdP can assume the identity.')
+            level = 'critical'
+        elif '*' in subject:
+            reasons.append(f'Subject contains a wildcard ("{subject}") — broader trust than recommended.')
+            level = 'high'
+        elif known['issuer_type'] == 'github_actions':
+            if not (subject.startswith('repo:') and (':ref:' in subject or ':environment:' in subject)):
+                reasons.append('GitHub subject lacks ref or environment pin — any branch/PR can assume the identity.')
+                level = 'high' if level == 'low' else level
+        elif known['issuer_type'] == 'terraform_cloud':
+            if ':workspace:' not in subject:
+                reasons.append('Terraform subject lacks workspace pin — any workspace in the org can assume.')
+                level = 'high' if level == 'low' else level
+
+    # Audience hygiene
+    if not audiences_list:
+        reasons.append('No audience restriction set — token can be replayed against any AAD endpoint.')
+        level = 'medium' if level == 'low' else level
+    elif any(a == '*' or a == 'api://AzureADTokenExchange/*' for a in audiences_list):
+        reasons.append('Audience is wildcarded — replay risk.')
+        level = 'high' if level in ('low', 'medium') else level
+
+    if not reasons:
+        reasons.append('Subject is pinned to a specific workload and audience is restricted.')
+
+    return {
+        'risk_level': level,
+        'reasons': reasons,
+        'framework_refs': {
+            'nist': ['IA-5', 'AC-2(7)'],
+            'cis_azure': ['1.21'],
+            'mitre': ['T1606.001'],
+        },
+    }
+
+
+def get_identity_federated_credentials(identity_id: str):
+    """GET /api/identities/<identity_id>/federated-credentials
+
+    AG-150: Dedicated endpoint so the Credentials tab can render the
+    federated section without paying for the full lineage payload.
+    Returns the credentials list + per-credential risk posture +
+    a top-level summary suitable for a CISO-facing card.
+    """
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({
+                'identity_id': identity_id,
+                'credentials': [],
+                'summary': {'total': 0, 'critical': 0, 'high': 0},
+                'last_collected_at': None,
+            })
+
+        # Look up the identity by external id (not numeric db id).
+        cursor.execute("""
+            SELECT id, has_federated_credentials, federated_cred_count
+            FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC
+            LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = row['id'] if isinstance(row, dict) else row[0]
+        flag = row['has_federated_credentials'] if isinstance(row, dict) else row[1]
+        count = row['federated_cred_count'] if isinstance(row, dict) else row[2]
+
+        # Prefer richer federated_credentials table (AG-148 Graph fetch).
+        creds = []
+        last_collected = None
+        try:
+            cursor.execute("""
+                SELECT fc.credential_id, fc.name, fc.issuer, fc.subject,
+                       fc.audiences, fc.issuer_type, fc.description,
+                       fc.collected_at
+                FROM federated_credentials fc
+                WHERE fc.identity_db_id = %s
+                ORDER BY fc.name
+            """, (db_id,))
+            for r in cursor.fetchall():
+                aud = r['audiences'] if isinstance(r['audiences'], list) else []
+                risk = _classify_federated_risk(r['issuer'], r['subject'], aud)
+                creds.append({
+                    'credential_id': r['credential_id'],
+                    'name': r['name'],
+                    'issuer': r['issuer'],
+                    'subject': r['subject'],
+                    'audiences': aud,
+                    'issuer_type': r['issuer_type'],
+                    'description': r['description'],
+                    'risk_level': risk['risk_level'],
+                    'reasons': risk['reasons'],
+                    'framework_refs': risk['framework_refs'],
+                })
+                col = r.get('collected_at')
+                if col and (last_collected is None or col > last_collected):
+                    last_collected = col
+        except Exception:
+            cursor.connection.rollback()
+
+        # Fallback: legacy credentials table.
+        if not creds:
+            try:
+                cursor.execute("""
+                    SELECT key_id, display_name, issuer, subject
+                    FROM credentials
+                    WHERE identity_db_id = %s AND credential_type = 'federated'
+                    ORDER BY display_name
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    issuer = r['issuer']
+                    subject = r['subject']
+                    risk = _classify_federated_risk(issuer, subject, [])
+                    cls = None
+                    try:
+                        from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+                        cls = AzureDiscoveryEngine._classify_federated_credential(issuer or '', subject or '')
+                    except Exception:
+                        pass
+                    creds.append({
+                        'credential_id': r['key_id'],
+                        'name': r['display_name'],
+                        'issuer': issuer,
+                        'subject': subject,
+                        'audiences': [],
+                        'issuer_type': (cls or {}).get('federated_workload_type', 'external_oidc'),
+                        'description': None,
+                        'risk_level': risk['risk_level'],
+                        'reasons': risk['reasons'],
+                        'framework_refs': risk['framework_refs'],
+                    })
+            except Exception:
+                cursor.connection.rollback()
+
+        # Summary
+        summary = {
+            'total': len(creds),
+            'critical': sum(1 for c in creds if c['risk_level'] == 'critical'),
+            'high': sum(1 for c in creds if c['risk_level'] == 'high'),
+            'medium': sum(1 for c in creds if c['risk_level'] == 'medium'),
+            'low': sum(1 for c in creds if c['risk_level'] == 'low'),
+            'flag_set': bool(flag),
+            'count_field': int(count or 0),
+        }
+
+        return jsonify({
+            'identity_id': identity_id,
+            'credentials': creds,
+            'summary': summary,
+            'last_collected_at': last_collected.isoformat() if last_collected and hasattr(last_collected, 'isoformat') else None,
+        })
+    except Exception as e:
+        logger.error(f"federated-credentials endpoint failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────
+# AG-86: Shadow App Detection — Approved Apps Registry + verdicts
+# ──────────────────────────────────────────────────────────
+
+def list_approved_apps_handler():
+    """GET /api/approved-apps — list this org's approved app registry."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT id, app_id, display_name, publisher_name, app_category,
+                   match_kind, notes, is_seeded, created_at, updated_at,
+                   added_by_user_id
+            FROM approved_apps
+            WHERE organization_id = %s
+            ORDER BY is_seeded DESC, display_name ASC NULLS LAST
+        """, (_org_id(),))
+        rows = []
+        for r in cursor.fetchall():
+            rows.append({
+                'id': r['id'],
+                'app_id': r['app_id'],
+                'display_name': r['display_name'],
+                'publisher_name': r['publisher_name'],
+                'app_category': r['app_category'],
+                'match_kind': r['match_kind'],
+                'notes': r['notes'],
+                'is_seeded': bool(r['is_seeded']),
+                'added_by_user_id': r['added_by_user_id'],
+                'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+                'updated_at': r['updated_at'].isoformat() if r['updated_at'] else None,
+            })
+        return jsonify({'approved_apps': rows, 'total': len(rows)})
+    except Exception as e:
+        logger.error(f"list_approved_apps failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def add_approved_app_handler():
+    """POST /api/approved-apps — admin-only. Body: {app_id?, publisher_name?,
+    display_name?, match_kind, app_category?, notes?}."""
+    payload = request.get_json(silent=True) or {}
+    match_kind = (payload.get('match_kind') or 'app_id').strip().lower()
+    if match_kind not in ('app_id', 'publisher', 'display_name_prefix'):
+        return jsonify({'error': 'Invalid match_kind'}), 400
+
+    app_id = (payload.get('app_id') or '').strip() or None
+    display_name = (payload.get('display_name') or '').strip() or None
+    publisher_name = (payload.get('publisher_name') or '').strip() or None
+
+    if match_kind == 'app_id' and not app_id:
+        return jsonify({'error': 'app_id required when match_kind=app_id'}), 400
+    if match_kind == 'publisher' and not publisher_name:
+        return jsonify({'error': 'publisher_name required when match_kind=publisher'}), 400
+    if match_kind == 'display_name_prefix' and not display_name:
+        return jsonify({'error': 'display_name required when match_kind=display_name_prefix'}), 400
+
+    category = (payload.get('app_category') or 'general').strip().lower()
+    notes = (payload.get('notes') or '').strip() or None
+
+    user = getattr(g, 'current_user', None)
+    user_id = user.get('id') if user else None
+
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            INSERT INTO approved_apps
+                (organization_id, app_id, display_name, publisher_name,
+                 app_category, match_kind, notes, added_by_user_id, is_seeded)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+            ON CONFLICT (organization_id, app_id) WHERE app_id IS NOT NULL
+            DO UPDATE SET
+                display_name   = EXCLUDED.display_name,
+                publisher_name = EXCLUDED.publisher_name,
+                app_category   = EXCLUDED.app_category,
+                notes          = EXCLUDED.notes,
+                updated_at     = NOW()
+            RETURNING id, app_id, display_name
+        """, (_org_id(), app_id, display_name, publisher_name,
+              category, match_kind, notes, user_id))
+        new_row = cursor.fetchone()
+        db.commit()
+        _log(db, 'approved_app_added',
+             f"Approved app added: {display_name or app_id or publisher_name}",
+             {'match_kind': match_kind, 'category': category})
+        return jsonify({
+            'id': new_row['id'],
+            'app_id': new_row['app_id'],
+            'display_name': new_row['display_name'],
+        }), 201
+    except Exception as e:
+        logger.error(f"add_approved_app failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def delete_approved_app_handler(app_row_id: int):
+    """DELETE /api/approved-apps/<id> — admin only."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            DELETE FROM approved_apps
+            WHERE id = %s AND organization_id = %s
+            RETURNING display_name, app_id, is_seeded
+        """, (app_row_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        db.commit()
+        _log(db, 'approved_app_removed',
+             f"Approved app removed: {row['display_name'] or row['app_id']}",
+             {'was_seeded': bool(row['is_seeded'])})
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"delete_approved_app failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def list_shadow_apps_handler():
+    """GET /api/shadow-apps — list identities flagged is_shadow_app."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({'shadow_apps': [], 'total': 0})
+
+        cursor.execute("""
+            SELECT i.identity_id, i.display_name, i.publisher_name,
+                   i.verified_publisher, i.created_datetime,
+                   i.risk_level, i.risk_score,
+                   COALESCE(i.shadow_reasons, '[]'::jsonb) AS shadow_reasons,
+                   COALESCE(ac.platform, '') AS ai_platform
+            FROM identities i
+            LEFT JOIN agent_classifications ac
+                   ON ac.identity_db_id = i.id
+                  AND ac.discovery_run_id = i.discovery_run_id
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.organization_id = %s
+              AND COALESCE(i.is_shadow_app, FALSE) = TRUE
+            ORDER BY i.created_datetime DESC NULLS LAST
+            LIMIT 500
+        """, (run_ids, _org_id()))
+        rows = []
+        for r in cursor.fetchall():
+            reasons = r['shadow_reasons']
+            if isinstance(reasons, str):
+                try: reasons = json.loads(reasons)
+                except Exception: reasons = []
+            rows.append({
+                'identity_id': r['identity_id'],
+                'display_name': r['display_name'],
+                'publisher_name': r['publisher_name'],
+                'verified_publisher': r['verified_publisher'],
+                'created_datetime': r['created_datetime'].isoformat() if r['created_datetime'] else None,
+                'risk_level': r['risk_level'],
+                'risk_score': int(r['risk_score'] or 0),
+                'reasons': reasons if isinstance(reasons, list) else [],
+                'ai_platform': r['ai_platform'] or None,
+            })
+        return jsonify({'shadow_apps': rows, 'total': len(rows)})
+    except Exception as e:
+        logger.error(f"list_shadow_apps failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def shadow_apps_stats_handler():
+    """GET /api/shadow-apps/stats — CISO dashboard summary."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({
+                'total': 0, 'new_30d': 0, 'with_high_scope': 0,
+                'ai_classified': 0, 'by_category': {},
+            })
+
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE COALESCE(i.is_shadow_app, FALSE) = TRUE) AS total,
+              COUNT(*) FILTER (
+                  WHERE COALESCE(i.is_shadow_app, FALSE) = TRUE
+                    AND i.created_datetime > NOW() - INTERVAL '30 days'
+              ) AS new_30d,
+              COUNT(*) FILTER (
+                  WHERE COALESCE(i.is_shadow_app, FALSE) = TRUE
+                    AND EXISTS (
+                        SELECT 1 FROM agent_classifications ac
+                        WHERE ac.identity_db_id = i.id
+                          AND ac.discovery_run_id = i.discovery_run_id
+                          AND ac.platform IS NOT NULL
+                          AND ac.platform <> ''
+                    )
+              ) AS ai_classified
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.organization_id = %s
+        """, (run_ids, _org_id()))
+        agg = cursor.fetchone()
+
+        return jsonify({
+            'total': int(agg['total'] or 0),
+            'new_30d': int(agg['new_30d'] or 0),
+            'ai_classified': int(agg['ai_classified'] or 0),
+        })
+    except Exception as e:
+        logger.error(f"shadow_apps_stats failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def approve_shadow_app_handler(identity_id: str):
+    """POST /api/shadow-apps/<identity_id>/approve — flips shadow → approved
+    by adding the identity to approved_apps. One-click acknowledge."""
+    user = getattr(g, 'current_user', None)
+    user_id = user.get('id') if user else None
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor)
+        cursor.execute("""
+            SELECT id, identity_id, display_name, publisher_name
+            FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+              AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        cursor.execute("""
+            INSERT INTO approved_apps
+                (organization_id, app_id, display_name, publisher_name,
+                 app_category, match_kind, added_by_user_id, is_seeded)
+            VALUES (%s, %s, %s, %s, 'general', 'app_id', %s, FALSE)
+            ON CONFLICT (organization_id, app_id) WHERE app_id IS NOT NULL
+            DO UPDATE SET updated_at = NOW()
+        """, (_org_id(), row['identity_id'], row['display_name'],
+              row['publisher_name'], user_id))
+
+        # Clear the verdict on this identity across all runs.
+        cursor.execute("""
+            UPDATE identities
+               SET is_shadow_app = FALSE, shadow_reasons = NULL
+             WHERE identity_id = %s AND organization_id = %s
+        """, (identity_id, _org_id()))
+        db.commit()
+        _log(db, 'shadow_app_approved',
+             f"Shadow app approved: {row['display_name']}",
+             {'identity_id': identity_id})
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"approve_shadow_app failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
 
 
 # ──────────────────────────────────────────────────────────

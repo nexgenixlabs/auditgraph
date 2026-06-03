@@ -317,172 +317,252 @@ export default function ConnectedApps() {
         </div>
       </div>
 
-      {/* Vercel scenario interactive detector — AG-84 */}
-      <VercelScenarioPanel />
+      {/* Multi-scenario consent risk detector — Vercel/MOVEit/Storm-0558/
+          NOBELIUM/Shadow-IT. CISO chooses which playbook to surface. */}
+      <ScenarioMenuPanel />
     </div>
   );
 }
 
-interface VercelMatch {
+interface ScenarioMatch {
   id: number;
   client_app_id: string;
   client_display_name: string | null;
   resource_display_name: string | null;
   publisher_name: string | null;
   verified_publisher: boolean | null;
-  consent_type: string | null;
   risk_level: string;
   risk_score: number;
   age_days: number | null;
   high_risk_scopes: string[];
   has_offline_access: boolean;
-  created_datetime: string | null;
-  reasons: string[];
+  consent_type: string | null;
 }
 
-interface VercelResp {
-  matched: VercelMatch[];
-  matched_count: number;
-  with_offline_access: number;
-  scenario: {
-    name: string;
-    signature: string[];
-    why_it_matters: string;
-  };
+interface ConsentScenario {
+  key: string;
+  name: string;
+  tagline: string;
+  signature: string[];
+  why_it_matters: string;
+  count: number;
+  top: ScenarioMatch[];
+  frameworks?: { nist?: string[]; cis?: string[]; mitre?: string[] };
 }
 
-function VercelScenarioPanel() {
-  const [data, setData] = React.useState<VercelResp | null>(null);
-  const [loading, setLoading] = React.useState(false);
+interface ScenariosResp {
+  scenarios: ConsentScenario[];
+  totals: { scenarios: number; matched_grants: number };
+}
+
+const SCENARIO_TONE: Record<string, { tone: string; bg: string; ring: string; text: string }> = {
+  vercel:              { tone: '#ef4444', bg: 'bg-red-50',     ring: 'ring-red-300',     text: 'text-red-900' },
+  moveit:              { tone: '#f97316', bg: 'bg-orange-50',  ring: 'ring-orange-300',  text: 'text-orange-900' },
+  storm0558:           { tone: '#a855f7', bg: 'bg-purple-50',  ring: 'ring-purple-300',  text: 'text-purple-900' },
+  nobelium_dormant:    { tone: '#f59e0b', bg: 'bg-amber-50',   ring: 'ring-amber-300',   text: 'text-amber-900' },
+  shadow_productivity: { tone: '#3b82f6', bg: 'bg-blue-50',    ring: 'ring-blue-300',    text: 'text-blue-900' },
+};
+
+function ScenarioMenuPanel() {
+  const navigate = useNavigate();
+  const [data, setData] = React.useState<ScenariosResp | null>(null);
+  const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState(false);
-  const [expanded, setExpanded] = React.useState(false);
+  const [activeKey, setActiveKey] = React.useState<string | null>(null);
 
-  const runScenario = () => {
-    setLoading(true);
-    setError(false);
-    fetch('/api/connected-apps/vercel-scenario')
+  React.useEffect(() => {
+    fetch('/api/connected-apps/scenarios')
       .then(r => r.ok ? r.json() : Promise.reject(new Error('fetch_failed')))
-      .then((d: VercelResp) => { setData(d); setExpanded(true); })
+      .then((d: ScenariosResp) => {
+        setData(d);
+        // Auto-select the highest-count scenario so the page lands
+        // on something useful even before the user clicks.
+        const top = [...(d.scenarios || [])].sort((a, b) => b.count - a.count)[0];
+        if (top && top.count > 0) setActiveKey(top.key);
+      })
       .catch(() => setError(true))
       .finally(() => setLoading(false));
-  };
+  }, []);
+
+  if (error) {
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+        <p className="text-xs text-red-700">Couldn't load consent scenarios. Run a discovery first.</p>
+      </div>
+    );
+  }
+
+  if (loading || !data) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-5 animate-pulse">
+        <div className="h-4 w-1/3 bg-gray-100 rounded mb-3" />
+        <div className="grid grid-cols-5 gap-2">
+          {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-16 bg-gray-100 rounded" />)}
+        </div>
+      </div>
+    );
+  }
+
+  const active = data.scenarios.find(s => s.key === activeKey) || null;
+  const meta = active ? (SCENARIO_TONE[active.key] || SCENARIO_TONE.vercel) : SCENARIO_TONE.vercel;
 
   return (
     <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 space-y-4">
       <div className="flex items-start gap-3">
         <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-600 text-white flex-shrink-0">
-          Scenario
+          Scenarios
         </span>
-        <div className="text-xs text-amber-900 space-y-2 flex-1">
-          <p className="font-medium">Vercel / Context.ai (2024-2025): The OAuth consent breach playbook.</p>
-          <p>
-            Attacker registers a "productivity" OAuth app under an unverified publisher, prompts a single
-            admin to grant tenant-wide consent for Mail.Read + Files.Read.All + offline_access. That single
-            click hands them a refresh token that survives password rotations, MFA upgrades, and the
-            original user's departure.
+        <div className="text-xs text-amber-900 space-y-1 flex-1">
+          <p className="font-medium">
+            Consent risk has four axes: publisher trust, scope minimization, dormancy, and intake hygiene.
           </p>
           <p>
-            Signature: <strong>unverified publisher + admin consent + high-risk scope + offline_access</strong>.
+            Verified ≠ safe (MOVEit). Microsoft ≠ safe (Storm-0558). Recent ≠ safe (Shadow IT). Old ≠ safe (NOBELIUM).
+            Each tile below filters your own grants against one of the canonical breach playbooks.
           </p>
         </div>
-        <button
-          onClick={runScenario}
-          disabled={loading}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-amber-600 text-white hover:bg-amber-700 transition disabled:opacity-50 flex-shrink-0"
-        >
-          {loading ? 'Scanning…' : data ? 'Re-run scenario' : 'Run Vercel scenario →'}
-        </button>
       </div>
 
-      {error && (
-        <p className="text-xs text-red-700">Couldn't run scenario. Re-run discovery first.</p>
-      )}
+      {/* Scenario tile picker */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        {data.scenarios.map(s => {
+          const tone = SCENARIO_TONE[s.key] || SCENARIO_TONE.vercel;
+          const isActive = activeKey === s.key;
+          return (
+            <button
+              key={s.key}
+              onClick={() => setActiveKey(s.key)}
+              className={`text-left rounded-lg p-3 transition border-2 ${
+                isActive
+                  ? `${tone.bg} ${tone.text} border-current shadow-sm`
+                  : 'bg-white border-gray-200 hover:border-gray-300 text-gray-700'
+              }`}
+              style={isActive ? { color: tone.tone } : {}}
+            >
+              <div className="flex items-baseline justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider">{s.name.split(' (')[0]}</span>
+                <span className={`text-xl font-bold ${isActive ? '' : 'text-gray-900'}`}>{s.count}</span>
+              </div>
+              <p className={`text-[10px] mt-1 leading-tight ${isActive ? tone.text : 'text-gray-500'}`}>
+                {s.tagline}
+              </p>
+            </button>
+          );
+        })}
+      </div>
 
-      {data && (
-        <div className="rounded-lg bg-white border border-amber-200 p-4 space-y-3">
+      {/* Active scenario detail panel */}
+      {active && (
+        <div className={`rounded-lg bg-white border-2 ${meta.ring.replace('ring-', 'border-')} p-4 space-y-3`}>
           <div className="flex items-baseline justify-between">
-            <h3 className="text-sm font-semibold text-gray-900">Matched grants</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">{active.name}</h3>
+              <p className="text-xs text-gray-600 mt-0.5">{active.tagline}</p>
+            </div>
             <div className="text-right">
-              <div className="text-2xl font-bold text-red-700">{data.matched_count}</div>
-              <div className="text-[10px] text-gray-500">{data.with_offline_access} with offline_access</div>
+              <div className={`text-3xl font-bold`} style={{ color: meta.tone }}>{active.count}</div>
+              <div className="text-[10px] text-gray-500">matched grants</div>
             </div>
           </div>
 
-          {data.matched_count === 0 ? (
-            <p className="text-sm text-emerald-700 font-medium">
-              No grants match the Vercel signature. Your OAuth surface is clean against this specific playbook.
-            </p>
-          ) : (
-            <>
-              <p className="text-xs text-gray-600">
-                Each row matches all four signature preconditions. Investigate immediately and revoke
-                any grant that wasn't explicitly approved by your change-control process.
-              </p>
-              {!expanded && (
-                <button
-                  onClick={() => setExpanded(true)}
-                  className="text-xs font-medium text-amber-700 hover:text-amber-900"
-                >
-                  Show matched grants →
-                </button>
-              )}
-              {expanded && (
-                <div className="overflow-x-auto -mx-4 px-4">
-                  <table className="w-full text-xs">
-                    <thead className="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-200">
-                      <tr>
-                        <th className="text-left py-2 pr-3">App</th>
-                        <th className="text-left py-2 pr-3">Resource</th>
-                        <th className="text-left py-2 pr-3">Why it matched</th>
-                        <th className="text-right py-2 pr-3">Age</th>
-                        <th className="text-right py-2">Risk</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {data.matched.slice(0, 20).map(m => (
-                        <tr key={m.id} className="hover:bg-amber-50/50">
-                          <td className="py-2 pr-3">
-                            <div className="font-medium text-gray-900">{m.client_display_name || '—'}</div>
-                            <div className="text-[10px] font-mono text-gray-400">{m.client_app_id.slice(0, 16)}…</div>
-                          </td>
-                          <td className="py-2 pr-3 text-gray-700">{m.resource_display_name || '—'}</td>
-                          <td className="py-2 pr-3">
-                            <ul className="space-y-0.5">
-                              {m.reasons.map((r, i) => (
-                                <li key={i} className="text-[10px] text-gray-700">
-                                  <span className="text-red-500 mr-1">●</span>{r}
-                                </li>
-                              ))}
-                            </ul>
-                          </td>
-                          <td className="py-2 pr-3 text-right text-gray-600">
-                            {typeof m.age_days === 'number' ? `${m.age_days}d` : '—'}
-                          </td>
-                          <td className="py-2 text-right">
-                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                              m.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
-                              m.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                              'bg-amber-100 text-amber-700'
-                            }`}>
-                              {m.risk_level}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {data.matched_count > 20 && (
-                    <p className="text-[10px] text-gray-500 mt-2">
-                      Showing top 20 of {data.matched_count} matches. Use the Connected Apps table above
-                      and filter by publisher trust to see the rest.
-                    </p>
-                  )}
+          <div className="grid md:grid-cols-2 gap-4 pt-2 border-t border-gray-100">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-medium text-gray-500 mb-1">Signature</div>
+              <ul className="space-y-0.5">
+                {active.signature.map((sig, i) => (
+                  <li key={i} className="text-xs text-gray-700 flex items-start gap-1">
+                    <span style={{ color: meta.tone }}>●</span> {sig}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-medium text-gray-500 mb-1">Why it matters</div>
+              <p className="text-xs text-gray-700">{active.why_it_matters}</p>
+              {active.frameworks && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {(active.frameworks.mitre || []).map(t => (
+                    <span key={t} className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-gray-100 text-gray-600">
+                      MITRE {t}
+                    </span>
+                  ))}
+                  {(active.frameworks.cis || []).slice(0, 2).map(t => (
+                    <span key={t} className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-gray-100 text-gray-600">
+                      {t}
+                    </span>
+                  ))}
                 </div>
               )}
-            </>
+            </div>
+          </div>
+
+          {active.count === 0 ? (
+            <p className="text-sm text-emerald-700 font-medium pt-2 border-t border-gray-100">
+              No grants match this signature. Your inventory is clean against this specific playbook.
+            </p>
+          ) : (
+            <div className="overflow-x-auto -mx-4 px-4 pt-2 border-t border-gray-100">
+              <table className="w-full text-xs">
+                <thead className="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-100">
+                  <tr>
+                    <th className="text-left py-2 pr-3">App</th>
+                    <th className="text-left py-2 pr-3">Publisher</th>
+                    <th className="text-left py-2 pr-3">Resource</th>
+                    <th className="text-right py-2 pr-3">Age</th>
+                    <th className="text-right py-2">Risk</th>
+                    <th className="py-2"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {active.top.map(m => (
+                    <tr key={m.id} className="hover:bg-gray-50">
+                      <td className="py-2 pr-3">
+                        <div className="font-medium text-gray-900">{m.client_display_name || '—'}</div>
+                        <div className="text-[10px] font-mono text-gray-400">{m.client_app_id.slice(0, 16)}…</div>
+                      </td>
+                      <td className="py-2 pr-3">
+                        {(m.publisher_name || '').toLowerCase().startsWith('microsoft')
+                          ? <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-800">Microsoft</span>
+                          : m.verified_publisher === true
+                            ? <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">Verified</span>
+                            : m.verified_publisher === false
+                              ? <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-800">Unverified</span>
+                              : <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-700">Unknown</span>
+                        }
+                      </td>
+                      <td className="py-2 pr-3 text-gray-700">{m.resource_display_name || '—'}</td>
+                      <td className="py-2 pr-3 text-right text-gray-600">
+                        {typeof m.age_days === 'number' ? `${m.age_days}d` : '—'}
+                      </td>
+                      <td className="py-2 pr-3 text-right">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                          m.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
+                          m.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
+                          'bg-amber-100 text-amber-700'
+                        }`}>{m.risk_level}</span>
+                      </td>
+                      <td className="py-2 text-right">
+                        <button
+                          onClick={() => navigate(`/identities/${encodeURIComponent(m.client_app_id)}`)}
+                          className="text-[11px] font-medium text-blue-600 hover:text-blue-800"
+                        >
+                          →
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {active.count > active.top.length && (
+                <p className="text-[10px] text-gray-500 mt-2">
+                  Showing top {active.top.length} of {active.count}. Use the Top risky apps table above to drill further.
+                </p>
+              )}
+            </div>
           )}
         </div>
       )}
     </div>
   );
 }
+

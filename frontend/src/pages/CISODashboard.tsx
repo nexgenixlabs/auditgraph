@@ -36,6 +36,7 @@ import { BlastRadiusCardV31, AttackPathCardV31, IdentityRiskCardV31 } from '../c
 import { AIIdentityRiskCard } from '../components/ciso/AIIdentityRiskCard';
 import { ConnectedAppRiskCard } from '../components/ciso/ConnectedAppRiskCard';
 import { JmlSnapshotCard } from '../components/ciso/JmlSnapshotCard';
+import { ShadowAppCard } from '../components/ciso/ShadowAppCard';
 import { AnomalyWidgetV31 } from '../components/ciso/ActiveThreatsSection';
 import { BusinessImpactWidgetV31 } from '../components/ciso/BusinessImpactSection';
 import { DriftWidgetV31 } from '../components/ciso/ActivityDriftSection';
@@ -537,6 +538,7 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
           <AIIdentityRiskCard />
           <ConnectedAppRiskCard />
           <JmlSnapshotCard />
+          <ShadowAppCard />
         </div>
 
         {/* Right Rail — spans row 2 + row 3 */}
