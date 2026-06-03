@@ -2216,6 +2216,22 @@ def create_app():
     def ai_runtime_fleet_route():
         return get_ai_runtime_fleet()
 
+    # AG-179 (Tier 1B): Trust Score + Board Scorecard
+    @app.get("/api/ai-security/trust-score/<identity_id>")
+    def ai_security_trust_score_route(identity_id):
+        from app.api.handlers import get_agent_trust_score_handler
+        return get_agent_trust_score_handler(identity_id)
+
+    @app.get("/api/ai-security/board-scorecard")
+    def ai_security_board_scorecard_route():
+        from app.api.handlers import get_ai_board_scorecard_handler
+        return get_ai_board_scorecard_handler()
+
+    @app.get("/api/ai-security/board-scorecard/history")
+    def ai_security_board_scorecard_history_route():
+        from app.api.handlers import get_ai_board_scorecard_history_handler
+        return get_ai_board_scorecard_history_handler()
+
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')
     def admin_platform_restart_workers():

@@ -15,12 +15,18 @@
 import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { ReactFlow, Controls, Background } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+// AG-178: shared MITRE chip components for the technique strip
+import { MitreChipStrip } from '../security/MitreChip';
 
 interface PathStep {
   node_type: string;
   node_id: string;
   node_label: string;
   description: string;
+  // AG-178: optional MITRE technique IDs the backend tagged on this node
+  mitre_techniques?: Array<string | { id: string }>;
+  // AG-178: optional data classification (PHI/PCI/PII/HR/Source/etc)
+  classification?: string;
 }
 
 interface AttackPath {
@@ -32,12 +38,37 @@ interface AttackPath {
 }
 
 const NODE_STYLES: Record<string, { bg: string; border: string; text: string }> = {
+  // Generic legacy
   identity:  { bg: '#EFF6FF', border: '#3B82F6', text: '#1E40AF' },
   permission: { bg: '#FFF7ED', border: '#F97316', text: '#9A3412' },
   role:      { bg: '#FFF7ED', border: '#F97316', text: '#9A3412' },
   owned_spn: { bg: '#FFF7ED', border: '#F97316', text: '#9A3412' },
   pim:       { bg: '#FEF3C7', border: '#F59E0B', text: '#92400E' },
   target:    { bg: '#FEF2F2', border: '#EF4444', text: '#991B1B' },
+  // AG-178: AI-agent exfiltration chain node types
+  ai_agent:            { bg: '#F5F3FF', border: '#7C3AED', text: '#5B21B6' },
+  managed_identity:    { bg: '#ECFDF5', border: '#10B981', text: '#065F46' },
+  rbac_role:           { bg: '#FFF7ED', border: '#F97316', text: '#9A3412' },
+  entra_role:          { bg: '#FFF7ED', border: '#F97316', text: '#9A3412' },
+  key_vault:           { bg: '#FFFBEB', border: '#F59E0B', text: '#92400E' },
+  kv_secret:           { bg: '#FEF3C7', border: '#D97706', text: '#78350F' },
+  storage_account:     { bg: '#EFF6FF', border: '#2563EB', text: '#1E3A8A' },
+  sql_database:        { bg: '#EEF2FF', border: '#4F46E5', text: '#3730A3' },
+  data_classification: { bg: '#FEF2F2', border: '#DC2626', text: '#7F1D1D' },
+  network_egress:      { bg: '#FEE2E2', border: '#B91C1C', text: '#7F1D1D' },
+};
+
+const NODE_ICONS: Record<string, string> = {
+  ai_agent: '🤖',
+  managed_identity: '🛡',
+  rbac_role: '🎭',
+  entra_role: '🎭',
+  key_vault: '🔐',
+  kv_secret: '🔑',
+  storage_account: '🗄',
+  sql_database: '🗄',
+  data_classification: '📋',
+  network_egress: '🌐',
 };
 
 const CLOUD_ICONS: Record<string, { label: string; bg: string; text: string }> = {
@@ -78,6 +109,9 @@ function AttackNode({ data }: { data: Record<string, unknown> }) {
       }}
     >
       <div className="flex items-center gap-1.5 mb-0.5">
+        {NODE_ICONS[nodeType] && (
+          <span className="text-[12px] leading-none" aria-hidden>{NODE_ICONS[nodeType]}</span>
+        )}
         <span
           className="px-1 py-px rounded text-[8px] font-bold uppercase"
           style={{ backgroundColor: cloudIcon.bg, color: cloudIcon.text }}
@@ -98,6 +132,12 @@ function AttackNode({ data }: { data: Record<string, unknown> }) {
       <div className="text-[10px] text-gray-600 line-clamp-2">
         {data.description as string}
       </div>
+      {/* AG-178: classification chip on data_classification + storage_account nodes */}
+      {!!data.classification && (
+        <div className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-red-600 text-white">
+          {data.classification as string}
+        </div>
+      )}
       {isCompromised && isTarget && (
         <div className="mt-1.5 text-[9px] font-bold text-red-700 uppercase tracking-wider">
           ⚠ Reached
@@ -275,6 +315,9 @@ export default function AttackPathView({
           nodeType: step.node_type,
           cloud: (step as any).cloud || 'azure',
           hopState: hopStateFor(i),
+          // AG-178: pipe classification + MITRE for chip rendering
+          classification: (step as any).classification,
+          mitreTechniques: step.mitre_techniques,
         },
       })),
       edges: stops.slice(0, -1).map((_, i) => {
@@ -394,6 +437,27 @@ export default function AttackPathView({
             </div>
           )}
 
+          {/* AG-178: MITRE technique chip strip above the chain.
+              Collects every mitre_techniques[] from the steps, dedupes,
+              renders as clickable chips. Only shows when backend tagged
+              something — otherwise hidden (no fabricated chips). */}
+          {selectedPath && (() => {
+            const allIds: string[] = [];
+            for (const s of selectedPath.steps as PathStep[]) {
+              for (const t of (s.mitre_techniques || [])) {
+                allIds.push(typeof t === 'string' ? t : t.id);
+              }
+            }
+            return allIds.length > 0 ? (
+              <div className="mb-2 flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                  MITRE ATT&amp;CK
+                </span>
+                <MitreChipStrip ids={allIds} size="sm" />
+              </div>
+            ) : null;
+          })()}
+
           <div className="border rounded-xl overflow-hidden bg-gray-50" style={{ height: 280 }}>
             <ReactFlow
               nodes={nodes}
@@ -409,6 +473,46 @@ export default function AttackPathView({
               <Background gap={16} size={1} color="#e2e8f0" />
             </ReactFlow>
           </div>
+
+          {/* AG-178: Blast-radius rollup bar below the chain.
+              Reads optional path.rollup if backend provided counts;
+              otherwise derives a minimal summary from the steps array.
+              No fake numbers — fields that are unknown are omitted. */}
+          {selectedPath && (() => {
+            const rollup = (selectedPath as any).rollup as
+              | undefined
+              | {
+                  vault_count?: number;
+                  secret_count?: number;
+                  storage_count?: number;
+                  records_estimate?: number | null;
+                  classification?: string | null;
+                  egress_status?: 'open' | 'restricted' | null;
+                };
+            if (!rollup) return null;
+            const parts: string[] = [];
+            if (typeof rollup.vault_count === 'number')   parts.push(`${rollup.vault_count} vault${rollup.vault_count === 1 ? '' : 's'}`);
+            if (typeof rollup.secret_count === 'number')  parts.push(`${rollup.secret_count} secret${rollup.secret_count === 1 ? '' : 's'}`);
+            if (typeof rollup.storage_count === 'number') parts.push(`${rollup.storage_count} storage acct${rollup.storage_count === 1 ? '' : 's'}`);
+            if (rollup.records_estimate != null && rollup.classification) {
+              const m = rollup.records_estimate >= 1_000_000 ? `${(rollup.records_estimate / 1_000_000).toFixed(1)}M`
+                       : rollup.records_estimate >= 1_000 ? `${(rollup.records_estimate / 1_000).toFixed(1)}K`
+                       : `${rollup.records_estimate}`;
+              parts.push(`~${m} ${rollup.classification} rows`);
+            }
+            if (rollup.egress_status) parts.push(`${rollup.egress_status} network egress`);
+            if (parts.length === 0) return null;
+            return (
+              <div className="mt-2 rounded-xl px-3 py-2 bg-red-50 border border-red-200">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-red-700 mb-0.5">
+                  If compromised, reaches
+                </div>
+                <div className="text-xs text-red-900 font-medium">
+                  {parts.join(' · ')}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Per-hop narrative — updates as the animation progresses */}
           {selectedPath && (

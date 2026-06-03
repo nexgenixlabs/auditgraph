@@ -27,6 +27,8 @@ import IdentityDetail from './pages/IdentityDetail';
 import LifecycleJml from './pages/LifecycleJml';
 import ConnectedApps from './pages/ConnectedApps';
 import ShadowApps from './pages/ShadowApps';
+import AIAttackPaths from './pages/AIAttackPaths';
+import AIBoardScorecard from './pages/AIBoardScorecard';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
@@ -348,6 +350,10 @@ function AppContent() {
                   <Route path="/connected-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ConnectedApps /></ErrorBoundary>} />
                   {/* AG-86: Shadow App registry & flagging */}
                   <Route path="/shadow-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ShadowApps /></ErrorBoundary>} />
+                  {/* AG-178: AI Identity Attack Paths (cinematic chain) */}
+                  <Route path="/ai-risk/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAttackPaths /></ErrorBoundary>} />
+                  {/* AG-179: AI Board Scorecard */}
+                  <Route path="/board-scorecard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIBoardScorecard /></ErrorBoundary>} />
                   {/* AG-161: 5-pillar AI Security IA. Legacy routes below redirect into new pillars. */}
                   <Route path="/ai-inventory" element={<Navigate to="/ai-inventory/graph" replace />} />
                   <Route path="/ai-inventory/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIInventory /></ErrorBoundary>} />

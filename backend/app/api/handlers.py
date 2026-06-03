@@ -33919,6 +33919,7 @@ def get_attack_paths_list():
         limit (int, default 50, max 100)
         severity (critical|high|medium|low)
         path_type (PRIVILEGE_ESCALATION|KEYVAULT_SECRET_ACCESS|...)
+        source_entity_type (ai_agent|service_principal|human_user|...) — AG-178
         connection_id (int, optional — filter to specific cloud connection)
     """
     db = None
@@ -33928,6 +33929,7 @@ def get_attack_paths_list():
         limit = min(request.args.get('limit', 50, type=int), 100)
         severity = request.args.get('severity', '')
         path_type = request.args.get('path_type', '')
+        source_entity_type = request.args.get('source_entity_type', '').strip().lower()
         conn_id = _connection_id()
 
         org_id = _org_id()
@@ -33945,6 +33947,11 @@ def get_attack_paths_list():
         if path_type:
             conditions.append("ap.path_type = %s")
             params.append(path_type)
+        if source_entity_type:
+            # AG-178: filter to ai_agent (or other) source_entity_type for the
+            # /ai-risk/attack-paths page that consumes the cinematic chain.
+            conditions.append("ap.source_entity_type = %s")
+            params.append(source_entity_type)
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -42162,6 +42169,105 @@ def get_ai_inventory_graph():
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         db.close()
+
+
+# ============================================================
+# ============================================================
+# AG-179 (Tier 1B): Trust Score + Board Scorecard handlers
+# ============================================================
+
+def get_agent_trust_score_handler(identity_id: str):
+    """GET /api/ai-security/trust-score/<identity_id>
+
+    Returns the 5-dimension Trust Score for one AI agent. No fake data —
+    returns 404 if the identity doesn't exist or isn't an AI agent.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor)
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name, i.agent_identity_type
+            FROM identities i
+            WHERE i.identity_id = %s
+              AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id(), run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.scoring.agent_trust_scorer import compute_agent_trust
+        result = compute_agent_trust(cursor, row['id'])
+        result['identity_id'] = row['identity_id']
+        result['display_name'] = row['display_name']
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"trust-score handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_board_scorecard_handler():
+    """GET /api/ai-security/board-scorecard
+
+    Returns the 5 KPIs + distribution + top-10 worst for the current tenant.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        from app.engines.scoring.board_scorecard_engine import compute_board_scorecard
+        result = compute_board_scorecard(cursor, _org_id())
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"board-scorecard handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_board_scorecard_history_handler():
+    """GET /api/ai-security/board-scorecard/history?days=180
+
+    Returns persisted historical snapshots for trend rendering.
+    """
+    days = min(request.args.get('days', 180, type=int), 365)
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT snapshot_date, total_agents,
+                   with_owner_pct, with_telemetry_pct, private_network_pct,
+                   least_privilege_pct, policy_compliant_pct,
+                   distribution_strong, distribution_good,
+                   distribution_elevated, distribution_critical,
+                   exceptions_pending
+            FROM ai_board_scorecard_snapshots
+            WHERE organization_id = %s
+              AND snapshot_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+            ORDER BY snapshot_date ASC
+        """, (_org_id(), days))
+        history = []
+        for r in cursor.fetchall():
+            row = dict(r)
+            row['snapshot_date'] = row['snapshot_date'].isoformat() if row['snapshot_date'] else None
+            history.append(row)
+        return jsonify({'history': history, 'days': days})
+    except Exception as e:
+        logger.error(f"board-scorecard history handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
 
 
 # ============================================================

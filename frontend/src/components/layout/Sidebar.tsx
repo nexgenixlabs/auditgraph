@@ -161,7 +161,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-access',     label: 'AI Access',     icon: effectiveAccessIcon },
           { to: '/ai-runtime',    label: 'AI Runtime',    icon: agentBotIcon },
           { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
+          // AG-178 (Tier 1A): AI Identity Attack Paths — the signature demo
+          { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
           { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },
+          // AG-179 (Tier 1B): Board-ready scorecard
+          { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
         ],
       },
       {

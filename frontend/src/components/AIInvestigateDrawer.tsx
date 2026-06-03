@@ -22,6 +22,8 @@ import {
   confidenceLabel,
   confidenceColor,
 } from '../constants/aiRisk';
+// AG-179: Trust Score card mounts at the top of the drawer
+import { AgentTrustScoreCard } from './ai-security/AgentTrustScoreCard';
 
 interface AIInvestigateDrawerProps {
   identityId: string | null;
@@ -456,6 +458,13 @@ export default function AIInvestigateDrawer({ identityId, onClose }: AIInvestiga
                     {data.permissions.ai_risk_score?.toFixed(1) || '0.0'}
                   </span>
                 </div>
+              </div>
+            )}
+
+            {/* AG-179: Trust Score card — first thing visible inside the drawer */}
+            {identityId && (
+              <div className="px-4 pb-3">
+                <AgentTrustScoreCard identityId={identityId} />
               </div>
             )}
 
