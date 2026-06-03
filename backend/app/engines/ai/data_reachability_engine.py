@@ -110,7 +110,7 @@ def refresh_data_reachability(db, run_id: int, organization_id: int) -> dict:
     }
     classifications_seen: set[str] = set()
 
-    cursor = db.cursor()
+    cursor = db.conn.cursor()
 
     # ── 1. Load AI agent cohort for this run ────────────────────────
     agents = _load_agents(cursor, run_id, organization_id, summary)
@@ -244,7 +244,7 @@ def classify_undiscovered_resources(db, run_id: int, organization_id: int) -> in
 
     Returns the total number of rows updated across all three source tables.
     """
-    cursor = db.cursor()
+    cursor = db.conn.cursor()
     total_updated = 0
 
     table_specs: tuple[dict[str, str], ...] = (

@@ -147,7 +147,7 @@ DRIFT_AGENT_ID = AGENTS[0]["identity_id"]
 # ─── Helpers ──────────────────────────────────────────────────────────
 
 def _find_org(db, org_id: int) -> int:
-    cur = db.cursor()
+    cur = db.conn.cursor()
     cur.execute("SELECT id FROM organizations WHERE id = %s", (org_id,))
     row = cur.fetchone()
     if row is None:
@@ -159,45 +159,71 @@ def _find_org(db, org_id: int) -> int:
     return org_id
 
 
-def _ensure_run(db, org_id: int, label: str, completed_at: datetime) -> int:
-    cur = db.cursor()
+def _find_connection_id(db, org_id: int) -> int:
+    cur = db.conn.cursor()
+    cur.execute(
+        "SELECT id FROM cloud_connections WHERE organization_id=%s LIMIT 1",
+        (org_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"No cloud_connections row for org_id={org_id}. "
+            "Seed a connection first or pick a different org."
+        )
+    return row[0]
+
+
+def _ensure_run(db, org_id: int, label: str, completed_at: datetime,
+                connection_id: int) -> int:
+    cur = db.conn.cursor()
+    # Schema-tolerant: actual discovery_runs has cloud_connection_id (NOT NULL)
+    # and subscription_id (NOT NULL). We pass a synthetic sub id so the row is
+    # valid; the seeder rows are clearly demo-only.
     cur.execute("""
-        INSERT INTO discovery_runs (organization_id, started_at, completed_at,
-                                    status, cloud_provider, connection_id)
-        VALUES (%s, %s, %s, 'completed', 'azure', NULL)
+        INSERT INTO discovery_runs
+            (organization_id, cloud_connection_id, subscription_id,
+             started_at, completed_at, status)
+        VALUES (%s, %s, %s, %s, %s, 'completed')
         RETURNING id
-    """, (org_id, completed_at - timedelta(minutes=15), completed_at))
+    """, (org_id, connection_id, SUB_ID,
+          completed_at - timedelta(minutes=15), completed_at))
     rid = cur.fetchone()[0]
-    db.connection.commit() if hasattr(db, 'connection') else db.conn.commit()
-    logger.info("Created discovery_run id=%s (%s)", rid, label)
+    db.conn.commit()
+    logger.info("Created discovery_run id=%s (%s) [conn=%s]", rid, label, connection_id)
     return rid
 
 
 def _cleanup_aiag_demo(db, org_id: int):
     """Remove only rows created by this seeder. Does NOT touch real customer data."""
-    cur = db.cursor()
+    cur = db.conn.cursor()
+    # Set RLS context so policies on org-scoped tables match
+    cur.execute("SET LOCAL app.current_organization_id = %s", (str(org_id),))
+    cur.execute("SET LOCAL app.current_tenant_id = %s", (str(org_id),))
     # Remove only agents whose identity_id starts with 'aa000' (deterministic seeder UUIDs)
     cur.execute("""
         DELETE FROM identities
         WHERE organization_id = %s
-          AND identity_id LIKE 'aa000%'
+          AND identity_id LIKE 'aa000%%'
     """, (org_id,))
     deleted_identities = cur.rowcount
 
     # Remove our demo resources
-    for table, prefix in [
-        ("azure_cognitive_services_accounts", "/subscriptions/11111111-"),
-        ("azure_ai_model_deployments", "/subscriptions/11111111-"),
-        ("azure_key_vaults", "/subscriptions/11111111-"),
-        ("azure_storage_accounts", "/subscriptions/11111111-"),
-        ("azure_sql_servers", "/subscriptions/11111111-"),
-        ("azure_sql_databases", "/subscriptions/11111111-"),
-        ("azure_cosmos_accounts", "/subscriptions/11111111-"),
-        ("azure_cosmos_databases", "/subscriptions/11111111-"),
+    # Cleanup tuples: (table, key_column, prefix). azure_ai_model_deployments
+    # uses account_resource_id (not resource_id) in the schema.
+    for table, col, prefix in [
+        ("azure_cognitive_services_accounts", "resource_id",         "/subscriptions/11111111-"),
+        ("azure_ai_model_deployments",        "account_resource_id", "/subscriptions/11111111-"),
+        ("azure_key_vaults",                  "resource_id",         "/subscriptions/11111111-"),
+        ("azure_storage_accounts",            "resource_id",         "/subscriptions/11111111-"),
+        ("azure_sql_servers",                 "resource_id",         "/subscriptions/11111111-"),
+        ("azure_sql_databases",               "resource_id",         "/subscriptions/11111111-"),
+        ("azure_cosmos_accounts",             "resource_id",         "/subscriptions/11111111-"),
+        ("azure_cosmos_databases",            "resource_id",         "/subscriptions/11111111-"),
     ]:
         try:
             cur.execute(
-                f"DELETE FROM {table} WHERE organization_id = %s AND resource_id LIKE %s",
+                f"DELETE FROM {table} WHERE organization_id = %s AND {col} LIKE %s",
                 (org_id, prefix + "%"),
             )
         except Exception as e:
@@ -211,7 +237,7 @@ def _cleanup_aiag_demo(db, org_id: int):
                   "agent_behavior_anomalies", "agent_data_reachability"):
         try:
             cur.execute(
-                f"DELETE FROM {table} WHERE organization_id = %s AND identity_id LIKE 'aa000%'",
+                f"DELETE FROM {table} WHERE organization_id = %s AND identity_id LIKE 'aa000%%'",
                 (org_id,),
             )
         except Exception as e:
@@ -223,26 +249,50 @@ def _cleanup_aiag_demo(db, org_id: int):
     logger.info("Cleanup removed %d demo identities + dependent rows", deleted_identities)
 
 
-def _seed_resources(db, run_id: int, org_id: int):
-    cur = db.cursor()
+def _set_org_context(cur, org_id: int):
+    """Set both possible RLS settings — different tables use different keys."""
+    cur.execute("SET LOCAL app.current_organization_id = %s", (str(org_id),))
+    cur.execute("SET LOCAL app.current_tenant_id = %s", (str(org_id),))
 
-    # Cognitive services accounts
+
+def _try_insert(cur, label: str, sql: str, params: tuple):
+    """Run an INSERT inside a savepoint so a single column mismatch
+    doesn't poison the rest of the transaction. Returns True on success."""
+    import re
+    sp = "sp_" + re.sub(r"[^a-zA-Z0-9_]", "_", label)[:48]
+    try:
+        cur.execute(f"SAVEPOINT {sp}")
+        cur.execute(sql, params)
+        cur.execute(f"RELEASE SAVEPOINT {sp}")
+        return True
+    except Exception as e:
+        try: cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+        except Exception: pass
+        msg = str(e).splitlines()[0]
+        logger.warning("INSERT %s skipped: %s", label, msg)
+        return False
+
+
+def _seed_resources(db, run_id: int, org_id: int):
+    cur = db.conn.cursor()
+    _set_org_context(cur, org_id)
+
+    # Cognitive services accounts — schema uses `name` (not account_name)
     cog_rows = [
-        (COG_ACCT_1, "aiag-openai-prod", "OpenAI", "Disabled", 1, True, "https://aiag-openai-prod.cognitiveservices.azure.com"),
-        (COG_ACCT_2, "aiag-openai-stg",  "OpenAI", "Enabled",  0, False, "https://aiag-openai-stg.cognitiveservices.azure.com"),
-        (COG_ACCT_3, "aiag-copilot-bot", "CognitiveServices", "Disabled", 1, True, None),
+        (COG_ACCT_1, "aiag-openai-prod", "OpenAI", "Disabled", 1),
+        (COG_ACCT_2, "aiag-openai-stg",  "OpenAI", "Enabled",  0),
+        (COG_ACCT_3, "aiag-copilot-bot", "CognitiveServices", "Disabled", 1),
     ]
-    for rid, name, kind, pna, pe, has_mi, ep_url in cog_rows:
-        cur.execute("""
+    for rid, name, kind, pna, pe in cog_rows:
+        _try_insert(cur, f"cog_{name}", """
             INSERT INTO azure_cognitive_services_accounts
                 (organization_id, discovery_run_id, subscription_id, resource_id,
-                 resource_group, account_name, kind, public_network_access,
-                 network_acls_default_action, private_endpoint_count,
-                 endpoint_url, discovered_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                 resource_group, name, kind, public_network_access,
+                 network_acls_default_action, private_endpoint_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
         """, (org_id, run_id, SUB_ID, rid, RG_NAME, name, kind, pna,
-              'Deny' if pna == 'Disabled' else 'Allow', pe, ep_url))
+              'Deny' if pna == 'Disabled' else 'Allow', pe))
 
     # Model deployments
     deps = [
@@ -254,115 +304,98 @@ def _seed_resources(db, run_id: int, org_id: int):
         (COG_ACCT_3, "embedding-3", "text-embedding-3-large", "1", "Standard", 100),
     ]
     for acct, dname, mname, mver, sku, cap in deps:
-        cur.execute("""
+        _try_insert(cur, f"dep_{dname}", """
             INSERT INTO azure_ai_model_deployments
                 (organization_id, discovery_run_id, account_resource_id,
-                 deployment_name, model_name, model_version, sku_name,
-                 sku_capacity, discovered_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                 deployment_name, model_name, model_version, sku_name, sku_capacity)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
         """, (org_id, run_id, acct, dname, mname, mver, sku, cap))
 
-    # Key Vaults
-    cur.execute("""
-        INSERT INTO azure_key_vaults
-            (organization_id, discovery_run_id, subscription_id, resource_id,
-             resource_group, vault_name, location, public_network_access,
-             default_network_action, private_endpoint_count, secrets_total,
-             secrets_detail, discovered_at)
-        VALUES (%s, %s, %s, %s, %s, 'aiag-vault-phi', 'eastus', 'Disabled',
-                'Deny', 1, 14,
-                '[]'::jsonb, NOW())
-        ON CONFLICT DO NOTHING
-    """, (org_id, run_id, SUB_ID, KV_PHI, RG_NAME))
-    cur.execute("""
-        INSERT INTO azure_key_vaults
-            (organization_id, discovery_run_id, subscription_id, resource_id,
-             resource_group, vault_name, location, public_network_access,
-             default_network_action, private_endpoint_count, secrets_total,
-             secrets_detail, discovered_at)
-        VALUES (%s, %s, %s, %s, %s, 'aiag-vault-pci', 'eastus', 'Enabled',
-                'Allow', 0, 8,
-                '[]'::jsonb, NOW())
-        ON CONFLICT DO NOTHING
-    """, (org_id, run_id, SUB_ID, KV_PCI, RG_NAME))
+    # Key Vaults — schema uses `name` (not vault_name)
+    for kv_id, name, pna, dna, pe, secrets in [
+        (KV_PHI, "aiag-vault-phi", "Disabled", "Deny",  1, 14),
+        (KV_PCI, "aiag-vault-pci", "Enabled",  "Allow", 0, 8),
+    ]:
+        _try_insert(cur, f"kv_{name}", """
+            INSERT INTO azure_key_vaults
+                (organization_id, discovery_run_id, subscription_id, resource_id,
+                 resource_group, name, location, public_network_access,
+                 default_network_action, private_endpoint_count, secrets_total)
+            VALUES (%s, %s, %s, %s, %s, %s, 'eastus', %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+        """, (org_id, run_id, SUB_ID, kv_id, RG_NAME, name, pna, dna, pe, secrets))
 
-    # Storage accounts — set data_classification + record_count_estimate
-    # so the AG-180 page lights up. Tag values are LABEL ONLY (no PHI content).
-    storage_rows = [
-        # (resource_id, name, public_blob_access, default_action, classification, source, est)
+    # Storage accounts — schema uses `name`. Classification + records on top.
+    for rid, name, pba, dna, cls, src, est in [
         (STORAGE_PHI, "aiagphiblob01", False, "Deny",  "PHI",    "tag",          120000),
         (STORAGE_PCI, "aiagpci01",     False, "Deny",  "PCI",    "tag",          45000),
         (STORAGE_SRC, "aiagsrccode01", False, "Allow", "SOURCE", "name_pattern", None),
         (STORAGE_PUB, "aiagpublic01",  True,  "Allow", None,     None,           None),
-    ]
-    for rid, name, pba, dna, cls, src, est in storage_rows:
-        cur.execute("""
+    ]:
+        _try_insert(cur, f"sa_{name}", """
             INSERT INTO azure_storage_accounts
                 (organization_id, discovery_run_id, subscription_id, resource_id,
-                 resource_group, account_name, location, public_blob_access,
+                 resource_group, name, location, public_blob_access,
                  default_network_action, private_endpoint_count,
                  data_classification, classification_source, classification_confidence,
-                 record_count_estimate, discovered_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 'eastus', %s, %s, 0, %s, %s,
-                    %s, %s, NOW())
+                 record_count_estimate)
+            VALUES (%s, %s, %s, %s, %s, %s, 'eastus', %s, %s, 0, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
         """, (org_id, run_id, SUB_ID, rid, RG_NAME, name, pba, dna,
               cls, src, ('high' if src == 'tag' else 'medium' if src else None),
               est))
 
-    # SQL
-    cur.execute("""
+    # SQL — table from migration 121 (already has discovered_at)
+    _try_insert(cur, "sql_srv", """
         INSERT INTO azure_sql_servers
             (organization_id, discovery_run_id, subscription_id, resource_id,
-             resource_group, server_name, location, public_network_access,
-             discovered_at)
-        VALUES (%s, %s, %s, %s, %s, 'aiag-sql-prod', 'eastus', 'Enabled', NOW())
+             resource_group, server_name, location, public_network_access)
+        VALUES (%s, %s, %s, %s, %s, 'aiag-sql-prod', 'eastus', 'Enabled')
         ON CONFLICT DO NOTHING
     """, (org_id, run_id, SUB_ID, SQL_SERVER, RG_NAME))
-    cur.execute("""
+    _try_insert(cur, "sql_db_hr", """
         INSERT INTO azure_sql_databases
             (organization_id, discovery_run_id, subscription_id, resource_id,
              server_resource_id, database_name, sku_name, sku_tier, capacity,
              data_classification, classification_source, classification_confidence,
-             record_count_estimate, discovered_at)
+             record_count_estimate)
         VALUES (%s, %s, %s, %s, %s, 'hr-analytics', 'GP_Gen5', 'GeneralPurpose',
-                4, 'HR', 'tag', 'high', 250000, NOW())
+                4, 'HR', 'tag', 'high', 250000)
         ON CONFLICT DO NOTHING
     """, (org_id, run_id, SUB_ID, SQL_DB_HR, SQL_SERVER))
-    cur.execute("""
+    _try_insert(cur, "sql_db_gen", """
         INSERT INTO azure_sql_databases
             (organization_id, discovery_run_id, subscription_id, resource_id,
-             server_resource_id, database_name, sku_name, discovered_at)
-        VALUES (%s, %s, %s, %s, %s, 'generic-app', 'S0', NOW())
+             server_resource_id, database_name, sku_name)
+        VALUES (%s, %s, %s, %s, %s, 'generic-app', 'S0')
         ON CONFLICT DO NOTHING
     """, (org_id, run_id, SUB_ID, SQL_DB_GEN, SQL_SERVER))
 
     # Cosmos
-    cur.execute("""
+    _try_insert(cur, "cosmos_acct", """
         INSERT INTO azure_cosmos_accounts
             (organization_id, discovery_run_id, subscription_id, resource_id,
-             resource_group, account_name, location, kind, public_network_access,
-             discovered_at)
+             resource_group, account_name, location, kind, public_network_access)
         VALUES (%s, %s, %s, %s, %s, 'aiag-cosmos-prod', 'eastus',
-                'GlobalDocumentDB', 'Enabled', NOW())
+                'GlobalDocumentDB', 'Enabled')
         ON CONFLICT DO NOTHING
     """, (org_id, run_id, SUB_ID, COSMOS_ACCT, RG_NAME))
-    cur.execute("""
+    _try_insert(cur, "cosmos_db_pii", """
         INSERT INTO azure_cosmos_databases
             (organization_id, discovery_run_id, subscription_id, resource_id,
              account_resource_id, database_name, api_kind,
              data_classification, classification_source, classification_confidence,
-             record_count_estimate, discovered_at)
+             record_count_estimate)
         VALUES (%s, %s, %s, %s, %s, 'customer-pii', 'sql', 'PII', 'tag',
-                'high', 80000, NOW())
+                'high', 80000)
         ON CONFLICT DO NOTHING
     """, (org_id, run_id, SUB_ID, COSMOS_DB_PII, COSMOS_ACCT))
-    cur.execute("""
+    _try_insert(cur, "cosmos_db_gen", """
         INSERT INTO azure_cosmos_databases
             (organization_id, discovery_run_id, subscription_id, resource_id,
-             account_resource_id, database_name, api_kind, discovered_at)
-        VALUES (%s, %s, %s, %s, %s, 'generic-app-db', 'sql', NOW())
+             account_resource_id, database_name, api_kind)
+        VALUES (%s, %s, %s, %s, %s, 'generic-app-db', 'sql')
         ON CONFLICT DO NOTHING
     """, (org_id, run_id, SUB_ID, COSMOS_DB_GEN, COSMOS_ACCT))
 
@@ -376,7 +409,8 @@ def _seed_agents(db, run_id: int, org_id: int, *, escalate: bool):
     escalate=True: assigns the high-risk roles that trigger AI_PERMISSIONS_ESCALATED
     on the drift agent. Set False for the first historical run.
     """
-    cur = db.cursor()
+    cur = db.conn.cursor()
+    _set_org_context(cur, org_id)
     for agent in AGENTS:
         cur.execute("""
             INSERT INTO identities
@@ -419,14 +453,14 @@ def _seed_agents(db, run_id: int, org_id: int, *, escalate: bool):
             roles = [{"role_name": "Reader", "scope": COG_ACCT_1, "scope_type": "resource"}]
 
         for r in roles:
-            cur.execute("""
+            _try_insert(cur, f"ra_{agent['identity_id'][:8]}_{r['role_name'][:8]}", """
                 INSERT INTO role_assignments
-                    (organization_id, identity_db_id, identity_id, role_name,
-                     scope, scope_type, discovery_run_id, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    (organization_id, identity_db_id, role_name,
+                     scope, scope_type, principal_id, assignment_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
-            """, (org_id, identity_db_id, agent["identity_id"], r["role_name"],
-                  r["scope"], r["scope_type"], run_id))
+            """, (org_id, identity_db_id, r["role_name"], r["scope"], r["scope_type"],
+                  agent["identity_id"], str(uuid.uuid4())))
 
     db.conn.commit()
     logger.info("Agents + classifications + role_assignments seeded (escalate=%s)", escalate)
@@ -435,7 +469,8 @@ def _seed_agents(db, run_id: int, org_id: int, *, escalate: bool):
 def _seed_activity_events(db, org_id: int):
     """Seed a 20-day stream of activity events per agent so behavior_baseline
     has enough samples to be 'is_active' = True."""
-    cur = db.cursor()
+    cur = db.conn.cursor()
+    _set_org_context(cur, org_id)
     for agent in AGENTS:
         cur.execute("SELECT id FROM identities WHERE identity_id=%s AND organization_id=%s ORDER BY discovery_run_id DESC LIMIT 1",
                     (agent["identity_id"], org_id))
@@ -476,17 +511,21 @@ def main():
     db = Database()
     try:
         org_id = _find_org(db, args.org_id)
+        conn_id = _find_connection_id(db, org_id)
+        logger.info("Using cloud_connection_id=%s", conn_id)
         if not args.no_cleanup:
             _cleanup_aiag_demo(db, org_id)
 
         # Historical run (T-2 days)
         prev_run = _ensure_run(db, org_id, "previous",
-                               completed_at=NOW - timedelta(days=2))
+                               completed_at=NOW - timedelta(days=2),
+                               connection_id=conn_id)
         _seed_resources(db, prev_run, org_id)
         _seed_agents(db, prev_run, org_id, escalate=False)
 
         # Current run (now)
-        curr_run = _ensure_run(db, org_id, "current", completed_at=NOW)
+        curr_run = _ensure_run(db, org_id, "current", completed_at=NOW,
+                               connection_id=conn_id)
         _seed_resources(db, curr_run, org_id)
         _seed_agents(db, curr_run, org_id, escalate=True)
 
