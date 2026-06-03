@@ -150,38 +150,62 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
         ],
       },
+      // 2026-06-03 reorg: AI Security shrunk to discovery+governance; tactical
+      // attack-surface features (data reachability, attack paths) consolidated
+      // under "Attack Surface" so humans/machines/AI share one home. Argus
+      // promoted to its own top-level (spans all identity types). Board
+      // Scorecard promoted (CEO/CFO view, not buried in AI). URLs unchanged.
       {
-        // 5-pillar IA per AG-161. Order: Inventory (who/what) → Access (what
-        // can they touch) → Runtime (where they execute) → Risk (how they're
-        // exploited) → Governance (are we within policy).
         label: 'AI Security',
         color: '#8b5cf6',
         items: [
           { to: '/ai-inventory',  label: 'AI Inventory',  icon: agentBotIcon },
           { to: '/ai-access',     label: 'AI Access',     icon: effectiveAccessIcon },
-          // AG-180 (Tier 2A): per-agent data classification reachability
-          { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
           { to: '/ai-runtime',    label: 'AI Runtime',    icon: agentBotIcon },
-          // AG-182 (Tier 3A): per-agent forensic timeline + baseline anomalies
-          { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: agentBotIcon },
           { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
-          // AG-178 (Tier 1A): AI Identity Attack Paths — the signature demo
-          { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
           // AG-181 (Tier 2C): AI agent J/M/L drift
           { to: '/ai-lifecycle', label: 'AI Lifecycle', icon: identityIcon },
           { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },
-          // AG-179 (Tier 1B): Board-ready scorecard
-          { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
-          // AG-184 (Argus EPIC): structured-output home for L3 + L5 (L1/2/4/6/7 queued)
+        ],
+      },
+      {
+        // Promoted top-level — Argus reasons across humans + machines + AI.
+        label: 'Argus',
+        color: '#a78bfa',
+        items: [
           { to: '/argus', label: 'Argus Analyst', icon: agentBotIcon },
         ],
       },
       {
+        // Unified attack-surface home — same URLs, organized so users find
+        // every chain (human / machine / AI) in one place.
         label: 'Attack Surface',
         color: '#dc2626',
         items: [
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
+          // AG-178 (Tier 1A): AI Identity Attack Paths — the cinematic chain
+          { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
+          // AG-180 (Tier 2A): data reachability — attack signal, not AI feature
+          { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
+        ],
+      },
+      {
+        // Observability — behavior monitoring + audit + anomalies
+        label: 'Observability',
+        color: '#0ea5e9',
+        items: [
+          // AG-182 (Tier 3A): per-agent forensic timeline + baseline anomalies
+          { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: agentBotIcon },
+        ],
+      },
+      {
+        // Board — CEO/CFO/audit-committee view
+        label: 'Board',
+        color: '#f59e0b',
+        items: [
+          // AG-179 (Tier 1B): Board-ready scorecard
+          { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
         ],
       },
       {
