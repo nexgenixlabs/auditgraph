@@ -16141,15 +16141,22 @@ def get_dashboard_jml_snapshot():
         """, (run_ids, org_id))
         joiner_count = int(cursor.fetchone()[0] or 0)
 
-        # Movers: open (unresolved) mover_stale_access anomalies for this org
+        # Movers: open mover_stale_access anomalies — DISTINCT identities,
+        # not raw anomaly records (each ghost can have multiple records as
+        # detectors fire every run).
         cursor.execute("""
+            WITH ranked AS (
+              SELECT identity_id, identity_name, severity, title, created_at,
+                     ROW_NUMBER() OVER (PARTITION BY identity_id
+                                        ORDER BY created_at DESC NULLS LAST) AS rn
+                FROM anomalies
+               WHERE organization_id = %s
+                 AND anomaly_type = 'mover_stale_access'
+                 AND resolved = false
+            )
             SELECT identity_id, identity_name, severity, title, created_at
-              FROM anomalies
-             WHERE organization_id = %s
-               AND anomaly_type = 'mover_stale_access'
-               AND resolved = false
-             ORDER BY created_at DESC NULLS LAST
-             LIMIT 5
+              FROM ranked WHERE rn = 1
+             ORDER BY created_at DESC NULLS LAST LIMIT 5
         """, (org_id,))
         mover_top = [
             {
@@ -16162,23 +16169,34 @@ def get_dashboard_jml_snapshot():
             for r in cursor.fetchall()
         ]
         cursor.execute("""
-            SELECT count(*) FROM anomalies
+            SELECT count(DISTINCT identity_id) FROM anomalies
              WHERE organization_id = %s
                AND anomaly_type = 'mover_stale_access'
                AND resolved = false
         """, (org_id,))
         mover_count = int(cursor.fetchone()[0] or 0)
 
-        # Leavers: open ghost_identity anomalies (disabled + still privileged)
+        # Leavers: ghost identities visible in the LATEST run only. AG-JML
+        # truth fix (2026-06-02): we used to count anomaly records, which
+        # accumulate across runs (one row per identity per detection). For
+        # the CISO dashboard tile + this drill-down to agree, count UNIQUE
+        # disabled-but-privileged identities in the latest snapshot — the
+        # same definition the CISO "ghost accounts" metric uses.
         cursor.execute("""
-            SELECT identity_id, identity_name, severity, title, created_at
-              FROM anomalies
-             WHERE organization_id = %s
-               AND anomaly_type = 'ghost_identity'
-               AND resolved = false
-             ORDER BY created_at DESC NULLS LAST
+            SELECT i.identity_id, i.display_name, 'critical' AS severity,
+                   CONCAT('Ghost identity: ', i.display_name, ' (disabled) retains role(s)') AS title,
+                   i.created_datetime AS created_at
+              FROM identities i
+             WHERE i.discovery_run_id = ANY(%s)
+               AND i.organization_id = %s
+               AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL)
+               AND (
+                    EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                    OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+               )
+             ORDER BY i.created_datetime DESC NULLS LAST
              LIMIT 5
-        """, (org_id,))
+        """, (run_ids, org_id))
         leaver_top = [
             {
                 'identity_id': r[0],
@@ -16190,11 +16208,15 @@ def get_dashboard_jml_snapshot():
             for r in cursor.fetchall()
         ]
         cursor.execute("""
-            SELECT count(*) FROM anomalies
-             WHERE organization_id = %s
-               AND anomaly_type = 'ghost_identity'
-               AND resolved = false
-        """, (org_id,))
+            SELECT count(DISTINCT i.identity_id) FROM identities i
+             WHERE i.discovery_run_id = ANY(%s)
+               AND i.organization_id = %s
+               AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL)
+               AND (
+                    EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                    OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+               )
+        """, (run_ids, org_id))
         leaver_count = int(cursor.fetchone()[0] or 0)
 
         cursor.close()
