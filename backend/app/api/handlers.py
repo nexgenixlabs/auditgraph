@@ -5483,10 +5483,16 @@ def _map_identity_row(row):
     def _parse_dt_map(v):
         if not v:
             return None
+        # Normalize to a tz-aware UTC datetime so a later max() / comparison
+        # never mixes naive + aware (TypeError "can't compare offset-naive
+        # and offset-aware datetimes" — observed when DB returns tz-aware
+        # rows but a sibling string field strips tz on parse).
+        from datetime import timezone as _tz_aware
         if hasattr(v, 'timestamp'):
-            return v
+            return v if v.tzinfo else v.replace(tzinfo=_tz_aware.utc)
         try:
-            return _dt_map.fromisoformat(str(v).replace('Z', '+00:00').replace('+00:00', ''))
+            parsed = _dt_map.fromisoformat(str(v).replace('Z', '+00:00'))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=_tz_aware.utc)
         except (ValueError, TypeError):
             return None
 
