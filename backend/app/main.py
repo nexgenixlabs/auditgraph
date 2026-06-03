@@ -1704,8 +1704,14 @@ def create_app():
     # -----------------------
     # Authentication (Phase 31)
     # -----------------------
+    # AG-LOGIN-RATE: per-IP login throttle. Production stays tight (5/min) to
+    # blunt credential-stuffing. Local dev is looser (30/min) because the
+    # devtools auto-retry + multi-tab pattern shares one IP with the human
+    # and burns through the prod-tight quota in seconds.
+    _LOGIN_RPM = 30 if os.getenv('APP_ENV', 'local') in ('local', 'dev') else 5
+
     @app.post("/api/auth/login")
-    @rate_limit(max_requests=5, window_seconds=60)   # 5 attempts/min per IP
+    @rate_limit(max_requests=_LOGIN_RPM, window_seconds=60)
     @validate_json(LOGIN_SCHEMA)
     def login():
         return auth_login()
