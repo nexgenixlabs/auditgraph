@@ -16268,6 +16268,275 @@ def list_consent_grants_handler():
         db.close()
 
 
+def get_consent_scenarios_handler():
+    """GET /api/connected-apps/scenarios — multi-scenario consent risk surface.
+
+    The Vercel/Context.ai playbook is only ONE shape of OAuth consent risk.
+    For CISOs whose grants are mostly Microsoft + verified publishers, the
+    Vercel signature returns zero and the page looks empty — which is
+    misleading. The remaining risk has shifted to scope creep, dormancy,
+    supply-chain post-compromise, and shadow-IT productivity tools.
+
+    Returns one entry per scenario with a count + top-N sample grants +
+    "why it matters" + framework refs. The UI renders these as a
+    scenario menu (think a Splunk savedsearch list for consent risk).
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id, grant_type, client_app_id, client_display_name,
+                   resource_app_id, resource_display_name, scopes,
+                   consent_type, risk_level, risk_score, age_days,
+                   verified_publisher, publisher_name, created_datetime,
+                   high_risk_scopes, last_activity_at
+              FROM consent_grants
+             WHERE organization_id = %s
+        """, (org_id,))
+        cols = [c[0] for c in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+    except Exception as e:
+        logger.warning("scenarios fetch failed: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        rows = []
+    finally:
+        db.close()
+
+    def _is_admin(r):
+        return r.get('consent_type') == 'AllPrincipals' or r.get('grant_type') == 'application'
+
+    def _is_microsoft(r):
+        return (r.get('publisher_name') or '').lower().startswith('microsoft')
+
+    def _has_offline_access(r):
+        return any((s or '').strip() == 'offline_access' for s in (r.get('scopes') or []))
+
+    def _summarise(r):
+        return {
+            'id': r.get('id'),
+            'client_app_id': r.get('client_app_id'),
+            'client_display_name': r.get('client_display_name'),
+            'resource_display_name': r.get('resource_display_name'),
+            'publisher_name': r.get('publisher_name'),
+            'verified_publisher': r.get('verified_publisher'),
+            'risk_level': r.get('risk_level'),
+            'risk_score': r.get('risk_score'),
+            'age_days': r.get('age_days'),
+            'high_risk_scopes': r.get('high_risk_scopes') or [],
+            'has_offline_access': _has_offline_access(r),
+            'consent_type': r.get('consent_type'),
+        }
+
+    scenarios = []
+
+    # 1. VERCEL — unverified + admin + high-risk + (offline_access amplifies)
+    vercel_matches = []
+    for r in rows:
+        if r.get('publisher_name') and _is_microsoft(r):
+            continue
+        if r.get('verified_publisher') is True:
+            continue
+        if not _is_admin(r):
+            continue
+        if not (r.get('high_risk_scopes') or []):
+            continue
+        vercel_matches.append(_summarise(r))
+    vercel_matches.sort(key=lambda m: (
+        -1 if m['has_offline_access'] else 0,
+        -(m.get('risk_score') or 0),
+    ))
+    scenarios.append({
+        'key': 'vercel',
+        'name': 'Vercel / Context.ai (2024-25)',
+        'tagline': 'The OAuth consent-phishing playbook',
+        'signature': [
+            'Unverified publisher',
+            'Admin-consented (tenant-wide)',
+            'High-risk scope (Mail.*, Files.*, Sites.*, Directory.*)',
+            'offline_access amplifies (refresh-token persistence)',
+        ],
+        'why_it_matters': (
+            'A single admin click on an unverified app hands the attacker a '
+            'refresh token that outlives password resets, MFA upgrades, and '
+            'the consenting user\'s employment.'
+        ),
+        'count': len(vercel_matches),
+        'top': vercel_matches[:5],
+        'frameworks': {
+            'mitre': ['T1550.001', 'T1078.004'],
+            'cis': ['CIS Azure 5.1.1'],
+        },
+    })
+
+    # 2. MOVEIT / SUPPLY-CHAIN — verified vendor with EXCESSIVE scope. The
+    # publisher is legit but the scope is broader than the app's stated
+    # purpose. Heuristic: ≥3 high-risk scopes on a non-Microsoft grant.
+    moveit_matches = []
+    for r in rows:
+        if _is_microsoft(r):
+            continue
+        hrs = r.get('high_risk_scopes') or []
+        if len(hrs) < 3:
+            continue
+        if r.get('verified_publisher') is not True:
+            continue  # already covered by Vercel scenario
+        moveit_matches.append(_summarise(r))
+    moveit_matches.sort(key=lambda m: -(len(m.get('high_risk_scopes') or [])))
+    scenarios.append({
+        'key': 'moveit',
+        'name': 'MOVEit / Cl0p (2023)',
+        'tagline': 'Supply-chain compromise of a legitimately installed app',
+        'signature': [
+            'Verified publisher (trust was earned)',
+            'Excessive scope (3+ high-risk scopes)',
+            'Long-tenured grant (the trust persisted past the compromise)',
+        ],
+        'why_it_matters': (
+            'When a legitimately-installed SaaS gets backdoored upstream, '
+            'every grant you ever gave it is now attacker reach. Verification '
+            'is not a permanent safety guarantee — it\'s a point-in-time check.'
+        ),
+        'count': len(moveit_matches),
+        'top': moveit_matches[:5],
+        'frameworks': {
+            'mitre': ['T1195.002', 'T1078.004'],
+            'cis': ['CIS Azure 5.1.1'],
+        },
+    })
+
+    # 3. STORM-0558 — Microsoft-published app with broad Mail/Outlook scope.
+    # The Microsoft signing-key compromise meant tokens for these specific
+    # apps could be forged externally.
+    storm_matches = []
+    STORM_HIGH_VALUE_SCOPES = {
+        'mail.read', 'mail.readwrite', 'mail.send', 'mail.readbasic',
+        'mail.readwrite.shared', 'mail.read.shared',
+        'directory.read.all', 'directory.readwrite.all',
+        'files.read.all', 'files.readwrite.all',
+    }
+    for r in rows:
+        if not _is_microsoft(r):
+            continue
+        scopes = [(s or '').lower().strip() for s in (r.get('scopes') or [])]
+        if not any(s in STORM_HIGH_VALUE_SCOPES for s in scopes):
+            continue
+        if not _is_admin(r):
+            continue
+        storm_matches.append(_summarise(r))
+    storm_matches.sort(key=lambda m: -(m.get('risk_score') or 0))
+    scenarios.append({
+        'key': 'storm0558',
+        'name': 'Storm-0558 (2023)',
+        'tagline': 'Microsoft signing key compromise → cross-tenant token forgery',
+        'signature': [
+            'Microsoft-published',
+            'Admin-consented',
+            'Broad Mail.*/Files.*/Directory.* scope',
+        ],
+        'why_it_matters': (
+            'Microsoft-published does not equal safe. Storm-0558 demonstrated '
+            'that a compromise of Microsoft\'s consumer signing key let an '
+            'adversary forge tokens for Microsoft-published apps across every '
+            'tenant. Your defense is scope minimization, not publisher trust.'
+        ),
+        'count': len(storm_matches),
+        'top': storm_matches[:5],
+        'frameworks': {
+            'mitre': ['T1550.001', 'T1606.001'],
+            'cis': ['CIS Azure 1.13', 'CIS Azure 5.1.1'],
+        },
+    })
+
+    # 4. NOBELIUM / DORMANT — long-lived grants with no recent activity.
+    # Even verified vendors can go silent (acquired, abandoned, dormant).
+    dormant_matches = []
+    for r in rows:
+        if (r.get('age_days') or 0) < 180:
+            continue
+        if r.get('risk_level') not in ('critical', 'high'):
+            continue
+        if not _is_admin(r):
+            continue
+        dormant_matches.append(_summarise(r))
+    dormant_matches.sort(key=lambda m: -(m.get('age_days') or 0))
+    scenarios.append({
+        'key': 'nobelium_dormant',
+        'name': 'NOBELIUM / dormant grants (2020-now)',
+        'tagline': 'Long-lived authorization, no recent activity, full reach if compromised',
+        'signature': [
+            'Grant > 180 days old',
+            'Admin-consented (tenant-wide)',
+            'High-risk scope',
+            'No business owner of record',
+        ],
+        'why_it_matters': (
+            'The grants you forgot about are the ones that bite hardest. '
+            'NOBELIUM (SolarWinds aftermath) leveraged exactly this pattern — '
+            'trusted vendors get acquired or backdoored, and the dormant '
+            'consent grants stay live as a persistence mechanism.'
+        ),
+        'count': len(dormant_matches),
+        'top': dormant_matches[:5],
+        'frameworks': {
+            'mitre': ['T1078.004', 'T1195.002'],
+            'cis': ['CIS Azure 5.1.1'],
+        },
+    })
+
+    # 5. SHADOW-IT productivity — recently-created grant for an AI/automation
+    # tool without a clear intake record. Self-served by an admin for
+    # personal productivity, often never reviewed.
+    shadow_matches = []
+    SHADOW_TOOL_HINTS = ('ai', 'copilot', 'gpt', 'claude', 'anthropic',
+                         'automation', 'zapier', 'make.com', 'n8n',
+                         'powerautomate', 'flow', 'productivity')
+    for r in rows:
+        if (r.get('age_days') or 999) > 90:
+            continue
+        if r.get('risk_level') not in ('critical', 'high'):
+            continue
+        name_low = ((r.get('client_display_name') or '') + ' ' +
+                    (r.get('publisher_name') or '')).lower()
+        if not any(h in name_low for h in SHADOW_TOOL_HINTS):
+            continue
+        shadow_matches.append(_summarise(r))
+    shadow_matches.sort(key=lambda m: -(m.get('risk_score') or 0))
+    scenarios.append({
+        'key': 'shadow_productivity',
+        'name': 'Shadow productivity (ongoing)',
+        'tagline': 'Admin self-serves consent for an AI/automation tool',
+        'signature': [
+            'Created in last 90 days',
+            'High-risk scope',
+            'Name suggests AI / automation / productivity tool',
+            'No intake / change-control record',
+        ],
+        'why_it_matters': (
+            'The most common breach precondition isn\'t exotic — it\'s an '
+            'admin clicking yes on a productivity tool they wanted, then '
+            'forgetting. Surfacing this as a scenario gives the CISO a path '
+            'to "approved tool registry" maturity.'
+        ),
+        'count': len(shadow_matches),
+        'top': shadow_matches[:5],
+        'frameworks': {
+            'nist': ['CM-3 (Configuration Change Control)'],
+            'mitre': ['T1078.004'],
+        },
+    })
+
+    return jsonify({
+        'scenarios': scenarios,
+        'totals': {
+            'scenarios': len(scenarios),
+            'matched_grants': sum(s['count'] for s in scenarios),
+        },
+    })
+
+
 def get_vercel_scenario_grants_handler():
     """GET /api/connected-apps/vercel-scenario — find OAuth grants matching the
     Vercel/Context.ai breach signature.

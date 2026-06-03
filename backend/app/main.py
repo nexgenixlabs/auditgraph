@@ -134,6 +134,7 @@ from app.api.handlers import (
     get_dashboard_jml_snapshot,
     list_consent_grants_handler,
     get_vercel_scenario_grants_handler,
+    get_consent_scenarios_handler,
     get_dashboard_connected_app_risk,
     get_trends_velocity,
     get_identity_risk_history,
@@ -2923,6 +2924,13 @@ def create_app():
     @app.get("/api/connected-apps/vercel-scenario")
     def connected_apps_vercel_scenario():
         return get_vercel_scenario_grants_handler()
+
+    # AG-OAUTH-NARRATIVE: multi-scenario surface (Vercel + MOVEit + Storm-0558 +
+    # NOBELIUM dormant + shadow productivity). One entry per scenario with
+    # matched-grant count + top samples.
+    @app.get("/api/connected-apps/scenarios")
+    def connected_apps_scenarios():
+        return get_consent_scenarios_handler()
 
     # -----------------------
     # Anomaly Detection (Phase 40)
