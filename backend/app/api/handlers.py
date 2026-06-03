@@ -34181,6 +34181,103 @@ def trigger_attack_path_analysis():
 
 
 # ================================================================
+# Argus L3 — Attack Path Investigator (AG-187)
+# ================================================================
+
+def argus_investigate_attack_path_handler():
+    """POST /api/argus/investigate-attack-path
+
+    Body: {source_query, target_query, prefer_persisted}
+
+    Resolves the user's free-text source/target descriptors against the
+    identity + resource catalog, then returns the strongest matching row
+    from ``attack_paths``. With ``prefer_persisted=false`` we additionally
+    run a live :class:`AttackPathEngine.analyze` if nothing is persisted.
+
+    Returns the dict produced by :func:`investigate_attack_path` (always
+    HTTP 200 — the ``found`` flag drives the UI). Validation errors are
+    HTTP 400; the handler never throws.
+    """
+    from app.engines.argus.attack_path_investigator import investigate_attack_path
+    from psycopg2.extras import RealDictCursor
+
+    data = request.get_json(silent=True) or {}
+    source_query = data.get('source_query')
+    target_query = data.get('target_query')
+    prefer_persisted = data.get('prefer_persisted', True)
+
+    if source_query is not None and not isinstance(source_query, str):
+        return jsonify({'error': 'source_query must be a string'}), 400
+    if target_query is not None and not isinstance(target_query, str):
+        return jsonify({'error': 'target_query must be a string'}), 400
+    if not isinstance(prefer_persisted, bool):
+        return jsonify({'error': 'prefer_persisted must be boolean'}), 400
+
+    source_query = source_query.strip() if isinstance(source_query, str) else None
+    target_query = target_query.strip() if isinstance(target_query, str) else None
+    if not source_query and not target_query:
+        return jsonify({
+            'error': 'at least one of source_query or target_query is required',
+        }), 400
+
+    org_id = _org_id()
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = investigate_attack_path(
+                cursor, org_id,
+                source_query=source_query,
+                target_query=target_query,
+                prefer_persisted=prefer_persisted,
+            )
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the investigation for the auditor pack.
+        try:
+            _log(db, 'argus_investigate_attack_path',
+                 f'Argus L3 investigate: source={source_query!r} target={target_query!r}',
+                 {
+                     'source_query': source_query,
+                     'target_query': target_query,
+                     'prefer_persisted': prefer_persisted,
+                     'found': bool(result.get('found')) if isinstance(result, dict) else False,
+                     'fallback_used': bool(result.get('fallback_used')) if isinstance(result, dict) else False,
+                     'resolution_confidence': result.get('resolution_confidence') if isinstance(result, dict) else None,
+                     'duration_ms': duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        # Attach timing so the UI can show "investigated in <Xms>".
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_investigate_attack_path failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'found': False,
+            'path': None,
+            'source_resolved': None,
+            'target_resolved': None,
+            'resolution_confidence': 'low',
+            'fallback_used': False,
+            'why': f'investigation error: {type(exc).__name__}',
+        }), 200
+    finally:
+        db.close()
+
+
+# ================================================================
 # Phase 4: Fix Recommendations
 # ================================================================
 
@@ -42268,6 +42365,66 @@ def get_ai_board_scorecard_history_handler():
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         if db: db.close()
+
+
+# ============================================================
+# AG-189 (Argus Layer 5): Risk Score Waterfall handler
+# ============================================================
+
+def get_explain_risk_score_handler(identity_id: str):
+    """GET /api/argus/explain-risk-score/<identity_id>
+
+    Returns a per-signal waterfall decomposition of the identity's risk
+    score: every fired signal, the points it contributes, and the concrete
+    graph evidence (role + scope + since DATE) that triggers it. Honesty
+    contract enforced by the engine — no fabricated weights, no invented
+    MITRE / CIS / NIST tags. 404 when the identity is not found in the
+    caller's organization scope.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        org_id = _org_id()
+        if org_id is None:
+            # Superadmin without an org override — cannot resolve a single
+            # identity unambiguously. Require X-Tenant-Id (handled upstream)
+            # or an explicit org context.
+            return jsonify({'error': 'Organization context required'}), 400
+
+        run_ids = _latest_run_ids(cursor, organization_id=org_id)
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        cursor.execute(
+            """
+            SELECT i.id
+              FROM identities i
+             WHERE i.identity_id = %s
+               AND i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+             ORDER BY i.discovery_run_id DESC
+             LIMIT 1
+            """,
+            (identity_id, org_id, run_ids),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        identity_db_id = int(row['id'] if isinstance(row, dict) else row[0])
+
+        from app.engines.argus.explain_risk_score import explain_risk_score
+        result = explain_risk_score(cursor, identity_db_id, org_id)
+        if result is None:
+            return jsonify({'error': 'Identity not found'}), 404
+        return jsonify(result)
+    except Exception as e:
+        logger.error("explain-risk-score handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db:
+            db.close()
 
 
 # ============================================================

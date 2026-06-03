@@ -31,6 +31,7 @@ import AIAttackPaths from './pages/AIAttackPaths';
 import AIBoardScorecard from './pages/AIBoardScorecard';
 import AILifecycle from './pages/AILifecycle';
 import AIDataReachability from './pages/AIDataReachability';
+import Argus from './pages/Argus';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
@@ -353,6 +354,8 @@ function AppContent() {
                   <Route path="/connected-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ConnectedApps /></ErrorBoundary>} />
                   {/* AG-86: Shadow App registry & flagging */}
                   <Route path="/shadow-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ShadowApps /></ErrorBoundary>} />
+                  {/* AG-184: Argus 7-layer EPIC — Layer 3 (Investigate) + Layer 5 (Explain Why) live */}
+                  <Route path="/argus" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Argus /></ErrorBoundary>} />
                   {/* AG-178: AI Identity Attack Paths (cinematic chain) */}
                   <Route path="/ai-risk/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAttackPaths /></ErrorBoundary>} />
                   {/* AG-179: AI Board Scorecard */}

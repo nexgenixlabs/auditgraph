@@ -172,6 +172,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },
           // AG-179 (Tier 1B): Board-ready scorecard
           { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
+          // AG-184 (Argus EPIC): structured-output home for L3 + L5 (L1/2/4/6/7 queued)
+          { to: '/argus', label: 'Argus Analyst', icon: agentBotIcon },
         ],
       },
       {

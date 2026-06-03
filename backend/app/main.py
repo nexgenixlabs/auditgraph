@@ -2232,6 +2232,12 @@ def create_app():
         from app.api.handlers import get_ai_board_scorecard_history_handler
         return get_ai_board_scorecard_history_handler()
 
+    # AG-189 (Argus Layer 5): Risk Score Waterfall — "Why is risk score N?"
+    @app.get("/api/argus/explain-risk-score/<identity_id>")
+    def argus_explain_risk_score_route(identity_id):
+        from app.api.handlers import get_explain_risk_score_handler
+        return get_explain_risk_score_handler(identity_id)
+
     # AG-180 (Tier 2A): Data Reachability
     @app.get("/api/ai-agents/<identity_id>/data-reachability")
     def ai_agent_data_reachability_route(identity_id):
@@ -4684,6 +4690,14 @@ def create_app():
     @app.post("/api/attack-paths/analyze")
     def attack_paths_analyze():
         return trigger_attack_path_analysis()
+
+    # AG-187 — Argus L3 Attack Path Investigator. POST body:
+    #   {source_query, target_query, prefer_persisted}
+    # Returns the strongest matching attack_paths row or {found: False}.
+    @app.post("/api/argus/investigate-attack-path")
+    def argus_investigate_attack_path_route():
+        from app.api.handlers import argus_investigate_attack_path_handler
+        return argus_investigate_attack_path_handler()
 
     @app.get("/api/dashboard/attack-surface")
     def dashboard_attack_surface():
