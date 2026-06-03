@@ -730,6 +730,24 @@ class AttackPathEngine:
         paths: List[Dict] = []
         cursor = self.db.conn.cursor()
 
+        # If no org context on the Database (admin / dry-run usage),
+        # derive it from the discovery_run itself so the org-scoped
+        # latest-per-resource queries still fire.
+        if org_id is None:
+            try:
+                cursor.execute("SAVEPOINT ag178_derive_org")
+                cursor.execute(
+                    "SELECT organization_id FROM discovery_runs WHERE id = %s",
+                    (run_id,),
+                )
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    org_id = row[0]
+                cursor.execute("RELEASE SAVEPOINT ag178_derive_org")
+            except Exception:
+                try: cursor.execute("ROLLBACK TO SAVEPOINT ag178_derive_org")
+                except Exception: pass
+
         # ── 1. Find AI agents in this run ───────────────────────────────
         # AI agents are identities flagged by agent_classifications with type
         # 'ai_agent' or 'possible_ai_agent'. We need identity_db_id (FK for
@@ -897,6 +915,10 @@ class AttackPathEngine:
         # severity if enrichment is missing, instead of dropping it.
         kv_pool = key_vaults if key_vaults else []
         if not kv_pool and not storage_accounts:
+            logger.debug(
+                "[AG-178] org=%s run=%s: 0 kvs / 0 storage → early return",
+                org_id, run_id,
+            )
             cursor.close()
             return []
 
@@ -923,10 +945,14 @@ class AttackPathEngine:
                 if access is not None:
                     reachable_storage.append((sa, access))
 
-            # AG-178 requires BOTH a KV-secret stage AND a classified-storage
-            # stage. If either is missing for this agent, no chain.
+            # AG-178 requires BOTH a KV-secret stage AND a storage stage.
+            # If either is missing for this agent, no chain.
             if not reachable_kvs or not reachable_storage:
                 continue
+            logger.debug(
+                "[AG-178] agent=%s kvs=%d storage=%d",
+                identity_id, len(reachable_kvs), len(reachable_storage),
+            )
 
             # 4b. Emit one chain per (kv, storage) pair the agent can reach.
             for kv, kv_access in reachable_kvs:
