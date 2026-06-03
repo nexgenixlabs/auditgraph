@@ -761,19 +761,24 @@ class AttackPathEngine:
             cursor.close()
             return []
 
-        # ── 2. Load this run's Key Vaults (need org_id-scoped query) ────
+        # ── 2. Load Key Vaults for this org. Resource enumeration may run
+        # less often than identity discovery (customers sometimes only run
+        # ARM enum every Nth scan), so we use latest-per-resource_id
+        # across the org rather than strict run-id match. Falls back to
+        # the run-id strict query if the org-scoped one isn't possible.
         key_vaults: List[dict] = []
         try:
             cursor.execute("SAVEPOINT ag178_load_kv")
             if org_id is not None:
                 cursor.execute("""
-                    SELECT resource_id, name, subscription_id, resource_group,
+                    SELECT DISTINCT ON (resource_id)
+                           resource_id, name, subscription_id, resource_group,
                            secrets_total, public_network_access,
                            default_network_action, private_endpoint_count
                     FROM azure_key_vaults
-                    WHERE discovery_run_id = %s
-                      AND organization_id = %s
-                """, (run_id, org_id))
+                    WHERE organization_id = %s
+                    ORDER BY resource_id, discovery_run_id DESC
+                """, (org_id,))
             else:
                 cursor.execute("""
                     SELECT resource_id, name, subscription_id, resource_group,
@@ -802,23 +807,31 @@ class AttackPathEngine:
                 self.db._rollback()
 
         # ── 3. Load this run's Storage Accounts with non-null classifications.
-        # Only classified storage participates in an exfil chain — un-classified
-        # accounts are not "sensitive data" and the chain doesn't terminate.
+        # AG-178: storage accounts on the chain. We classify on the fly via
+        # the SSOT taxonomy (name + tag) so that real-world customer storage
+        # that has NEVER been classified still produces chains — un-classified
+        # rows become "Suspected (heuristic)" instead of being filtered out.
+        # If even the heuristic finds nothing, we keep the row with
+        # classification=None so the chain emits at a lower severity rather
+        # than disappear entirely (admin role on storage IS the risk signal,
+        # tag is just enrichment).
         storage_accounts: List[dict] = []
         try:
             cursor.execute("SAVEPOINT ag178_load_storage")
             if org_id is not None:
+                # latest-per-resource_id across the org (resource enumeration
+                # may have run on an earlier discovery_run_id than identities)
                 cursor.execute("""
-                    SELECT resource_id, name, subscription_id, resource_group,
+                    SELECT DISTINCT ON (resource_id)
+                           resource_id, name, subscription_id, resource_group,
                            public_blob_access, default_network_action,
                            private_endpoint_count, data_classification,
                            classification_confidence, classification_source,
                            tags
                     FROM azure_storage_accounts
-                    WHERE discovery_run_id = %s
-                      AND organization_id = %s
-                      AND data_classification IS NOT NULL
-                """, (run_id, org_id))
+                    WHERE organization_id = %s
+                    ORDER BY resource_id, discovery_run_id DESC
+                """, (org_id,))
             else:
                 cursor.execute("""
                     SELECT resource_id, name, subscription_id, resource_group,
@@ -828,28 +841,34 @@ class AttackPathEngine:
                            tags
                     FROM azure_storage_accounts
                     WHERE discovery_run_id = %s
-                      AND data_classification IS NOT NULL
                 """, (run_id,))
             for row in cursor.fetchall():
-                cls_id = (row[7] or '').upper()
-                if cls_id not in _EXFIL_CLASSES:
-                    # Outside the AG-178 exfil scope (e.g. FINANCIAL/CONFIDENTIAL)
-                    continue
-                # Re-validate the classification through the SSOT taxonomy. If
-                # the stored value is a known class we keep it; if not, fall
-                # back to classify_resource() against name+tags (the SSOT).
+                stored_cls = (row[7] or '').upper()
                 tags = row[10] if isinstance(row[10], dict) else None
+                # Live SSOT classify — derives PHI/PCI/etc. from name + tag.
                 cls_result = classify_resource(row[1], tags, None)
-                if cls_result and cls_result['classification'] in _EXFIL_CLASSES:
+
+                if stored_cls and stored_cls in _EXFIL_CLASSES:
+                    classification = stored_cls
+                    cls_confidence = row[8] or 'medium'
+                    cls_source = row[9] or 'stored'
+                elif cls_result and cls_result['classification'] in _EXFIL_CLASSES:
                     classification = cls_result['classification']
                     cls_confidence = cls_result['confidence']
                     cls_source = cls_result['source']
-                else:
-                    # Trust the stored classification only if SSOT agrees that
-                    # it's a recognized class. No fabricated defaults.
-                    classification = cls_id
-                    cls_confidence = row[8] or 'medium'
+                elif stored_cls:
+                    # Stored classification is outside AG-178 scope
+                    # (e.g. FINANCIAL / CONFIDENTIAL) — chain still risky,
+                    # just labeled honestly.
+                    classification = stored_cls
+                    cls_confidence = row[8] or 'low'
                     cls_source = row[9] or 'stored'
+                else:
+                    # Truly unclassified — chain still emits at lower severity
+                    # so admin-role-on-storage doesn't vanish from the demo.
+                    classification = None
+                    cls_confidence = None
+                    cls_source = None
 
                 storage_accounts.append({
                     'resource_id': row[0],
@@ -871,10 +890,13 @@ class AttackPathEngine:
             except Exception:
                 self.db._rollback()
 
-        # If we have no KV with secrets AND no classified storage, the chain
-        # has no payload — nothing to emit.
-        kv_with_secrets = [kv for kv in key_vaults if kv['secrets_total'] > 0]
-        if not kv_with_secrets and not storage_accounts:
+        # AG-178: relaxed gating. Secrets enumeration (kv.secrets_total > 0)
+        # is enrichment — KV-Administrator on the vault IS the access risk
+        # whether or not we've successfully listed secrets via Graph. Same
+        # philosophy as the storage classification: emit chain at lower
+        # severity if enrichment is missing, instead of dropping it.
+        kv_pool = key_vaults if key_vaults else []
+        if not kv_pool and not storage_accounts:
             cursor.close()
             return []
 
@@ -886,7 +908,7 @@ class AttackPathEngine:
             # We use the canonical resolver — single source of truth for
             # "does identity X reach scope Y."
             reachable_kvs: list[tuple[dict, dict]] = []
-            for kv in kv_with_secrets:
+            for kv in kv_pool:
                 access = resolve_agent_resource_access(
                     cursor, id_db_id, kv['resource_id']
                 )
@@ -1011,26 +1033,44 @@ class AttackPathEngine:
 
                     # ── Node 4: kv_secret (synthesized aggregate, T1552.001) ─
                     secret_mitre = enrich_path_node_with_mitre('kv_secret')
+                    kv_secrets_known = kv['secrets_total'] > 0
+                    if kv_secrets_known:
+                        node4_label = f'{kv["secrets_total"]} secret(s) in {kv["name"]}'
+                        node4_desc = (
+                            "Aggregate of all readable secrets in the vault — "
+                            "compromising the agent yields every secret's "
+                            "credentials for lateral pivot."
+                        )
+                        node4_severity = 'critical'
+                        node4_risk = 15
+                    else:
+                        node4_label = f'Secrets in {kv["name"]} (not enumerated)'
+                        node4_desc = (
+                            "Vault contents not enumerated (Graph permission gap "
+                            "OR discovery has not run secret list). "
+                            "KV-Administrator role still implies access to any "
+                            "secrets present — chain emits at reduced severity "
+                            "until enumeration confirms count."
+                        )
+                        node4_severity = 'high'
+                        node4_risk = 8
                     node4 = {
                         'node_type': 'kv_secret',
                         'type': 'kv_secret',
                         'id': f'{kv["resource_id"]}#secrets',
-                        'label': f'{kv["secrets_total"]} secret(s) in {kv["name"]}',
-                        'description': (
-                            "Aggregate of all readable secrets in the vault — "
-                            "compromising the agent yields every secret's "
-                            "credentials for lateral pivot."
-                        ),
+                        'label': node4_label,
+                        'description': node4_desc,
                         'mitre_techniques': secret_mitre,
                         'evidence_id': f'kv_secrets:{kv["resource_id"]}',
-                        'severity': 'critical',
-                        'risk_contribution': 15,
+                        'severity': node4_severity,
+                        'risk_contribution': node4_risk,
                     }
 
-                    # ── Node 5: storage_account (T1530) ───────────────
+                    # ── Node 5: storage_account (T1530 when classified) ─
+                    has_classified = sa['classification'] is not None
                     sa_mitre = enrich_path_node_with_mitre(
                         'storage_account',
-                        has_sensitive_data=True,  # filtered to classified only
+                        has_sensitive_data=has_classified,
                     )
                     # Role techniques for the storage-side role too
                     sa_role_name = sa_access['role_name']
@@ -1042,22 +1082,36 @@ class AttackPathEngine:
                         m for m in sa_role_mitre
                         if m['id'] not in {x['id'] for x in sa_mitre}
                     ]
+                    if has_classified:
+                        sa_description = (
+                            f"Storage account classified {sa['classification']} "
+                            f"(confidence={sa['classification_confidence']}, "
+                            f"source={sa['classification_source']}); "
+                            f"reached via {sa_role_name} ({sa_access['access_level']})."
+                        )
+                        sa_severity = 'critical'
+                        sa_risk = 20
+                    else:
+                        # Honest unclassified case — chain still emits but at
+                        # lower severity, with a copy that explains the gap.
+                        sa_description = (
+                            f"Storage account (no data-classification tag — apply "
+                            f"the 'data-classification' Azure tag or run "
+                            f"auto-classifier to confirm sensitivity); "
+                            f"reached via {sa_role_name} ({sa_access['access_level']})."
+                        )
+                        sa_severity = 'high'
+                        sa_risk = 12
                     node5 = {
                         'node_type': 'storage_account',
                         'type': 'storage_account',
                         'id': sa['resource_id'],
                         'label': sa['name'],
-                        'description': (
-                            f"Storage account classified {sa['classification']} "
-                            f"(confidence={sa['classification_confidence']}, "
-                            f"source={sa['classification_source']}); "
-                            f"reached via {sa_role_name} "
-                            f"({sa_access['access_level']})."
-                        ),
+                        'description': sa_description,
                         'mitre_techniques': sa_all_mitre,
                         'evidence_id': f'storage:{sa["resource_id"]}',
-                        'severity': 'critical',
-                        'risk_contribution': 20,
+                        'severity': sa_severity,
+                        'risk_contribution': sa_risk,
                         'detail': {
                             'classification': sa['classification'],
                             'classification_confidence': sa['classification_confidence'],
@@ -1112,10 +1166,15 @@ class AttackPathEngine:
                     # then we cannot legitimately compute it, so severity
                     # uses egress-openness + classification as the proxy.
                     records_estimate = None
+                    classification_label = sa['classification'] or 'unclassified'
                     if records_estimate is not None and records_estimate > 10000:
                         severity = 'critical'
                     elif egress_open or sa['classification'] in ('PHI', 'PCI'):
                         severity = 'critical'
+                    elif sa['classification'] is None:
+                        # Unclassified storage — chain still risky (admin role on
+                        # storage IS the signal), but we can't claim PHI/PCI.
+                        severity = 'medium' if not egress_open else 'high'
                     else:
                         severity = 'high'
 
@@ -1126,7 +1185,7 @@ class AttackPathEngine:
                     description = (
                         f'AI agent {display_name or identity_id} → '
                         f'{kv["name"]} secret → {sa["name"]} '
-                        f'({sa["classification"]})'
+                        f'({classification_label})'
                         + (' → open egress' if egress_open else '')
                     )
 
@@ -1146,7 +1205,7 @@ class AttackPathEngine:
                         # Argus generates the narrative lazily on first detail view.
                         'narrative': None,
                         'impact': (
-                            f'Exfiltration of {sa["classification"]} data via '
+                            f'Exfiltration of {classification_label} data via '
                             f'{kv["name"]} secrets and '
                             + ('open egress' if egress_open else 'reachable storage')
                         ),
