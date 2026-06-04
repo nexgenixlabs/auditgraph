@@ -44160,6 +44160,153 @@ def get_ai_abuse_scenarios_rollup_handler():
 
 
 # ============================================================
+# AG-T2.2: AI Model Registry — approval workflow
+# ============================================================
+
+def get_ai_model_registry_handler():
+    """GET /api/ai-security/model-registry — list all discovered models
+    + their approval state.
+
+    Response: {models: [...], summary: {...}, computed_at}
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'models': [], 'summary': {}})
+        from app.engines.ai import model_registry as mr
+        models = mr.list_registry(db, org_id)
+        summary = mr.get_summary(models)
+        from datetime import datetime, timezone
+        return jsonify({
+            'models': models,
+            'summary': summary,
+            'computed_at': datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"model_registry list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_model_registry_submit_handler():
+    """POST /api/ai-security/model-registry/submit — request review for a model.
+
+    Body: {model_name, model_format?, model_version?, justification?}
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    model_name = (data.get('model_name') or '').strip()
+    if not model_name:
+        return jsonify({'error': 'model_name is required'}), 400
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+
+    db = _db()
+    try:
+        from app.engines.ai import model_registry as mr
+        out = mr.submit_for_review(
+            db, org_id,
+            model_name,
+            data.get('model_format'),
+            data.get('model_version'),
+            requested_by=user.get('username') or user.get('email') or 'unknown',
+            justification=(data.get('justification') or '').strip() or None,
+        )
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"model_registry submit failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_model_registry_decide_handler():
+    """POST /api/ai-security/model-registry/decide — approve or reject.
+
+    Body: {model_name, model_format?, model_version?, decision:'approved'|'rejected',
+           review_notes?, expires_at?:ISO8601}
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Only admins/security_admins can approve models'}), 403
+    data = request.get_json(silent=True) or {}
+    model_name = (data.get('model_name') or '').strip()
+    decision   = (data.get('decision') or '').strip()
+    if not model_name or decision not in ('approved', 'rejected'):
+        return jsonify({'error': "model_name + decision in ('approved','rejected') required"}), 400
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+
+    db = _db()
+    try:
+        from app.engines.ai import model_registry as mr
+        out = mr.decide_review(
+            db, org_id,
+            model_name,
+            data.get('model_format'),
+            data.get('model_version'),
+            decision,
+            reviewed_by=user.get('username') or user.get('email') or 'unknown',
+            review_notes=(data.get('review_notes') or '').strip() or None,
+            expires_at=data.get('expires_at'),
+        )
+        if not out:
+            return jsonify({'error': 'Model not found in approvals table — submit for review first'}), 404
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"model_registry decide failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_model_registry_revoke_handler():
+    """POST /api/ai-security/model-registry/revoke — revoke approval."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Only admins/security_admins can revoke'}), 403
+    data = request.get_json(silent=True) or {}
+    model_name = (data.get('model_name') or '').strip()
+    if not model_name:
+        return jsonify({'error': 'model_name is required'}), 400
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+
+    db = _db()
+    try:
+        from app.engines.ai import model_registry as mr
+        out = mr.revoke(
+            db, org_id,
+            model_name,
+            data.get('model_format'),
+            data.get('model_version'),
+            reviewed_by=user.get('username') or user.get('email') or 'unknown',
+            notes=(data.get('notes') or '').strip() or None,
+        )
+        if not out:
+            return jsonify({'error': 'Model approval not found'}), 404
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"model_registry revoke failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
 # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline handlers
 # ============================================================
 

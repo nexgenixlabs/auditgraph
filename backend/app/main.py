@@ -860,6 +860,12 @@ def create_app():
         '/api/settings/test-email',              # Send test email (no mutation)
         '/api/settings/test-connection',         # Test connection (read-only)
         '/api/settings/sso/parse-metadata',      # Parse IdP metadata (read-only)
+        # AG-T2.2: Model Registry workflow — genuine mutations BUT scoped
+        # to the org's own ai_model_approvals rows. Required for the demo
+        # to exercise the approval workflow.
+        '/api/ai-security/model-registry/submit',
+        '/api/ai-security/model-registry/decide',
+        '/api/ai-security/model-registry/revoke',
     })
     # Exact-path exemptions for unauthenticated auth flows.
     # These are public POST routes that must work before/without
@@ -2334,6 +2340,27 @@ def create_app():
     def ai_abuse_scenarios_rollup_route():
         from app.api.handlers import get_ai_abuse_scenarios_rollup_handler
         return get_ai_abuse_scenarios_rollup_handler()
+
+    # AG-T2.2: AI Model Registry — approval workflow
+    @app.get("/api/ai-security/model-registry")
+    def ai_model_registry_list_route():
+        from app.api.handlers import get_ai_model_registry_handler
+        return get_ai_model_registry_handler()
+
+    @app.post("/api/ai-security/model-registry/submit")
+    def ai_model_registry_submit_route():
+        from app.api.handlers import post_ai_model_registry_submit_handler
+        return post_ai_model_registry_submit_handler()
+
+    @app.post("/api/ai-security/model-registry/decide")
+    def ai_model_registry_decide_route():
+        from app.api.handlers import post_ai_model_registry_decide_handler
+        return post_ai_model_registry_decide_handler()
+
+    @app.post("/api/ai-security/model-registry/revoke")
+    def ai_model_registry_revoke_route():
+        from app.api.handlers import post_ai_model_registry_revoke_handler
+        return post_ai_model_registry_revoke_handler()
 
     # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline
     @app.get("/api/ai-agents/<identity_id>/activity-timeline")

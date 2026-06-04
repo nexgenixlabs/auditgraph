@@ -64,6 +64,7 @@ import AIAgents from './pages/AIAgents';
 // pillars; legacy URLs redirect (see Route declarations below).
 import AIInventory from './pages/AIInventory';
 import AIAccess from './pages/AIAccess';
+import AIModelRegistry from './pages/AIModelRegistry';
 import AIRuntime from './pages/AIRuntime';
 import AgentActivityTimeline from './pages/AgentActivityTimeline';
 import AIRisk from './pages/AIRisk';
@@ -369,6 +370,8 @@ function AppContent() {
                   {/* AG-180: Per-agent data reachability (PHI/PCI/PII/Source/HR/Financial/Confidential) */}
                   <Route path="/ai-access/data-reachability" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIDataReachability /></ErrorBoundary>} />
                   <Route path="/ai-runtime" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRuntime /></ErrorBoundary>} />
+                  {/* AG-T2.2: Model Registry approval workflow */}
+                  <Route path="/ai-runtime/model-registry" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIModelRegistry /></ErrorBoundary>} />
                   {/* AG-182: Per-agent forensic timeline + behavior baseline */}
                   <Route path="/ai-runtime/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AgentActivityTimeline /></ErrorBoundary>} />
                   <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />
