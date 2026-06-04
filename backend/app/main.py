@@ -844,6 +844,8 @@ def create_app():
         '/api/security/copilot-query',           # AI copilot (read + activity log)
         '/api/argus/nl-query',                   # AG-185 Argus L1 NL query (read-only)
         '/api/argus/investigate-attack-path',    # AG-187 Argus L3 (read-only)
+        '/api/argus/reason',                     # AG-186 Argus L2 (cache write is internal optimization)
+        '/api/argus/what-if/role-removal',       # AG-190 Argus L6 (read-only projection, never mutates roles)
         '/api/attack-paths/analyze',             # Attack path computation
         '/api/graph-attack/analyze',             # Graph attack analysis
         '/api/ai/explain-attack-path',           # AI explanation (stateless)
