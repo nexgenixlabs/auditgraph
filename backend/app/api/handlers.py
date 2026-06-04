@@ -7462,6 +7462,156 @@ def _compute_compliance_metrics(cursor, run_ids):
         (max(total_with_creds - no_credential_rotation, 0) / max(total_with_creds, 1)) * 100
     )
 
+    # ── AG-T1.2: AI-specific compliance metrics (NIST AI RMF / ISO 42001 / EU AI Act) ──
+    # All counts use the same _scalar helper + run_ids filter as the human/NHI
+    # metrics above. AI agents are identified by agent_classifications rows.
+
+    # ai_agents_total — count of AI agents (any AI classification)
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND i.deleted_at IS NULL
+    """, (run_ids,))
+    ai_agents_total = _scalar(cursor, 0)
+
+    # ai_agents_no_owner — AI agents missing an owner attribution
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND (ac.owner_display_name_at_classify IS NULL OR ac.owner_display_name_at_classify = '')
+        AND i.deleted_at IS NULL
+    """, (run_ids,))
+    ai_agents_no_owner = _scalar(cursor, 0)
+
+    # ai_agents_with_kv_admin — AI agents holding KV Admin/Secrets Officer
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN role_assignments ra ON ra.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(ra.role_name) IN (
+            'key vault administrator', 'key vault secrets officer', 'key vault certificates officer'
+        )
+    """, (run_ids,))
+    ai_agents_with_kv_admin = _scalar(cursor, 0)
+
+    # ai_agents_with_blob_owner — AI agents holding Storage Blob Data Owner
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN role_assignments ra ON ra.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(ra.role_name) = 'storage blob data owner'
+    """, (run_ids,))
+    ai_agents_with_blob_owner = _scalar(cursor, 0)
+
+    # ai_agents_with_subscription_owner — AI agents with Owner at sub scope
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN role_assignments ra ON ra.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator')
+        AND ra.scope LIKE '/subscriptions/%%'
+        AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'
+    """, (run_ids,))
+    ai_agents_with_subscription_owner = _scalar(cursor, 0)
+
+    # ai_agents_reaching_phi / pci / pii — from agent_data_reachability
+    def _ai_reachers(cls):
+        cursor.execute("""
+            SELECT COUNT(DISTINCT identity_db_id) FROM agent_data_reachability
+            WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+              AND data_classification = %s
+              AND est_records > 0
+        """, (cls,))
+        return _scalar(cursor, 0)
+    try:
+        cursor.execute("SAVEPOINT _ai_reach_sp")
+        ai_agents_reaching_phi = _ai_reachers('PHI')
+        ai_agents_reaching_pci = _ai_reachers('PCI')
+        ai_agents_reaching_pii = _ai_reachers('PII')
+        cursor.execute("RELEASE SAVEPOINT _ai_reach_sp")
+    except Exception:
+        try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_reach_sp")
+        except Exception: pass
+        ai_agents_reaching_phi = ai_agents_reaching_pci = ai_agents_reaching_pii = 0
+
+    # ai_agents_no_telemetry — AI agents with zero activity events in last 30d
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND NOT EXISTS (
+            SELECT 1 FROM agent_activity_events ae
+            WHERE ae.identity_db_id = i.id
+              AND ae.occurred_at >= NOW() - INTERVAL '30 days'
+        )
+    """, (run_ids,))
+    ai_agents_no_telemetry = _scalar(cursor, 0)
+
+    # ai_high_risk_agents — AI agents at critical or high risk
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(COALESCE(i.risk_level, '')) IN ('critical', 'high')
+    """, (run_ids,))
+    ai_high_risk_agents = _scalar(cursor, 0)
+
+    # ai_agents_public_endpoint — AI agents whose reachable Cog Services account
+    # is public-network-exposed (raw posture signal).
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN azure_cognitive_services_accounts csa
+          ON csa.resource_id = ac.account_resource_id
+         AND csa.organization_id = i.organization_id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(COALESCE(csa.public_network_access, '')) = 'enabled'
+    """, (run_ids,))
+    ai_agents_public_endpoint = _scalar(cursor, 0)
+
+    # ai_lifecycle_events_unresolved — AI drift events not yet acknowledged
+    cursor.execute("""
+        SELECT COUNT(*) FROM ai_agent_lifecycle_events
+        WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+          AND resolved = FALSE
+    """)
+    ai_lifecycle_events_unresolved = _scalar(cursor, 0)
+
+    # ai_models_unverified — model deployments whose vendor isn't on an approved
+    # list. The approval signal lives on a future model_registry table (Tier 2.2).
+    # Until that lands, count CUSTOM/fine-tuned models since they're the only
+    # ones a registry would gate. This is a real signal, not a placeholder.
+    cursor.execute("""
+        SELECT COUNT(*) FROM azure_ai_model_deployments
+        WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+          AND (
+              LOWER(COALESCE(model_name, '')) LIKE '%%-ft-%%'
+              OR LOWER(COALESCE(model_format, '')) NOT IN ('openai', 'azureopenai', 'microsoft')
+          )
+    """)
+    ai_models_unverified = _scalar(cursor, 0)
+
     return {
         't0_count': t0_count,
         'dormant_privileged': dormant_privileged,
@@ -7478,6 +7628,20 @@ def _compute_compliance_metrics(cursor, run_ids):
         'access_reviews_completed': access_reviews_completed,
         'managed_identity_pct': managed_identity_pct,
         'credential_rotation_compliance_pct': credential_rotation_compliance_pct,
+        # AG-T1.2 AI-specific
+        'ai_agents_total': ai_agents_total,
+        'ai_agents_no_owner': ai_agents_no_owner,
+        'ai_agents_with_kv_admin': ai_agents_with_kv_admin,
+        'ai_agents_with_blob_owner': ai_agents_with_blob_owner,
+        'ai_agents_with_subscription_owner': ai_agents_with_subscription_owner,
+        'ai_agents_reaching_phi': ai_agents_reaching_phi,
+        'ai_agents_reaching_pci': ai_agents_reaching_pci,
+        'ai_agents_reaching_pii': ai_agents_reaching_pii,
+        'ai_agents_no_telemetry': ai_agents_no_telemetry,
+        'ai_high_risk_agents': ai_high_risk_agents,
+        'ai_agents_public_endpoint': ai_agents_public_endpoint,
+        'ai_lifecycle_events_unresolved': ai_lifecycle_events_unresolved,
+        'ai_models_unverified': ai_models_unverified,
     }
 
 
@@ -9170,6 +9334,44 @@ def get_dashboard_posture():
             "inactive_admin_count": dormant_priv_count,
             "disabled_live_rbac_count": ghost_count,
         }
+
+        # AG-T1.1: enrich with dollar exposure for board-level comprehension.
+        # Pulls classified-resource totals + breach_cost_factors. Fail-soft:
+        # if the table is missing or the query fails, exposure stays absent.
+        try:
+            from app.engines.scoring.breach_cost import aggregate_exposure, format_dollar_short
+            cursor.execute("""
+                SELECT data_classification, SUM(record_count_estimate) AS est_records
+                FROM (
+                    SELECT data_classification, record_count_estimate FROM azure_storage_accounts
+                      WHERE organization_id = %s AND data_classification IS NOT NULL
+                    UNION ALL
+                    SELECT data_classification, record_count_estimate FROM azure_sql_databases
+                      WHERE organization_id = %s AND data_classification IS NOT NULL
+                    UNION ALL
+                    SELECT data_classification, record_count_estimate FROM azure_cosmos_databases
+                      WHERE organization_id = %s AND data_classification IS NOT NULL
+                ) classified
+                GROUP BY data_classification
+            """, (org_id, org_id, org_id))
+            classified_rows = [
+                {'data_classification': r[0], 'est_records': r[1] or 0}
+                for r in cursor.fetchall()
+            ]
+            agg = aggregate_exposure(db, classified_rows)
+            if agg['covered'] > 0:
+                business_impact['estimated_exposure'] = {
+                    'low':  float(agg['total_exposure_low']),
+                    'mid':  float(agg['total_exposure_mid']),
+                    'high': float(agg['total_exposure_high']),
+                    'low_display':  format_dollar_short(agg['total_exposure_low']),
+                    'mid_display':  format_dollar_short(agg['total_exposure_mid']),
+                    'high_display': format_dollar_short(agg['total_exposure_high']),
+                    'classified_resource_count': len(classified_rows),
+                    'total_records': agg['total_records'],
+                }
+        except Exception as _exp_err:
+            logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
 
         return jsonify({
             "current_run": current_run,
@@ -34460,6 +34662,205 @@ def _nl_role_filter_sql(role_filters: list) -> tuple:
     return ' AND ' + ' AND '.join(parts), params
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AG-T1.4: Argus L1 NL Query — server-side executors for AI-ISPM meta intents
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _nl_execute_ai_meta(meta_value, org_id, connection_id, limit, offset):
+    """Server-side executor for AI-ISPM meta-intents.
+
+    Returns {'identities': [...], 'count': N} for known meta values.
+    Returns None when the meta value isn't ours — caller falls back to
+    the regular meta_route response.
+    """
+    if not meta_value or org_id is None:
+        return None
+    if isinstance(meta_value, str) and meta_value.startswith('data_reachability_class_'):
+        cls = meta_value.replace('data_reachability_class_', '', 1)
+        return _nl_execute_reachability_meta(cls, org_id, connection_id, limit, offset)
+    if meta_value == 'multi_model_threshold_3':
+        return _nl_execute_multi_model_meta(org_id, connection_id, limit, offset)
+    if meta_value == 'scope_subscription':
+        return _nl_execute_subscription_owner_meta(org_id, connection_id, limit, offset)
+    if meta_value == 'oauth_dangerous_graph_permissions':
+        return _nl_execute_dangerous_oauth_meta(org_id, limit, offset)
+    return None
+
+
+def _nl_execute_reachability_meta(cls, org_id, connection_id, limit, offset):
+    """AI agents reaching a given data classification."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        if not run_ids:
+            return {'identities': [], 'count': 0}
+        cursor.execute(
+            """
+            SELECT DISTINCT i.id, i.identity_id, i.display_name, i.risk_level,
+                   COALESCE(i.risk_score, 0), COALESCE(i.identity_category, ''),
+                   adr.est_records, adr.write_resource_count
+              FROM identities i
+              JOIN agent_classifications ac ON ac.identity_db_id = i.id
+              JOIN agent_data_reachability adr ON adr.identity_db_id = i.id
+             WHERE i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+               AND NOT COALESCE(i.is_microsoft_system, false)
+               AND i.deleted_at IS NULL
+               AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+               AND UPPER(adr.data_classification) = UPPER(%s)
+               AND COALESCE(adr.est_records, 0) > 0
+             ORDER BY adr.est_records DESC NULLS LAST
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, run_ids, cls, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1], 'display_name': r[2] or r[1],
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4],
+             'identity_category': r[5],
+             'reason': f"{'Writes to' if (r[7] or 0) > 0 else 'Reads'} {cls} "
+                       f"({(r[6] or 0):,} records)"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _nl_execute_multi_model_meta(org_id, connection_id, limit, offset):
+    """AI agents tied to ≥3 distinct model deployments."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        if not run_ids:
+            return {'identities': [], 'count': 0}
+        cursor.execute(
+            """
+            WITH model_counts AS (
+                SELECT ac.identity_db_id, COUNT(DISTINCT aimd.model_name) AS n
+                  FROM agent_classifications ac
+                  JOIN azure_ai_model_deployments aimd
+                    ON aimd.account_resource_id = ac.account_resource_id
+                   AND aimd.organization_id = ac.organization_id
+                 WHERE ac.organization_id = %s
+                 GROUP BY ac.identity_db_id
+                HAVING COUNT(DISTINCT aimd.model_name) >= 3
+            )
+            SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                   COALESCE(i.risk_score, 0), COALESCE(i.identity_category, ''),
+                   mc.n
+              FROM identities i
+              JOIN model_counts mc ON mc.identity_db_id = i.id
+             WHERE i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+               AND NOT COALESCE(i.is_microsoft_system, false)
+               AND i.deleted_at IS NULL
+             ORDER BY mc.n DESC, i.risk_score DESC
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, org_id, run_ids, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1], 'display_name': r[2] or r[1],
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4],
+             'identity_category': r[5],
+             'reason': f"Uses {r[6]} distinct models"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _nl_execute_subscription_owner_meta(org_id, connection_id, limit, offset):
+    """AI agents holding Owner / Contributor / UAA at subscription scope.
+
+    Uses ROW_NUMBER() rather than DISTINCT — DISTINCT + ORDER BY on a
+    non-projected column is invalid SQL; the window approach is the
+    Postgres-idiomatic way to "keep one row per identity, pick highest
+    risk".
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        if not run_ids:
+            return {'identities': [], 'count': 0}
+        cursor.execute(
+            """
+            WITH ranked AS (
+                SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                       COALESCE(i.risk_score, 0) AS risk_score,
+                       COALESCE(i.identity_category, '') AS identity_category,
+                       ra.role_name, ra.scope,
+                       ROW_NUMBER() OVER (PARTITION BY i.id ORDER BY ra.role_name) AS rn
+                  FROM identities i
+                  JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                  JOIN role_assignments ra ON ra.identity_db_id = i.id
+                 WHERE i.organization_id = %s
+                   AND i.discovery_run_id = ANY(%s)
+                   AND NOT COALESCE(i.is_microsoft_system, false)
+                   AND i.deleted_at IS NULL
+                   AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+                   AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator')
+                   AND ra.scope LIKE '/subscriptions/%%'
+                   AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'
+            )
+            SELECT id, identity_id, display_name, risk_level, risk_score,
+                   identity_category, role_name, scope
+              FROM ranked WHERE rn = 1
+             ORDER BY risk_score DESC
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, run_ids, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1], 'display_name': r[2] or r[1],
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4],
+             'identity_category': r[5],
+             'reason': f"Holds {r[6]} at subscription scope"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _nl_execute_dangerous_oauth_meta(org_id, limit, offset):
+    """OAuth consent grants carrying critical/high risk Graph scopes."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT id, client_app_id, client_display_name, risk_level, risk_score, scopes
+              FROM consent_grants
+             WHERE organization_id = %s
+               AND LOWER(COALESCE(risk_level, '')) IN ('critical', 'high')
+             ORDER BY risk_score DESC NULLS LAST
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1] or str(r[0]),
+             'display_name': r[2] or r[1] or 'OAuth app',
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4] or 0,
+             'identity_category': 'oauth_app',
+             'reason': f"Scopes: {', '.join((r[5] or [])[:3])}"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
 def argus_nl_query_handler():
     """POST /api/argus/nl-query - Argus Layer 1 (AG-185).
 
@@ -34527,10 +34928,25 @@ def argus_nl_query_handler():
     (query_conditions, role_filters, sort_field,
      meta, extra_sql_parts, unknown_fields) = _nl_split_filters(filters)
 
-    # Meta-intent - non-filter question routed to another endpoint by
-    # the UI. We don't execute the query builder; we just return the
-    # interpretation so the caller can dispatch correctly.
+    # Meta-intent — for several AI-ISPM meta values we execute the query
+    # server-side so the chip immediately returns identities + counts
+    # (no need for the UI to dispatch to a meta_route). For meta values
+    # that genuinely point at a different endpoint (e.g. OAuth scenarios),
+    # we still return the empty body + meta_route hint.
     if meta:
+        _ai_meta_results = _nl_execute_ai_meta(meta, _org_id(), _connection_id(), limit, offset)
+        if _ai_meta_results is not None:
+            return jsonify({
+                'query': text,
+                'filters_interpreted': filters,
+                'identities': _ai_meta_results['identities'],
+                'count': _ai_meta_results['count'],
+                'total': _ai_meta_results['count'],
+                'why': translation.get('description'),
+                'confidence': translation.get('confidence'),
+                'intent': translation.get('intent'),
+                'meta_question': meta,
+            })
         return jsonify({
             'query': text,
             'filters_interpreted': filters,
@@ -43313,15 +43729,45 @@ def get_ai_agent_data_reachability_handler(identity_id: str):
             return jsonify({'error': 'Not an AI agent'}), 400
 
         from app.engines.ai.data_reachability_engine import get_agent_data_reachability
+        from app.engines.scoring.breach_cost import compute_exposure, aggregate_exposure, format_dollar_short
         rollups = get_agent_data_reachability(cursor, row['id'], _org_id())
         total_resources = sum(r.get('resource_count', 0) for r in rollups)
         total_records = sum(r.get('est_records', 0) or 0 for r in rollups)
+
+        # AG-T1.1: enrich each classification with dollar exposure band
+        for r in rollups:
+            exp = compute_exposure(db, r.get('data_classification'), r.get('est_records'))
+            r['exposure'] = {
+                'has_factor': exp['has_factor'],
+                'low':  float(exp['estimated_exposure_low']),
+                'mid':  float(exp['estimated_exposure_mid']),
+                'high': float(exp['estimated_exposure_high']),
+                'low_display':  format_dollar_short(exp['estimated_exposure_low']),
+                'mid_display':  format_dollar_short(exp['estimated_exposure_mid']),
+                'high_display': format_dollar_short(exp['estimated_exposure_high']),
+                'source': exp['source'],
+                'source_year': exp['source_year'],
+                'cost_per_record_mid': float(exp['cost_per_record_mid']),
+            }
+
+        agg = aggregate_exposure(db, rollups)
         return jsonify({
             'identity_id': row['identity_id'],
             'display_name': row['display_name'],
             'by_classification': rollups,
             'total_resources': total_resources,
             'total_records': total_records if total_records > 0 else None,
+            # AG-T1.1: aggregate dollar exposure for this agent
+            'total_exposure': {
+                'low':  float(agg['total_exposure_low']),
+                'mid':  float(agg['total_exposure_mid']),
+                'high': float(agg['total_exposure_high']),
+                'low_display':  format_dollar_short(agg['total_exposure_low']),
+                'mid_display':  format_dollar_short(agg['total_exposure_mid']),
+                'high_display': format_dollar_short(agg['total_exposure_high']),
+                'covered_classes':   agg['covered'],
+                'uncovered_classes': agg['uncovered'],
+            } if agg['covered'] > 0 else None,
         })
     except Exception as e:
         logger.error(f"data-reachability handler failed: {e}", exc_info=True)
@@ -43368,10 +43814,40 @@ def get_data_security_summary_handler():
         """, (_org_id(), run_ids))
         agg = cursor.fetchone()
 
+        # AG-T1.1: enrich each classification with dollar exposure
+        from app.engines.scoring.breach_cost import compute_exposure, aggregate_exposure, format_dollar_short
+        for r in rows:
+            exp = compute_exposure(db, r.get('data_classification'), r.get('est_records'))
+            r['exposure'] = {
+                'has_factor': exp['has_factor'],
+                'low':  float(exp['estimated_exposure_low']),
+                'mid':  float(exp['estimated_exposure_mid']),
+                'high': float(exp['estimated_exposure_high']),
+                'low_display':  format_dollar_short(exp['estimated_exposure_low']),
+                'mid_display':  format_dollar_short(exp['estimated_exposure_mid']),
+                'high_display': format_dollar_short(exp['estimated_exposure_high']),
+                'source': exp['source'],
+                'cost_per_record_mid': float(exp['cost_per_record_mid']),
+            }
+        org_agg = aggregate_exposure(db, [
+            {'data_classification': r['data_classification'], 'est_records': r.get('est_records')}
+            for r in rows
+        ])
+
         return jsonify({
             'classifications': rows,
             'agents_with_reachability': int(agg['agents_with_reachability'] or 0),
             'total_classified_resources': sum(r['resource_count'] for r in rows),
+            'total_exposure': {
+                'low':  float(org_agg['total_exposure_low']),
+                'mid':  float(org_agg['total_exposure_mid']),
+                'high': float(org_agg['total_exposure_high']),
+                'low_display':  format_dollar_short(org_agg['total_exposure_low']),
+                'mid_display':  format_dollar_short(org_agg['total_exposure_mid']),
+                'high_display': format_dollar_short(org_agg['total_exposure_high']),
+                'covered_classes':   org_agg['covered'],
+                'uncovered_classes': org_agg['uncovered'],
+            } if org_agg['covered'] > 0 else None,
         })
     except Exception as e:
         logger.error(f"data-security handler failed: {e}", exc_info=True)

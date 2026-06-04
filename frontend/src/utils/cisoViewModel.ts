@@ -145,6 +145,13 @@ export interface PostureV31Response {
   business_impact?: {
     inactive_admin_count: number;
     disabled_live_rbac_count: number;
+    // AG-T1.1: dollar exposure band (server-computed, breach_cost_factors)
+    estimated_exposure?: {
+      low: number; mid: number; high: number;
+      low_display: string; mid_display: string; high_display: string;
+      classified_resource_count: number;
+      total_records: number;
+    };
   };
   drift?: {
     has_drift: boolean;

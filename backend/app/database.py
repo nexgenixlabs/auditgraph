@@ -1889,6 +1889,10 @@ class Database:
             customer_prefixes = [
                 'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
                 'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
+                # AG-T1.4: demo-* identities are explicitly synthetic AuditGraph
+                # demo agents (org=9 / org=3). They are customer-owned in the
+                # demo context, never Microsoft platform-owned.
+                'demo-',
             ]
             prefix_conditions = " OR ".join(
                 ["LOWER(display_name) LIKE %s"] * len(customer_prefixes)
@@ -2352,6 +2356,10 @@ class Database:
             customer_prefixes = [
                 'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
                 'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
+                # AG-T1.4: demo-* identities are explicitly synthetic AuditGraph
+                # demo agents (org=9 / org=3). They are customer-owned in the
+                # demo context, never Microsoft platform-owned.
+                'demo-',
             ]
             prefix_conditions = " OR ".join(
                 ["LOWER(display_name) LIKE %s"] * len(customer_prefixes)

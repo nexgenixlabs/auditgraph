@@ -74,6 +74,14 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
     items.push({ text: 'No material business risk detected', level: 'green', nav: null });
   }
 
+  // AG-T1.1: dollar exposure band — sourced from breach_cost_factors,
+  // computed server-side, never hardcoded. Surfaces when the org has
+  // any classified resource so the board sees a $ figure not just counts.
+  const exposure = (bi as { estimated_exposure?: {
+    low_display: string; mid_display: string; high_display: string;
+    classified_resource_count: number; total_records: number;
+  } }).estimated_exposure;
+
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0"
          title="Business-level risks from identity exposures">
@@ -89,6 +97,22 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
           return item.nav ? <DN key={i} navigateTo={item.nav}>{inner}</DN> : inner;
         })}
       </div>
+      {exposure ? (
+        <DN navigateTo="/ai-access/data-reachability">
+          <div className="mt-2 pt-2 border-t border-white/5 cursor-pointer hover:opacity-90 transition"
+               title={`Estimated breach exposure across ${exposure.classified_resource_count} classified resources (${exposure.total_records.toLocaleString()} records). Range = industry low/high; mid is headline. Source: IBM 2023.`}>
+            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
+              Estimated breach exposure
+            </p>
+            <p className="text-base font-bold font-mono text-rose-400 mt-0.5">
+              {exposure.mid_display}
+            </p>
+            <p className="text-[10px] font-mono text-gray-500">
+              {exposure.low_display} – {exposure.high_display}
+            </p>
+          </div>
+        </DN>
+      ) : null}
     </div>
   );
 }

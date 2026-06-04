@@ -69,9 +69,10 @@ const RISK_TONE: Record<string, string> = {
 const EXAMPLES: string[] = [
   'AI agents with KV admin',
   'Ownerless AI agents',
+  'AI agents reaching PHI',
+  'Multi-model AI agents',
+  'AI agents with subscription Owner',
   'OAuth apps with dangerous Graph permissions',
-  'Service principals with expired credentials',
-  'Critical identities reaching PHI',
 ];
 
 export default function NlQuery() {

@@ -136,15 +136,17 @@ export interface ActivityEvent {
 // ─── Trust Score (AG-179) ──────────────────────────────────────────────
 
 export type TrustGrade =
-  | 'PASS' | 'FAIL'                       // Ownership / Egress / Oversight
-  | 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'   // Secrets
-  | 'PARTIAL' | 'FULL';                   // Telemetry
+  | 'PASS' | 'FAIL'                       // Ownership / Egress / Oversight / Network / Supply Chain
+  | 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'   // Secrets / Data Access
+  | 'PARTIAL' | 'FULL'                   // Telemetry
+  | 'ONE' | 'MULTI';                      // Model Exposure (AG-T1.3)
 
 export interface TrustDimension {
   grade: TrustGrade;
   evidence: string;
   role_name?: string | null;
   scope?: string | null;
+  count?: number;                         // Model Exposure carries count
 }
 
 export interface AgentTrust {
@@ -156,6 +158,11 @@ export interface AgentTrust {
   egress: TrustDimension;
   telemetry: TrustDimension;
   oversight: TrustDimension;
+  // AG-T1.3: 4 new dimensions (5 → 9)
+  data_access: TrustDimension;
+  network: TrustDimension;
+  model_exposure: TrustDimension;
+  supply_chain: TrustDimension;
   computed_at: string;
 }
 

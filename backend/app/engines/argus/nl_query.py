@@ -168,6 +168,34 @@ HIGHEST_RISK_TOKENS = (
     'biggest risk', 'riskiest',
 )
 
+# ── AG-T1.4: AI-ISPM-aligned shortcut vocabularies ──
+# Data-classification reach (PHI / PCI / PII)
+DATA_CLASS_TOKENS_PHI = ('phi', 'protected health', 'patient data', 'health record', 'health records')
+DATA_CLASS_TOKENS_PCI = ('pci', 'cardholder', 'card data', 'payment data')
+DATA_CLASS_TOKENS_PII = ('pii', 'personal data', 'personal info', 'personally identifiable')
+DATA_CLASS_REACH_TOKENS = ('reach', 'reaching', 'reaches', 'can access', 'have access', 'have read', 'have write')
+
+# Multi-model AI usage
+MULTI_MODEL_TOKENS = (
+    'multi-model', 'multi model', 'multiple models', 'multi-modal', 'multimodal',
+    'multi-model agent', 'multi-model agents',
+)
+
+# Subscription-scope privilege containment
+SUB_OWNER_TOKENS = (
+    'subscription owner', 'sub owner', 'sub-owner',
+    'subscription contributor', 'sub contributor',
+    'tenant-wide', 'tenant wide',
+)
+
+# Dangerous Graph permissions — independent of the Vercel-specific intent
+DANGEROUS_GRAPH_TOKENS = (
+    'dangerous graph', 'risky graph', 'high-risk graph', 'high risk graph',
+    'mail.readwrite', 'files.readwrite', 'sites.fullcontrol',
+    'dangerous oauth', 'risky oauth', 'high-risk oauth',
+    'dangerous permission', 'dangerous permissions',
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lightweight tokenisation helper
@@ -319,10 +347,100 @@ def _match_highest_business_risk(text: str) -> Optional[dict[str, Any]]:
     }
 
 
+# ─── AG-T1.4: AI-ISPM intents ─────────────────────────────────────────
+
+def _match_ai_agents_reaching_class(text: str) -> Optional[dict[str, Any]]:
+    """Shortcut: "AI agents reaching PHI / PCI / PII"."""
+    if not _contains_any(text, AI_AGENT_TOKENS):
+        return None
+    if not _contains_any(text, DATA_CLASS_REACH_TOKENS):
+        return None
+    if _contains_any(text, DATA_CLASS_TOKENS_PHI):
+        cls = 'PHI'
+    elif _contains_any(text, DATA_CLASS_TOKENS_PCI):
+        cls = 'PCI'
+    elif _contains_any(text, DATA_CLASS_TOKENS_PII):
+        cls = 'PII'
+    else:
+        return None
+    return {
+        'intent': f'ai_agents_reaching_{cls.lower()}',
+        'filters': [
+            {'field': 'agent_identity_type', 'op': 'equals', 'value': 'ai_agent'},
+            {'field': SYNTHETIC_FIELD_META, 'op': 'equals',
+             'value': f'data_reachability_class_{cls}'},
+        ],
+        'description': f'AI agents with read or write access to {cls}-classified resources',
+        'confidence': 'high',
+    }
+
+
+def _match_multi_model_ai(text: str) -> Optional[dict[str, Any]]:
+    """Shortcut: "Multi-model AI agents" — agents tied to ≥3 model deployments."""
+    if not _contains_any(text, MULTI_MODEL_TOKENS):
+        return None
+    if not _contains_any(text, AI_AGENT_TOKENS) and 'model' not in text:
+        return None
+    return {
+        'intent': 'multi_model_ai_agents',
+        'filters': [
+            {'field': 'agent_identity_type', 'op': 'equals', 'value': 'ai_agent'},
+            {'field': SYNTHETIC_FIELD_META, 'op': 'equals',
+             'value': 'multi_model_threshold_3'},
+        ],
+        'description': 'AI agents tied to ≥3 distinct model deployments (multi-model)',
+        'confidence': 'high',
+    }
+
+
+def _match_ai_with_sub_owner(text: str) -> Optional[dict[str, Any]]:
+    """Shortcut: "AI agents with subscription Owner"."""
+    if not _contains_any(text, AI_AGENT_TOKENS):
+        return None
+    if not _contains_any(text, SUB_OWNER_TOKENS):
+        return None
+    return {
+        'intent': 'ai_agents_with_subscription_owner',
+        'filters': [
+            {'field': 'agent_identity_type', 'op': 'equals', 'value': 'ai_agent'},
+            {'field': SYNTHETIC_FIELD_HAS_ROLE_NAME, 'op': 'equals', 'value': 'Owner'},
+            {'field': SYNTHETIC_FIELD_META, 'op': 'equals',
+             'value': 'scope_subscription'},
+        ],
+        'description': 'AI agents holding Owner at subscription scope',
+        'confidence': 'high',
+    }
+
+
+def _match_dangerous_oauth_grants(text: str) -> Optional[dict[str, Any]]:
+    """Shortcut: "OAuth apps with dangerous Graph permissions" — distinct from Vercel."""
+    if not _contains_any(text, DANGEROUS_GRAPH_TOKENS):
+        # Also accept "oauth apps" + "dangerous"/"risky"
+        if not (_contains_any(text, OAUTH_GRANT_TOKENS)
+                and any(t in text for t in ('dangerous', 'risky', 'high-risk', 'high risk'))):
+            return None
+    return {
+        'intent': 'oauth_apps_dangerous_graph',
+        'filters': [
+            {'field': SYNTHETIC_FIELD_META, 'op': 'equals',
+             'value': 'oauth_dangerous_graph_permissions'},
+        ],
+        'description': 'OAuth consent grants carrying high-risk Microsoft Graph scopes',
+        'confidence': 'high',
+        'meta_route': '/api/consent-grants?risk_level=critical,high',
+    }
+
+
 # Ordered list of named-shortcut matchers. The first to return a non-None
 # wins; ordering reflects specificity (compound intents before generic).
 NAMED_SHORTCUTS = (
     _match_ai_agents_with_kv_admin,
+    # AG-T1.4: AI-ISPM intents — declared early so they win over the
+    # generic ai-agent fallback that fires on the bare "AI agent" token.
+    _match_ai_agents_reaching_class,
+    _match_multi_model_ai,
+    _match_ai_with_sub_owner,
+    _match_dangerous_oauth_grants,
     _match_ownerless_ai_agents,           # before generic AI-agent fallback
     _match_oauth_grants_matching_vercel,
     _match_spns_reaching_prod_dbs,

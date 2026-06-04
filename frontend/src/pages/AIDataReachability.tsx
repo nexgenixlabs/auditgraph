@@ -26,18 +26,39 @@ import { CLASS_COLORS } from '../types/security_events';
 
 // ─── Types (matches backend response shapes) ─────────────────────────────
 
+interface ExposureBand {
+  has_factor: boolean;
+  low: number;
+  mid: number;
+  high: number;
+  low_display: string;
+  mid_display: string;
+  high_display: string;
+  source?: string | null;
+  cost_per_record_mid?: number;
+}
+
+interface TotalExposure {
+  low: number; mid: number; high: number;
+  low_display: string; mid_display: string; high_display: string;
+  covered_classes: number;
+  uncovered_classes: number;
+}
+
 interface ClassificationRollup {
   data_classification: string;          // 'PHI' | 'PCI' | 'PII' | 'SOURCE' | 'HR' | 'FINANCIAL' | 'CONFIDENTIAL'
   resource_count: number;
   tag_sourced: number;
   pattern_sourced: number;
   est_records: number | null;
+  exposure?: ExposureBand;              // AG-T1.1 dollar band
 }
 
 interface DataSecuritySummary {
   classifications: ClassificationRollup[];
   agents_with_reachability: number;
   total_classified_resources: number;
+  total_exposure?: TotalExposure | null; // AG-T1.1 org-level $
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────
@@ -171,6 +192,29 @@ function ClassCard({ cls, rollup }: { cls: ClassKey; rollup: ClassificationRollu
           {estRecords == null ? '—' : <AnimatedCount value={estRecords} />}
         </p>
       </div>
+
+      {/* AG-T1.1: Dollar exposure band — server-computed, citation tooltip */}
+      {rollup?.exposure?.has_factor ? (
+        <div
+          className="-mt-1"
+          title={
+            `Estimated breach exposure band for ${estRecords?.toLocaleString() || 0} records ` +
+            `@ ~$${(rollup.exposure.cost_per_record_mid ?? 0).toFixed(0)}/record. ` +
+            `Source: ${rollup.exposure.source || 'IBM Cost of a Data Breach 2023'}. ` +
+            `Range reflects industry low/high; mid is the headline figure.`
+          }
+        >
+          <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: 'var(--text-tertiary)' }}>
+            Est. exposure
+          </p>
+          <p className="text-lg font-bold font-mono" style={{ color }}>
+            {rollup.exposure.mid_display}
+          </p>
+          <p className="text-[9px] font-mono" style={{ color: 'var(--text-tertiary)' }}>
+            {rollup.exposure.low_display} – {rollup.exposure.high_display}
+          </p>
+        </div>
+      ) : null}
 
       {resourceCount > 0 ? (
         <div
@@ -351,7 +395,7 @@ export default function AIDataReachability() {
       </div>
 
       {/* Summary strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <div className={`grid grid-cols-2 ${data?.total_exposure ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-3`}>
         <div
           className="rounded-xl border p-4"
           style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-raised)' }}
@@ -394,6 +438,31 @@ export default function AIDataReachability() {
             of {ALL_CLASSES.length} total
           </p>
         </div>
+
+        {/* AG-T1.1: Org-level estimated exposure */}
+        {data?.total_exposure ? (
+          <div
+            className="rounded-xl border p-4"
+            style={{ borderColor: 'rgba(239,68,68,0.35)', backgroundColor: 'var(--bg-raised)' }}
+            title={
+              `Estimated breach exposure across ${data.total_exposure.covered_classes} data classifications. ` +
+              `Band reflects industry low–high per-record cost (IBM 2023). The mid figure is the headline.` +
+              (data.total_exposure.uncovered_classes > 0
+                ? ` — ${data.total_exposure.uncovered_classes} classification(s) have no cost factor and were excluded.`
+                : '')
+            }
+          >
+            <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: 'var(--text-tertiary)' }}>
+              Est. Exposure
+            </p>
+            <p className="text-3xl font-bold font-mono mt-1" style={{ color: 'rgb(239,68,68)' }}>
+              {data.total_exposure.mid_display}
+            </p>
+            <p className="text-[10px] mt-1 font-mono" style={{ color: 'var(--text-tertiary)' }}>
+              {data.total_exposure.low_display} – {data.total_exposure.high_display}
+            </p>
+          </div>
+        ) : null}
       </div>
 
       {/* Empty state */}

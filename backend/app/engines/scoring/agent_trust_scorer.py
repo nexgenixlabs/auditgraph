@@ -75,9 +75,20 @@ DEFAULTS: dict[str, Any] = {
     "telemetry_penalty_full":      0,
     "oversight_penalty_fail":     10,   # signed-off (low because attestation flow is new)
     "telemetry_window_days":      30,
+    # ── AG-T1.3: 4 new dimensions (5 → 9) ──
+    # Worst-case all-FAIL across 9 dimensions ≈ 100 (was 78 with 5 dimensions).
+    # New penalties pre-signed-off for v1; tunable via settings.
+    "data_access_penalty_critical": 12,  # writes to PHI
+    "data_access_penalty_high":      8,  # reads PHI/PCI
+    "data_access_penalty_medium":    4,  # reads PII or financial
+    "data_access_penalty_none":      0,
+    "network_penalty_fail":          5,  # public-network endpoint
+    "model_exposure_penalty_multi":  3,  # ≥3 distinct models in use
+    "model_exposure_penalty_one":    0,
+    "supply_chain_penalty_fail":     2,  # custom / fine-tuned / unverified vendor
     # Calibration version — bump when thresholds change. Surfaced in the
     # API response so audit trails are clear post-recalibration.
-    "calibration_version":     "2026-06-03",
+    "calibration_version":     "2026-06-04-9d",
 }
 
 DEFAULTS_JSON_STRING = json.dumps(DEFAULTS)
@@ -135,6 +146,31 @@ AGENT_TRUST_DIMENSIONS: list[dict[str, Any]] = [
         "label":       "Oversight",
         "signal_keys": ["broad_owner_role", "dormant_agent"],
         "weight":      DEFAULTS["oversight_penalty_fail"],
+    },
+    # AG-T1.3: 4 new dimensions (5 → 9)
+    {
+        "key":         "data_access",
+        "label":       "Data Access",
+        "signal_keys": ["reaches_phi", "reaches_pci", "reaches_pii"],
+        "weight":      DEFAULTS["data_access_penalty_critical"],
+    },
+    {
+        "key":         "network",
+        "label":       "Network",
+        "signal_keys": ["public_endpoint"],
+        "weight":      DEFAULTS["network_penalty_fail"],
+    },
+    {
+        "key":         "model_exposure",
+        "label":       "Model Exposure",
+        "signal_keys": ["multi_model_usage"],
+        "weight":      DEFAULTS["model_exposure_penalty_multi"],
+    },
+    {
+        "key":         "supply_chain",
+        "label":       "Supply Chain",
+        "signal_keys": ["unverified_model_provenance"],
+        "weight":      DEFAULTS["supply_chain_penalty_fail"],
     },
 ]
 
@@ -394,7 +430,133 @@ def _penalty(dim_key: str, grade: str, weights: dict[str, Any]) -> float:
         }.get(grade, 0))
     if dim_key == "oversight":
         return float(weights["oversight_penalty_fail"]) if grade == "FAIL" else 0.0
+    # AG-T1.3: 4 new dimensions
+    if dim_key == "data_access":
+        return float({
+            "CRITICAL": weights["data_access_penalty_critical"],
+            "HIGH":     weights["data_access_penalty_high"],
+            "MEDIUM":   weights["data_access_penalty_medium"],
+            "NONE":     weights["data_access_penalty_none"],
+        }.get(grade, 0))
+    if dim_key == "network":
+        return float(weights["network_penalty_fail"]) if grade == "FAIL" else 0.0
+    if dim_key == "model_exposure":
+        return float({
+            "MULTI": weights["model_exposure_penalty_multi"],
+            "ONE":   weights["model_exposure_penalty_one"],
+            "NONE":  0.0,
+        }.get(grade, 0))
+    if dim_key == "supply_chain":
+        return float(weights["supply_chain_penalty_fail"]) if grade == "FAIL" else 0.0
     return 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AG-T1.3: New dimension grade helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _grade_data_access(reachability: list[dict]) -> dict[str, Any]:
+    """Grade reachable data classifications.
+
+    CRITICAL: writes to PHI
+    HIGH:     reads PHI or PCI
+    MEDIUM:   reads PII or FINANCIAL
+    NONE:     no classified reachability
+
+    Reachability rows come from agent_data_reachability (loaded by the
+    batch query). Each row has data_classification, est_records,
+    write_resource_count.
+    """
+    has_phi_write = False
+    has_phi_read = False
+    has_pci_read = False
+    has_pii_read = False
+    has_fin_read = False
+    worst_cls = None
+    worst_records = 0
+
+    for r in reachability:
+        cls = (r.get("data_classification") or "").upper()
+        if not cls:
+            continue
+        w = int(r.get("write_resource_count") or 0)
+        recs = int(r.get("est_records") or 0)
+        if recs > worst_records:
+            worst_records = recs
+            worst_cls = cls
+        if cls == "PHI":
+            if w > 0:
+                has_phi_write = True
+            else:
+                has_phi_read = True
+        elif cls == "PCI":
+            has_pci_read = True
+        elif cls == "PII":
+            has_pii_read = True
+        elif cls == "FINANCIAL":
+            has_fin_read = True
+
+    if has_phi_write:
+        return {"grade": "CRITICAL",
+                "evidence": f"Write access to PHI ({worst_records:,} records)" if worst_records else "Write access to PHI"}
+    if has_phi_read or has_pci_read:
+        cls = "PHI" if has_phi_read else "PCI"
+        return {"grade": "HIGH",
+                "evidence": f"Read access to {cls} ({worst_records:,} records)" if worst_records else f"Read access to {cls}"}
+    if has_pii_read or has_fin_read:
+        cls = "PII" if has_pii_read else "FINANCIAL"
+        return {"grade": "MEDIUM",
+                "evidence": f"Read access to {cls} ({worst_records:,} records)" if worst_records else f"Read access to {cls}"}
+    return {"grade": "NONE",
+            "evidence": "No classified data reachability"}
+
+
+def _grade_network(network_flags: dict) -> dict[str, str]:
+    """FAIL if the AI agent's linked Cog Services account is public-network-exposed.
+
+    network_flags['public_endpoint'] is set by the batch query.
+    """
+    if network_flags.get("public_endpoint"):
+        acct = network_flags.get("account_name") or "linked Cognitive Services account"
+        return {"grade": "FAIL",
+                "evidence": f"{acct} has public_network_access = Enabled"}
+    if network_flags.get("private_endpoint"):
+        return {"grade": "PASS",
+                "evidence": "Private Endpoint only (no public-network exposure)"}
+    return {"grade": "PASS",
+            "evidence": "No public network exposure on linked AI resources"}
+
+
+def _grade_model_exposure(model_count: int) -> dict[str, Any]:
+    """MULTI if the agent uses ≥3 distinct models; ONE if 1-2; NONE if 0.
+
+    Multi-model usage expands the prompt/tool attack surface.
+    """
+    if model_count >= 3:
+        return {"grade": "MULTI",
+                "count": model_count,
+                "evidence": f"{model_count} distinct models in use (multi-model agent expands attack surface)"}
+    if model_count >= 1:
+        return {"grade": "ONE",
+                "count": model_count,
+                "evidence": f"{model_count} model(s) in use"}
+    return {"grade": "NONE",
+            "count": 0,
+            "evidence": "No model deployments detected"}
+
+
+def _grade_supply_chain(provenance: dict) -> dict[str, str]:
+    """FAIL if the agent uses fine-tuned or non-Microsoft-OpenAI models without
+    explicit vendor approval. Provenance is set by the batch query.
+    """
+    if provenance.get("has_finetune"):
+        return {"grade": "FAIL",
+                "evidence": f"Uses fine-tuned model: {provenance.get('finetune_name','(unknown)')}"}
+    if provenance.get("has_unverified_vendor"):
+        return {"grade": "FAIL",
+                "evidence": f"Uses model from unverified vendor: {provenance.get('vendor','(unknown)')}"}
+    return {"grade": "PASS",
+            "evidence": "All models from verified vendor (Microsoft / OpenAI base catalog)"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -533,6 +695,110 @@ def compute_agent_trust_batch(
     except Exception as exc:  # pragma: no cover — table optional
         logger.debug("ai_governance_exceptions lookup skipped: %s", exc)
 
+    # ─── AG-T1.3: 3 more queries for the new dimensions ───────────────
+    # 5) Data reachability — one row per (identity, classification).
+    reach_by_id: dict[int, list[dict[str, Any]]] = {i: [] for i in ids}
+    try:
+        cursor.execute(
+            """
+            SELECT identity_db_id, data_classification, est_records, write_resource_count
+              FROM agent_data_reachability
+             WHERE identity_db_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        for r in cursor.fetchall():
+            rec = _row_to_dict(r, ["identity_db_id", "data_classification",
+                                   "est_records", "write_resource_count"])
+            iid = rec.get("identity_db_id")
+            if iid is not None:
+                reach_by_id.setdefault(int(iid), []).append(rec)
+    except Exception as exc:  # pragma: no cover
+        logger.debug("agent_data_reachability lookup skipped: %s", exc)
+
+    # 6) Network posture — public-network status of the linked Cog Services
+    #    account. JOIN identity → agent_classifications.account_resource_id →
+    #    azure_cognitive_services_accounts. A NULL account means no Cog
+    #    Services link (e.g., human ai_privileged_human) — treat as PASS.
+    network_by_id: dict[int, dict[str, Any]] = {i: {"public_endpoint": False,
+                                                     "private_endpoint": False,
+                                                     "account_name": None}
+                                                for i in ids}
+    try:
+        cursor.execute(
+            """
+            SELECT ac.identity_db_id,
+                   csa.name,
+                   LOWER(COALESCE(csa.public_network_access, '')) AS public_access,
+                   COALESCE(csa.private_endpoint_count, 0) AS pec
+              FROM agent_classifications ac
+              JOIN azure_cognitive_services_accounts csa
+                ON csa.resource_id = ac.account_resource_id
+               AND csa.organization_id = ac.organization_id
+             WHERE ac.identity_db_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        for r in cursor.fetchall():
+            rec = _row_to_dict(r, ["identity_db_id", "name", "public_access", "pec"])
+            iid = rec.get("identity_db_id")
+            if iid is None:
+                continue
+            network_by_id[int(iid)] = {
+                "account_name":      rec.get("name"),
+                "public_endpoint":   rec.get("public_access") == "enabled",
+                "private_endpoint":  (rec.get("pec") or 0) > 0,
+            }
+    except Exception as exc:  # pragma: no cover — schema older than expected
+        logger.debug("cog services network lookup skipped: %s", exc)
+
+    # 7) Model exposure + supply chain — count distinct models per agent
+    #    AND check provenance (fine-tunes / non-Microsoft vendors).
+    models_by_id: dict[int, dict[str, Any]] = {i: {"count": 0,
+                                                    "has_finetune": False,
+                                                    "finetune_name": None,
+                                                    "has_unverified_vendor": False,
+                                                    "vendor": None}
+                                               for i in ids}
+    try:
+        cursor.execute(
+            """
+            SELECT ac.identity_db_id,
+                   COUNT(DISTINCT aimd.model_name)                              AS model_count,
+                   BOOL_OR(LOWER(COALESCE(aimd.model_name, '')) LIKE '%%-ft-%%') AS has_ft,
+                   MAX(CASE WHEN LOWER(COALESCE(aimd.model_name, '')) LIKE '%%-ft-%%'
+                            THEN aimd.model_name END)                            AS ft_name,
+                   BOOL_OR(LOWER(COALESCE(aimd.model_format, '')) NOT IN
+                           ('openai', 'azureopenai', 'microsoft', ''))           AS has_unverified,
+                   MAX(CASE WHEN LOWER(COALESCE(aimd.model_format, '')) NOT IN
+                                 ('openai', 'azureopenai', 'microsoft', '')
+                            THEN aimd.model_format END)                          AS vendor
+              FROM agent_classifications ac
+              JOIN azure_ai_model_deployments aimd
+                ON aimd.account_resource_id = ac.account_resource_id
+               AND aimd.organization_id = ac.organization_id
+             WHERE ac.identity_db_id = ANY(%s)
+             GROUP BY ac.identity_db_id
+            """,
+            (ids,),
+        )
+        for r in cursor.fetchall():
+            rec = _row_to_dict(r, ["identity_db_id", "model_count",
+                                   "has_ft", "ft_name",
+                                   "has_unverified", "vendor"])
+            iid = rec.get("identity_db_id")
+            if iid is None:
+                continue
+            models_by_id[int(iid)] = {
+                "count":                  int(rec.get("model_count") or 0),
+                "has_finetune":           bool(rec.get("has_ft")),
+                "finetune_name":          rec.get("ft_name"),
+                "has_unverified_vendor":  bool(rec.get("has_unverified")),
+                "vendor":                 rec.get("vendor"),
+            }
+    except Exception as exc:  # pragma: no cover
+        logger.debug("model deployments lookup skipped: %s", exc)
+
     # Compose result per id.
     out: dict[int, dict[str, Any]] = {}
     for iid in ids:
@@ -547,6 +813,11 @@ def compute_agent_trust_batch(
         egress    = _grade_egress(ras, meta)
         telemetry = _grade_telemetry(meta, window_days)
         oversight = _grade_oversight(ras, meta, excp_flag.get(iid, False))
+        # AG-T1.3: 4 new dimensions
+        data_access    = _grade_data_access(reach_by_id.get(iid, []))
+        network        = _grade_network(network_by_id.get(iid, {}))
+        model_exposure = _grade_model_exposure(models_by_id.get(iid, {}).get("count", 0))
+        supply_chain   = _grade_supply_chain(models_by_id.get(iid, {}))
 
         penalty = (
             _penalty("ownership", ownership["grade"], weights)
@@ -554,6 +825,10 @@ def compute_agent_trust_batch(
             + _penalty("egress",   egress["grade"],   weights)
             + _penalty("telemetry", telemetry["grade"], weights)
             + _penalty("oversight", oversight["grade"], weights)
+            + _penalty("data_access",    data_access["grade"],    weights)
+            + _penalty("network",        network["grade"],        weights)
+            + _penalty("model_exposure", model_exposure["grade"], weights)
+            + _penalty("supply_chain",   supply_chain["grade"],   weights)
         )
         score = int(round(max(0.0, min(100.0, 100.0 - penalty))))
 
@@ -564,6 +839,11 @@ def compute_agent_trust_batch(
             "egress":      egress,
             "telemetry":   telemetry,
             "oversight":   oversight,
+            # AG-T1.3
+            "data_access":    data_access,
+            "network":        network,
+            "model_exposure": model_exposure,
+            "supply_chain":   supply_chain,
         }
     return out
 
@@ -582,6 +862,11 @@ def _empty_result() -> dict[str, Any]:
         "egress":    {"grade": "FAIL", "evidence": "Identity not found"},
         "telemetry": {"grade": "NONE", "evidence": "Identity not found"},
         "oversight": {"grade": "FAIL", "evidence": "Identity not found"},
+        # AG-T1.3
+        "data_access":    {"grade": "NONE",  "evidence": "Identity not found"},
+        "network":        {"grade": "PASS",  "evidence": "Identity not found"},
+        "model_exposure": {"grade": "NONE",  "count": 0, "evidence": "Identity not found"},
+        "supply_chain":   {"grade": "PASS",  "evidence": "Identity not found"},
     }
 
 

@@ -58,7 +58,9 @@ function bandFor(score: number): BandStyle {
   return { key: 'critical', label: 'CRITICAL', text: 'text-red-400', bg: 'bg-red-500/10', ring: 'ring-red-500/40', dot: 'bg-red-400' };
 }
 
-type DimKey = 'ownership' | 'secrets' | 'egress' | 'telemetry' | 'oversight';
+type DimKey = 'ownership' | 'secrets' | 'egress' | 'telemetry' | 'oversight'
+            // AG-T1.3: 4 new dimensions (5 → 9)
+            | 'data_access' | 'network' | 'model_exposure' | 'supply_chain';
 
 interface DimStyle {
   text: string;
@@ -83,13 +85,14 @@ function styleForGrade(dim: DimKey, grade: TrustGrade): DimStyle {
   let dot = 'bg-slate-500';
   let isFailing = false;
 
-  if (dim === 'ownership' || dim === 'egress' || dim === 'oversight') {
+  if (dim === 'ownership' || dim === 'egress' || dim === 'oversight'
+      || dim === 'network' || dim === 'supply_chain') {
     if (grade === 'PASS') {
       text = 'text-emerald-300'; bg = 'bg-emerald-900/30'; border = 'border-emerald-800/40'; dot = 'bg-emerald-400';
     } else if (grade === 'FAIL') {
       text = 'text-red-300'; bg = 'bg-red-900/30'; border = 'border-red-800/40'; dot = 'bg-red-400'; isFailing = true;
     }
-  } else if (dim === 'secrets') {
+  } else if (dim === 'secrets' || dim === 'data_access') {
     switch (grade) {
       case 'NONE':
         text = 'text-emerald-300'; bg = 'bg-emerald-900/30'; border = 'border-emerald-800/40'; dot = 'bg-emerald-400'; break;
@@ -109,6 +112,14 @@ function styleForGrade(dim: DimKey, grade: TrustGrade): DimStyle {
       text = 'text-amber-300'; bg = 'bg-amber-900/30'; border = 'border-amber-800/40'; dot = 'bg-amber-400';
     } else if (grade === 'FULL') {
       text = 'text-emerald-300'; bg = 'bg-emerald-900/30'; border = 'border-emerald-800/40'; dot = 'bg-emerald-400';
+    }
+  } else if (dim === 'model_exposure') {
+    if (grade === 'NONE') {
+      text = 'text-slate-400'; bg = 'bg-slate-800/30'; border = 'border-slate-700/40'; dot = 'bg-slate-500';
+    } else if (grade === 'ONE') {
+      text = 'text-emerald-300'; bg = 'bg-emerald-900/30'; border = 'border-emerald-800/40'; dot = 'bg-emerald-400';
+    } else if (grade === 'MULTI') {
+      text = 'text-amber-300'; bg = 'bg-amber-900/30'; border = 'border-amber-800/40'; dot = 'bg-amber-400'; isFailing = true;
     }
   }
 
@@ -155,6 +166,35 @@ const DIMENSIONS: DimMeta[] = [
     label: 'Oversight',
     // shield-check icon
     icon: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z M9 12l2 2 4-4',
+  },
+  // AG-T1.3: 4 new dimensions (5 → 9)
+  {
+    key: 'data_access',
+    label: 'Data Access',
+    // database icon
+    icon: 'M12 2c4.42 0 8 1.79 8 4s-3.58 4-8 4-8-1.79-8-4 3.58-4 8-4z M4 6v6c0 2.21 3.58 4 8 4s8-1.79 8-4V6 M4 12v6c0 2.21 3.58 4 8 4s8-1.79 8-4v-6',
+    tooltip: 'Grade reflects the worst-case classified data the agent can reach. CRITICAL = write to PHI, HIGH = read PHI/PCI, MEDIUM = PII/Financial',
+  },
+  {
+    key: 'network',
+    label: 'Network',
+    // server-network icon
+    icon: 'M3 6h18M3 12h18M3 18h18 M9 6v12 M15 6v12',
+    tooltip: 'PASS = linked Cog Services on Private Endpoint or restricted network. FAIL = public-network endpoint exposed.',
+  },
+  {
+    key: 'model_exposure',
+    label: 'Model Exposure',
+    // layers icon
+    icon: 'M12 2 2 7l10 5 10-5-10-5z M2 17l10 5 10-5 M2 12l10 5 10-5',
+    tooltip: 'MULTI ≥3 distinct models attached to the agent. Multi-model expands prompt/tool attack surface.',
+  },
+  {
+    key: 'supply_chain',
+    label: 'Supply Chain',
+    // git-merge icon
+    icon: 'M18 16c-2 0-4-1-5-3 m-1 0c-1 2-3 3-5 3 M6 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M18 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M6 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+    tooltip: 'FAIL if the agent uses fine-tuned models or models from unverified vendors (no model registry approval).',
   },
 ];
 
