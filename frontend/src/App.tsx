@@ -66,6 +66,7 @@ import AIInventory from './pages/AIInventory';
 import AIAccess from './pages/AIAccess';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
+import MultiHopXGraph from './pages/MultiHopXGraph';
 import AIRuntime from './pages/AIRuntime';
 import AgentActivityTimeline from './pages/AgentActivityTimeline';
 import AIRisk from './pages/AIRisk';
@@ -375,6 +376,8 @@ function AppContent() {
                   <Route path="/ai-runtime/model-registry" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIModelRegistry /></ErrorBoundary>} />
                   {/* AG-T2.3: AI Findings catalog */}
                   <Route path="/ai-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIFindings /></ErrorBoundary>} />
+                  {/* AG-T3.1: Multi-hop XGRAPH (agent-to-agent reachability) */}
+                  <Route path="/ai-attack-paths/multi-hop" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><MultiHopXGraph /></ErrorBoundary>} />
                   {/* AG-182: Per-agent forensic timeline + behavior baseline */}
                   <Route path="/ai-runtime/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AgentActivityTimeline /></ErrorBoundary>} />
                   <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />

@@ -44270,6 +44270,69 @@ def post_ai_model_registry_decide_handler():
         if db: db.close()
 
 
+# ============================================================
+# AG-T3.1: Multi-hop XGRAPH — Agent A → Agent B → Resource
+# ============================================================
+
+def get_multihop_reachability_handler():
+    """GET /api/argus/multi-hop-reachability
+
+    Query params:
+      source       — identity_id of source AI agent (optional; default: all agents)
+      classification — filter chains by terminal classification (PHI|PCI|PII|...)
+      max_depth    — BFS depth cap (default 4, max 6)
+      max_chains   — pagination cap on returned chains (default 200)
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'chains': [], 'chain_count': 0,
+                            'by_severity': {'critical':0,'high':0,'medium':0,'low':0}})
+        try:
+            max_depth = min(int(request.args.get('max_depth', 4)), 6)
+        except (TypeError, ValueError):
+            max_depth = 4
+        try:
+            max_chains = min(int(request.args.get('max_chains', 200)), 500)
+        except (TypeError, ValueError):
+            max_chains = 200
+        from app.engines.ai.multihop_xgraph import trace_multihop
+        result = trace_multihop(
+            db, org_id,
+            source_identity_id=request.args.get('source') or None,
+            max_depth=max_depth,
+            classification_filter=request.args.get('classification') or None,
+            max_chains=max_chains,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"multihop reachability failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_invocation_graph_handler():
+    """GET /api/ai-security/invocation-graph
+
+    Returns nodes + edges for the agent-invocation visualization.
+    No traversal — just the raw graph.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'nodes': [], 'edges': []})
+        from app.engines.ai.multihop_xgraph import invocation_graph
+        return jsonify(invocation_graph(db, org_id))
+    except Exception as e:
+        logger.error(f"invocation graph failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
 def get_ai_findings_handler():
     """GET /api/ai-security/findings — list AI findings from security_findings.
 

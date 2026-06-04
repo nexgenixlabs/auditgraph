@@ -2374,6 +2374,17 @@ def create_app():
         from app.api.handlers import post_ai_model_registry_revoke_handler
         return post_ai_model_registry_revoke_handler()
 
+    # AG-T3.1: Multi-hop XGRAPH (Agent A → Agent B → Resource)
+    @app.get("/api/argus/multi-hop-reachability")
+    def multihop_reachability_route():
+        from app.api.handlers import get_multihop_reachability_handler
+        return get_multihop_reachability_handler()
+
+    @app.get("/api/ai-security/invocation-graph")
+    def invocation_graph_route():
+        from app.api.handlers import get_invocation_graph_handler
+        return get_invocation_graph_handler()
+
     # AG-T2.3: AI Findings catalog
     @app.get("/api/ai-security/findings")
     def ai_findings_list_route():

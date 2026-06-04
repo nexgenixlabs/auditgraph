@@ -189,6 +189,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
           // AG-178 (Tier 1A): AI Identity Attack Paths — the cinematic chain
           { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
+          // AG-T3.1: multi-hop agent-to-agent reachability (patent territory)
+          { to: '/ai-attack-paths/multi-hop', label: 'Multi-Hop XGRAPH', icon: roleOptIcon },
           // AG-180 (Tier 2A): data reachability — attack signal, not AI feature
           { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
