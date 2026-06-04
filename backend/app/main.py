@@ -2324,6 +2324,17 @@ def create_app():
         from app.api.handlers import get_ai_jml_snapshot_handler
         return get_ai_jml_snapshot_handler()
 
+    # AG-T2.1: AI Abuse Scenarios — per-agent + org rollup
+    @app.get("/api/ai-agents/<identity_id>/abuse-scenarios")
+    def ai_agent_abuse_scenarios_route(identity_id):
+        from app.api.handlers import get_ai_agent_abuse_scenarios_handler
+        return get_ai_agent_abuse_scenarios_handler(identity_id)
+
+    @app.get("/api/ai-security/abuse-scenarios/rollup")
+    def ai_abuse_scenarios_rollup_route():
+        from app.api.handlers import get_ai_abuse_scenarios_rollup_handler
+        return get_ai_abuse_scenarios_rollup_handler()
+
     # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline
     @app.get("/api/ai-agents/<identity_id>/activity-timeline")
     def ai_agent_activity_timeline_route(identity_id):

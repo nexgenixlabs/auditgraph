@@ -24,6 +24,7 @@ import {
 } from '../constants/aiRisk';
 // AG-179: Trust Score card mounts at the top of the drawer
 import { AgentTrustScoreCard } from './ai-security/AgentTrustScoreCard';
+import { AIAbuseScenariosCard } from './ai-security/AIAbuseScenariosCard';
 
 interface AIInvestigateDrawerProps {
   identityId: string | null;
@@ -465,6 +466,13 @@ export default function AIInvestigateDrawer({ identityId, onClose }: AIInvestiga
             {identityId && (
               <div className="px-4 pb-3">
                 <AgentTrustScoreCard identityId={identityId} />
+              </div>
+            )}
+
+            {/* AG-T2.1: AI Abuse Scenarios — what happens if a threat succeeds */}
+            {identityId && (
+              <div className="px-4 pb-3">
+                <AIAbuseScenariosCard identityId={identityId} />
               </div>
             )}
 

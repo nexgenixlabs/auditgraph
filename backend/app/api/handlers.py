@@ -44094,6 +44094,72 @@ def get_ai_jml_snapshot_handler():
 
 
 # ============================================================
+# AG-T2.1: AI Abuse Scenarios — handlers
+# ============================================================
+
+def get_ai_agent_abuse_scenarios_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/abuse-scenarios
+
+    Returns the 5 abuse scenarios computed for one AI agent — what could
+    happen under prompt injection / credential theft / owner departure /
+    tool abuse / supply-chain compromise.
+
+    Architecture-derived; no telemetry required.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        cursor.execute("""
+            SELECT id, agent_identity_type FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+              AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, org_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.ai.abuse_scenarios import compute_abuse_scenarios
+        result = compute_abuse_scenarios(db, row['id'], org_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"abuse_scenarios handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_abuse_scenarios_rollup_handler():
+    """GET /api/ai-security/abuse-scenarios/rollup
+
+    Org-wide rollup: for each scenario, returns the worst-affected agents
+    + severity counts. Feeds the AI Risk page hero panel.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai.abuse_scenarios import compute_abuse_scenarios_org_rollup
+        result = compute_abuse_scenarios_org_rollup(db, org_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"abuse_scenarios rollup handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
 # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline handlers
 # ============================================================
 
