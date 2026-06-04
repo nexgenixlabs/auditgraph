@@ -25,16 +25,17 @@ SELECT set_config('app.current_organization_id', '3', true);
 SELECT set_config('app.current_tenant_id', '3', true);
 
 -- ============================================================
--- Cleanup: only aa000-* fingerprinted rows (never customer data)
+-- Cleanup: aa000-* (legacy fingerprint) AND de000-* (current demo agents)
+-- NEVER touches customer data.
 -- ============================================================
-DELETE FROM agent_activity_events       WHERE organization_id=3 AND identity_id LIKE 'aa000%';
-DELETE FROM agent_data_reachability     WHERE organization_id=3 AND identity_id LIKE 'aa000%';
-DELETE FROM ai_agent_lifecycle_events   WHERE organization_id=3 AND identity_id LIKE 'aa000%';
-DELETE FROM attack_paths                WHERE organization_id=3 AND source_entity_id LIKE 'aa000%';
+DELETE FROM agent_activity_events       WHERE organization_id=3 AND (identity_id LIKE 'aa000%' OR identity_id LIKE 'de000%');
+DELETE FROM agent_data_reachability     WHERE organization_id=3 AND (identity_id LIKE 'aa000%' OR identity_id LIKE 'de000%');
+DELETE FROM ai_agent_lifecycle_events   WHERE organization_id=3 AND (identity_id LIKE 'aa000%' OR identity_id LIKE 'de000%');
+DELETE FROM attack_paths                WHERE organization_id=3 AND (source_entity_id LIKE 'aa000%' OR source_entity_id LIKE 'de000%');
 DELETE FROM role_assignments            WHERE organization_id=3
-   AND identity_db_id IN (SELECT id FROM identities WHERE organization_id=3 AND identity_id LIKE 'aa000%');
-DELETE FROM agent_classifications       WHERE organization_id=3 AND identity_id LIKE 'aa000%';
-DELETE FROM identities                  WHERE organization_id=3 AND identity_id LIKE 'aa000%';
+   AND identity_db_id IN (SELECT id FROM identities WHERE organization_id=3 AND (identity_id LIKE 'aa000%' OR identity_id LIKE 'de000%'));
+DELETE FROM agent_classifications       WHERE organization_id=3 AND (identity_id LIKE 'aa000%' OR identity_id LIKE 'de000%');
+DELETE FROM identities                  WHERE organization_id=3 AND (identity_id LIKE 'aa000%' OR identity_id LIKE 'de000%');
 DELETE FROM azure_ai_model_deployments  WHERE organization_id=3 AND account_resource_id LIKE '/subscriptions/11111111-%';
 DELETE FROM azure_cognitive_services_accounts WHERE organization_id=3 AND resource_id LIKE '/subscriptions/11111111-%';
 DELETE FROM azure_key_vaults            WHERE organization_id=3 AND resource_id LIKE '/subscriptions/11111111-%';
@@ -195,27 +196,36 @@ FROM unnest(ARRAY[:prev_run_id::bigint, :curr_run_id::bigint]) r,
 ON CONFLICT DO NOTHING;
 
 -- ============================================================
--- IDENTITIES — 1 marquee AI agent in both runs
+-- IDENTITIES — 3 clearly-demo-branded AI agents in both runs
+--   demo-ai-copilot-prod  (CRITICAL  KV Admin + Storage Blob Owner)
+--   demo-ai-rag-indexer   (HIGH      Storage Blob Reader on PHI)
+--   demo-ai-eval-bot      (MEDIUM    Cognitive Services User only)
+-- All owned by "AuditGraph Demo Platform Team" — clearly synthetic.
 -- ============================================================
 INSERT INTO identities
     (organization_id, discovery_run_id, identity_id, display_name,
      identity_type, identity_category, risk_score, risk_level,
      agent_identity_type, activity_status, last_sign_in, created_datetime,
      is_microsoft_system)
-SELECT 3, r, 'aa000001-aaaa-4aaa-aaaa-aaaaaaaaa001', 'ai_startup_alexander_CoS_project',
-       'service_principal', 'service_principal', 88, 'critical',
-       'ai_agent', 'active', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '30 days', FALSE
-FROM unnest(ARRAY[:prev_run_id::bigint, :curr_run_id::bigint]) r
+SELECT 3, r, agent.id, agent.name,
+       'service_principal', 'service_principal', agent.score, agent.level,
+       'ai_agent', 'active', NOW() - (agent.signin_h || ' hours')::interval,
+       NOW() - (agent.age_d || ' days')::interval, FALSE
+FROM unnest(ARRAY[:prev_run_id::bigint, :curr_run_id::bigint]) r,
+     (VALUES
+        ('de000001-d3a0-4000-aaaa-aaaaaaaaa001', 'demo-ai-copilot-prod', 92, 'critical', 1,   120),
+        ('de000002-d3a0-4000-aaaa-aaaaaaaaa002', 'demo-ai-rag-indexer',  72, 'high',     4,    60),
+        ('de000003-d3a0-4000-aaaa-aaaaaaaaa003', 'demo-ai-eval-bot',     42, 'medium',   6,    45)
+     ) AS agent(id, name, score, level, signin_h, age_d)
 ON CONFLICT DO NOTHING;
 
 -- Belt-and-suspenders against the trigger / code path that sometimes
--- flips is_microsoft_system to TRUE on the INSERT path. Our demo agent
--- must be visible to AI Inventory (which filters NOT is_microsoft_system).
+-- flips is_microsoft_system to TRUE on the INSERT path. Demo agents
+-- MUST be visible to AI Inventory (filters NOT is_microsoft_system).
 UPDATE identities SET is_microsoft_system=FALSE
-WHERE organization_id=3 AND identity_id LIKE 'aa000%';
+WHERE organization_id=3 AND identity_id LIKE 'de000%';
 
--- Backfill total_identities so the snapshot-picker dropdown shows the
--- correct count instead of "0 identities".
+-- Backfill total_identities so the snapshot picker shows the correct count.
 UPDATE discovery_runs SET total_identities=(
     SELECT count(*) FROM identities
     WHERE organization_id=3 AND discovery_run_id=discovery_runs.id
@@ -227,21 +237,28 @@ INSERT INTO agent_classifications
     (identity_db_id, identity_id, agent_identity_type, classification_confidence,
      classification_reason, detected_platform, pattern_version, discovery_run_id,
      organization_id, model_name, owner_display_name_at_classify, account_resource_id)
-SELECT i.id, i.identity_id, 'ai_agent', 0.95, 'aiag_cloud_demo_seed',
+SELECT i.id, i.identity_id, 'ai_agent', 0.93, 'aiag_cloud_demo_seed',
        'azure_openai', '1.0.0', i.discovery_run_id, 3,
-       'gpt-4o', 'alexander@example.com',
+       CASE i.identity_id
+            WHEN 'de000001-d3a0-4000-aaaa-aaaaaaaaa001' THEN 'gpt-4o'
+            WHEN 'de000002-d3a0-4000-aaaa-aaaaaaaaa002' THEN 'text-embedding-3-large'
+            ELSE 'gpt-4o-mini'
+       END,
+       'AuditGraph Demo Platform Team',
        '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.CognitiveServices/accounts/aiag-openai-prod'
 FROM identities i
-WHERE i.organization_id=3 AND i.identity_id='aa000001-aaaa-4aaa-aaaa-aaaaaaaaa001'
+WHERE i.organization_id=3 AND i.identity_id LIKE 'de000%'
   AND i.discovery_run_id IN (:prev_run_id::bigint, :curr_run_id::bigint)
 ON CONFLICT DO NOTHING;
 
 -- ============================================================
--- ROLE ASSIGNMENTS — escalation pattern across the 2 runs
---   prev run: Reader only (low-priv baseline)
---   curr run: KV Admin + Storage Contributor (the escalation = T2C event)
+-- ROLE ASSIGNMENTS — escalation pattern on copilot (T2C lifecycle drift)
+--   prev run: copilot=Reader, rag=Reader, eval=Cognitive Services User (low-priv baselines)
+--   curr run: copilot=KV Admin + Storage Blob Owner (escalation),
+--             rag=Storage Blob Data Reader on PHI (data reachability),
+--             eval=Cognitive Services User (unchanged — safe baseline)
 -- ============================================================
--- Prev run: Reader on the cog svc
+-- PREV RUN: low-priv baseline for all 3
 INSERT INTO role_assignments
     (organization_id, identity_db_id, role_name, scope, scope_type,
      principal_id, assignment_id)
@@ -249,11 +266,22 @@ SELECT 3, i.id, 'Reader',
        '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.CognitiveServices/accounts/aiag-openai-prod',
        'resource', i.identity_id, gen_random_uuid()::text
 FROM identities i
-WHERE i.organization_id=3 AND i.identity_id='aa000001-aaaa-4aaa-aaaa-aaaaaaaaa001'
+WHERE i.organization_id=3 AND i.identity_id IN ('de000001-d3a0-4000-aaaa-aaaaaaaaa001','de000002-d3a0-4000-aaaa-aaaaaaaaa002')
   AND i.discovery_run_id = :prev_run_id::bigint
 ON CONFLICT DO NOTHING;
 
--- Curr run: KV Admin + Storage Contributor (the escalation)
+INSERT INTO role_assignments
+    (organization_id, identity_db_id, role_name, scope, scope_type,
+     principal_id, assignment_id)
+SELECT 3, i.id, 'Cognitive Services User',
+       '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.CognitiveServices/accounts/aiag-openai-prod',
+       'resource', i.identity_id, gen_random_uuid()::text
+FROM identities i
+WHERE i.organization_id=3 AND i.identity_id='de000003-d3a0-4000-aaaa-aaaaaaaaa003'
+  AND i.discovery_run_id = :prev_run_id::bigint
+ON CONFLICT DO NOTHING;
+
+-- CURR RUN: copilot escalates to critical scope
 INSERT INTO role_assignments
     (organization_id, identity_db_id, role_name, scope, scope_type,
      principal_id, assignment_id)
@@ -262,28 +290,76 @@ FROM identities i,
      (VALUES
         ('Key Vault Administrator',
          '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.KeyVault/vaults/aiag-vault-phi'),
-        ('Storage Blob Data Contributor',
+        ('Storage Blob Data Owner',
          '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.Storage/storageAccounts/aiagphiblob01')
      ) AS ra(rn, sc)
-WHERE i.organization_id=3 AND i.identity_id='aa000001-aaaa-4aaa-aaaa-aaaaaaaaa001'
+WHERE i.organization_id=3 AND i.identity_id='de000001-d3a0-4000-aaaa-aaaaaaaaa001'
+  AND i.discovery_run_id = :curr_run_id::bigint
+ON CONFLICT DO NOTHING;
+
+-- CURR RUN: rag-indexer gains Storage Blob Data Reader on PHI
+INSERT INTO role_assignments
+    (organization_id, identity_db_id, role_name, scope, scope_type,
+     principal_id, assignment_id)
+SELECT 3, i.id, 'Storage Blob Data Reader',
+       '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.Storage/storageAccounts/aiagphiblob01',
+       'resource', i.identity_id, gen_random_uuid()::text
+FROM identities i
+WHERE i.organization_id=3 AND i.identity_id='de000002-d3a0-4000-aaaa-aaaaaaaaa002'
+  AND i.discovery_run_id = :curr_run_id::bigint
+ON CONFLICT DO NOTHING;
+
+-- CURR RUN: eval-bot keeps Cognitive Services User (safe baseline, no drift)
+INSERT INTO role_assignments
+    (organization_id, identity_db_id, role_name, scope, scope_type,
+     principal_id, assignment_id)
+SELECT 3, i.id, 'Cognitive Services User',
+       '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.CognitiveServices/accounts/aiag-openai-prod',
+       'resource', i.identity_id, gen_random_uuid()::text
+FROM identities i
+WHERE i.organization_id=3 AND i.identity_id='de000003-d3a0-4000-aaaa-aaaaaaaaa003'
   AND i.discovery_run_id = :curr_run_id::bigint
 ON CONFLICT DO NOTHING;
 
 -- ============================================================
--- ACTIVITY EVENTS — 20 days of model calls for behavior baseline
--- (last day spikes to 5x → triggers volume_spike anomaly)
+-- ACTIVITY EVENTS — 14 days of model calls + storage reads
+-- copilot spikes on day 14 → volume_spike anomaly hook
 -- ============================================================
 INSERT INTO agent_activity_events
     (organization_id, identity_db_id, identity_id, category, occurred_at,
-     source, operation_name, metric_value, severity)
-SELECT 3, i.id, i.identity_id, 'model_call',
-       NOW() - ((19 - d.day_offset) || ' days')::interval,
-       'azure_monitor', 'POST /chat/completions',
-       CASE WHEN d.day_offset = 19 THEN 1000 ELSE 200 END,
-       'info'
-FROM identities i,
-     generate_series(0, 19) AS d(day_offset)
-WHERE i.organization_id=3 AND i.identity_id='aa000001-aaaa-4aaa-aaaa-aaaaaaaaa001'
+     source, resource_id, resource_type, operation_name, metric_value, severity)
+SELECT 3, i.id, i.identity_id, 'inference',
+       NOW() - ((14 - d.day_offset) || ' days')::interval,
+       'azure_openai',
+       '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.CognitiveServices/accounts/aiag-openai-prod',
+       'cognitive_services', 'completions',
+       CASE WHEN d.day_offset = 14 THEN 5000 ELSE 1000 END, 'info'
+FROM identities i, generate_series(0, 14) AS d(day_offset)
+WHERE i.organization_id=3 AND i.identity_id='de000001-d3a0-4000-aaaa-aaaaaaaaa001'
+  AND i.discovery_run_id = :curr_run_id::bigint;
+
+INSERT INTO agent_activity_events
+    (organization_id, identity_db_id, identity_id, category, occurred_at,
+     source, resource_id, resource_type, operation_name, metric_value, severity)
+SELECT 3, i.id, i.identity_id, 'data_read',
+       NOW() - ((14 - d.day_offset) || ' days')::interval,
+       'azure_storage',
+       '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.Storage/storageAccounts/aiagphiblob01',
+       'storage_account', 'blob_get', 250.0 + d.day_offset*5, 'info'
+FROM identities i, generate_series(0, 14) AS d(day_offset)
+WHERE i.organization_id=3 AND i.identity_id='de000002-d3a0-4000-aaaa-aaaaaaaaa002'
+  AND i.discovery_run_id = :curr_run_id::bigint;
+
+INSERT INTO agent_activity_events
+    (organization_id, identity_db_id, identity_id, category, occurred_at,
+     source, resource_id, resource_type, operation_name, metric_value, severity)
+SELECT 3, i.id, i.identity_id, 'inference',
+       NOW() - ((14 - d.day_offset) || ' days')::interval,
+       'azure_openai',
+       '/subscriptions/11111111-1111-4111-1111-111111111111/resourceGroups/rg-aiag-demo/providers/Microsoft.CognitiveServices/accounts/aiag-openai-prod',
+       'cognitive_services', 'completions', 80.0 + d.day_offset, 'info'
+FROM identities i, generate_series(0, 14) AS d(day_offset)
+WHERE i.organization_id=3 AND i.identity_id='de000003-d3a0-4000-aaaa-aaaaaaaaa003'
   AND i.discovery_run_id = :curr_run_id::bigint;
 
 COMMIT;
