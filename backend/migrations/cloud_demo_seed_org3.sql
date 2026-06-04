@@ -208,6 +208,20 @@ SELECT 3, r, 'aa000001-aaaa-4aaa-aaaa-aaaaaaaaa001', 'ai_startup_alexander_CoS_p
 FROM unnest(ARRAY[:prev_run_id::bigint, :curr_run_id::bigint]) r
 ON CONFLICT DO NOTHING;
 
+-- Belt-and-suspenders against the trigger / code path that sometimes
+-- flips is_microsoft_system to TRUE on the INSERT path. Our demo agent
+-- must be visible to AI Inventory (which filters NOT is_microsoft_system).
+UPDATE identities SET is_microsoft_system=FALSE
+WHERE organization_id=3 AND identity_id LIKE 'aa000%';
+
+-- Backfill total_identities so the snapshot-picker dropdown shows the
+-- correct count instead of "0 identities".
+UPDATE discovery_runs SET total_identities=(
+    SELECT count(*) FROM identities
+    WHERE organization_id=3 AND discovery_run_id=discovery_runs.id
+)
+WHERE organization_id=3 AND id IN (:prev_run_id::bigint, :curr_run_id::bigint);
+
 -- agent_classifications row (with AG-177 enrichment columns)
 INSERT INTO agent_classifications
     (identity_db_id, identity_id, agent_identity_type, classification_confidence,
