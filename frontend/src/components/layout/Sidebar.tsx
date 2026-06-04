@@ -166,6 +166,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-runtime/model-registry', label: 'Model Registry', icon: agentBotIcon },
           // AG-T3.2: AI Supply Chain — model/plugin/vector-db/external API tree
           { to: '/ai-runtime/supply-chain',   label: 'Supply Chain',   icon: agentBotIcon },
+          // AG-T4: Threat-source partner connectors
+          { to: '/ai-runtime/threat-connectors', label: 'Threat Connectors', icon: agentBotIcon },
           { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
           // AG-T2.3: AI Findings catalog
           { to: '/ai-findings',   label: 'AI Findings',   icon: roleOptIcon },

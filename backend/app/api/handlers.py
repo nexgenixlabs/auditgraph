@@ -44313,6 +44313,122 @@ def get_multihop_reachability_handler():
         if db: db.close()
 
 
+# ============================================================
+# AG-T4: Threat-source partner connectors
+# ============================================================
+
+def post_threat_signal_ingest_handler():
+    """POST /api/ai-security/threat-signals?vendor=<vendor>
+
+    Body: vendor-specific payload (dispatched to the right adapter).
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        vendor = request.args.get('vendor', '').strip()
+        if not vendor:
+            return jsonify({'error': 'vendor query param required'}), 400
+        payload = request.get_json(silent=True) or {}
+        from app.engines.ai.threat_connectors import ingest_signals, SUPPORTED_VENDORS
+        if vendor not in SUPPORTED_VENDORS:
+            return jsonify({'error': f'Unknown vendor. Supported: {list(SUPPORTED_VENDORS)}'}), 400
+        result = ingest_signals(db, org_id, vendor, payload)
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"threat signal ingest failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_threat_signals_handler():
+    """GET /api/ai-security/threat-signals — list signals with filters."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'signals': [], 'total': 0})
+        from app.engines.ai.threat_connectors import list_signals
+        items = list_signals(
+            db, org_id,
+            identity_id=request.args.get('identity_id'),
+            vendor=request.args.get('vendor'),
+            severity=request.args.get('severity'),
+            limit=min(int(request.args.get('limit', 200)), 1000),
+        )
+        by_vendor: dict = {}
+        by_type:   dict = {}
+        by_sev = {'critical':0,'high':0,'medium':0,'low':0,'info':0}
+        for s in items:
+            by_vendor[s['vendor']] = by_vendor.get(s['vendor'], 0) + 1
+            by_type[s['signal_type']] = by_type.get(s['signal_type'], 0) + 1
+            if s['severity'] in by_sev: by_sev[s['severity']] += 1
+        return jsonify({'signals': items, 'total': len(items),
+                        'by_vendor': by_vendor, 'by_signal_type': by_type,
+                        'by_severity': by_sev})
+    except Exception as e:
+        logger.error(f"threat signals list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_threat_connectors_handler():
+    """GET /api/ai-security/threat-connectors — connector health page."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'connectors': [], 'supported': []})
+        from app.engines.ai.threat_connectors import get_connector_health, SUPPORTED_VENDORS
+        return jsonify({
+            'connectors': get_connector_health(db, org_id),
+            'supported':  list(SUPPORTED_VENDORS),
+        })
+    except Exception as e:
+        logger.error(f"threat connectors list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_threat_connector_upsert_handler():
+    """POST /api/ai-security/threat-connectors — register or update a connector."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    vendor = (data.get('vendor') or '').strip()
+    display_name = (data.get('display_name') or '').strip() or vendor
+    if not vendor:
+        return jsonify({'error': 'vendor required'}), 400
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai.threat_connectors import upsert_connector, SUPPORTED_VENDORS
+        if vendor not in SUPPORTED_VENDORS:
+            return jsonify({'error': f'Unknown vendor. Supported: {list(SUPPORTED_VENDORS)}'}), 400
+        out = upsert_connector(db, org_id, vendor, display_name,
+                                is_enabled=bool(data.get('is_enabled', True)),
+                                config=data.get('config'))
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"threat connector upsert failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
 def get_agent_supply_chain_handler(identity_id: str):
     """GET /api/ai-security/supply-chain/<identity_id>
 

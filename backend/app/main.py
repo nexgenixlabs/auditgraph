@@ -868,6 +868,10 @@ def create_app():
         '/api/ai-security/model-registry/revoke',
         # AG-T2.3: Findings catalog — recompose is idempotent (re-runs detectors).
         '/api/ai-security/findings/recompose',
+        # AG-T4: Threat-source partner connectors — ingest + upsert are the
+        # demo workflow; both scoped to the demo's own org.
+        '/api/ai-security/threat-signals',
+        '/api/ai-security/threat-connectors',
     })
     # Exact-path exemptions for unauthenticated auth flows.
     # These are public POST routes that must work before/without
@@ -2395,6 +2399,27 @@ def create_app():
     def org_supply_chain_rollup_route():
         from app.api.handlers import get_org_supply_chain_rollup_handler
         return get_org_supply_chain_rollup_handler()
+
+    # AG-T4: Threat-source partner connectors
+    @app.post("/api/ai-security/threat-signals")
+    def threat_signals_ingest_route():
+        from app.api.handlers import post_threat_signal_ingest_handler
+        return post_threat_signal_ingest_handler()
+
+    @app.get("/api/ai-security/threat-signals")
+    def threat_signals_list_route():
+        from app.api.handlers import get_threat_signals_handler
+        return get_threat_signals_handler()
+
+    @app.get("/api/ai-security/threat-connectors")
+    def threat_connectors_list_route():
+        from app.api.handlers import get_threat_connectors_handler
+        return get_threat_connectors_handler()
+
+    @app.post("/api/ai-security/threat-connectors")
+    def threat_connectors_upsert_route():
+        from app.api.handlers import post_threat_connector_upsert_handler
+        return post_threat_connector_upsert_handler()
 
     # AG-T2.3: AI Findings catalog
     @app.get("/api/ai-security/findings")
