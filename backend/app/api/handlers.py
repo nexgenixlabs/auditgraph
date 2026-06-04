@@ -24527,7 +24527,7 @@ def get_identity_federated_credentials(identity_id: str):
     db = Database(_tenant_id())
     try:
         cursor = db.cursor()
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({
                 'identity_id': identity_id,
@@ -24773,7 +24773,7 @@ def list_shadow_apps_handler():
     db = Database(_tenant_id())
     try:
         cursor = db.cursor()
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({'shadow_apps': [], 'total': 0})
 
@@ -24823,7 +24823,7 @@ def shadow_apps_stats_handler():
     db = Database(_tenant_id())
     try:
         cursor = db.cursor()
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({
                 'total': 0, 'new_30d': 0, 'with_high_scope': 0,
@@ -24873,7 +24873,7 @@ def approve_shadow_app_handler(identity_id: str):
     db = Database(_tenant_id())
     try:
         cursor = db.cursor()
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         cursor.execute("""
             SELECT id, identity_id, display_name, publisher_name
             FROM identities
@@ -42684,7 +42684,7 @@ def get_agent_trust_score_handler(identity_id: str):
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({'error': 'No discovery runs yet'}), 404
 
@@ -43295,7 +43295,7 @@ def get_ai_agent_data_reachability_handler(identity_id: str):
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({'by_classification': [], 'total_resources': 0, 'total_records': 0})
 
@@ -43336,7 +43336,7 @@ def get_data_security_summary_handler():
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({'classifications': [], 'agents_with_reachability': 0, 'total_classified_resources': 0})
 
@@ -43421,7 +43421,7 @@ def auto_classify_resources_handler():
     try:
         from app.engines.ai.data_reachability_engine import classify_undiscovered_resources
         cursor = db.conn.cursor()
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({'classified': 0, 'reason': 'no runs'})
         updated = classify_undiscovered_resources(db, run_ids[0], _org_id())
@@ -43469,7 +43469,7 @@ def get_ai_agent_drift_handler(identity_id: str):
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
-        run_ids = _latest_run_ids(cursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
         if len(run_ids) < 1:
             return jsonify({'drift_events': [], 'summary': {'total': 0}})
         current_run = run_ids[0]
