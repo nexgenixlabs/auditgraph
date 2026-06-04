@@ -81,6 +81,40 @@ function getCsrfToken(): string {
   return match ? match.split('=')[1] : '';
 }
 
+/**
+ * Aggressively expire `csrf_token` at every plausible domain scope.
+ *
+ * Background: cross-subdomain auth sets csrf_token at `Domain=auditgraph.ai`
+ * (or `.auditgraph.ai`), but earlier server versions may have left a
+ * host-only cookie at e.g. `dev.app.auditgraph.ai`. Both can coexist;
+ * `document.cookie` returns whichever the browser orders first, while the
+ * `Cookie` header sent to the API may carry the other one. Result: JS
+ * X-CSRF-Token header != csrf_token cookie the server reads → permanent 403.
+ *
+ * Deleting requires re-issuing Set-Cookie with the SAME domain and path
+ * (and `expires` in the past). We try every variant: host-only, parent
+ * domain, leading-dot variant, and pathless. The browser silently ignores
+ * the ones it can't match.
+ */
+function purgeStaleCsrfCookies(): void {
+  const expired = 'expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  const host = window.location.hostname;
+  const variants: string[] = [];
+  variants.push(`csrf_token=; ${expired}; path=/`);
+  variants.push(`csrf_token=; ${expired}; path=/; domain=${host}`);
+  const parts = host.split('.');
+  for (let i = 1; i < parts.length; i++) {
+    const d = parts.slice(i).join('.');
+    if (d) {
+      variants.push(`csrf_token=; ${expired}; path=/; domain=${d}`);
+      variants.push(`csrf_token=; ${expired}; path=/; domain=.${d}`);
+    }
+  }
+  for (const v of variants) {
+    document.cookie = v;
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -255,6 +289,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               const freshCsrf = getCsrfToken();
               if (freshCsrf) retryHeaders.set('X-CSRF-Token', freshCsrf);
               response = await origFetch(resolvedInput, { ...init, headers: retryHeaders });
+
+              // If we STILL get a 403 CSRF mismatch after refresh, a stale
+              // host-only csrf_token cookie is shadowing the canonical one.
+              // Purge every variant, refresh again, and retry one final time.
+              if (response.status === 403) {
+                let stillCsrfError = false;
+                try {
+                  const cloned2 = response.clone();
+                  const body2 = await cloned2.text();
+                  stillCsrfError = body2.includes('CSRF token mismatch');
+                } catch { /* skip */ }
+                if (stillCsrfError) {
+                  purgeStaleCsrfCookies();
+                  const r2 = await tryRefresh();
+                  if (r2) {
+                    const finalHeaders = new Headers(init?.headers);
+                    const finalCsrf = getCsrfToken();
+                    if (finalCsrf) finalHeaders.set('X-CSRF-Token', finalCsrf);
+                    response = await origFetch(resolvedInput, { ...init, headers: finalHeaders });
+                  }
+                }
+              }
             }
             // HOTFIX 2026-05-31: previous version did
             //   setUser(null); window.location.href = '/login?reason=session_expired'

@@ -214,8 +214,12 @@ class _PoolManager:
                         cur.execute(
                             "SELECT set_config('app.current_organization_id', '0', FALSE)"
                         )
+                        cur.execute(
+                            "SELECT set_config('app.current_tenant_id', '0', FALSE)"
+                        )
                     else:
                         cur.execute("RESET app.current_organization_id")
+                        cur.execute("RESET app.current_tenant_id")
                     cur.execute("SET statement_timeout = '30s'")
                     cur.close()
                     conn.commit()  # Commit so the default takes effect
@@ -259,6 +263,9 @@ class _PoolManager:
                 cur.execute(
                     "SELECT set_config('app.current_organization_id', '0', FALSE)"
                 )
+                cur.execute(
+                    "SELECT set_config('app.current_tenant_id', '0', FALSE)"
+                )
                 cur.close()
                 conn.commit()
             except Exception:
@@ -279,6 +286,7 @@ class _PoolManager:
         try:
             cur = conn.cursor()
             cur.execute("RESET app.current_organization_id")
+            cur.execute("RESET app.current_tenant_id")
             cur.close()
             conn.commit()
         except Exception:
@@ -570,6 +578,14 @@ class Database:
                 "SELECT set_config('app.current_organization_id', %s, FALSE)",
                 (str(organization_id),)
             )
+            # Some RLS policies (ai_agent_lifecycle_events, agent_data_reachability,
+            # agent_activity_events, agent_behavior_anomalies, federated_credentials)
+            # read `app.current_tenant_id` instead of `app.current_organization_id`.
+            # Set both to the same value so every policy variant resolves correctly.
+            cursor.execute(
+                "SELECT set_config('app.current_tenant_id', %s, FALSE)",
+                (str(organization_id),)
+            )
             # Verify the context was actually set (fail closed)
             cursor.execute(
                 "SELECT current_setting('app.current_organization_id', true)"
@@ -641,6 +657,10 @@ class Database:
                 cur = self.conn.cursor()
                 cur.execute(
                     "SELECT set_config('app.current_organization_id', %s, FALSE)",
+                    (str(self._organization_id),),
+                )
+                cur.execute(
+                    "SELECT set_config('app.current_tenant_id', %s, FALSE)",
                     (str(self._organization_id),),
                 )
                 cur.close()
