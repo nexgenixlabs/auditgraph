@@ -44313,6 +44313,58 @@ def get_multihop_reachability_handler():
         if db: db.close()
 
 
+def get_agent_supply_chain_handler(identity_id: str):
+    """GET /api/ai-security/supply-chain/<identity_id>
+
+    Returns the supply chain dependency tree (model + plugin + vector_db
+    + external_api + tool) rooted at one AI agent + aggregate risk.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs'}), 404
+        cursor.execute("""
+            SELECT id, agent_identity_type FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+              AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, org_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent','possible_ai_agent','ai_privileged_human'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.ai.supply_chain import get_agent_supply_chain
+        return jsonify(get_agent_supply_chain(db, org_id, row['id']))
+    except Exception as e:
+        logger.error(f"agent supply chain failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_org_supply_chain_rollup_handler():
+    """GET /api/ai-security/supply-chain — org-wide rollup."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'agents': [], 'agent_count': 0, 'by_kind': []})
+        from app.engines.ai.supply_chain import get_org_supply_chain_rollup
+        return jsonify(get_org_supply_chain_rollup(db, org_id))
+    except Exception as e:
+        logger.error(f"org supply chain rollup failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
 def get_invocation_graph_handler():
     """GET /api/ai-security/invocation-graph
 

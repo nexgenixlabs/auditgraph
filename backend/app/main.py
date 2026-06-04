@@ -2385,6 +2385,17 @@ def create_app():
         from app.api.handlers import get_invocation_graph_handler
         return get_invocation_graph_handler()
 
+    # AG-T3.2: AI Supply Chain dependency graph
+    @app.get("/api/ai-security/supply-chain/<identity_id>")
+    def agent_supply_chain_route(identity_id):
+        from app.api.handlers import get_agent_supply_chain_handler
+        return get_agent_supply_chain_handler(identity_id)
+
+    @app.get("/api/ai-security/supply-chain")
+    def org_supply_chain_rollup_route():
+        from app.api.handlers import get_org_supply_chain_rollup_handler
+        return get_org_supply_chain_rollup_handler()
+
     # AG-T2.3: AI Findings catalog
     @app.get("/api/ai-security/findings")
     def ai_findings_list_route():
