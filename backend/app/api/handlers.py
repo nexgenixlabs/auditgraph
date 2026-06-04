@@ -9335,11 +9335,37 @@ def get_dashboard_posture():
             "disabled_live_rbac_count": ghost_count,
         }
 
-        # AG-T1.1: enrich with dollar exposure for board-level comprehension.
-        # Pulls classified-resource totals + breach_cost_factors. Fail-soft:
-        # if the table is missing or the query fails, exposure stays absent.
+        # AG-T1.1 / AG-T1.5: dollar exposure for board-level comprehension.
+        # We compute THREE scopes so the Business Impact card is unambiguous
+        # about WHO can reach the data:
+        #
+        #   total           — ALL classified data in the tenant (org-wide
+        #                     baseline; what's at stake if anything is breached).
+        #   ai_reachable    — only $ that AI agents have RBAC reach to
+        #                     (the AI-ISPM moat — prompt-injection blast radius).
+        #   nhi_reachable   — $ that ANY non-human identity (SPN / MI / AI)
+        #                     has RBAC reach to (workload identity attack surface).
+        #
+        # All three pull from breach_cost_factors so the figures are
+        # consistent and citation-backed. Fail-soft: any sub-query that
+        # errors → that scope's exposure is absent rather than fabricated.
         try:
             from app.engines.scoring.breach_cost import aggregate_exposure, format_dollar_short
+
+            def _band(agg_result):
+                if not agg_result or agg_result.get('covered', 0) <= 0:
+                    return None
+                return {
+                    'low':  float(agg_result['total_exposure_low']),
+                    'mid':  float(agg_result['total_exposure_mid']),
+                    'high': float(agg_result['total_exposure_high']),
+                    'low_display':  format_dollar_short(agg_result['total_exposure_low']),
+                    'mid_display':  format_dollar_short(agg_result['total_exposure_mid']),
+                    'high_display': format_dollar_short(agg_result['total_exposure_high']),
+                    'total_records': agg_result['total_records'],
+                }
+
+            # ── Scope 1: TOTAL — every classified data resource in the tenant ──
             cursor.execute("""
                 SELECT data_classification, SUM(record_count_estimate) AS est_records
                 FROM (
@@ -9358,17 +9384,97 @@ def get_dashboard_posture():
                 {'data_classification': r[0], 'est_records': r[1] or 0}
                 for r in cursor.fetchall()
             ]
-            agg = aggregate_exposure(db, classified_rows)
-            if agg['covered'] > 0:
+            total_agg = aggregate_exposure(db, classified_rows)
+            total_band = _band(total_agg)
+
+            # ── Scope 2: AI-REACHABLE — what AI agents have RBAC into ──
+            # agent_data_reachability is keyed (agent × classification).
+            # If two agents reach the SAME classified resource we must NOT
+            # sum their records — the data exposure is the resource itself,
+            # not the agent count. Take MAX per classification to avoid
+            # double-counting (within a class, the highest reach is the
+            # blast radius — multiple agents reaching it doesn't add records).
+            ai_band = None
+            try:
+                cursor.execute("SAVEPOINT _ai_reach_sp_bi")
+                cursor.execute("""
+                    SELECT data_classification, MAX(est_records) AS recs
+                      FROM agent_data_reachability
+                     WHERE organization_id = %s
+                     GROUP BY data_classification
+                """, (org_id,))
+                ai_rows = [
+                    {'data_classification': r[0], 'est_records': r[1] or 0}
+                    for r in cursor.fetchall() if (r[1] or 0) > 0
+                ]
+                ai_band = _band(aggregate_exposure(db, ai_rows))
+                cursor.execute("RELEASE SAVEPOINT _ai_reach_sp_bi")
+            except Exception:
+                try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_reach_sp_bi")
+                except Exception: pass
+
+            # ── Scope 3: NHI-REACHABLE — every service principal / managed
+            # identity / AI agent that holds RBAC into a classified resource.
+            # We join role_assignments → resource (storage/sql/cosmos) so
+            # the count reflects ACTUAL RBAC reach, not just identity type.
+            nhi_band = None
+            try:
+                cursor.execute("SAVEPOINT _nhi_reach_sp_bi")
+                cursor.execute("""
+                    WITH classified_resources AS (
+                        SELECT resource_id, data_classification,
+                               record_count_estimate AS recs
+                          FROM azure_storage_accounts
+                         WHERE organization_id = %s AND data_classification IS NOT NULL
+                        UNION ALL
+                        SELECT resource_id, data_classification, record_count_estimate
+                          FROM azure_sql_databases
+                         WHERE organization_id = %s AND data_classification IS NOT NULL
+                        UNION ALL
+                        SELECT resource_id, data_classification, record_count_estimate
+                          FROM azure_cosmos_databases
+                         WHERE organization_id = %s AND data_classification IS NOT NULL
+                    )
+                    SELECT cr.data_classification, MAX(cr.recs) AS recs
+                      FROM classified_resources cr
+                     WHERE EXISTS (
+                         SELECT 1 FROM role_assignments ra
+                         JOIN identities i ON i.id = ra.identity_db_id
+                         WHERE i.organization_id = %s
+                           AND i.discovery_run_id = ANY(%s)
+                           AND LOWER(COALESCE(i.identity_category,'')) IN
+                               ('service_principal','managed_identity_system','managed_identity_user')
+                           AND NOT COALESCE(i.is_microsoft_system, false)
+                           AND ra.scope = cr.resource_id
+                     )
+                     GROUP BY cr.data_classification
+                """, (org_id, org_id, org_id, org_id, run_ids))
+                nhi_rows = [
+                    {'data_classification': r[0], 'est_records': r[1] or 0}
+                    for r in cursor.fetchall() if (r[1] or 0) > 0
+                ]
+                nhi_band = _band(aggregate_exposure(db, nhi_rows))
+                cursor.execute("RELEASE SAVEPOINT _nhi_reach_sp_bi")
+            except Exception as _exc_nhi:
+                logger.debug("nhi exposure skipped: %s", _exc_nhi)
+                try: cursor.execute("ROLLBACK TO SAVEPOINT _nhi_reach_sp_bi")
+                except Exception: pass
+
+            if total_band:
+                # Back-compat: existing UI reads `estimated_exposure` as the
+                # headline number; we keep that pointing at TOTAL but add
+                # explicit `scope='total'` and a `by_scope` breakdown so
+                # the new UI can render all three.
                 business_impact['estimated_exposure'] = {
-                    'low':  float(agg['total_exposure_low']),
-                    'mid':  float(agg['total_exposure_mid']),
-                    'high': float(agg['total_exposure_high']),
-                    'low_display':  format_dollar_short(agg['total_exposure_low']),
-                    'mid_display':  format_dollar_short(agg['total_exposure_mid']),
-                    'high_display': format_dollar_short(agg['total_exposure_high']),
+                    **total_band,
+                    'scope': 'total',
+                    'scope_label': 'Total classified-data exposure (org-wide)',
                     'classified_resource_count': len(classified_rows),
-                    'total_records': agg['total_records'],
+                }
+                business_impact['exposure_by_scope'] = {
+                    'total': total_band,
+                    'ai_reachable':  ai_band,
+                    'nhi_reachable': nhi_band,
                 }
         except Exception as _exp_err:
             logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
