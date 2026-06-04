@@ -866,6 +866,8 @@ def create_app():
         '/api/ai-security/model-registry/submit',
         '/api/ai-security/model-registry/decide',
         '/api/ai-security/model-registry/revoke',
+        # AG-T2.3: Findings catalog — recompose is idempotent (re-runs detectors).
+        '/api/ai-security/findings/recompose',
     })
     # Exact-path exemptions for unauthenticated auth flows.
     # These are public POST routes that must work before/without
@@ -910,6 +912,16 @@ def create_app():
 
         # Skip read-like POST endpoints (exact match)
         if request.method == 'POST' and path in DEMO_GUARD_READ_LIKE_POSTS:
+            return None
+
+        # AG-T2.3: PATCH on AI Findings status — wildcard match on the
+        # finding_id path segment. Status update is part of the demo
+        # workflow (acknowledge / suppress / resolve / reopen) and only
+        # affects rows in the demo's own org via the handler's org-scoped
+        # WHERE clause.
+        if (request.method == 'PATCH'
+                and path.startswith('/api/ai-security/findings/')
+                and path.endswith('/status')):
             return None
 
         # Skip simulate endpoints with dynamic identity_id segments
@@ -2361,6 +2373,22 @@ def create_app():
     def ai_model_registry_revoke_route():
         from app.api.handlers import post_ai_model_registry_revoke_handler
         return post_ai_model_registry_revoke_handler()
+
+    # AG-T2.3: AI Findings catalog
+    @app.get("/api/ai-security/findings")
+    def ai_findings_list_route():
+        from app.api.handlers import get_ai_findings_handler
+        return get_ai_findings_handler()
+
+    @app.post("/api/ai-security/findings/recompose")
+    def ai_findings_recompose_route():
+        from app.api.handlers import post_ai_findings_recompose_handler
+        return post_ai_findings_recompose_handler()
+
+    @app.patch("/api/ai-security/findings/<finding_id>/status")
+    def ai_finding_status_route(finding_id):
+        from app.api.handlers import patch_ai_finding_status_handler
+        return patch_ai_finding_status_handler(finding_id)
 
     # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline
     @app.get("/api/ai-agents/<identity_id>/activity-timeline")

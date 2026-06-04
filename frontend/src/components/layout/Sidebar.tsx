@@ -165,6 +165,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           // AG-T2.2: Model Registry — approval workflow for deployed models
           { to: '/ai-runtime/model-registry', label: 'Model Registry', icon: agentBotIcon },
           { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
+          // AG-T2.3: AI Findings catalog
+          { to: '/ai-findings',   label: 'AI Findings',   icon: roleOptIcon },
           // AG-181 (Tier 2C): AI agent J/M/L drift
           { to: '/ai-lifecycle', label: 'AI Lifecycle', icon: identityIcon },
           { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },

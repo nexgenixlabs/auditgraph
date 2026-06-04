@@ -44270,6 +44270,114 @@ def post_ai_model_registry_decide_handler():
         if db: db.close()
 
 
+def get_ai_findings_handler():
+    """GET /api/ai-security/findings — list AI findings from security_findings.
+
+    Query params: status, severity, finding_type, limit, refresh=1 to
+    recompose before returning.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'findings': [], 'summary': {}})
+        from app.engines.ai import findings as F
+        if (request.args.get('refresh') or '').lower() in ('1', 'true', 'yes'):
+            F.compose_ai_findings(db, org_id)
+        items = F.list_ai_findings(
+            db, org_id,
+            status=request.args.get('status'),
+            severity=request.args.get('severity'),
+            finding_type=request.args.get('finding_type'),
+            limit=min(int(request.args.get('limit', 200)), 1000),
+        )
+        # Summary counts
+        sev = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        by_type: dict = {}
+        by_status: dict = {}
+        for f in items:
+            s = f.get('severity')
+            if s in sev: sev[s] += 1
+            t = f.get('finding_type')
+            by_type[t] = by_type.get(t, 0) + 1
+            st = f.get('status') or 'open'
+            by_status[st] = by_status.get(st, 0) + 1
+        return jsonify({
+            'findings': items,
+            'summary': {
+                'total': len(items),
+                'by_severity': sev,
+                'by_type': by_type,
+                'by_status': by_status,
+            },
+        })
+    except Exception as e:
+        logger.error(f"ai-findings list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_findings_recompose_handler():
+    """POST /api/ai-security/findings/recompose — re-run detectors + upsert."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai import findings as F
+        result = F.compose_ai_findings(db, org_id)
+        # Strip raw findings array for the recompose response — caller can
+        # re-GET to see them. Returns counts only.
+        result.pop('findings', None)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"ai-findings recompose failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def patch_ai_finding_status_handler(finding_id: str):
+    """PATCH /api/ai-security/findings/<finding_id>/status
+
+    Body: {"status": "acknowledged"|"suppressed"|"resolved"|"open"}
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get('status') or '').strip()
+    if new_status not in ('open', 'acknowledged', 'suppressed', 'resolved'):
+        return jsonify({'error': "status must be one of: open|acknowledged|suppressed|resolved"}), 400
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai import findings as F
+        ok = F.update_ai_finding_status(
+            db, org_id, finding_id, new_status,
+            changed_by=user.get('username') or user.get('email') or 'unknown',
+        )
+        if not ok:
+            return jsonify({'error': 'Finding not found'}), 404
+        return jsonify({'status': new_status})
+    except Exception as e:
+        logger.error(f"ai-finding status failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
 def post_ai_model_registry_revoke_handler():
     """POST /api/ai-security/model-registry/revoke — revoke approval."""
     user = getattr(g, 'current_user', None) or {}
