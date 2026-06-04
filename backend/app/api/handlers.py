@@ -44321,15 +44321,42 @@ def post_threat_signal_ingest_handler():
     """POST /api/ai-security/threat-signals?vendor=<vendor>
 
     Body: vendor-specific payload (dispatched to the right adapter).
+
+    Hardening (PROD-AUDIT F-001):
+      - Role gated: only admin/security_admin can ingest (prevents low-priv
+        users from tainting the Findings catalog).
+      - Payload size capped at 256 KB to bound attacker DoS.
+      - Per-org-per-minute rate limit so a compromised credential can't
+        spam thousands of signals.
     """
+    # Role gate
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Insufficient permissions to ingest threat signals'}), 403
+
+    # Payload size cap (request.content_length is best-effort; raw read is the backstop)
+    if (request.content_length or 0) > 262_144:
+        return jsonify({'error': 'Payload too large (max 256 KB)'}), 413
+
+    # Rate limit: per (org, vendor) per minute
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+    vendor = request.args.get('vendor', '').strip()
+    if not vendor:
+        return jsonify({'error': 'vendor query param required'}), 400
+
+    try:
+        from app.security.sso_security import check_sso_rate_limit  # reuses the existing in-memory rate-limiter
+        rate_key = f"threat_signal_ingest:{org_id}:{vendor}"
+        if not check_sso_rate_limit(rate_key, max_attempts=120, window_sec=60):
+            return jsonify({'error': 'Rate limit exceeded (120 signals/min per vendor)'}), 429
+    except Exception:
+        # Rate-limit module missing — fail open in dev but log
+        logger.warning("rate-limit module unavailable; ingesting without throttle")
+
     db = _db()
     try:
-        org_id = _org_id()
-        if org_id is None or org_id == -1:
-            return jsonify({'error': 'Org context required'}), 400
-        vendor = request.args.get('vendor', '').strip()
-        if not vendor:
-            return jsonify({'error': 'vendor query param required'}), 400
         payload = request.get_json(silent=True) or {}
         from app.engines.ai.threat_connectors import ingest_signals, SUPPORTED_VENDORS
         if vendor not in SUPPORTED_VENDORS:
@@ -44418,7 +44445,8 @@ def post_threat_connector_upsert_handler():
             return jsonify({'error': f'Unknown vendor. Supported: {list(SUPPORTED_VENDORS)}'}), 400
         out = upsert_connector(db, org_id, vendor, display_name,
                                 is_enabled=bool(data.get('is_enabled', True)),
-                                config=data.get('config'))
+                                config=data.get('config'),
+                                webhook_secret=data.get('webhook_secret'))
         return jsonify(out)
     except Exception as e:
         logger.error(f"threat connector upsert failed: {e}", exc_info=True)

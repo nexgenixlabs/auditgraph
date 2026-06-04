@@ -445,12 +445,22 @@ def list_signals(db, org_id: int, identity_id: Optional[str] = None,
 
 
 def get_connector_health(db, org_id: int) -> list[dict]:
-    """Return one row per registered connector with health stats."""
+    """Return one row per registered connector with health stats.
+
+    SECURITY (PENTEST F-002): `webhook_secret` is NEVER returned. Callers
+    receive `webhook_secret_set: bool` only. Any callers of this function
+    that need the secret to verify a signature must read it from the DB
+    via a dedicated, server-internal accessor.
+
+    Likewise, `config` is sanitized — any keys that look like credentials
+    are stripped before serialization.
+    """
     cursor = db.conn.cursor()
     try:
         cursor.execute("""
             SELECT vendor, display_name, is_enabled,
-                   last_signal_at, total_signals, config, created_at
+                   last_signal_at, total_signals, config, created_at,
+                   webhook_secret
               FROM threat_connectors
              WHERE organization_id = %s
              ORDER BY vendor
@@ -464,32 +474,71 @@ def get_connector_health(db, org_id: int) -> list[dict]:
             'is_enabled': bool(r[2]),
             'last_signal_at': r[3].isoformat() if r[3] else None,
             'total_signals': int(r[4] or 0),
-            'config': r[5] or {},
+            'config': _sanitize_config(r[5] or {}),
             'created_at': r[6].isoformat() if r[6] else None,
+            'webhook_secret_set': bool(r[7]),
         }
         for r in rows
     ]
 
 
+_SENSITIVE_CONFIG_KEYS = (
+    'secret', 'token', 'key', 'password', 'credential',
+    'webhook_secret', 'api_key', 'apikey', 'bearer',
+)
+
+
+def _sanitize_config(config: dict) -> dict:
+    """Strip credential-looking keys from a config dict before egress."""
+    if not isinstance(config, dict):
+        return {}
+    out = {}
+    for k, v in config.items():
+        kl = str(k).lower()
+        if any(s in kl for s in _SENSITIVE_CONFIG_KEYS):
+            out[k] = '***REDACTED***'
+        else:
+            out[k] = v
+    return out
+
+
 def upsert_connector(db, org_id: int, vendor: str, display_name: str,
-                      is_enabled: bool = True, config: Optional[dict] = None) -> dict:
+                      is_enabled: bool = True, config: Optional[dict] = None,
+                      webhook_secret: Optional[str] = None) -> dict:
+    """Register or update a connector.
+
+    SECURITY: webhook_secret goes to its own column (not config JSONB).
+    When provided, it overwrites the existing value. When None, the
+    existing value is preserved (so callers don't accidentally null it).
+    """
     cursor = db.conn.cursor()
     try:
+        # Sanitize config — never accept credential-looking keys into JSONB
+        clean_config = {}
+        if config and isinstance(config, dict):
+            for k, v in config.items():
+                kl = str(k).lower()
+                if not any(s in kl for s in _SENSITIVE_CONFIG_KEYS):
+                    clean_config[k] = v
+
         cursor.execute("""
             INSERT INTO threat_connectors
-                (organization_id, vendor, display_name, is_enabled, config)
-            VALUES (%s, %s, %s, %s, %s::jsonb)
+                (organization_id, vendor, display_name, is_enabled, config, webhook_secret)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s)
             ON CONFLICT (organization_id, vendor) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
                 is_enabled   = EXCLUDED.is_enabled,
-                config       = EXCLUDED.config
-            RETURNING id, vendor, display_name, is_enabled, total_signals
+                config       = EXCLUDED.config,
+                webhook_secret = COALESCE(EXCLUDED.webhook_secret, threat_connectors.webhook_secret)
+            RETURNING id, vendor, display_name, is_enabled, total_signals, (webhook_secret IS NOT NULL)
         """, (org_id, vendor, display_name, is_enabled,
-              __import__('json').dumps(config or {})))
+              __import__('json').dumps(clean_config),
+              webhook_secret))
         row = cursor.fetchone()
         db.conn.commit()
         return {'id': row[0], 'vendor': row[1], 'display_name': row[2],
-                'is_enabled': bool(row[3]), 'total_signals': int(row[4])}
+                'is_enabled': bool(row[3]), 'total_signals': int(row[4]),
+                'webhook_secret_set': bool(row[5])}
     finally:
         cursor.close()
 
