@@ -164,11 +164,12 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-inventory',      label: 'AI Inventory',       icon: agentBotIcon },
           { to: '/ai-access',         label: 'Identity Access',    icon: effectiveAccessIcon },
           // AG-181 (Tier 2C): J/M/L drift — will generalize to all NHI in week 5-6
+          // AG-WK2: Identity Trust — universal 9-dim Trust across SPNs+MIs+AI
+          { to: '/identity-trust',    label: 'Identity Trust',     icon: roleOptIcon },
           { to: '/ai-lifecycle',      label: 'Identity Lifecycle', icon: identityIcon },
           { to: '/ai-governance',     label: 'Identity Governance', icon: identityIcon },
-          // Identity Trust (universal Trust Score page) is built in Week 2 —
-          // until then the 9-dim score lives on the AgentTrustScoreCard in
-          // each identity drawer (see /ai-inventory).
+          // AG-WK3.1: Ownership Center — the SailPoint-tier governance hook
+          { to: '/ownership',         label: 'Ownership Center',   icon: identityIcon },
         ],
       },
       {

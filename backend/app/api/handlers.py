@@ -43210,12 +43210,15 @@ def get_agent_trust_score_handler(identity_id: str):
         if not run_ids:
             return jsonify({'error': 'No discovery runs yet'}), 404
 
-        # AG-FIX(2026-06-05): use agent_classifications (authoritative) with fallback
-        # to the denormalized identities.agent_identity_type column. The former is
-        # populated by the runtime classifier on every discovery; the latter is set
-        # only by some discovery paths and is stale for ~80% of demo agents.
+        # AG-WK2(2026-06-05): Trust Score now applies to ALL non-human
+        # identities (SPNs, MIs, AI agents). The 9-dim engine returns NONE
+        # for dims that don't apply to non-AI NHIs (model_exposure,
+        # supply_chain) — that's correct behavior, not a missing value.
+        # Humans use a different trust model (MFA, password age, etc) —
+        # they're rejected with a friendly 400.
         cursor.execute("""
             SELECT i.id, i.identity_id, i.display_name,
+                   i.identity_category,
                    COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
             FROM identities i
             LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
@@ -43227,8 +43230,14 @@ def get_agent_trust_score_handler(identity_id: str):
         row = cursor.fetchone()
         if not row:
             return jsonify({'error': 'Identity not found'}), 404
-        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
-            return jsonify({'error': 'Not an AI agent'}), 400
+
+        # Reject humans + guests (different trust model — Week 3+)
+        human_categories = {'human_user', 'guest'}
+        is_nhi = row['identity_category'] not in human_categories
+        ai_types = {'ai_agent', 'possible_ai_agent', 'ai_privileged_human'}
+        is_ai = row['agent_identity_type'] in ai_types
+        if not (is_nhi or is_ai):
+            return jsonify({'error': 'Identity Trust not available for human users yet'}), 400
 
         from app.engines.scoring.agent_trust_scorer import compute_agent_trust
         result = compute_agent_trust(cursor, row['id'])
@@ -43237,6 +43246,133 @@ def get_agent_trust_score_handler(identity_id: str):
         return jsonify(result)
     except Exception as e:
         logger.error(f"trust-score handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-WK3.1: Ownership Center
+# ============================================================
+
+def get_ownership_summary_handler():
+    """GET /api/ownership/summary — headline metrics for Ownership Center."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'total_nhi': 0, 'active_assigned': 0, 'unowned': 0,
+                            'pct_owned': 0, 'expiring_soon': 0, 'exceptions': 0})
+        from app.engines.ownership.ownership_center import get_ownership_summary
+        return jsonify(get_ownership_summary(db, org_id))
+    except Exception as e:
+        logger.error(f"ownership summary failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_unowned_nhis_handler():
+    """GET /api/ownership/unowned — NHIs without an active owner assignment."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'items': [], 'total_unowned': 0, 'total_nhis': 0, 'pct_unowned': 0})
+        try:
+            limit = min(int(request.args.get('limit', 200)), 1000)
+        except (TypeError, ValueError):
+            limit = 200
+        from app.engines.ownership.ownership_center import list_unowned_nhis
+        return jsonify(list_unowned_nhis(db, org_id, limit))
+    except Exception as e:
+        logger.error(f"unowned NHIs failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ownership_assignments_handler():
+    """GET /api/ownership/assignments — active ownership assignments."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'items': []})
+        status = request.args.get('status')
+        from app.engines.ownership.ownership_center import list_assignments
+        return jsonify({'items': list_assignments(db, org_id, status)})
+    except Exception as e:
+        logger.error(f"ownership assignments failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ownership_assign_handler():
+    """POST /api/ownership/assign — assign or update owner for one NHI."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    identity_id = (data.get('identity_id') or '').strip()
+    owner_display_name = (data.get('owner_display_name') or '').strip()
+    if not identity_id or not owner_display_name:
+        return jsonify({'error': 'identity_id and owner_display_name are required'}), 400
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ownership.ownership_center import assign_owner
+        result = assign_owner(
+            db, org_id, identity_id,
+            owner_display_name=owner_display_name,
+            owner_email=data.get('owner_email'),
+            owner_user_id=data.get('owner_user_id'),
+            delegate_display_name=data.get('delegate_display_name'),
+            delegate_user_id=data.get('delegate_user_id'),
+            assignment_reason=data.get('assignment_reason'),
+            expires_at=data.get('expires_at'),
+            assigned_by_user_id=user.get('id'),
+        )
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"ownership assign failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_identity_trust_rollup_handler():
+    """GET /api/identity-trust/rollup
+
+    Org-wide Identity Trust rollup across all NHIs (SPNs + MIs + AI).
+    Drives the new Identity Trust page (Week 2 of the brand/IA pivot).
+
+    Query params:
+      threshold — Trust score below which an identity counts as "low trust"
+                  (default 50)
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        try:
+            threshold = max(0, min(int(request.args.get('threshold', 50)), 100))
+        except (TypeError, ValueError):
+            threshold = 50
+        from app.engines.scoring.agent_trust_scorer import compute_org_trust_rollup
+        return jsonify(compute_org_trust_rollup(cursor, org_id, threshold))
+    except Exception as e:
+        logger.error(f"identity-trust rollup failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         if db: db.close()

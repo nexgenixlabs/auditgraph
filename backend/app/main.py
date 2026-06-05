@@ -872,6 +872,8 @@ def create_app():
         # demo workflow; both scoped to the demo's own org.
         '/api/ai-security/threat-signals',
         '/api/ai-security/threat-connectors',
+        # AG-WK3.1: Ownership Center — assign is the SailPoint demo workflow.
+        '/api/ownership/assign',
     })
     # Exact-path exemptions for unauthenticated auth flows.
     # These are public POST routes that must work before/without
@@ -2399,6 +2401,33 @@ def create_app():
     def org_supply_chain_rollup_route():
         from app.api.handlers import get_org_supply_chain_rollup_handler
         return get_org_supply_chain_rollup_handler()
+
+    # AG-WK2 (2026-06-05): Universal Identity Trust org rollup
+    @app.get("/api/identity-trust/rollup")
+    def identity_trust_rollup_route():
+        from app.api.handlers import get_identity_trust_rollup_handler
+        return get_identity_trust_rollup_handler()
+
+    # AG-WK3.1 (2026-06-05): Ownership Center
+    @app.get("/api/ownership/summary")
+    def ownership_summary_route():
+        from app.api.handlers import get_ownership_summary_handler
+        return get_ownership_summary_handler()
+
+    @app.get("/api/ownership/unowned")
+    def ownership_unowned_route():
+        from app.api.handlers import get_unowned_nhis_handler
+        return get_unowned_nhis_handler()
+
+    @app.get("/api/ownership/assignments")
+    def ownership_assignments_route():
+        from app.api.handlers import get_ownership_assignments_handler
+        return get_ownership_assignments_handler()
+
+    @app.post("/api/ownership/assign")
+    def ownership_assign_route():
+        from app.api.handlers import post_ownership_assign_handler
+        return post_ownership_assign_handler()
 
     # AG-T4: Threat-source partner connectors
     @app.post("/api/ai-security/threat-signals")

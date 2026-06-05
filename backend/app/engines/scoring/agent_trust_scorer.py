@@ -886,10 +886,120 @@ def _row_to_dict(row: Any, columns: list[str]) -> dict[str, Any]:
         return {}
 
 
+def compute_org_trust_rollup(cursor: Any, org_id: int,
+                              trust_below: int = 50) -> dict[str, Any]:
+    """Org-wide Identity Trust rollup across ALL non-human identities
+    (SPNs, MIs, AI agents). Used by the new Identity Trust page.
+
+    Returns:
+      {
+        total_evaluated:    int,
+        by_band: {strong, good, elevated, critical}: counts,
+        by_dim_failing: {ownership: N, secrets: N, ...},
+        below_threshold_count: int (Trust < `trust_below`),
+        threshold: int,
+        worst_identities: [top 25 by lowest Trust],
+        computed_at: ISO
+      }
+    """
+    cursor.execute("""
+        SELECT i.id, i.identity_id, i.display_name
+          FROM identities i
+         WHERE i.organization_id = %s
+           AND i.deleted_at IS NULL
+           AND i.identity_category IN
+                ('service_principal','managed_identity_system',
+                 'managed_identity_user')
+           AND NOT COALESCE(i.is_microsoft_system, false)
+    """, (org_id,))
+    # Tolerate both RealDictCursor and tuple cursor.
+    rows = cursor.fetchall()
+    if rows and isinstance(rows[0], dict):
+        meta = {r['id']: (r['identity_id'], r['display_name']) for r in rows}
+    else:
+        meta = {r[0]: (r[1], r[2]) for r in rows}
+    ids = list(meta.keys())
+    if not ids:
+        return _empty_rollup(trust_below)
+
+    results = compute_agent_trust_batch(cursor, ids)
+
+    by_band = {'strong': 0, 'good': 0, 'elevated': 0, 'critical': 0}
+    by_dim_failing: dict[str, int] = {}
+    worst: list[dict[str, Any]] = []
+    below_count = 0
+
+    for ident_id, t in results.items():
+        score = t.get('trust_score')
+        if score is None:
+            continue
+        # Map score → band (matches AgentTrustScoreCard.tsx)
+        if   score >= 80: by_band['strong']   += 1
+        elif score >= 65: by_band['good']     += 1
+        elif score >= 40: by_band['elevated'] += 1
+        else:             by_band['critical'] += 1
+        if score < trust_below:
+            below_count += 1
+
+        # Tally failing dims. FAIL/HIGH/CRITICAL/MULTI/PARTIAL are real failures.
+        # NONE is treated as "absence" — counts as failing only for shared dims
+        # (telemetry, ownership, secrets, data_access, oversight, egress,
+        # network). For AI-specific dims (model_exposure, supply_chain), NONE
+        # means "not applicable to this identity type", not a failure.
+        ai_only_dims = {'model_exposure', 'supply_chain'}
+        failing_dims = []
+        for dim_def in AGENT_TRUST_DIMENSIONS:
+            dim_name = dim_def['key']
+            dim = t.get(dim_name)
+            if isinstance(dim, dict):
+                grade = (dim.get('grade') or '').upper()
+                is_failure = grade in ('FAIL', 'HIGH', 'CRITICAL', 'MULTI', 'PARTIAL')
+                if grade == 'NONE' and dim_name not in ai_only_dims:
+                    is_failure = True
+                if is_failure:
+                    by_dim_failing[dim_name] = by_dim_failing.get(dim_name, 0) + 1
+                    failing_dims.append(dim_name)
+
+        idn, dn = meta.get(ident_id, (None, None))
+        worst.append({
+            'identity_db_id': ident_id,
+            'identity_id':    idn,
+            'display_name':   dn or idn,
+            'trust_score':    score,
+            'failing_dims':   failing_dims,
+            'failing_count':  len(failing_dims),
+        })
+
+    worst.sort(key=lambda x: (x['trust_score'], -x['failing_count']))
+    return {
+        'total_evaluated':       len([r for r in results.values()
+                                       if r.get('trust_score') is not None]),
+        'by_band':               by_band,
+        'by_dim_failing':        by_dim_failing,
+        'below_threshold_count': below_count,
+        'threshold':             trust_below,
+        'worst_identities':      worst[:25],
+        'computed_at':           datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _empty_rollup(trust_below: int) -> dict[str, Any]:
+    return {
+        'total_evaluated':       0,
+        'by_band':               {'strong': 0, 'good': 0, 'elevated': 0, 'critical': 0},
+        'by_dim_failing':        {},
+        'below_threshold_count': 0,
+        'threshold':             trust_below,
+        'worst_identities':      [],
+        'computed_at':           datetime.now(timezone.utc).isoformat(),
+    }
+
+
 __all__ = [
     "AGENT_TRUST_DIMENSIONS",
     "DEFAULTS",
     "DEFAULTS_JSON_STRING",
     "compute_agent_trust",
     "compute_agent_trust_batch",
+    "compute_org_trust_rollup",
 ]
