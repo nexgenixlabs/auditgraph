@@ -109,7 +109,7 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
   └── Ownership Center            ⭐ NEW — the SailPoint money (Gap 1)
 
 ══════════════════════════════════════════════════════════════════════════
-  IDENTITY TOPOLOGY                                   (graph-based views)
+  GRAPH INTELLIGENCE                                   (graph-based views)
 ──────────────────────────────────────────────────────────────────────────
   ├── Identity Graph              (relationships)
   ├── Access Graph                (identity → resource)
@@ -173,7 +173,7 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
 |---|---|
 | **Command Center** | Operational + executive landing. Board Scorecard moved up here because that's where CEOs look. |
 | **Identity Security** | The platform. Filter-driven: same page shows Human / NHI / AI. Each row is a per-identity job (inventory → access → trust → lifecycle → governance → ownership). |
-| **Identity Topology** | Graph-based analytical surfaces. Multi-Hop XGRAPH lives here because it's a **graph view**, not an attack surface (although it adjacents). |
+| **Graph Intelligence** | Graph-based analytical surfaces. Multi-Hop XGRAPH lives here because it's a **graph view**, not an attack surface (although it adjacents). |
 | **Attack Surface** | Cross-cutting attack analytics. Data Reachability stays here because it answers "what can the worst attacker reach", not "who owns this identity". |
 | **AI Security** | The AI **workload** layer. No identities live here — these are about models, plugins, supply chain, threat ingestion, AI-specific findings. |
 | **Argus** | Cross-cutting analyst. Promoted top-level because it answers questions across all layers. |
@@ -196,9 +196,9 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
 | `/board-scorecard` | Command Center | Board Scorecard |
 | `/identity-explorer` | Identity Security | Identity Inventory (with type tabs) |
 | `/ai-inventory` | Identity Security | Identity Inventory (?type=ai) |
-| `/access-graph` | Identity Topology | Access Graph |
-| `/identity-graph` | Identity Topology | Identity Graph |
-| `/role-mining` | Identity Topology | Role Optimization |
+| `/access-graph` | Graph Intelligence | Access Graph |
+| `/identity-graph` | Graph Intelligence | Identity Graph |
+| `/role-mining` | Graph Intelligence | Role Optimization |
 | `/ai-access` | Identity Security | Identity Access (?type=ai) |
 | `/ai-risk` | Identity Security | Identity Trust (?type=ai) |
 | `/ai-lifecycle` | Identity Security | Identity Lifecycle (?type=ai) |
@@ -212,7 +212,7 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
 | `/ai-abuse-scenarios` ⭐ NEW page | AI Security | AI Abuse Scenarios |
 | `/attack-paths` | Attack Surface | Attack Paths |
 | `/ai-risk/attack-paths` | Attack Surface | AI Attack Paths |
-| `/ai-attack-paths/multi-hop` | Identity Topology | Multi-Hop XGRAPH |
+| `/ai-attack-paths/multi-hop` | Graph Intelligence | Multi-Hop XGRAPH |
 | `/ai-access/data-reachability` | Attack Surface | Data Reachability |
 | `/attack-simulator` | Attack Surface | Attack Simulator |
 | `/argus` | Argus | Argus Analyst |
@@ -251,7 +251,7 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
 | 9 top-level sections (above) | Clear, non-overlapping, Gartner-aligned |
 | Identity Security unifies Human + NHI + AI via type filter | AI is a subtype, not a peer |
 | AI Security = workload only (no identities) | Eliminates "wait, isn't an AI agent just an SPN?" buyer question |
-| Multi-Hop XGRAPH moves to Identity Topology | It's a graph view, not just an attack surface |
+| Multi-Hop XGRAPH moves to Graph Intelligence | It's a graph view, not just an attack surface |
 
 ### C) New capabilities (6 weeks)
 
@@ -309,13 +309,15 @@ stabilizes. Total Year-1 patent budget: **$15-20k** (was $45-60k).
 
 ## 6. Sequenced 8-week plan
 
-### Week 1 — Brand + IA pivot (zero risk, fully reversible)
+### Week 1 — Brand + IA pivot (zero risk, fully reversible) — REORDERED PER PEER REVIEW v4
 
-- ✅ New brand: "Identity Security Graph"
-- ✅ New tagline: "Identity Security for the AI Era"
-- ✅ Sidebar reorg to 9 sections (label + group changes; URLs unchanged)
-- ✅ Trust Score rename in UI (Risk Score → Trust Score)
-- ✅ Marketing copy sweep removing "we detect prompt injection"
+- Day 1-2: Sidebar reorg to 9 sections (label + group changes; URLs unchanged)
+- Day 2:   Brand hierarchy (login page + nav header — logo / category / headline / sub)
+- Day 3:   Rename "Risk Score" → "Identity Trust" across UI
+- Day 4:   **Executive language pass** (moved earlier — produces more visible value than UI tweaks)
+- Day 5:   Local verify → commit → push → cloud deploy → re-bind domains → cloud smoke
+
+**Why exec language jumped to Day 4**: per reviewer, "14 AI agents" → "41 identities · 12 can access PHI · $81.6M exposure" is what makes buyers stop scrolling. More impact than further UI polish.
 
 ### Week 2 — Trust Score (universal) + Exec language
 
@@ -382,6 +384,15 @@ stabilizes. Total Year-1 patent budget: **$15-20k** (was $45-60k).
 | 8 | Patent strategy: 1 filing (Multi-Hop XGRAPH) for Year 1, defer #2 + #3 | ✅ Approved |
 | 9 | External pentest engagement ($25-40k) | ✅ Approved |
 | 10 | Week 1 execution: brand + sidebar relabel | ✅ Approved — PROCEED |
+
+## 8b. Future-merge note (2027 problem, parked here so we don't forget)
+
+Per peer review v4: **Attack Paths** + **AI Attack Paths** will eventually merge.
+Once AI agents are fully treated as another identity type, buyers will expect a
+single graph showing chains like `User → SPN → AI Agent → Database`.
+
+For now they stay separate (the AI Attack Path UI has cinematic differences).
+Refactor when the unified Identity Inventory + Trust Score model is bedded down.
 
 ## 9. Trademark filings (Week 8)
 

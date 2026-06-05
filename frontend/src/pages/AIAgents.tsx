@@ -397,18 +397,20 @@ export default function AIAgents() {
           Active card shows a colored ring; "Clear filter ×" chip lives above
           the table when any filter is active. */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-        {/* AI Agents (NHI) — clear all filters; humans section auto-collapsed */}
+        {/* AI Agents (NHI) — clear all filters; humans section auto-collapsed.
+            AG-BRAND v3: subtitle now leads with the business question ("AI
+            identities operating in your tenant") not the architect-speak count. */}
         <button
           onClick={() => { clearFilters(); setHumanSectionOpen(false); }}
           className={`rounded-lg border p-4 text-left transition hover:scale-[1.01] ${
             !roleFilter && !metricFilter && !humanSectionOpen ? 'ring-2 ring-teal-400/60' : ''
           }`}
           style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
-          title="Show all AI agents (NHI) · clear filters"
+          title="Show all AI identities in this tenant — clear filters"
         >
-          <p className="text-xs text-slate-400">AI Agents (NHI)</p>
+          <p className="text-xs text-slate-400">AI identities in tenant</p>
           <p className="text-2xl font-bold mt-1 text-teal-400">{stats.agentCount}</p>
-          <p className="text-[10px] text-slate-600 mt-0.5">click to view all</p>
+          <p className="text-[10px] text-slate-600 mt-0.5">non-human identities running AI workloads</p>
         </button>
 
         {/* AI-Privileged Humans — opens the humans section */}
@@ -418,11 +420,11 @@ export default function AIAgents() {
             humanSectionOpen ? 'ring-2 ring-violet-400/60' : ''
           }`}
           style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
-          title="Toggle the AI-Privileged Humans section"
+          title="Humans with administrative access over AI systems"
         >
-          <p className="text-xs text-slate-400">AI-Privileged Humans</p>
+          <p className="text-xs text-slate-400">Humans with AI access</p>
           <p className="text-2xl font-bold mt-1 text-violet-400">{stats.humanCount}</p>
-          <p className="text-[10px] text-slate-600 mt-0.5">{humanSectionOpen ? 'hide section' : 'click to expand'}</p>
+          <p className="text-[10px] text-slate-600 mt-0.5">can configure or deploy AI models</p>
         </button>
 
         {/* Avg Risk Score — sort table by risk_score DESC */}
@@ -432,11 +434,11 @@ export default function AIAgents() {
             sortCol === 'risk_score' && sortDir === 'desc' ? 'ring-2 ring-white/40' : ''
           }`}
           style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
-          title="Sort table by risk score (highest first)"
+          title="Sort by per-identity risk — highest first"
         >
-          <p className="text-xs text-slate-400">Avg Risk Score</p>
+          <p className="text-xs text-slate-400">Avg risk per identity</p>
           <p className="text-2xl font-bold mt-1 text-white">{stats.avgRisk}</p>
-          <p className="text-[10px] text-slate-600 mt-0.5">click to sort by risk</p>
+          <p className="text-[10px] text-slate-600 mt-0.5">sort by highest risk first</p>
         </button>
 
         {/* With Model Access — filter ?filter=model_access */}

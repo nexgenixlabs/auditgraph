@@ -330,10 +330,26 @@ export default function Login() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
             {branding?.company_name || resolvedOrg?.name || 'AuditGraph'}
           </h1>
+          {/* AG-BRAND v3: when showing the default AuditGraph brand (no tenant
+              override), display the category + headline. Hidden for tenant-
+              branded portals to keep the customer's brand front-and-center. */}
+          {!branding?.company_name && !resolvedOrg && (
+            <>
+              <p className="text-[11px] font-mono uppercase tracking-[0.2em] text-blue-600 dark:text-blue-400 mt-2">
+                Identity Security Graph™
+              </p>
+              <p className="text-base font-semibold text-gray-700 dark:text-slate-200 mt-2">
+                See Every Identity. Understand Every Risk.
+              </p>
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
+                Identity Security for the AI Era
+              </p>
+            </>
+          )}
           {resolvedOrg ? (
-            <p className="text-sm text-gray-500 mt-1">Sign in to your organization's portal</p>
+            <p className="text-sm text-gray-500 mt-4">Sign in to your organization's portal</p>
           ) : (
-            <p className="text-sm text-gray-500 mt-1">Welcome</p>
+            <p className="text-sm text-gray-500 mt-4">Sign in to continue</p>
           )}
         </div>
 

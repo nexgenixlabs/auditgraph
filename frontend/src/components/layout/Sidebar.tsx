@@ -119,65 +119,105 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
   const [openSubGroups, setOpenSubGroups] = useState<Record<string, boolean>>({});
   const navGroups: NavGroup[] = useMemo(() => {
     const groups: NavGroup[] = [
+      // ============================================================
+      // 2026-06-05 IA pivot v3 (locked after peer review v4):
+      //   Brand:    "Identity Security Graph"
+      //   Headline: "See Every Identity. Understand Every Risk."
+      //   Sub:      "Identity Security for the AI Era"
+      //   Model:    AI is a SUBTYPE of NHI, not a peer.
+      // 9-section navigation:
+      //   1. Command Center
+      //   2. Identity Security        (Human + NHI + AI via filter)
+      //   3. Graph Intelligence       (was "Identity & Access" + Multi-Hop)
+      //   4. Attack Surface
+      //   5. AI Security              (AI WORKLOAD only — no identities)
+      //   6. Argus
+      //   7. Governance & Assurance   (merged Board + Observability + Evidence)
+      //   8. Platform
+      //   9. Billing
+      // All URLs preserved — this is a label/group change only.
+      // ============================================================
       {
         label: 'Command Center',
         color: '#2563eb',
         items: [
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
+          { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
           { to: '/command-center', label: 'Command Center', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
           { to: '/drift-analysis', label: 'Drift Analysis', icon: driftIcon },
-          { to: '/security-findings', label: 'Security Findings', icon: findingsIcon },
+          { to: '/security-findings', label: 'Findings', icon: findingsIcon },
           { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
           { to: '/remediation-queue', label: 'Change Control Center', icon: remediationIcon },
         ],
       },
       {
-        // Win 1 (P1 nav consolidation): merged the 1-item "Identity Truth"
-        // section into "Access Explainability" and renamed to "Identity &
-        // Access". Win 2: items ordered broad → narrow so a new user can
-        // navigate top-to-bottom — start at the inventory list, drill into
-        // identity-to-identity relationships, then identity-to-resource
-        // access paths, then role cleanup. URLs unchanged.
-        label: 'Identity & Access',
+        // Per-identity controls. Same pages for now; "Identity Inventory"
+        // unification (one page with Human / NHI / AI tabs) lands in
+        // weeks 3-4. Today the rows are AI-prefixed because the existing
+        // pages only cover AI — but the SECTION is type-agnostic so the
+        // mental model is right from day one.
+        label: 'Identity Security',
+        color: '#8b5cf6',
+        items: [
+          { to: '/identity-explorer', label: 'Identity Inventory', icon: identityIcon },
+          { to: '/ai-inventory',      label: 'AI Inventory',       icon: agentBotIcon },
+          { to: '/ai-access',         label: 'Identity Access',    icon: effectiveAccessIcon },
+          // AG-181 (Tier 2C): J/M/L drift — will generalize to all NHI in week 5-6
+          { to: '/ai-lifecycle',      label: 'Identity Lifecycle', icon: identityIcon },
+          { to: '/ai-governance',     label: 'Identity Governance', icon: identityIcon },
+          // Identity Trust (universal Trust Score page) is built in Week 2 —
+          // until then the 9-dim score lives on the AgentTrustScoreCard in
+          // each identity drawer (see /ai-inventory).
+        ],
+      },
+      {
+        // Graph-based analytical surfaces. "Graph Intelligence" replaces
+        // "Identity Topology" per peer review v4 — execs don't use "topology".
+        label: 'Graph Intelligence',
         color: '#0891b2',
         items: [
-          { to: '/identity-explorer', label: 'Identity Explorer', icon: identityIcon },
           { to: '/identity-graph', label: 'Identity Graph', icon: identityIcon },
           { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
+          // AG-T3.1: Multi-Hop XGRAPH — moved from Attack Surface (it's a
+          // graph view first, attack surface second)
+          { to: '/ai-attack-paths/multi-hop', label: 'Multi-Hop XGRAPH', icon: roleOptIcon },
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon }] : []),
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon }] : []),
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
         ],
       },
-      // 2026-06-03 reorg: AI Security shrunk to discovery+governance; tactical
-      // attack-surface features (data reachability, attack paths) consolidated
-      // under "Attack Surface" so humans/machines/AI share one home. Argus
-      // promoted to its own top-level (spans all identity types). Board
-      // Scorecard promoted (CEO/CFO view, not buried in AI). URLs unchanged.
       {
-        label: 'AI Security',
-        color: '#8b5cf6',
+        // Cross-cutting attack analytics. Per peer review v4: Attack Paths +
+        // AI Attack Paths will eventually merge into one graph (2027 problem).
+        label: 'Attack Surface',
+        color: '#dc2626',
         items: [
-          { to: '/ai-inventory',  label: 'AI Inventory',  icon: agentBotIcon },
-          { to: '/ai-access',     label: 'AI Access',     icon: effectiveAccessIcon },
-          { to: '/ai-runtime',    label: 'AI Runtime',    icon: agentBotIcon },
-          // AG-T2.2: Model Registry — approval workflow for deployed models
-          { to: '/ai-runtime/model-registry', label: 'Model Registry', icon: agentBotIcon },
-          // AG-T3.2: AI Supply Chain — model/plugin/vector-db/external API tree
-          { to: '/ai-runtime/supply-chain',   label: 'Supply Chain',   icon: agentBotIcon },
-          // AG-T4: Threat-source partner connectors
-          { to: '/ai-runtime/threat-connectors', label: 'Threat Connectors', icon: agentBotIcon },
-          { to: '/ai-risk',       label: 'AI Risk',       icon: roleOptIcon },
-          // AG-T2.3: AI Findings catalog
-          { to: '/ai-findings',   label: 'AI Findings',   icon: roleOptIcon },
-          // AG-181 (Tier 2C): AI agent J/M/L drift
-          { to: '/ai-lifecycle', label: 'AI Lifecycle', icon: identityIcon },
-          { to: '/ai-governance', label: 'AI Governance', icon: identityIcon },
+          { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
+          { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
+          { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
+          { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
         ],
       },
       {
-        // Promoted top-level — Argus reasons across humans + machines + AI.
+        // AI WORKLOAD layer — NOT identity. Model + plugin + vector + threat
+        // signal ingestion. No "AI identities" live here (they're in Identity
+        // Security as a subtype of NHI).
+        label: 'AI Security',
+        color: '#a78bfa',
+        items: [
+          { to: '/ai-runtime', label: 'AI Runtime', icon: agentBotIcon },
+          { to: '/ai-runtime/model-registry', label: 'Model Registry', icon: agentBotIcon },
+          { to: '/ai-runtime/supply-chain', label: 'AI Supply Chain', icon: agentBotIcon },
+          { to: '/ai-runtime/threat-connectors', label: 'Threat Connectors', icon: agentBotIcon },
+          { to: '/ai-findings', label: 'AI Findings', icon: roleOptIcon },
+          // AI Abuse Scenarios (Tier 2.1) — promoted from drawer to page view.
+          // Was labeled "AI Risk"; renamed for clarity (the page IS the scenarios).
+          { to: '/ai-risk', label: 'AI Abuse Scenarios', icon: roleOptIcon },
+        ],
+      },
+      {
+        // Argus — cross-cutting analyst (humans + NHIs + AI + workload)
         label: 'Argus',
         color: '#a78bfa',
         items: [
@@ -185,50 +225,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        // Unified attack-surface home — same URLs, organized so users find
-        // every chain (human / machine / AI) in one place.
-        label: 'Attack Surface',
-        color: '#dc2626',
-        items: [
-          { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
-          // AG-178 (Tier 1A): AI Identity Attack Paths — the cinematic chain
-          { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
-          // AG-T3.1: multi-hop agent-to-agent reachability (patent territory)
-          { to: '/ai-attack-paths/multi-hop', label: 'Multi-Hop XGRAPH', icon: roleOptIcon },
-          // AG-180 (Tier 2A): data reachability — attack signal, not AI feature
-          { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
-          { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
-        ],
-      },
-      {
-        // Observability — behavior monitoring + audit + anomalies
-        label: 'Observability',
-        color: '#0ea5e9',
-        items: [
-          // AG-182 (Tier 3A): per-agent forensic timeline + baseline anomalies
-          { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: agentBotIcon },
-        ],
-      },
-      {
-        // Board — CEO/CFO/audit-committee view
-        label: 'Board',
-        color: '#f59e0b',
-        items: [
-          // AG-179 (Tier 1B): Board-ready scorecard
-          { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
-        ],
-      },
-      {
-        label: 'Evidence',
+        // Merged "Board" + "Observability" + "Evidence" → single Governance
+        // & Assurance section. Board Scorecard moved up to Command Center
+        // (where execs land). Activity Timeline + Compliance + Reports here.
+        label: 'Governance & Assurance',
         color: '#ca8a04',
         items: [
           { to: '/compliance-posture', label: 'Compliance Posture', icon: complianceIcon },
           { to: '/compliance', label: 'Compliance Evidence', icon: complianceIcon },
           { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
-          // Win 3 (P1 nav consolidation): single entry for both /reports
-          // (PDF audit reports) and /exports (CSV/JSON data dumps). The two
-          // pages share a tab strip so users can switch between them in-page.
-          // Active-state highlighting matches either route via startsWith.
+          { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: activityIcon },
           { to: '/reports', label: 'Reports & Exports', icon: reportsIcon, matchPrefixes: ['/reports', '/exports'] },
         ],
       },
