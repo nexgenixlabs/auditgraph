@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- NexgenixLabs mark — square with corner circles, X-cross, orange center dot.
+       Matches the brand identity provided 2026-06-05. -->
+  <rect width="512" height="512" rx="80" fill="#0b1220"/>
+
+  <!-- Outer perimeter square (rounded corners) -->
+  <rect x="88" y="88" width="336" height="336" rx="8" fill="none" stroke="#24A2A1" stroke-width="9"/>
+
+  <!-- X diagonals -->
+  <line x1="88"  y1="88"  x2="424" y2="424" stroke="#24A2A1" stroke-width="9" stroke-linecap="round"/>
+  <line x1="424" y1="88"  x2="88"  y2="424" stroke="#24A2A1" stroke-width="9" stroke-linecap="round"/>
+
+  <!-- Corner glow halos (subtle) -->
+  <circle cx="88"  cy="88"  r="30" fill="none" stroke="#24A2A1" stroke-width="4" opacity="0.35"/>
+  <circle cx="424" cy="88"  r="30" fill="none" stroke="#24A2A1" stroke-width="4" opacity="0.35"/>
+  <circle cx="88"  cy="424" r="30" fill="none" stroke="#24A2A1" stroke-width="4" opacity="0.35"/>
+  <circle cx="424" cy="424" r="30" fill="none" stroke="#24A2A1" stroke-width="4" opacity="0.35"/>
+
+  <!-- Corner solid nodes -->
+  <circle cx="88"  cy="88"  r="18" fill="#0e3a4a" stroke="#24A2A1" stroke-width="5"/>
+  <circle cx="424" cy="88"  r="18" fill="#0e3a4a" stroke="#24A2A1" stroke-width="5"/>
+  <circle cx="88"  cy="424" r="18" fill="#0e3a4a" stroke="#24A2A1" stroke-width="5"/>
+  <circle cx="424" cy="424" r="18" fill="#0e3a4a" stroke="#24A2A1" stroke-width="5"/>
+
+  <!-- Center orange dot — the signature -->
+  <circle cx="256" cy="256" r="20" fill="none" stroke="#ff7a1a" stroke-width="5"/>
+  <circle cx="256" cy="256" r="9"  fill="#ff7a1a"/>
+</svg>

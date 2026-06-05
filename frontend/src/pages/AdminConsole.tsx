@@ -66,9 +66,17 @@ function AdminLogin() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
-          <img src="/auditgraph_icon.png" alt="NexgenixLabs" className="w-16 h-16 object-contain rounded-2xl mb-4 mx-auto" />
+          {/* AG-BRAND (2026-06-05): admin portal is for NexgenixLabs (the
+              parent company), not AuditGraph (the product). Use the
+              NexgenixLabs mark here, NOT the AuditGraph shield. */}
+          <img src="/nexgenixlabs_icon.svg" alt="NexgenixLabs" className="w-16 h-16 object-contain mb-4 mx-auto" />
           <h1 className="text-2xl font-bold text-white">NexgenixLabs</h1>
-          <p className="text-sm text-gray-400 mt-1">Platform Administration</p>
+          <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-teal-400 mt-2">
+            Platform Administration
+          </p>
+          <p className="text-xs text-gray-500 mt-2">
+            Operator console for the AuditGraph platform
+          </p>
         </div>
 
         <div className="bg-gray-900 rounded-xl border border-gray-700 shadow-lg p-8 space-y-5">
@@ -175,7 +183,7 @@ export default function AdminConsole() {
       {/* Admin Top Bar */}
       <div className="h-14 bg-gray-900 border-b border-gray-700 flex items-center justify-between px-5 flex-shrink-0">
         <div className="flex items-center gap-3">
-          <img src="/auditgraph_icon.png" alt="NexgenixLabs" className="w-8 h-8 object-contain rounded-lg" />
+          <img src="/nexgenixlabs_icon.svg" alt="NexgenixLabs" className="w-8 h-8 object-contain" />
           <div>
             <span className="text-sm font-semibold text-white">NexgenixLabs</span>
             <span className="text-xs text-gray-400 ml-2">Admin Portal</span>

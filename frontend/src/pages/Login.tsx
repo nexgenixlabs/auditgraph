@@ -320,12 +320,13 @@ export default function Login() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
+          {/* AG-BRAND (2026-06-05): default fallback is the AuditGraph
+              shield icon, not a plain "AG" letterbox. Tenant-branded
+              portals still override with their custom logo_url. */}
           {branding?.logo_url ? (
             <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
           ) : (
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
-            </div>
+            <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
           )}
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
             {branding?.company_name || resolvedOrg?.name || 'AuditGraph'}
