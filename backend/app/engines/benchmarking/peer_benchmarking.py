@@ -216,7 +216,10 @@ def seed_synthetic_peers(db, count_per_bucket: int = 15,
     customer tenants only.
     """
     from app.database import Database
-    admin_db = Database()  # NO org_id = uses auditgraph_admin (BYPASSRLS)
+    # ADMIN_GUARD requires an explicit reason for cross-tenant access. This
+    # is correct: the synthetic seed writes rows for fictitious orgs, which
+    # legitimately must bypass tenant RLS. NOT customer data.
+    admin_db = Database(_admin_reason='peer_benchmarking_synthetic_seed_demo_only')
     try:
         return _seed_synthetic_peers_impl(admin_db, count_per_bucket,
                                            industries, size_bands)
@@ -287,7 +290,9 @@ def recompute_aggregates(db=None) -> dict[str, int]:
     from app.database import Database
     own_admin = False
     if db is None:
-        db = Database()
+        # ADMIN_GUARD: aggregator must SELECT across all orgs to compute
+        # cross-tenant percentile bands.
+        db = Database(_admin_reason='peer_benchmarking_aggregate_recompute')
         own_admin = True
     try:
         return _recompute_aggregates_impl(db)
