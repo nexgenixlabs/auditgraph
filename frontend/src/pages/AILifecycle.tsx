@@ -243,13 +243,15 @@ export default function AILifecycle(): React.ReactElement {
       {/* Header */}
       <div>
         <div className="flex items-center gap-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
-          AI Security
+          Identity Security
           <span className="text-gray-300">·</span>
           <span>Lifecycle</span>
         </div>
-        <h1 className="text-2xl font-semibold text-gray-900 mt-1">AI Agent Lifecycle</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 mt-1">Identity Lifecycle</h1>
         <p className="text-sm text-gray-600 mt-2 max-w-3xl">
-          Joiners, movers, leavers across AI agents — model changes, permission escalations, owner changes.
+          Joiners, movers, and leavers across every non-human identity — model
+          changes, permission escalations, owner changes, credential rotation.
+          AI agents are highlighted as a subtype where applicable.
         </p>
       </div>
 

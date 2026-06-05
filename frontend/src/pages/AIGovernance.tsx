@@ -308,10 +308,14 @@ export default function AIGovernance() {
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">AI Governance</h1>
-        <p className="text-sm text-slate-400 mt-1">
-          Policy compliance across {s.total_agents} AI agent{s.total_agents === 1 ? '' : 's'} —
-          derived from architecture, mapped to NIST / CIS / ISO controls
+        <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-violet-400">
+          Identity Security · Governance
+        </p>
+        <h1 className="text-2xl font-bold text-white mt-1">Identity Governance</h1>
+        <p className="text-sm text-slate-400 mt-1 max-w-3xl">
+          Policy compliance across {s.total_agents} AI agent{s.total_agents === 1 ? '' : 's'} today —
+          extending to all NHIs in Sprint 3. Derived from architecture, mapped to
+          NIST · CIS · ISO controls. No reliance on logs.
         </p>
       </div>
 

@@ -454,13 +454,11 @@ export default function AIAgents() {
             metricFilter === 'model_access' ? 'ring-2 ring-violet-400/60' : ''
           }`}
           style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
-          title="Filter table to agents with Model Access"
+          title="AI identities that can deploy, configure, or invoke models"
         >
-          <p className="text-xs text-slate-400">With Model Access</p>
+          <p className="text-xs text-slate-400">Can deploy/invoke models</p>
           <p className="text-2xl font-bold mt-1 text-violet-400">{stats.withModel}</p>
-          <p className="text-[10px] text-slate-600 mt-0.5">
-            {metricFilter === 'model_access' ? '✓ filtering · click to clear' : 'click to filter'}
-          </p>
+          <p className="text-[10px] text-slate-600 mt-0.5">model deployment scope</p>
         </button>
 
         {/* With Key Vault — filter ?filter=key_vault_access */}
@@ -476,13 +474,11 @@ export default function AIAgents() {
             metricFilter === 'key_vault_access' ? 'ring-2 ring-red-400/60' : ''
           }`}
           style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
-          title="Filter table to agents with Key Vault access"
+          title="AI identities that can read secrets from a Key Vault — credential blast radius"
         >
-          <p className="text-xs text-slate-400">With Key Vault</p>
+          <p className="text-xs text-slate-400">Can reach secrets</p>
           <p className="text-2xl font-bold mt-1 text-red-400">{stats.withKv}</p>
-          <p className="text-[10px] text-slate-600 mt-0.5">
-            {metricFilter === 'key_vault_access' ? '✓ filtering · click to clear' : 'click to filter'}
-          </p>
+          <p className="text-[10px] text-slate-600 mt-0.5">Key Vault read or admin scope</p>
         </button>
       </div>
 
@@ -493,16 +489,18 @@ export default function AIAgents() {
         </div>
       )}
 
-      {/* Section A — AI Agent Identities (NHI) */}
+      {/* Section A — AI Agent Identities (NHI subtype) */}
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-2">
           <h2 className="text-sm font-bold text-white">AI Agent Identities</h2>
           <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-teal-900/40 text-teal-300">
-            {nhiAgents.length} NHI
+            {nhiAgents.length}
           </span>
+          <span className="text-[10px] text-slate-500 font-mono">subtype of NHI</span>
         </div>
         <p className="text-[11px] text-slate-400 mb-2">
-          Machine identities operating AI services — no human accountable for their actions
+          Service principals and managed identities running AI workloads — the
+          credentials your AI is using when it talks to data, models, and external APIs.
         </p>
         <div className="rounded-lg border overflow-hidden" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}>
           <div className="overflow-x-auto">
