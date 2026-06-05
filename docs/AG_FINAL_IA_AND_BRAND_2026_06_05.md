@@ -37,17 +37,37 @@ These are about **what the AI is doing**, not **who the AI is**.
 
 ---
 
-## 2. Brand
+## 2. Brand (locked after peer review v3)
 
 | Property | Value |
 |---|---|
 | **Product** | AuditGraph |
 | **Category** | **Identity Security Graph™** |
-| **Tagline (homepage)** | **Identity Security for the AI Era** |
-| **Longer pitch** | The Identity Security Graph for Humans, NHIs, and AI |
-| **One-sentence elevator** | AuditGraph is the Identity Security Graph that continuously maps human, non-human, and AI identities to the data, permissions, and attack paths they can reach. |
+| **Primary headline** | **See Every Identity. Understand Every Risk.** |
+| **Sub-headline** | Identity Security for the AI Era |
+| **Positioning** | Identity Security Graph platform with AI-native identity intelligence |
+| **Elevator (one sentence)** | AuditGraph is the Identity Security Graph that reveals what every human, non-human, and AI identity can access, reach, and impact. |
 | **AI analyst** | Argus (unchanged) |
 | **Argus tagline** | Argus sees what your logs miss (unchanged) |
+
+### Why this hierarchy works
+
+```
+LOGO        AuditGraph
+CATEGORY    Identity Security Graph™
+HEADLINE    See Every Identity. Understand Every Risk.   ← value proposition
+SUB         Identity Security for the AI Era              ← market positioning
+```
+
+- **Headline** explains the value (what the buyer gets)
+- **Sub-headline** explains the market (why now)
+- "for the AI Era" became too generic in 2026 — every vendor uses it — so it gets demoted to support copy, not the lead
+
+### Positioning language
+
+> "Identity Security Graph platform with **AI-native identity intelligence**"
+
+NOT "AI Security Platform". This single shift expands the addressable market from ~$2B (AI security) to ~$15B (broader identity security), while keeping AI as the wedge that gets us in the door.
 
 Brand promise = **graph**. Everything in the platform IS a graph:
 - Identity Graph
@@ -83,7 +103,7 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
   Each page works for Human / NHI / AI via a type filter at the top.
   ├── Identity Inventory          unified — was Identity Explorer + AI Inventory
   ├── Identity Access             unified — was Access Graph + AI Access
-  ├── Identity Trust Score        ⭐ NEW name (was "Risk Score") — 9 dims per type
+  ├── Identity Trust        ⭐ NEW name (was "Risk Score") — 9 dims per type
   ├── Identity Lifecycle          unified — JML for Human + NHI + AI
   ├── Identity Governance         unified — policy + ownership + certification
   └── Ownership Center            ⭐ NEW — the SailPoint money (Gap 1)
@@ -180,7 +200,7 @@ Every existing page is placed. Every new capability has a slot. AI is the **wedg
 | `/identity-graph` | Identity Topology | Identity Graph |
 | `/role-mining` | Identity Topology | Role Optimization |
 | `/ai-access` | Identity Security | Identity Access (?type=ai) |
-| `/ai-risk` | Identity Security | Identity Trust Score (?type=ai) |
+| `/ai-risk` | Identity Security | Identity Trust (?type=ai) |
 | `/ai-lifecycle` | Identity Security | Identity Lifecycle (?type=ai) |
 | `/ai-governance` | Identity Security | Identity Governance (?type=ai) |
 | `/ownership-center` ⭐ NEW | Identity Security | Ownership Center |
@@ -263,9 +283,14 @@ From `AG_PROD_READINESS_PENTEST_2026_06_04.md`:
 
 | Item | Effort |
 |---|---|
-| Patent filing #1: Multi-Hop XGRAPH (Agent → Agent → Resource transitive blast radius) | $15-20k legal + 6 months |
-| Patent filing #2: Per-role last-used inference from ARM + auditLogs | $15-20k legal + 6 months |
-| Patent filing #3: Cross-cloud identity attack graph composition | $15-20k legal + 6 months |
+| **Patent filing #1: Multi-Hop XGRAPH** (Agent → Agent → Resource transitive blast radius) | $15-20k legal + 6 months — **FILE THIS ONE NOW** |
+| ~~Patent filing #2~~ (per-role last-used inference) | **DEFERRED 12 months** — feature still evolving |
+| ~~Patent filing #3~~ (cross-cloud identity attack graph) | **DEFERRED 12 months** — feature still evolving |
+
+**Updated patent strategy (per peer review v3):** Start with 1 strong filing.
+Multi-Hop XGRAPH is the most novel, most defensible piece in the platform.
+Save cash on the other two until they mature; refile when the feature surface
+stabilizes. Total Year-1 patent budget: **$15-20k** (was $45-60k).
 | External pentest (Trail of Bits / NCC Group) | $25-40k + 4-6 weeks |
 | SOC 2 Type II evidence collection | rolling, controls already exist in `compliance` table |
 | 3 design partner case studies | depends on customer pilots |
@@ -343,13 +368,24 @@ From `AG_PROD_READINESS_PENTEST_2026_06_04.md`:
 
 ---
 
-## 8. Open founder calls
+## 8. Decisions — APPROVED (peer review v3)
 
-1. **Approve "Identity Security Graph™" as category name?**
-2. **Approve "Identity Security for the AI Era" as homepage tagline?**
-3. **Approve the 9-section IA above?**
-4. **Patent budget: $45-60k (3 filings)?**
-5. **External pentest budget: $25-40k?**
-6. **Sprint 1 priority within Week 2: Trust Score surfacing first, or Exec language pass first?**
+| # | Decision | Status |
+|---|---|---|
+| 1 | Category: **Identity Security Graph™** | ✅ Approved |
+| 2 | 9-section sidebar IA | ✅ Approved |
+| 3 | AI as subtype of NHI (not peer) | ✅ Approved |
+| 4 | AI Security section = AI workload (Runtime), not identities | ✅ Approved |
+| 5 | Primary headline: "See Every Identity. Understand Every Risk." | ✅ Approved |
+| 6 | Sub-headline: "Identity Security for the AI Era" | ✅ Approved |
+| 7 | Rename "Identity Trust Score" → "Identity Trust" (UI brand) | ✅ Approved |
+| 8 | Patent strategy: 1 filing (Multi-Hop XGRAPH) for Year 1, defer #2 + #3 | ✅ Approved |
+| 9 | External pentest engagement ($25-40k) | ✅ Approved |
+| 10 | Week 1 execution: brand + sidebar relabel | ✅ Approved — PROCEED |
 
-Once you approve #1-3, I'll start Week 1 immediately — it's the lowest-risk highest-impact change (no schema changes, no URL changes, just label + grouping in the sidebar component).
+## 9. Trademark filings (Week 8)
+
+| Mark | Class | Priority |
+|---|---|---|
+| **Identity Security Graph™** | 9 (software), 42 (SaaS) | 1 — file alongside patent #1 |
+| Argus (in security context) | 9, 42 | 2 — only if conflict-clear |
