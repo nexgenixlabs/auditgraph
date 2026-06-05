@@ -11,6 +11,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../components/ToastProvider';
 
 type EffectiveStatus = 'approved' | 'pending_review' | 'rejected' | 'revoked' | 'unverified' | 'expired';
 
@@ -71,6 +72,7 @@ const RISK_STYLE: Record<string, { text: string }> = {
 
 export default function AIModelRegistry() {
   const { user } = useAuth();
+  const { addToast } = useToast();
   const [data, setData] = useState<RegistryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -102,7 +104,7 @@ export default function AIModelRegistry() {
         justification,
       }),
     });
-    if (!r.ok) { alert(`Submit failed: ${r.status}`); return; }
+    if (!r.ok) { addToast(`Submit failed: ${r.status}`, 'error'); return; }
     setActiveRow(null);
     load();
   };
@@ -116,7 +118,7 @@ export default function AIModelRegistry() {
         expires_at: expiresAt || null,
       }),
     });
-    if (!r.ok) { alert(`Decision failed: ${r.status}`); return; }
+    if (!r.ok) { addToast(`Decision failed: ${r.status}`, 'error'); return; }
     setActiveRow(null);
     load();
   };
@@ -130,7 +132,7 @@ export default function AIModelRegistry() {
         notes,
       }),
     });
-    if (!r.ok) { alert(`Revoke failed: ${r.status}`); return; }
+    if (!r.ok) { addToast(`Revoke failed: ${r.status}`, 'error'); return; }
     setActiveRow(null);
     load();
   };

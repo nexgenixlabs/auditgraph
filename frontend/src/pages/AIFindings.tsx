@@ -9,6 +9,7 @@
  *         PATCH /api/ai-security/findings/<id>/status
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useToast } from '../components/ToastProvider';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low';
 type Status = 'open' | 'acknowledged' | 'suppressed' | 'resolved';
@@ -55,6 +56,7 @@ const STATUS_STYLE: Record<Status, { text: string; bg: string; border: string }>
 };
 
 export default function AIFindings() {
+  const { addToast } = useToast();
   const [data, setData] = useState<FindingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -79,7 +81,7 @@ export default function AIFindings() {
       if (!r.ok) throw new Error(`Recompose failed: ${r.status}`);
       load();
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'Recompose failed');
+      addToast(e instanceof Error ? e.message : 'Recompose failed', 'error');
     } finally {
       setRecomposing(false);
     }
@@ -90,7 +92,7 @@ export default function AIFindings() {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: newStatus }),
     });
-    if (!r.ok) { alert(`Status update failed: ${r.status}`); return; }
+    if (!r.ok) { addToast(`Status update failed: ${r.status}`, 'error'); return; }
     setActiveFinding(null);
     load();
   };

@@ -71,6 +71,7 @@ import AISupplyChain from './pages/AISupplyChain';
 import AIThreatConnectors from './pages/AIThreatConnectors';
 import IdentityTrust from './pages/IdentityTrust';
 import OwnershipCenter from './pages/OwnershipCenter';
+import PeerBenchmarking from './pages/PeerBenchmarking';
 import AIRuntime from './pages/AIRuntime';
 import AgentActivityTimeline from './pages/AgentActivityTimeline';
 import AIRisk from './pages/AIRisk';
@@ -390,6 +391,8 @@ function AppContent() {
                   <Route path="/identity-trust" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityTrust /></ErrorBoundary>} />
                   {/* AG-WK3.1: Ownership Center */}
                   <Route path="/ownership" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><OwnershipCenter /></ErrorBoundary>} />
+                  {/* AG-WK7.A: Peer Benchmarking */}
+                  <Route path="/peer-benchmarking" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PeerBenchmarking /></ErrorBoundary>} />
                   {/* AG-182: Per-agent forensic timeline + behavior baseline */}
                   <Route path="/ai-runtime/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AgentActivityTimeline /></ErrorBoundary>} />
                   <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />

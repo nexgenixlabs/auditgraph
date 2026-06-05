@@ -231,7 +231,14 @@ def compute_abuse_scenarios_org_rollup(db, org_id: int) -> dict[str, Any]:
             'computed_at': datetime.now(timezone.utc).isoformat(),
         }
 
-    # 2) compute scenarios for each agent (O(agents) — small cohort in v1)
+    # 2) compute scenarios for each agent.
+    #
+    # AG-PROD-H3 (2026-06-05): per-agent loop remains a known N+1 hotspot.
+    # compute_abuse_scenarios does ~5 queries per agent; for 100 agents that's
+    # ~500 round trips. The supply-chain rollup (sibling function) has been
+    # fully batched. Refactoring this one requires breaking compute_abuse_scenarios
+    # into pure-data + signal-application stages so the data can be batched.
+    # Tracked as Sprint 4 work; acceptable at current demo scale (<30 agents).
     results = []
     for aid in agent_ids:
         try:

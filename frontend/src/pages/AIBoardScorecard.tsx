@@ -18,6 +18,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { BoardScorecard } from '../types/security_events';
+import { useToast } from '../components/ToastProvider';
 
 // ── KPI configuration ─────────────────────────────────────────────────────
 
@@ -85,6 +86,7 @@ function easeOutCubic(t: number): number {
 
 export default function AIBoardScorecard() {
   const navigate = useNavigate();
+  const { addToast } = useToast();
   const { withConnection, selectedConnectionId } = useConnection();
 
   const [scorecard, setScorecard]   = useState<BoardScorecard | null>(null);
@@ -210,7 +212,7 @@ export default function AIBoardScorecard() {
     // TODO: wire to utils/pdfGenerator.ts — add generateBoardPack(scorecard, history)
     // that mirrors the cover / exec-summary / KPIs / worst-10 / trend layout.
     // For now, stub until the next sprint.
-    alert('Board pack PDF — coming in next sprint');
+    addToast('Board pack PDF — coming in next sprint', 'info');
   }, []);
 
   // ── Render ────────────────────────────────────────────────────────────

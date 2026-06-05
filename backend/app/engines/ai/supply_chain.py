@@ -167,10 +167,14 @@ def get_agent_supply_chain(db, org_id: int, identity_db_id: int) -> dict[str, An
 
 
 def get_org_supply_chain_rollup(db, org_id: int) -> dict[str, Any]:
-    """Org-wide rollup: per-agent risk + worst components."""
+    """Org-wide rollup: per-agent risk + worst components.
+
+    AG-PROD-H3 (2026-06-05): batched. Was O(N) get_agent_supply_chain calls,
+    each issuing 3+ queries. Now 3 queries total regardless of N.
+    """
     cursor = db.conn.cursor()
     try:
-        # All agents that have ANY supply chain link
+        # 1) All agents with supply chain links — single query
         cursor.execute("""
             SELECT DISTINCT l.source_identity_db_id, i.identity_id, i.display_name
               FROM ai_supply_chain_links l
@@ -182,20 +186,84 @@ def get_org_supply_chain_rollup(db, org_id: int) -> dict[str, Any]:
         """, (org_id,))
         agents = [{'identity_db_id': r[0], 'identity_id': r[1], 'display_name': r[2]}
                   for r in cursor.fetchall()]
+        if not agents:
+            agent_ids = []
+        else:
+            agent_ids = [a['identity_db_id'] for a in agents]
+
+        # 2) All agent→component edges in one go
+        edges_by_agent: dict[int, list[int]] = {}
+        if agent_ids:
+            cursor.execute("""
+                SELECT source_identity_db_id, target_component_id
+                  FROM ai_supply_chain_links
+                 WHERE organization_id = %s
+                   AND source_identity_db_id = ANY(%s)
+            """, (org_id, agent_ids))
+            for r in cursor.fetchall():
+                edges_by_agent.setdefault(r[0], []).append(r[1])
+
+        # 3) Plus component→component edges (transitive deps) — one query
+        transitive_targets: dict[int, list[int]] = {}
+        cursor.execute("""
+            SELECT source_component_id, target_component_id
+              FROM ai_supply_chain_links
+             WHERE organization_id = %s
+               AND source_component_id IS NOT NULL
+        """, (org_id,))
+        for r in cursor.fetchall():
+            transitive_targets.setdefault(r[0], []).append(r[1])
+
+        # 4) All components for this org, indexed by id — one query
+        cursor.execute("""
+            SELECT id, component_kind, component_name, vendor, version,
+                   is_managed_by_customer, risk_flags, risk_score
+              FROM ai_supply_chain_components
+             WHERE organization_id = %s
+        """, (org_id,))
+        comp_by_id = {}
+        for r in cursor.fetchall():
+            comp_by_id[r[0]] = {
+                'id': r[0], 'kind': r[1], 'name': r[2], 'vendor': r[3],
+                'version': r[4], 'is_managed_by_customer': r[5],
+                'risk_flags': r[6] or [], 'risk_score': r[7] or 0,
+            }
     finally:
         cursor.close()
 
+    # Compute per-agent rollup in Python — no further SQL
     per_agent = []
+    from collections import defaultdict
     for a in agents:
-        sc = get_agent_supply_chain(db, org_id, a['identity_db_id'])
+        seed = edges_by_agent.get(a['identity_db_id'], [])
+        # BFS through transitive_targets
+        visited = set(seed)
+        frontier = list(seed)
+        while frontier:
+            next_frontier = []
+            for cid in frontier:
+                for tgt in transitive_targets.get(cid, []):
+                    if tgt not in visited:
+                        visited.add(tgt)
+                        next_frontier.append(tgt)
+            frontier = next_frontier
+        agg_score = 0
+        flag_contrib = defaultdict(int)
+        for cid in visited:
+            comp = comp_by_id.get(cid)
+            if comp:
+                agg_score = max(agg_score, comp['risk_score'])
+                for f in comp['risk_flags']:
+                    flag_contrib[f] += FLAG_WEIGHT.get(f, 5)
+        top_flags = sorted(flag_contrib.items(), key=lambda x: -x[1])[:3]
         per_agent.append({
             'identity_db_id':  a['identity_db_id'],
             'identity_id':     a['identity_id'],
             'display_name':    a['display_name'],
-            'component_count': sc['component_count'],
-            'aggregate_risk_score': sc['aggregate_risk_score'],
-            'aggregate_severity':   sc['aggregate_severity'],
-            'top_risk_flags':  sc['top_risk_flags'],
+            'component_count': len(visited),
+            'aggregate_risk_score': agg_score,
+            'aggregate_severity':   next(s for t, s in SEVERITY_THRESHOLDS if agg_score >= t),
+            'top_risk_flags':  [{'flag': f, 'contribution': c} for f, c in top_flags],
         })
     per_agent.sort(key=lambda x: -x['aggregate_risk_score'])
 

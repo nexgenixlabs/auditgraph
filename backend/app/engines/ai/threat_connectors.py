@@ -46,6 +46,98 @@ SUPPORTED_VENDORS = ('azure_content_filter', 'bedrock_guardrails',
                       'lakera_guard', 'openai_moderation', 'nemo_guardrails',
                       'custom')
 
+# AG-PROD-C6 (2026-06-05): partner webhooks often include raw user prompts +
+# AI completions. Storing these indefinitely is a GDPR/HIPAA exposure. By
+# default we strip the 'raw' field and keep only the partner's normalized
+# signal metadata (severity, score, request_id, filter type).
+#
+# Customers can opt in to full-payload retention via a per-tenant setting:
+#   settings.threat_signals_retain_partner_payloads = true
+THREAT_SIGNAL_RETAIN_RAW_SETTING = 'threat_signals_retain_partner_payloads'
+
+
+def _retain_raw(db) -> bool:
+    """Per-tenant retention setting. Defaults to FALSE (strip raw)."""
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT value FROM settings
+             WHERE key = %s
+        """, (THREAT_SIGNAL_RETAIN_RAW_SETTING,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row and row[0]:
+            return str(row[0]).lower() in ('true', '1', 'yes', 'on')
+    except Exception:
+        pass
+    return False
+
+
+def _strip_raw(evidence: dict) -> dict:
+    """Remove top-level 'raw' key from evidence dict — keeps structured
+    signal metadata (filter_type, request_id, score) intact."""
+    if not isinstance(evidence, dict):
+        return {}
+    return {k: v for k, v in evidence.items() if k != 'raw'}
+
+
+# AG-PROD-H2 (2026-06-05): HMAC verification for inbound partner webhooks.
+# Partners sign their POSTs with the shared webhook_secret stored on the
+# threat_connectors row. We verify with hmac.compare_digest (constant-time).
+def verify_webhook_signature(db, org_id: int, vendor: str,
+                              body_bytes: bytes,
+                              provided_signature: Optional[str]) -> tuple[bool, str]:
+    """Returns (ok, reason). ok=True only when:
+      - the connector has a webhook_secret configured
+      - the provided X-AG-Signature header is present
+      - HMAC-SHA256(secret, body) matches provided_signature
+
+    Returns (True, 'no_secret_configured') if no secret is set — this is
+    a soft-pass that lets customers receive signals while they're setting
+    up. Once a secret is set, signature is required.
+    """
+    if not provided_signature:
+        # Look up secret first to decide if we're in "no secret = pass" mode
+        cursor = db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT webhook_secret FROM threat_connectors
+                 WHERE organization_id = %s AND vendor = %s
+            """, (org_id, vendor))
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        if not row or not row[0]:
+            return True, 'no_secret_configured'
+        return False, 'missing_signature_header'
+
+    import hmac
+    import hashlib
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT webhook_secret FROM threat_connectors
+             WHERE organization_id = %s AND vendor = %s
+        """, (org_id, vendor))
+        row = cursor.fetchone()
+    finally:
+        cursor.close()
+    if not row or not row[0]:
+        # Signature header sent but no secret — reject (can't verify)
+        return False, 'no_secret_to_verify_against'
+
+    secret = row[0]
+    expected = hmac.new(secret.encode(), body_bytes,
+                         hashlib.sha256).hexdigest()
+    # Accept either "sha256=<hex>" or bare "<hex>"
+    actual = provided_signature
+    if actual.startswith('sha256='):
+        actual = actual[len('sha256='):]
+    if hmac.compare_digest(expected, actual):
+        return True, 'verified'
+    return False, 'signature_mismatch'
+
+
 # Catalogued signal types — same fixed catalog discipline as Findings.
 SIGNAL_TYPES = ('prompt_injection', 'jailbreak', 'data_leakage',
                 'toxic_content', 'pii_in_output', 'hallucination',
@@ -345,6 +437,14 @@ def ingest_signals(db, org_id: int, vendor: str, payload: dict) -> dict[str, Any
     except Exception as exc:
         logger.error("adapter %s failed: %s", vendor, exc, exc_info=True)
         return {'error': f'Adapter parsing failed: {exc}'}
+
+    # AG-PROD-C6 (2026-06-05): Strip raw payloads by default. Tenants that
+    # need full retention for forensic replay can opt in via the
+    # threat_signals_retain_partner_payloads setting.
+    retain = _retain_raw(db)
+    if not retain:
+        for sig in raw_signals:
+            sig['evidence'] = _strip_raw(sig.get('evidence') or {})
 
     # Resolve identity_db_id for each signal (best-effort)
     cursor = db.conn.cursor()

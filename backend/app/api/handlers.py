@@ -43252,6 +43252,64 @@ def get_agent_trust_score_handler(identity_id: str):
 
 
 # ============================================================
+# AG-WK7.A: Peer Benchmarking
+# ============================================================
+
+def get_peer_benchmarks_handler():
+    """GET /api/peer-benchmarking/snapshot
+
+    Returns this org's metrics + peer percentile bands per industry/size.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'metrics': []})
+        industry      = request.args.get('industry', 'tech')
+        org_size_band = request.args.get('size_band', 'mid_500_5000')
+        from app.engines.benchmarking.peer_benchmarking import get_org_benchmarks
+        return jsonify(get_org_benchmarks(db, org_id, industry, org_size_band))
+    except Exception as e:
+        logger.error(f"peer benchmarking failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_peer_benchmarks_seed_handler():
+    """POST /api/peer-benchmarking/seed-demo
+
+    Demo-only: seed synthetic peer snapshots so the page has comparison
+    data. Idempotent — replays the same deterministic distribution.
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    db = _db()
+    try:
+        from app.engines.benchmarking.peer_benchmarking import (
+            snapshot_org, seed_synthetic_peers, recompute_aggregates
+        )
+        # 1) snapshot the requesting org's current numbers
+        org_id = _org_id()
+        snap = snapshot_org(db, org_id,
+                             industry=request.args.get('industry', 'tech'),
+                             org_size_band=request.args.get('size_band', 'mid_500_5000'))
+        # 2) seed synthetic peer bucket
+        seed = seed_synthetic_peers(db)
+        # 3) recompute aggregates
+        agg = recompute_aggregates(db)
+        return jsonify({'snapshot': snap, 'seed': seed, 'aggregates': agg})
+    except Exception as e:
+        logger.error(f"peer benchmarking seed failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
 # AG-WK3.1: Ownership Center
 # ============================================================
 
@@ -44507,9 +44565,24 @@ def post_threat_signal_ingest_handler():
     db = _db()
     try:
         payload = request.get_json(silent=True) or {}
-        from app.engines.ai.threat_connectors import ingest_signals, SUPPORTED_VENDORS
+        from app.engines.ai.threat_connectors import (
+            ingest_signals, SUPPORTED_VENDORS, verify_webhook_signature
+        )
         if vendor not in SUPPORTED_VENDORS:
             return jsonify({'error': f'Unknown vendor. Supported: {list(SUPPORTED_VENDORS)}'}), 400
+
+        # AG-PROD-H2 (2026-06-05): HMAC signature verification when the
+        # connector has a webhook_secret configured. Soft-passes if no
+        # secret is set (lets customers receive signals while bootstrapping).
+        provided_sig = request.headers.get('X-AG-Signature')
+        body_bytes = request.get_data() or b''
+        sig_ok, sig_reason = verify_webhook_signature(
+            db, org_id, vendor, body_bytes, provided_sig)
+        if not sig_ok:
+            logger.warning("webhook signature rejected vendor=%s reason=%s",
+                            vendor, sig_reason)
+            return jsonify({'error': f'Webhook signature failed: {sig_reason}'}), 401
+
         result = ingest_signals(db, org_id, vendor, payload)
         if 'error' in result:
             return jsonify(result), 400

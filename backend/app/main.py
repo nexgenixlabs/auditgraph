@@ -874,6 +874,9 @@ def create_app():
         '/api/ai-security/threat-connectors',
         # AG-WK3.1: Ownership Center — assign is the SailPoint demo workflow.
         '/api/ownership/assign',
+        # AG-WK7.A: Peer Benchmarking demo seed (idempotent — only writes
+        # the requesting org's own snapshot + a synthetic peer bucket).
+        '/api/peer-benchmarking/seed-demo',
     })
     # Exact-path exemptions for unauthenticated auth flows.
     # These are public POST routes that must work before/without
@@ -2408,7 +2411,18 @@ def create_app():
         from app.api.handlers import get_identity_trust_rollup_handler
         return get_identity_trust_rollup_handler()
 
-    # AG-WK3.1 (2026-06-05): Ownership Center
+    # AG-WK7.A: Peer Benchmarking
+    @app.get("/api/peer-benchmarking/snapshot")
+    def peer_benchmarking_snapshot_route():
+        from app.api.handlers import get_peer_benchmarks_handler
+        return get_peer_benchmarks_handler()
+
+    @app.post("/api/peer-benchmarking/seed-demo")
+    def peer_benchmarking_seed_route():
+        from app.api.handlers import post_peer_benchmarks_seed_handler
+        return post_peer_benchmarks_seed_handler()
+
+    # AG-WK3.1: Ownership Center
     @app.get("/api/ownership/summary")
     def ownership_summary_route():
         from app.api.handlers import get_ownership_summary_handler

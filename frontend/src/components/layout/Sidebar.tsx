@@ -236,6 +236,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/compliance', label: 'Compliance Evidence', icon: complianceIcon },
           { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
           { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: activityIcon },
+          // AG-WK7.A: Peer Benchmarking — network-effect moat
+          { to: '/peer-benchmarking', label: 'Peer Benchmarking', icon: roleOptIcon },
           { to: '/reports', label: 'Reports & Exports', icon: reportsIcon, matchPrefixes: ['/reports', '/exports'] },
         ],
       },

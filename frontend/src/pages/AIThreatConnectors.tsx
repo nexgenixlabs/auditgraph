@@ -13,6 +13,7 @@
  *   POST /api/ai-security/threat-signals?vendor=<v>  (simulate ingest)
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useToast } from '../components/ToastProvider';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -59,6 +60,7 @@ const VENDOR_LABEL: Record<string, string> = {
 };
 
 export default function AIThreatConnectors() {
+  const { addToast } = useToast();
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [supported, setSupported] = useState<string[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -94,7 +96,7 @@ export default function AIThreatConnectors() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ vendor, display_name: displayName, is_enabled: true }),
     });
-    if (!r.ok) { alert(`Register failed: ${r.status}`); return; }
+    if (!r.ok) { addToast(`Register failed: ${r.status}`, 'error'); return; }
     setRegisterOpen(null);
     load();
   };
