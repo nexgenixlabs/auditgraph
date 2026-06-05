@@ -43295,10 +43295,10 @@ def post_peer_benchmarks_seed_handler():
         snap = snapshot_org(db, org_id,
                              industry=request.args.get('industry', 'tech'),
                              org_size_band=request.args.get('size_band', 'mid_500_5000'))
-        # 2) seed synthetic peer bucket
+        # 2) seed synthetic peer bucket (uses its own admin DB; bypasses RLS)
         seed = seed_synthetic_peers(db)
-        # 3) recompute aggregates
-        agg = recompute_aggregates(db)
+        # 3) recompute aggregates (admin DB — reads across orgs)
+        agg = recompute_aggregates()
         return jsonify({'snapshot': snap, 'seed': seed, 'aggregates': agg})
     except Exception as e:
         logger.error(f"peer benchmarking seed failed: {e}", exc_info=True)

@@ -207,9 +207,24 @@ def seed_synthetic_peers(db, count_per_bucket: int = 15,
     Uses a deterministic distribution per metric — no random per call —
     so the demo shows consistent numbers.
 
+    The synthetic rows belong to fictitious orgs (negative IDs). Since
+    the table has tenant RLS, we open a fresh RLS-bypass connection
+    (auditgraph_admin) for the synthetic inserts only. The caller's
+    db (with RLS) is left untouched.
+
     Real-world: this function would NEVER run. Snapshots come from
     customer tenants only.
     """
+    from app.database import Database
+    admin_db = Database()  # NO org_id = uses auditgraph_admin (BYPASSRLS)
+    try:
+        return _seed_synthetic_peers_impl(admin_db, count_per_bucket,
+                                           industries, size_bands)
+    finally:
+        admin_db.close()
+
+
+def _seed_synthetic_peers_impl(db, count_per_bucket, industries, size_bands):
     industries = industries or ['healthcare', 'financial_services', 'tech', 'retail']
     size_bands = size_bands or ['smb_under_500', 'mid_500_5000', 'ent_5000_50000']
 
@@ -261,10 +276,27 @@ def seed_synthetic_peers(db, count_per_bucket: int = 15,
         cursor.close()
 
 
-def recompute_aggregates(db) -> dict[str, int]:
+def recompute_aggregates(db=None) -> dict[str, int]:
     """Roll up snapshots → aggregates with percentiles per (industry,
     size_band, metric, snapshot_date). n<10 buckets are skipped.
+
+    Aggregates table has no RLS (public read), but the SELECT FROM
+    snapshots needs to see across all orgs — so we use an admin
+    connection unconditionally.
     """
+    from app.database import Database
+    own_admin = False
+    if db is None:
+        db = Database()
+        own_admin = True
+    try:
+        return _recompute_aggregates_impl(db)
+    finally:
+        if own_admin:
+            db.close()
+
+
+def _recompute_aggregates_impl(db):
     cursor = db.conn.cursor()
     try:
         cursor.execute("""
