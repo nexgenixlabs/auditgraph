@@ -264,7 +264,10 @@ export function AgentTrustScoreCard({ identityId, compact = false }: Props) {
 
     fetch(withConnection(`/api/ai-security/trust-score/${encodeURIComponent(identityId)}`))
       .then(async (r) => {
-        if (r.status === 404) {
+        // AG-FIX(2026-06-05): 400 = "Not an AI agent" (consistent with backend's
+        // explicit error). Both 404 (identity missing) and 400 (identity exists
+        // but isn't AI-classified) collapse to the friendly notAgent state.
+        if (r.status === 404 || r.status === 400) {
           if (!cancelled) {
             setState({ loading: false, notAgent: true, error: null, data: null, displayName: null });
           }

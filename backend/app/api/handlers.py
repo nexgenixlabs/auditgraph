@@ -43210,9 +43210,15 @@ def get_agent_trust_score_handler(identity_id: str):
         if not run_ids:
             return jsonify({'error': 'No discovery runs yet'}), 404
 
+        # AG-FIX(2026-06-05): use agent_classifications (authoritative) with fallback
+        # to the denormalized identities.agent_identity_type column. The former is
+        # populated by the runtime classifier on every discovery; the latter is set
+        # only by some discovery paths and is stale for ~80% of demo agents.
         cursor.execute("""
-            SELECT i.id, i.identity_id, i.display_name, i.agent_identity_type
+            SELECT i.id, i.identity_id, i.display_name,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
             FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
             WHERE i.identity_id = %s
               AND i.organization_id = %s
               AND i.discovery_run_id = ANY(%s)
@@ -43221,7 +43227,7 @@ def get_agent_trust_score_handler(identity_id: str):
         row = cursor.fetchone()
         if not row:
             return jsonify({'error': 'Identity not found'}), 404
-        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent'):
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
             return jsonify({'error': 'Not an AI agent'}), 400
 
         from app.engines.scoring.agent_trust_scorer import compute_agent_trust
@@ -43821,17 +43827,20 @@ def get_ai_agent_data_reachability_handler(identity_id: str):
         if not run_ids:
             return jsonify({'by_classification': [], 'total_resources': 0, 'total_records': 0})
 
+        # AG-FIX(2026-06-05): prefer agent_classifications, fallback to identities col.
         cursor.execute("""
-            SELECT id, identity_id, display_name, agent_identity_type
-            FROM identities
-            WHERE identity_id = %s AND organization_id = %s
-              AND discovery_run_id = ANY(%s)
-            ORDER BY discovery_run_id DESC LIMIT 1
+            SELECT i.id, i.identity_id, i.display_name,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
         """, (identity_id, _org_id(), run_ids))
         row = cursor.fetchone()
         if not row:
             return jsonify({'error': 'Identity not found'}), 404
-        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent'):
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
             return jsonify({'error': 'Not an AI agent'}), 400
 
         from app.engines.ai.data_reachability_engine import get_agent_data_reachability
@@ -44115,11 +44124,15 @@ def get_ai_agent_abuse_scenarios_handler(identity_id: str):
         if not run_ids:
             return jsonify({'error': 'No discovery runs yet'}), 404
 
+        # AG-FIX(2026-06-05): prefer agent_classifications, fallback to identities col.
         cursor.execute("""
-            SELECT id, agent_identity_type FROM identities
-            WHERE identity_id = %s AND organization_id = %s
-              AND discovery_run_id = ANY(%s)
-            ORDER BY discovery_run_id DESC LIMIT 1
+            SELECT i.id,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
         """, (identity_id, org_id, run_ids))
         row = cursor.fetchone()
         cursor.close()
@@ -44472,10 +44485,14 @@ def get_agent_supply_chain_handler(identity_id: str):
         if not run_ids:
             return jsonify({'error': 'No discovery runs'}), 404
         cursor.execute("""
-            SELECT id, agent_identity_type FROM identities
-            WHERE identity_id = %s AND organization_id = %s
-              AND discovery_run_id = ANY(%s)
-            ORDER BY discovery_run_id DESC LIMIT 1
+            -- AG-FIX(2026-06-05): prefer agent_classifications, fallback to identities col.
+            SELECT i.id,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
         """, (identity_id, org_id, run_ids))
         row = cursor.fetchone()
         cursor.close()
