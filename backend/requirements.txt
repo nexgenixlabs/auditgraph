@@ -19,7 +19,7 @@ azure-mgmt-resourcegraph>=8.0.0
 # Phase 2.1: Cognitive Services / Azure OpenAI deployment discovery —
 # enables "which model does this AI agent use" derived from architecture (no logs)
 azure-mgmt-cognitiveservices>=13.5.0
-azure-keyvault-secrets>=4.7.0
+azure-keyvault-secrets>=4.11.0
 azure-keyvault-keys>=4.8.0
 azure-keyvault-certificates>=4.7.0
 boto3>=1.34.0
