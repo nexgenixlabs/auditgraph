@@ -190,9 +190,7 @@ export default function Login() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-lg px-4">
           <div className="text-center mb-6">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              AG
-            </div>
+            <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Select Organization</h1>
             <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Choose which organization to access</p>
           </div>
@@ -248,9 +246,7 @@ export default function Login() {
             {branding?.logo_url ? (
               <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
             ) : (
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-                {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
-              </div>
+              <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
             )}
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Set New Password</h1>
             <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Your administrator requires you to set a new password</p>
@@ -320,20 +316,37 @@ export default function Login() {
       <div className="w-full max-w-md px-4">
         {/* Brand */}
         <div className="text-center mb-8">
+          {/* AG-BRAND (2026-06-05): default fallback is the AuditGraph
+              shield icon, not a plain "AG" letterbox. Tenant-branded
+              portals still override with their custom logo_url. */}
           {branding?.logo_url ? (
             <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
           ) : (
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
-            </div>
+            <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
           )}
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
             {branding?.company_name || resolvedOrg?.name || 'AuditGraph'}
           </h1>
+          {/* AG-BRAND v3: when showing the default AuditGraph brand (no tenant
+              override), display the category + headline. Hidden for tenant-
+              branded portals to keep the customer's brand front-and-center. */}
+          {!branding?.company_name && !resolvedOrg && (
+            <>
+              <p className="text-[11px] font-mono uppercase tracking-[0.2em] text-blue-600 dark:text-blue-400 mt-2">
+                Identity Security Graph™
+              </p>
+              <p className="text-base font-semibold text-gray-700 dark:text-slate-200 mt-2">
+                See Every Identity. Understand Every Risk.
+              </p>
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
+                Identity Security for the AI Era
+              </p>
+            </>
+          )}
           {resolvedOrg ? (
-            <p className="text-sm text-gray-500 mt-1">Sign in to your organization's portal</p>
+            <p className="text-sm text-gray-500 mt-4">Sign in to your organization's portal</p>
           ) : (
-            <p className="text-sm text-gray-500 mt-1">Welcome</p>
+            <p className="text-sm text-gray-500 mt-4">Sign in to continue</p>
           )}
         </div>
 
@@ -472,6 +485,14 @@ export default function Login() {
           <button onClick={() => navigate('/signup')} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
             Sign up free
           </button>
+        </div>
+
+        <div className="flex items-center justify-center gap-4 mt-4 text-[11px] text-gray-400">
+          <a href="/trust" className="hover:text-gray-600 dark:hover:text-gray-200 transition">Trust</a>
+          <span className="text-gray-300 dark:text-gray-700">·</span>
+          <a href="/privacy" className="hover:text-gray-600 dark:hover:text-gray-200 transition">Privacy</a>
+          <span className="text-gray-300 dark:text-gray-700">·</span>
+          <a href="/terms" className="hover:text-gray-600 dark:hover:text-gray-200 transition">Terms</a>
         </div>
 
         <p className="text-center text-xs text-gray-400 mt-3">

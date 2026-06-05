@@ -74,6 +74,24 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
     items.push({ text: 'No material business risk detected', level: 'green', nav: null });
   }
 
+  // AG-T1.1 / AG-T1.5: 3-scope dollar exposure — sourced from
+  // breach_cost_factors, computed server-side, never hardcoded.
+  // Three scopes (total / ai_reachable / nhi_reachable) so the board
+  // sees WHO can touch the data, not just the bare total.
+  const bi2 = bi as {
+    estimated_exposure?: {
+      low_display: string; mid_display: string; high_display: string;
+      classified_resource_count?: number; total_records: number;
+    };
+    exposure_by_scope?: {
+      total?:         { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
+      ai_reachable?:  { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
+      nhi_reachable?: { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
+    };
+  };
+  const headline = bi2.estimated_exposure;
+  const scopes = bi2.exposure_by_scope;
+
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0"
          title="Business-level risks from identity exposures">
@@ -89,6 +107,44 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
           return item.nav ? <DN key={i} navigateTo={item.nav}>{inner}</DN> : inner;
         })}
       </div>
+      {headline ? (
+        <DN navigateTo="/ai-access/data-reachability">
+          <div className="mt-2 pt-2 border-t border-white/5 cursor-pointer hover:opacity-90 transition"
+               title={`Total classified-data breach exposure across the tenant (${(headline.total_records || 0).toLocaleString()} records). Range = IBM 2023 industry low/high; mid is the headline. Each scope shows how much of this is reachable by AI agents specifically and by any non-human identity (SPN / MI / AI).`}>
+            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
+              Estimated breach exposure · org-wide
+            </p>
+            <p className="text-base font-bold font-mono text-rose-400 mt-0.5">
+              {headline.mid_display}
+            </p>
+            <p className="text-[10px] font-mono text-gray-500">
+              {headline.low_display} – {headline.high_display}
+            </p>
+            {scopes && (scopes.ai_reachable || scopes.nhi_reachable) ? (
+              <div className="mt-2 pt-1.5 border-t border-white/5 space-y-1">
+                {scopes.ai_reachable ? (
+                  <div className="flex items-center justify-between gap-2"
+                       title="Estimated breach exposure for data that AI agents have RBAC reach to. This is the AI-ISPM blast radius under prompt-injection or AI-credential compromise.">
+                    <span className="text-[10px] text-violet-300 font-medium">AI-reachable</span>
+                    <span className="text-[11px] font-bold font-mono text-violet-300">
+                      {scopes.ai_reachable.mid_display}
+                    </span>
+                  </div>
+                ) : null}
+                {scopes.nhi_reachable ? (
+                  <div className="flex items-center justify-between gap-2"
+                       title="Estimated breach exposure for data that any non-human identity (service principal, managed identity, AI agent) can reach via RBAC.">
+                    <span className="text-[10px] text-amber-300 font-medium">NHI-reachable</span>
+                    <span className="text-[11px] font-bold font-mono text-amber-300">
+                      {scopes.nhi_reachable.mid_display}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </DN>
+      ) : null}
     </div>
   );
 }

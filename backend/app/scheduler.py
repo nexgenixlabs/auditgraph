@@ -1130,6 +1130,60 @@ def _send_change_notification_if_needed(db_org_id: int = None):
         # Phase 89: Run resource anomaly detection
         _run_resource_anomaly_detection(current_run_id, previous_run_id, db)
 
+        # AG-86: Refresh Shadow App verdicts (per-org allowlist comparison).
+        # Cheap UPDATE-only pass; safe to run after every discovery.
+        try:
+            from app.engines.shadow_app_detector import refresh_shadow_verdicts
+            org_id = getattr(db, '_organization_id', None)
+            if org_id:
+                shadow_counts = refresh_shadow_verdicts(db, current_run_id, org_id)
+                logger.info(
+                    "[AG-86] Shadow verdicts refreshed: %s for run #%s",
+                    shadow_counts, current_run_id,
+                )
+        except Exception as _sa_err:
+            logger.warning("[AG-86] Shadow verdict refresh failed: %s", _sa_err)
+
+        # AG-180 (Tier 2A): Refresh Data Reachability rollup per AI agent.
+        # AG-181 (Tier 2C): AI Lifecycle event detection (J/M/L + drift).
+        # AG-182 (Tier 3A): Refresh behavior baselines + run anomaly detection.
+        # All three are graceful no-ops when there are no AI agents / no events.
+        try:
+            org_id = getattr(db, '_organization_id', None)
+            if org_id:
+                # T2A: classify any new resources first, then compute reachability
+                from app.engines.ai.data_reachability_engine import (
+                    classify_undiscovered_resources,
+                    refresh_data_reachability,
+                )
+                classified = classify_undiscovered_resources(db, current_run_id, org_id)
+                logger.info("[AG-180] Auto-classified %d new resources for run #%s",
+                            classified, current_run_id)
+                dr_result = refresh_data_reachability(db, current_run_id, org_id)
+                logger.info("[AG-180] Data reachability: %s for run #%s",
+                            dr_result, current_run_id)
+
+                # T2C: lifecycle event detection comparing current vs previous run
+                from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+                lifecycle = AILifecycleEngine(db)
+                events = lifecycle.analyze(current_run_id, previous_run_id, org_id)
+                logger.info("[AG-181] AI lifecycle: %d events written for run #%s",
+                            len(events) if events else 0, current_run_id)
+
+                # T3A: behavior baseline refresh + anomaly detection
+                from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+                behavior = AgentBehaviorEngine(db)
+                baseline_result = behavior.refresh_baselines(org_id, window_days=14)
+                logger.info("[AG-182] Baselines: %s for run #%s",
+                            baseline_result, current_run_id)
+                anomalies = behavior.detect_anomalies(org_id, lookback_hours=24)
+                if anomalies:
+                    logger.info("[AG-182] %d behavior anomalies detected for run #%s",
+                                len(anomalies), current_run_id)
+        except Exception as _aiag_err:
+            logger.warning("[AIAG-T2T3] Tier 2/3 engine refresh failed: %s", _aiag_err)
+            logger.exception(_aiag_err)
+
         # ── Tiered Parallel Post-Processing ─────────────────────────
         # Jobs grouped by dependency.  Within each tier, jobs run
         # concurrently in a ThreadPoolExecutor with per-job DB
@@ -4841,6 +4895,74 @@ def mark_overdue_invoices():
         db.close()
 
 
+def expire_ai_governance_exceptions_job():
+    """Transition any approved AI governance exception whose expires_at has
+    passed into 'expired' status.
+
+    Per-org loop so we can write an activity_log row per tenant (auditors care
+    when a risk-accepted exception lapses — the policy is back in violation as
+    of NOW). Runs daily at 02:30 UTC.
+    """
+    from psycopg2.extras import RealDictCursor
+    logger.info("Checking for AI governance exceptions past expiry...")
+    admin_db = Database()
+    try:
+        cursor = admin_db.conn.cursor(cursor_factory=RealDictCursor)
+        # Snapshot rows that will be expired so we can log per-org transitions
+        # BEFORE the bulk UPDATE flips them. Using the admin connection because
+        # we cross organizations.
+        cursor.execute("""
+            SELECT id, organization_id, identity_id, policy_id
+              FROM ai_governance_exceptions
+             WHERE status = 'approved'
+               AND expires_at <= NOW()
+        """)
+        about_to_expire = cursor.fetchall()
+        cursor.close()
+
+        if not about_to_expire:
+            logger.info("No AI governance exceptions to expire")
+            return
+
+        # Bulk update via the admin connection. Returns the number of rows
+        # transitioned for the scheduler log line.
+        total = admin_db.expire_overdue_ai_governance_exceptions(org_id=None)
+        logger.info(f"Expired {total} AI governance exception(s)")
+
+        # Log per-org so each tenant's activity log captures the transitions.
+        # Group rows by org_id and emit a single activity_log row per org.
+        by_org: Dict = {}
+        for r in about_to_expire:
+            by_org.setdefault(r['organization_id'], []).append(r)
+        for org_id, rows in by_org.items():
+            try:
+                tdb = Database(organization_id=org_id)
+                try:
+                    tdb.log_activity(
+                        'ai_governance_exception_expired',
+                        f"{len(rows)} exception(s) expired",
+                        {
+                            'count': len(rows),
+                            'exceptions': [
+                                {'exception_id': r['id'],
+                                 'identity_id': r['identity_id'],
+                                 'policy_id': r['policy_id']}
+                                for r in rows
+                            ],
+                        },
+                        user_id=None,
+                        organization_id=org_id,
+                    )
+                finally:
+                    tdb.close()
+            except Exception as e:
+                logger.warning(f"Failed to log expiry transitions for org {org_id}: {e}")
+    except Exception as e:
+        logger.error(f"AI governance exception expiry sweep failed: {e}")
+    finally:
+        admin_db.close()
+
+
 def run_monthly_billing_snapshots():
     """Phase 3B: Generate billing snapshots for all active organizations.
     Runs on the 1st of each month at 04:00 UTC, snapshotting the previous month."""
@@ -5044,6 +5166,19 @@ def start_scheduler():
         trigger=CronTrigger(hour=2, minute=0, timezone="UTC"),
         id='mark_overdue_invoices',
         name='Invoice Auto-Overdue (Daily, 02:00 UTC)',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # AI governance exception expiry sweep — daily at 02:30 UTC.
+    # Picks up between the invoice sweep and the RLS audit so the daily
+    # 02:00-04:30 maintenance band stays cohesive.
+    scheduler.add_job(
+        func=expire_ai_governance_exceptions_job,
+        trigger=CronTrigger(hour=2, minute=30, timezone="UTC"),
+        id='expire_ai_governance_exceptions',
+        name='AI Governance Exception Expiry (Daily, 02:30 UTC)',
         replace_existing=True,
         max_instances=1,
         coalesce=True

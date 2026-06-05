@@ -131,6 +131,11 @@ from app.api.handlers import (
     resolve_anomaly_handler,
     get_identity_anomalies_handler,
     get_dashboard_anomalies,
+    get_dashboard_jml_snapshot,
+    list_consent_grants_handler,
+    get_vercel_scenario_grants_handler,
+    get_consent_scenarios_handler,
+    get_dashboard_connected_app_risk,
     get_trends_velocity,
     get_identity_risk_history,
     get_batch_risk_history,
@@ -159,6 +164,7 @@ from app.api.handlers import (
     get_cross_org_trends,
     get_login_sessions,
     get_onboarding_status,
+    get_onboarding_first_finding,
     test_azure_connection,
     simulate_risk,
     get_organization_by_slug_public,
@@ -195,6 +201,13 @@ from app.api.handlers import (
     get_spn_list,
     get_spn_detail,
     get_identity_lineage,
+    get_identity_federated_credentials,
+    list_approved_apps_handler,
+    add_approved_app_handler,
+    delete_approved_app_handler,
+    list_shadow_apps_handler,
+    shadow_apps_stats_handler,
+    approve_shadow_app_handler,
     get_spn_lineage,
     get_storage_stats,
     validate_org_isolation,
@@ -490,6 +503,22 @@ from app.api.handlers import (
     delete_agent_delegation,
     get_agent_risk_summary,
     get_agent_evidence,
+    get_ai_agents_enriched,
+    get_ai_agent_investigate,
+    get_ai_agents_permissions,
+    get_ai_security_stats,
+    get_ai_permissions_overview,
+    get_ai_inventory_graph,  # AG-163: AI Inventory clustered graph
+    get_ai_agent_actual_access,  # AG-167: Actual endpoint reach (AI Runtime Phase 1)
+    get_ai_governance,  # AI Governance pillar — policy compliance
+    # AI Governance exception workflow — risk-accepted policy waivers
+    list_ai_governance_exceptions_handler,
+    create_ai_governance_exception_handler,
+    approve_ai_governance_exception_handler,
+    reject_ai_governance_exception_handler,
+    revoke_ai_governance_exception_handler,
+    get_ai_risk_scenarios,  # AI Risk pillar — attack scenarios
+    get_ai_runtime_fleet,  # AI Runtime pillar — fleet view
     admin_restart_workers,
     # Phase 8: Graph Attack Findings & Identity Risk Scores
     get_graph_attack_findings_handler,
@@ -541,6 +570,8 @@ from app.api.handlers import (
     list_invitations_handler,
     create_invitation_handler,
     revoke_invitation_handler,
+    get_org_admin_settings_handler,
+    update_org_admin_settings_handler,
     validate_invitation_handler,
     accept_invitation_handler,
     # Phase 2A: Entra Group Scanner
@@ -744,20 +775,59 @@ def create_app():
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB request size limit
 
-    allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-    if not allowed_origins:
+    # AG-96 CORS hardening:
+    #   1. Validate every ALLOWED_ORIGINS entry at startup. Wildcards (*) are
+    #      always rejected when combined with supports_credentials=True
+    #      (browsers reject this anyway, but we fail-fast so the error is
+    #      obvious instead of intermittent CORS failures at request time).
+    #      Production requires https:// scheme; localhost http:// is allowed
+    #      for dev.
+    #   2. Remove X-API-Key and X-Organization-Id from CORS allow_headers.
+    #      X-API-Key is for server-to-server use (CLI, CI, integrations) and
+    #      has no business in a browser CORS preflight — browsers shouldn't
+    #      be sending API keys anyway. X-Organization-Id is a superadmin
+    #      tenant-switch header that only the admin portal sends from the
+    #      SAME origin; cross-origin requests have no reason to override
+    #      tenant context.
+    from urllib.parse import urlparse as _urlparse
+    _IS_PROD = (os.getenv('APP_ENV', '').lower() == 'production'
+                or os.getenv('FLASK_ENV', '').lower() == 'production')
+    allowed_origins_raw = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    if not allowed_origins_raw:
         raise RuntimeError(
             "ALLOWED_ORIGINS env var is required and must not be empty. "
             "Example: ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173"
         )
+    allowed_origins: list[str] = []
+    for _o in allowed_origins_raw:
+        if _o == '*':
+            raise RuntimeError(
+                "ALLOWED_ORIGINS contains '*' which is incompatible with "
+                "supports_credentials=True. Specify explicit origins."
+            )
+        _p = _urlparse(_o)
+        if _p.scheme not in ('http', 'https') or not _p.netloc:
+            raise RuntimeError(f"ALLOWED_ORIGINS entry is not a valid URL: {_o!r}")
+        if _IS_PROD and _p.scheme != 'https':
+            raise RuntimeError(
+                f"ALLOWED_ORIGINS entry must use https:// in production: {_o!r}"
+            )
+        # Strip any trailing slash so Flask-CORS string comparison matches
+        # the browser's Origin header (no trailing slash).
+        allowed_origins.append(_o.rstrip('/'))
+
     CORS(app, resources={r"/*": {
         "origins": allowed_origins,
+        # AG-96: X-API-Key + X-Organization-Id removed — server-to-server /
+        # admin-portal-same-origin only. Browsers cross-origin should not
+        # send these. Idempotency-Key + X-CSRF-Token remain since they're
+        # legitimate browser-issued headers.
         "allow_headers": ["Content-Type", "Authorization", "X-Portal-Context",
-                          "X-Organization-Id", "X-API-Key", "Idempotency-Key",
-                          "X-CSRF-Token", "X-Tenant-ID"],
+                          "Idempotency-Key", "X-CSRF-Token", "X-Tenant-ID"],
         "expose_headers": ["Content-Type", "X-Idempotency-Key", "X-Idempotent-Replayed", "X-Export-Total-Count"],
         "supports_credentials": True,
     }})
+    logger.info("[CORS] allowed_origins=%s prod=%s", allowed_origins, _IS_PROD)
 
     # Authentication middleware (Phase 31)
     app.before_request(auth_middleware)
@@ -772,6 +842,10 @@ def create_app():
         '/api/risk-rules/preview',               # Preview rule match count
         '/api/security/risk-simulation',         # What-if risk simulation
         '/api/security/copilot-query',           # AI copilot (read + activity log)
+        '/api/argus/nl-query',                   # AG-185 Argus L1 NL query (read-only)
+        '/api/argus/investigate-attack-path',    # AG-187 Argus L3 (read-only)
+        '/api/argus/reason',                     # AG-186 Argus L2 (cache write is internal optimization)
+        '/api/argus/what-if/role-removal',       # AG-190 Argus L6 (read-only projection, never mutates roles)
         '/api/attack-paths/analyze',             # Attack path computation
         '/api/graph-attack/analyze',             # Graph attack analysis
         '/api/ai/explain-attack-path',           # AI explanation (stateless)
@@ -786,6 +860,23 @@ def create_app():
         '/api/settings/test-email',              # Send test email (no mutation)
         '/api/settings/test-connection',         # Test connection (read-only)
         '/api/settings/sso/parse-metadata',      # Parse IdP metadata (read-only)
+        # AG-T2.2: Model Registry workflow — genuine mutations BUT scoped
+        # to the org's own ai_model_approvals rows. Required for the demo
+        # to exercise the approval workflow.
+        '/api/ai-security/model-registry/submit',
+        '/api/ai-security/model-registry/decide',
+        '/api/ai-security/model-registry/revoke',
+        # AG-T2.3: Findings catalog — recompose is idempotent (re-runs detectors).
+        '/api/ai-security/findings/recompose',
+        # AG-T4: Threat-source partner connectors — ingest + upsert are the
+        # demo workflow; both scoped to the demo's own org.
+        '/api/ai-security/threat-signals',
+        '/api/ai-security/threat-connectors',
+        # AG-WK3.1: Ownership Center — assign is the SailPoint demo workflow.
+        '/api/ownership/assign',
+        # AG-WK7.A: Peer Benchmarking demo seed (idempotent — only writes
+        # the requesting org's own snapshot + a synthetic peer bucket).
+        '/api/peer-benchmarking/seed-demo',
     })
     # Exact-path exemptions for unauthenticated auth flows.
     # These are public POST routes that must work before/without
@@ -830,6 +921,16 @@ def create_app():
 
         # Skip read-like POST endpoints (exact match)
         if request.method == 'POST' and path in DEMO_GUARD_READ_LIKE_POSTS:
+            return None
+
+        # AG-T2.3: PATCH on AI Findings status — wildcard match on the
+        # finding_id path segment. Status update is part of the demo
+        # workflow (acknowledge / suppress / resolve / reopen) and only
+        # affects rows in the demo's own org via the handler's org-scoped
+        # WHERE clause.
+        if (request.method == 'PATCH'
+                and path.startswith('/api/ai-security/findings/')
+                and path.endswith('/status')):
             return None
 
         # Skip simulate endpoints with dynamic identity_id segments
@@ -1076,6 +1177,7 @@ def create_app():
             ('deleted_at_column', lambda: _db_init.ensure_deleted_at_column()),
             ('identity_lineage_columns', lambda: _db_init.ensure_identity_lineage_columns()),
             ('last_activity_columns', lambda: _db_init.ensure_last_activity_columns()),
+            ('nhi_human_columns', lambda: _db_init.ensure_nhi_human_columns()),
             ('spn_exposure', lambda: _db_init._ensure_spn_exposure()),
             ('app_reg_exposure', lambda: _db_init._ensure_app_reg_exposure()),
             ('workload_telemetry', lambda: _db_init._ensure_workload_telemetry_tables()),
@@ -1105,6 +1207,8 @@ def create_app():
             ('copilot', lambda: _db_init._ensure_copilot_tables()),
             ('ai_audit_log', lambda: _db_init._ensure_ai_audit_log_table()),
             ('sa_attestations', lambda: _db_init._ensure_sa_attestations_table()),
+            ('ai_governance_exceptions', lambda: _db_init._ensure_ai_governance_exceptions_table()),
+            ('consent_grants', lambda: _db_init._ensure_consent_grants_table()),
             ('governance_decisions', lambda: _db_init._ensure_governance_decisions_table()),
             ('billing_events', lambda: _db_init._ensure_billing_events_table()),
             ('app_registrations', lambda: _db_init._ensure_app_registrations_table()),
@@ -1115,6 +1219,23 @@ def create_app():
             ('keyvault_metadata', lambda: _db_init._ensure_keyvault_metadata_table()),
             ('role_assignment_group_cols', lambda: _db_init._ensure_role_assignment_group_cols()),
             ('snapshot_timing_cols', lambda: _ensure_snapshot_timing_cols(_db_init)),
+            # Lazy-only tables: created here (admin) so the first tenant-scoped
+            # request (app user, no CREATE on schema public) finds them already
+            # present — CREATE IF NOT EXISTS then skips instead of erroring with
+            # "permission denied for schema public". (Placed after organizations
+            # so FK references resolve.)
+            ('invoices', lambda: _db_init._ensure_invoices_table()),
+            ('platform_settings', lambda: _db_init._ensure_platform_settings_table()),
+            ('platform_ops', lambda: _db_init._ensure_platform_ops_tables()),
+            ('invitations', lambda: _db_init._ensure_invitations_table()),
+            ('connector_permissions', lambda: _db_init._ensure_connector_permissions_table()),
+            ('generated_remediations', lambda: _db_init._ensure_generated_remediations_table()),
+            ('identity_exposures', lambda: _db_init._ensure_identity_exposures_table()),
+            ('risk_summary', lambda: _db_init._ensure_risk_summary_table()),
+            ('access_review_tables', lambda: _db_init._ensure_access_review_tables()),
+            ('discovery_stage_log', lambda: _db_init._ensure_discovery_stage_log_table()),
+            ('agirs_scores', lambda: _db_init._ensure_agirs_scores_table()),
+            ('schema_migrations', lambda: _db_init._ensure_schema_migrations_table()),
         ]
 
         for label, op in _startup_ops:
@@ -1622,8 +1743,14 @@ def create_app():
     # -----------------------
     # Authentication (Phase 31)
     # -----------------------
+    # AG-LOGIN-RATE: per-IP login throttle. Production stays tight (5/min) to
+    # blunt credential-stuffing. Local dev is looser (30/min) because the
+    # devtools auto-retry + multi-tab pattern shares one IP with the human
+    # and burns through the prod-tight quota in seconds.
+    _LOGIN_RPM = 30 if os.getenv('APP_ENV', 'local') in ('local', 'dev') else 5
+
     @app.post("/api/auth/login")
-    @rate_limit(max_requests=5, window_seconds=60)   # 5 attempts/min per IP
+    @rate_limit(max_requests=_LOGIN_RPM, window_seconds=60)
     @validate_json(LOGIN_SCHEMA)
     def login():
         return auth_login()
@@ -2048,6 +2175,327 @@ def create_app():
     def agent_evidence_route(identity_id):
         return get_agent_evidence(identity_id)
 
+    # ── MVP-1: AI Identity Governance — Enriched Endpoints ──
+    @app.get("/api/ai-agents/enriched")
+    def ai_agents_enriched_route():
+        return get_ai_agents_enriched()
+
+    @app.get("/api/ai-agents/<identity_id>/investigate")
+    def ai_agent_investigate_route(identity_id):
+        return get_ai_agent_investigate(identity_id)
+
+    @app.get("/api/ai-agents/<identity_id>/permissions")
+    def ai_agents_permissions_route(identity_id):
+        return get_ai_agents_permissions(identity_id)
+
+    @app.get("/api/ai-security/stats")
+    def ai_security_stats_route():
+        return get_ai_security_stats()
+
+    @app.get("/api/ai-security/permissions")
+    def ai_permissions_overview_route():
+        return get_ai_permissions_overview()
+
+    # AG-163: AI Inventory clustered graph (replaces wall-of-circles page)
+    @app.get("/api/ai-security/inventory-graph")
+    def ai_inventory_graph_route():
+        return get_ai_inventory_graph()
+
+    # AG-167: Actual endpoint reach — what an AI agent is really touching
+    @app.get("/api/ai-agents/<identity_id>/actual-access")
+    def ai_agent_actual_access_route(identity_id):
+        return get_ai_agent_actual_access(identity_id)
+
+    # AI Governance pillar — policy compliance across all AI agents
+    @app.get("/api/ai-security/governance")
+    def ai_governance_route():
+        return get_ai_governance()
+
+    # AI Governance exception workflow — risk-accepted policy waivers
+    @app.get("/api/ai-security/governance/exceptions")
+    @require_role('admin', 'security_admin', 'security_analyst', 'reader', 'compliance', 'owner')
+    def ai_security_exceptions_list():
+        return list_ai_governance_exceptions_handler()
+
+    @app.post("/api/ai-security/governance/exceptions")
+    @require_role('admin', 'security_admin', 'security_analyst', 'owner')
+    def ai_security_exceptions_create():
+        return create_ai_governance_exception_handler()
+
+    @app.post("/api/ai-security/governance/exceptions/<int:exc_id>/approve")
+    @require_role('admin', 'owner')
+    def ai_security_exceptions_approve(exc_id):
+        return approve_ai_governance_exception_handler(exc_id)
+
+    @app.post("/api/ai-security/governance/exceptions/<int:exc_id>/reject")
+    @require_role('admin', 'owner')
+    def ai_security_exceptions_reject(exc_id):
+        return reject_ai_governance_exception_handler(exc_id)
+
+    @app.post("/api/ai-security/governance/exceptions/<int:exc_id>/revoke")
+    @require_role('admin', 'security_admin', 'owner')
+    def ai_security_exceptions_revoke(exc_id):
+        return revoke_ai_governance_exception_handler(exc_id)
+
+    # AI Risk pillar — attack scenarios across all AI agents
+    @app.get("/api/ai-security/risk")
+    def ai_risk_scenarios_route():
+        return get_ai_risk_scenarios()
+
+    # AI Runtime pillar — fleet view (platforms, models, network, telemetry)
+    @app.get("/api/ai-security/runtime")
+    def ai_runtime_fleet_route():
+        return get_ai_runtime_fleet()
+
+    # AG-179 (Tier 1B): Trust Score + Board Scorecard
+    @app.get("/api/ai-security/trust-score/<identity_id>")
+    def ai_security_trust_score_route(identity_id):
+        from app.api.handlers import get_agent_trust_score_handler
+        return get_agent_trust_score_handler(identity_id)
+
+    @app.get("/api/ai-security/board-scorecard")
+    def ai_security_board_scorecard_route():
+        from app.api.handlers import get_ai_board_scorecard_handler
+        return get_ai_board_scorecard_handler()
+
+    @app.get("/api/ai-security/board-scorecard/history")
+    def ai_security_board_scorecard_history_route():
+        from app.api.handlers import get_ai_board_scorecard_history_handler
+        return get_ai_board_scorecard_history_handler()
+
+    # AG-189 (Argus Layer 5): Risk Score Waterfall — "Why is risk score N?"
+    @app.get("/api/argus/explain-risk-score/<identity_id>")
+    def argus_explain_risk_score_route(identity_id):
+        from app.api.handlers import get_explain_risk_score_handler
+        return get_explain_risk_score_handler(identity_id)
+
+    # AG-186 (Argus Layer 2): Multi-hop Security Reasoner. POST body:
+    #   {question_type, use_cache?}
+    # Runs 3-5 sub-queries against the graph and synthesises a board-ready
+    # narrative with cited evidence. Caches results in argus_reasoning_cache.
+    @app.post("/api/argus/reason")
+    def argus_reason_route():
+        from app.api.handlers import argus_reasoner_handler
+        return argus_reasoner_handler()
+
+    # AG-188 (Argus Layer 4): Board / CISO Advisor — "What should I fix this week?"
+    # Returns the top 5 ranked remediation priorities for the caller's org.
+    @app.get("/api/argus/recommendations")
+    def argus_ciso_advisor_route():
+        from app.api.handlers import argus_ciso_advisor_handler
+        return argus_ciso_advisor_handler()
+
+    # AG-191 (Argus Layer 7): Executive Storytelling — board-ready prose for
+    # "Are our AI agents secure?" / NHI / OAuth / overall posture.
+    # GET ?topic=<ai_agents_secure|nhi_secure|oauth_secure|overall_posture>.
+    @app.get("/api/argus/executive-summary")
+    def argus_executive_summary_route():
+        from app.api.handlers import argus_exec_narrative_handler
+        return argus_exec_narrative_handler()
+
+    # AG-192 (Argus XGRAPH): "Who can reach <classification>?" cross-identity rollup.
+    # GET ?classification=PHI — returns {by_category, common_path, total_records_exposed,
+    # top_resources, confidence}. Honest empty answer when nobody reaches.
+    @app.get("/api/argus/who-can-reach")
+    def argus_who_can_reach_route():
+        from app.api.handlers import argus_cross_graph_handler
+        return argus_cross_graph_handler()
+
+    # AG-190 (Argus Layer 6): What-If Simulator — "What if I remove this role?"
+    # POST body: {identity_id: '<external GUID>', role_assignment_id: <int>}
+    # Returns architectural projection (NOT a mutation) of current vs projected
+    # risk score with the signals + persisted attack-paths that would drop.
+    @app.post("/api/argus/what-if/role-removal")
+    def argus_what_if_role_removal_route():
+        from app.api.handlers import argus_what_if_handler
+        return argus_what_if_handler()
+
+    # AG-180 (Tier 2A): Data Reachability
+    @app.get("/api/ai-agents/<identity_id>/data-reachability")
+    def ai_agent_data_reachability_route(identity_id):
+        from app.api.handlers import get_ai_agent_data_reachability_handler
+        return get_ai_agent_data_reachability_handler(identity_id)
+
+    @app.get("/api/data-security")
+    def data_security_summary_route():
+        from app.api.handlers import get_data_security_summary_handler
+        return get_data_security_summary_handler()
+
+    @app.post("/api/resources/<path:resource_id>/classify")
+    @require_role('admin', 'owner')
+    def classify_resource_route(resource_id):
+        from app.api.handlers import classify_resource_handler
+        if not resource_id.startswith('/'):
+            resource_id = '/' + resource_id
+        return classify_resource_handler(resource_id)
+
+    @app.post("/api/resources/auto-classify")
+    @require_role('admin', 'owner', 'auditor')
+    def auto_classify_route():
+        from app.api.handlers import auto_classify_resources_handler
+        return auto_classify_resources_handler()
+
+    # AG-181 (Tier 2C): AI Lifecycle + Drift
+    @app.get("/api/ai-agents/<identity_id>/lifecycle")
+    def ai_agent_lifecycle_route(identity_id):
+        from app.api.handlers import get_ai_agent_lifecycle_handler
+        return get_ai_agent_lifecycle_handler(identity_id)
+
+    @app.get("/api/ai-agents/<identity_id>/drift")
+    def ai_agent_drift_route(identity_id):
+        from app.api.handlers import get_ai_agent_drift_handler
+        return get_ai_agent_drift_handler(identity_id)
+
+    @app.get("/api/dashboard/ai-jml-snapshot")
+    def ai_jml_snapshot_route():
+        from app.api.handlers import get_ai_jml_snapshot_handler
+        return get_ai_jml_snapshot_handler()
+
+    # AG-T2.1: AI Abuse Scenarios — per-agent + org rollup
+    @app.get("/api/ai-agents/<identity_id>/abuse-scenarios")
+    def ai_agent_abuse_scenarios_route(identity_id):
+        from app.api.handlers import get_ai_agent_abuse_scenarios_handler
+        return get_ai_agent_abuse_scenarios_handler(identity_id)
+
+    @app.get("/api/ai-security/abuse-scenarios/rollup")
+    def ai_abuse_scenarios_rollup_route():
+        from app.api.handlers import get_ai_abuse_scenarios_rollup_handler
+        return get_ai_abuse_scenarios_rollup_handler()
+
+    # AG-T2.2: AI Model Registry — approval workflow
+    @app.get("/api/ai-security/model-registry")
+    def ai_model_registry_list_route():
+        from app.api.handlers import get_ai_model_registry_handler
+        return get_ai_model_registry_handler()
+
+    @app.post("/api/ai-security/model-registry/submit")
+    def ai_model_registry_submit_route():
+        from app.api.handlers import post_ai_model_registry_submit_handler
+        return post_ai_model_registry_submit_handler()
+
+    @app.post("/api/ai-security/model-registry/decide")
+    def ai_model_registry_decide_route():
+        from app.api.handlers import post_ai_model_registry_decide_handler
+        return post_ai_model_registry_decide_handler()
+
+    @app.post("/api/ai-security/model-registry/revoke")
+    def ai_model_registry_revoke_route():
+        from app.api.handlers import post_ai_model_registry_revoke_handler
+        return post_ai_model_registry_revoke_handler()
+
+    # AG-T3.1: Multi-hop XGRAPH (Agent A → Agent B → Resource)
+    @app.get("/api/argus/multi-hop-reachability")
+    def multihop_reachability_route():
+        from app.api.handlers import get_multihop_reachability_handler
+        return get_multihop_reachability_handler()
+
+    @app.get("/api/ai-security/invocation-graph")
+    def invocation_graph_route():
+        from app.api.handlers import get_invocation_graph_handler
+        return get_invocation_graph_handler()
+
+    # AG-T3.2: AI Supply Chain dependency graph
+    @app.get("/api/ai-security/supply-chain/<identity_id>")
+    def agent_supply_chain_route(identity_id):
+        from app.api.handlers import get_agent_supply_chain_handler
+        return get_agent_supply_chain_handler(identity_id)
+
+    @app.get("/api/ai-security/supply-chain")
+    def org_supply_chain_rollup_route():
+        from app.api.handlers import get_org_supply_chain_rollup_handler
+        return get_org_supply_chain_rollup_handler()
+
+    # AG-WK2 (2026-06-05): Universal Identity Trust org rollup
+    @app.get("/api/identity-trust/rollup")
+    def identity_trust_rollup_route():
+        from app.api.handlers import get_identity_trust_rollup_handler
+        return get_identity_trust_rollup_handler()
+
+    # AG-WK7.A: Peer Benchmarking
+    @app.get("/api/peer-benchmarking/snapshot")
+    def peer_benchmarking_snapshot_route():
+        from app.api.handlers import get_peer_benchmarks_handler
+        return get_peer_benchmarks_handler()
+
+    @app.post("/api/peer-benchmarking/seed-demo")
+    def peer_benchmarking_seed_route():
+        from app.api.handlers import post_peer_benchmarks_seed_handler
+        return post_peer_benchmarks_seed_handler()
+
+    # AG-WK3.1: Ownership Center
+    @app.get("/api/ownership/summary")
+    def ownership_summary_route():
+        from app.api.handlers import get_ownership_summary_handler
+        return get_ownership_summary_handler()
+
+    @app.get("/api/ownership/unowned")
+    def ownership_unowned_route():
+        from app.api.handlers import get_unowned_nhis_handler
+        return get_unowned_nhis_handler()
+
+    @app.get("/api/ownership/assignments")
+    def ownership_assignments_route():
+        from app.api.handlers import get_ownership_assignments_handler
+        return get_ownership_assignments_handler()
+
+    @app.post("/api/ownership/assign")
+    def ownership_assign_route():
+        from app.api.handlers import post_ownership_assign_handler
+        return post_ownership_assign_handler()
+
+    # AG-T4: Threat-source partner connectors
+    @app.post("/api/ai-security/threat-signals")
+    def threat_signals_ingest_route():
+        from app.api.handlers import post_threat_signal_ingest_handler
+        return post_threat_signal_ingest_handler()
+
+    @app.get("/api/ai-security/threat-signals")
+    def threat_signals_list_route():
+        from app.api.handlers import get_threat_signals_handler
+        return get_threat_signals_handler()
+
+    @app.get("/api/ai-security/threat-connectors")
+    def threat_connectors_list_route():
+        from app.api.handlers import get_threat_connectors_handler
+        return get_threat_connectors_handler()
+
+    @app.post("/api/ai-security/threat-connectors")
+    def threat_connectors_upsert_route():
+        from app.api.handlers import post_threat_connector_upsert_handler
+        return post_threat_connector_upsert_handler()
+
+    # AG-T2.3: AI Findings catalog
+    @app.get("/api/ai-security/findings")
+    def ai_findings_list_route():
+        from app.api.handlers import get_ai_findings_handler
+        return get_ai_findings_handler()
+
+    @app.post("/api/ai-security/findings/recompose")
+    def ai_findings_recompose_route():
+        from app.api.handlers import post_ai_findings_recompose_handler
+        return post_ai_findings_recompose_handler()
+
+    @app.patch("/api/ai-security/findings/<finding_id>/status")
+    def ai_finding_status_route(finding_id):
+        from app.api.handlers import patch_ai_finding_status_handler
+        return patch_ai_finding_status_handler(finding_id)
+
+    # AG-182 (Tier 3A): Activity Timeline + Behavior Baseline
+    @app.get("/api/ai-agents/<identity_id>/activity-timeline")
+    def ai_agent_activity_timeline_route(identity_id):
+        from app.api.handlers import get_ai_agent_activity_timeline_handler
+        return get_ai_agent_activity_timeline_handler(identity_id)
+
+    @app.get("/api/ai-agents/<identity_id>/baseline")
+    def ai_agent_baseline_route(identity_id):
+        from app.api.handlers import get_ai_agent_baseline_handler
+        return get_ai_agent_baseline_handler(identity_id)
+
+    @app.get("/api/ai-agents/activity/anomalies")
+    def ai_agent_anomalies_route():
+        from app.api.handlers import get_ai_agent_anomalies_handler
+        return get_ai_agent_anomalies_handler()
+
     @app.post("/api/admin/platform/restart-workers")
     @require_portal_role('superadmin')
     def admin_platform_restart_workers():
@@ -2414,6 +2862,22 @@ def create_app():
         return accept_invitation_handler()
 
     # -----------------------
+    # AG-USERMGMT: org-admin can read/update a safe-listed subset of
+    # organization.settings (allowed_email_domains for invitation
+    # whitelist, more to come). Distinct from the superadmin-only
+    # /api/organizations/<id> endpoint.
+    # -----------------------
+    @app.get("/api/organization/settings")
+    @require_role('admin')
+    def org_settings_get():
+        return get_org_admin_settings_handler()
+
+    @app.put("/api/organization/settings")
+    @require_role('admin')
+    def org_settings_update():
+        return update_org_admin_settings_handler()
+
+    # -----------------------
     # Service Account Governance (Phase 63)
     # -----------------------
     @app.get("/api/service-accounts/stats")
@@ -2503,6 +2967,10 @@ def create_app():
     @app.get("/api/onboarding/status")
     def onboarding_status():
         return get_onboarding_status()
+
+    @app.get("/api/onboarding/first-finding")
+    def onboarding_first_finding():
+        return get_onboarding_first_finding()
 
     @app.post("/api/onboarding/test-connection")
     @require_role('admin', 'security_admin')
@@ -2725,6 +3193,32 @@ def create_app():
     def dashboard_anomalies():
         return get_dashboard_anomalies()
 
+    @app.get("/api/dashboard/jml-snapshot")
+    def dashboard_jml_snapshot():
+        return get_dashboard_jml_snapshot()
+
+    # AG-81: OAuth Consent Grant Inventory & Risk Scoring
+    @app.get("/api/consent-grants")
+    def consent_grants_list():
+        return list_consent_grants_handler()
+
+    @app.get("/api/dashboard/connected-app-risk")
+    def dashboard_connected_app_risk():
+        return get_dashboard_connected_app_risk()
+
+    # AG-84: Vercel/Context.ai breach scenario — finds grants matching the
+    # consent-phishing signature for sales-narrative demos.
+    @app.get("/api/connected-apps/vercel-scenario")
+    def connected_apps_vercel_scenario():
+        return get_vercel_scenario_grants_handler()
+
+    # AG-OAUTH-NARRATIVE: multi-scenario surface (Vercel + MOVEit + Storm-0558 +
+    # NOBELIUM dormant + shadow productivity). One entry per scenario with
+    # matched-grant count + top samples.
+    @app.get("/api/connected-apps/scenarios")
+    def connected_apps_scenarios():
+        return get_consent_scenarios_handler()
+
     # -----------------------
     # Anomaly Detection (Phase 40)
     # -----------------------
@@ -2815,6 +3309,17 @@ def create_app():
     @app.get("/api/reports/data")
     def report_data():
         return get_report_data()
+
+    # AG-Hero-5 (2026-05-31): Auditor Pack — framework-mapped findings
+    @app.get("/api/reports/auditor-pack/frameworks")
+    def list_auditor_frameworks():
+        from app.api.handlers import get_auditor_pack_frameworks
+        return get_auditor_pack_frameworks()
+
+    @app.get("/api/reports/auditor-pack")
+    def auditor_pack():
+        from app.api.handlers import get_auditor_pack_data
+        return get_auditor_pack_data()
 
     # -----------------------
     # Drift Detection (Phase 14)
@@ -2990,6 +3495,132 @@ def create_app():
     @require_role('admin')
     def admin_cleanup_inactive():
         return cleanup_inactive_connections_handler()
+
+    @app.post("/api/admin/seed-demo-org")
+    @require_superadmin()
+    def admin_seed_demo_org():
+        """Re-seed the AuditGraph Demo organization (org_id=9) with full
+        feature-coverage data: identities, classifications, AI agents,
+        behavior-evidence (Feature D + E), PIM hygiene, anomalies, and
+        a backfilled snapshot_job that drives the Progressive Scan modal.
+
+        Idempotent — each seeder clears its own rows before re-writing.
+        Superadmin-only because it touches another tenant's data by design.
+        Designed to run in-cluster (VNet → cloud DB) where direct
+        psycopg2 from a laptop can't reach. Roughly 60s to complete.
+        """
+        from flask import jsonify
+        import subprocess, sys, os, traceback, json
+        results = {}
+        scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts')
+        steps = [
+            ('base',      os.path.join(scripts_dir, 'seed_demo_org.py')),
+            ('behavior',  os.path.join(scripts_dir, 'seed_demo_behavior_evidence.py')),
+        ]
+        # Override APP_ENV=local for the subprocess: seed_demo_org.py has a
+        # production-safety check that refuses non-local envs to prevent
+        # accidental customer-data overwrites. This endpoint is the explicit
+        # opt-in path (superadmin-only, idempotent demo-tenant only).
+        seed_env = {**os.environ, 'APP_ENV': 'local'}
+        for name, path in steps:
+            if not os.path.exists(path):
+                results[name] = {'status': 'skipped', 'reason': 'script_not_found'}
+                continue
+            try:
+                proc = subprocess.run(
+                    [sys.executable, path],
+                    capture_output=True, text=True, timeout=180,
+                    cwd=os.path.dirname(scripts_dir),
+                    env=seed_env,
+                )
+                results[name] = {
+                    'status': 'ok' if proc.returncode == 0 else 'failed',
+                    'returncode': proc.returncode,
+                    'stdout_tail': (proc.stdout or '')[-2000:],
+                    'stderr_tail': (proc.stderr or '')[-2000:],
+                }
+            except subprocess.TimeoutExpired:
+                results[name] = {'status': 'timeout'}
+            except Exception as e:
+                results[name] = {'status': 'error', 'error': f'{type(e).__name__}: {e}'}
+
+        # Step 3 — backfill snapshot_job row with real risk counts + top
+        # findings so the Progressive Scan modal renders even when the demo
+        # has no live scan in flight. Inline (no subprocess) so we can use
+        # the existing DB connection pool.
+        try:
+            from app.database import Database
+            from datetime import datetime, timezone
+            db = Database(_admin_reason='seed-demo-org snapshot_job backfill')
+            cur = db.conn.cursor()
+            cur.execute("""SELECT id, cloud_connection_id, started_at, completed_at
+                             FROM discovery_runs WHERE organization_id=9 AND status='completed'
+                             ORDER BY id DESC LIMIT 1""")
+            row = cur.fetchone()
+            if row:
+                run_id, conn_id, started, completed = row
+                cur.execute("""SELECT risk_level, count(*) FROM identities
+                                WHERE organization_id=9 AND discovery_run_id=%s
+                                GROUP BY risk_level""", (run_id,))
+                counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+                for rl, c in cur.fetchall():
+                    if rl in counts:
+                        counts[rl] = c
+                cur.execute("SELECT count(*) FROM identities WHERE discovery_run_id=%s", (run_id,))
+                total_ids = cur.fetchone()[0]
+                cur.execute("""SELECT identity_id, display_name, identity_type, risk_level, risk_factors
+                                 FROM identities
+                                WHERE organization_id=9 AND discovery_run_id=%s
+                                  AND risk_level IN ('critical','high')
+                                ORDER BY CASE risk_level WHEN 'critical' THEN 4 ELSE 3 END DESC,
+                                         risk_score DESC NULLS LAST
+                                LIMIT 8""", (run_id,))
+                findings = []
+                for i, (iid, name, itype, rl, rf) in enumerate(cur.fetchall()):
+                    headline = None
+                    if rf and isinstance(rf, list) and rf:
+                        f0 = rf[0]
+                        if isinstance(f0, dict):
+                            headline = f0.get('description') or f0.get('code')
+                    findings.append({
+                        'identity_id': iid, 'display_name': name,
+                        'identity_type': itype, 'risk_level': rl,
+                        'headline': headline or 'High-risk identity detected',
+                        'discovered_at_offset_s': 15 + i * 4,
+                    })
+                # Clear existing demo snapshot_jobs (idempotent)
+                cur.execute("DELETE FROM snapshot_jobs WHERE organization_id=9 AND started_by='demoadmin'")
+                cur.execute("""
+                    INSERT INTO snapshot_jobs
+                      (organization_id, cloud_connection_id, discovery_run_id, scan_mode,
+                       status, stage, progress,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       started_at, completed_at, duration_seconds,
+                       critical_count, high_count, medium_count, low_count, live_findings,
+                       created_at, started_by)
+                    VALUES (9, %s, %s, 'manual', 'completed', 'finalizing', 100,
+                            %s, 0, 3, %s, %s, %s,
+                            %s, %s, %s, %s, %s::jsonb, NOW(), 'demoadmin')
+                """, (conn_id, run_id, total_ids,
+                      started or datetime.now(timezone.utc),
+                      completed or datetime.now(timezone.utc),
+                      int((completed - started).total_seconds()) if (completed and started) else 90,
+                      counts['critical'], counts['high'], counts['medium'], counts['low'],
+                      json.dumps(findings)))
+                db._commit()
+                results['snapshot_job_backfill'] = {
+                    'status': 'ok', 'counts': counts, 'findings': len(findings),
+                }
+            else:
+                results['snapshot_job_backfill'] = {'status': 'skipped',
+                                                    'reason': 'no_completed_run'}
+            cur.close()
+        except Exception as e:
+            results['snapshot_job_backfill'] = {'status': 'error',
+                                                'error': f'{type(e).__name__}: {e}',
+                                                'traceback': traceback.format_exc()[-1500:]}
+
+        return jsonify({'results': results}), 200
 
     @app.post("/api/client/connections/test")
     @require_role('admin', 'security_admin')
@@ -3354,6 +3985,40 @@ def create_app():
     @app.get("/api/identities/<identity_id>/lineage")
     def identity_lineage(identity_id):
         return get_identity_lineage(identity_id)
+
+    # AG-150: Dedicated federated-credentials endpoint for Credentials tab.
+    # Lighter payload than /lineage; per-credential risk posture.
+    @app.get("/api/identities/<identity_id>/federated-credentials")
+    def identity_federated_credentials(identity_id):
+        return get_identity_federated_credentials(identity_id)
+
+    # AG-86: Shadow App Detection
+    @app.get("/api/approved-apps")
+    def approved_apps_list():
+        return list_approved_apps_handler()
+
+    @app.post("/api/approved-apps")
+    @require_role('admin', 'owner')
+    def approved_apps_add():
+        return add_approved_app_handler()
+
+    @app.delete("/api/approved-apps/<int:row_id>")
+    @require_role('admin', 'owner')
+    def approved_apps_delete(row_id):
+        return delete_approved_app_handler(row_id)
+
+    @app.get("/api/shadow-apps")
+    def shadow_apps_list():
+        return list_shadow_apps_handler()
+
+    @app.get("/api/shadow-apps/stats")
+    def shadow_apps_stats():
+        return shadow_apps_stats_handler()
+
+    @app.post("/api/shadow-apps/<identity_id>/approve")
+    @require_role('admin', 'owner')
+    def shadow_apps_approve(identity_id):
+        return approve_shadow_app_handler(identity_id)
 
     # Deprecated alias — old SPN lineage route redirects to unified handler
     @app.get("/api/spn/<path:spn_id>/lineage")
@@ -4226,6 +4891,23 @@ def create_app():
     @app.post("/api/attack-paths/analyze")
     def attack_paths_analyze():
         return trigger_attack_path_analysis()
+
+    # AG-187 — Argus L3 Attack Path Investigator. POST body:
+    #   {source_query, target_query, prefer_persisted}
+    # Returns the strongest matching attack_paths row or {found: False}.
+    @app.post("/api/argus/investigate-attack-path")
+    def argus_investigate_attack_path_route():
+        from app.api.handlers import argus_investigate_attack_path_handler
+        return argus_investigate_attack_path_handler()
+
+    # AG-185 — Argus L1 Natural-Language Query. POST body: {query, limit?, offset?}
+    # Translates plain-English questions into Identity Query Builder filters
+    # and returns the matching identities. Honest empty-state when no intent
+    # or keyword matches.
+    @app.post("/api/argus/nl-query")
+    def argus_nl_query_route():
+        from app.api.handlers import argus_nl_query_handler
+        return argus_nl_query_handler()
 
     @app.get("/api/dashboard/attack-surface")
     def dashboard_attack_surface():

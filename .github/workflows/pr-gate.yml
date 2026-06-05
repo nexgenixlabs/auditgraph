@@ -193,6 +193,44 @@ jobs:
           echo ":white_check_mark: Frontend compiles without errors." >> $GITHUB_STEP_SUMMARY
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # 3b. Python Tests — AG-PROD-C4 (2026-06-05)
+  #     Runs the no-DB-required portion of the test suite. Fast (<10s) and
+  #     covers the Tier 1-4 engines + Universal Trust + Peer Benchmarking
+  #     catalog. Database-requiring tests are excluded so PRs that don't
+  #     touch infra don't need to spin Postgres.
+  # ═══════════════════════════════════════════════════════════════════════════
+  python-tests:
+    name: "Python Tests (no-DB)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-xdist
+
+      - name: Run no-DB tests
+        working-directory: ./backend
+        env:
+          PYTHONPATH: .
+          JWT_SECRET: "test-secret-for-pr-gate-only"
+        run: |
+          # AG-PROD-C3: explicit allowlist of fast pure tests for the PR gate.
+          # The full test suite (which includes DB-requiring tests) runs in
+          # the post-merge integration job.
+          python -m pytest tests/test_tier1_to_4_engines.py -v
+          echo "### Python Tests" >> $GITHUB_STEP_SUMMARY
+          echo ":white_check_mark: Tier 1-4 engine tests pass." >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # 4. Infrastructure Plan — Bicep what-if (only when infra/ changes)
   # ═══════════════════════════════════════════════════════════════════════════
   infra-plan:
@@ -248,7 +286,7 @@ jobs:
   gate-summary:
     name: "PR Gate Summary"
     runs-on: ubuntu-latest
-    needs: [title-check, code-scan, typescript-build]
+    needs: [title-check, code-scan, typescript-build, python-tests]
     if: always()
     steps:
       - name: Evaluate gate results
@@ -261,12 +299,14 @@ jobs:
           TITLE="${{ needs.title-check.result }}"
           CODE="${{ needs.code-scan.result }}"
           TS="${{ needs.typescript-build.result }}"
+          PY="${{ needs.python-tests.result }}"
 
           [ "$TITLE" = "success" ] && echo "| Jira Story ID | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Jira Story ID | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
           [ "$CODE" = "success" ] && echo "| Code Scan | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Code Scan | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
           [ "$TS" = "success" ] && echo "| TypeScript Build | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| TypeScript Build | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
+          [ "$PY" = "success" ] && echo "| Python Tests | :white_check_mark: Pass |" >> $GITHUB_STEP_SUMMARY || echo "| Python Tests | :red_circle: Fail |" >> $GITHUB_STEP_SUMMARY
 
-          if [ "$TITLE" != "success" ] || [ "$CODE" != "success" ] || [ "$TS" != "success" ]; then
+          if [ "$TITLE" != "success" ] || [ "$CODE" != "success" ] || [ "$TS" != "success" ] || [ "$PY" != "success" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo ":stop_sign: **PR Gate FAILED** — fix the issues above before merging." >> $GITHUB_STEP_SUMMARY
             echo "::error::PR Gate FAILED. See summary for details."

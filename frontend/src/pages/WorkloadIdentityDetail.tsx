@@ -99,6 +99,16 @@ interface WorkloadDetailData {
   recent_signins?: SignInEvent[];
   signals?: Record<string, string[]>;
   p2_enabled?: boolean;
+  // Feature D — aggregated sign-in source-IP intelligence.
+  signin_intelligence?: {
+    ips?: Array<{ ip: string; classification?: string; count?: number }>;
+    locations?: Array<{ city?: string; country?: string; count?: number }>;
+    resources_accessed?: Array<{ name?: string; count?: number }>;
+    client_apps?: Array<{ name?: string; count?: number }>;
+    failure_count_30d?: number;
+    success_count_30d?: number;
+    total_events_30d?: number;
+  };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -228,6 +238,7 @@ function daysUntil(dateStr?: string | null): number | null {
 const TABS = [
   { key: 'roles', label: 'Roles & Permissions' },
   { key: 'credentials', label: 'Credentials' },
+  { key: 'consents', label: 'OAuth Consents' },
   { key: 'access_graph', label: 'Access Graph' },
   { key: 'anomalies', label: 'Anomalies' },
   { key: 'activity', label: 'Activity' },
@@ -466,6 +477,364 @@ function CredentialsTab({ data }: { data: WorkloadDetailData }) {
   );
 }
 
+// ── Feature D: Sign-in Source IP Intelligence ────────────────────────
+//
+// Aggregated view of where this SPN authenticates from. Data is pre-computed
+// during scan (signin_ips / signin_locations / signin_resources_accessed /
+// signin_client_apps JSONB columns on identities) and surfaced via the
+// workload-identities/<id> handler at handlers.py:28430.
+//
+// IP classification (from azure_discovery._classify_ip):
+//   azure_datacenter  — known Azure egress IPs (expected for managed
+//                       identities + workload-identity-federated SPNs)
+//   external          — public internet IP (signal: where customer apps
+//                       or admins are calling from)
+//   unknown           — couldn't classify
+
+function classificationStyle(c?: string): React.CSSProperties {
+  switch ((c || '').toLowerCase()) {
+    case 'azure_datacenter':
+      return { background: 'rgba(37,99,235,0.15)', color: '#93c5fd', border: '1px solid rgba(37,99,235,0.4)' };
+    case 'external':
+      return { background: 'rgba(245,158,11,0.15)', color: '#fcd34d', border: '1px solid rgba(245,158,11,0.4)' };
+    default:
+      return { background: 'rgba(107,114,128,0.18)', color: '#9ca3af', border: '1px solid rgba(107,114,128,0.4)' };
+  }
+}
+
+function SignInSourceIntelPanel({ intel }: { intel?: WorkloadDetailData['signin_intelligence'] }) {
+  if (!intel) return null;
+  const ips = (intel.ips || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  const locations = (intel.locations || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  const resources = (intel.resources_accessed || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  const clientApps = (intel.client_apps || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  const hasAny = ips.length > 0 || locations.length > 0 || resources.length > 0 || clientApps.length > 0;
+  if (!hasAny) return null;
+
+  const totalIpVolume = ips.reduce((s, x) => s + (x.count || 0), 0);
+  const externalCount = ips.filter(x => (x.classification || '').toLowerCase() === 'external').length;
+  const azureCount = ips.filter(x => (x.classification || '').toLowerCase() === 'azure_datacenter').length;
+
+  return (
+    <div className="mb-4 rounded-xl p-4 border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900/60">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <svg className="w-4 h-4 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <h4 className="text-sm font-semibold text-gray-800 dark:text-slate-100">Source IP Intelligence</h4>
+          <span className="text-[10px] text-gray-500 dark:text-slate-500">behavior-evidence</span>
+        </div>
+        {totalIpVolume > 0 && (
+          <div className="text-[11px] text-gray-500 dark:text-slate-400 flex gap-3">
+            {azureCount > 0 && <span>{azureCount} Azure datacenter</span>}
+            {externalCount > 0 && <span className="text-amber-600 dark:text-amber-400">{externalCount} external</span>}
+            <span>{totalIpVolume.toLocaleString()} sign-ins</span>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Top IPs */}
+        {ips.length > 0 && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-slate-400 mb-1.5">
+              Top IPs ({ips.length})
+            </div>
+            <div className="space-y-1">
+              {ips.slice(0, 6).map((ip, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className="font-mono text-gray-800 dark:text-slate-200 truncate">{ip.ip}</span>
+                    {ip.classification && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-medium uppercase tracking-wide flex-shrink-0"
+                            style={classificationStyle(ip.classification)}>
+                        {ip.classification.replace(/_/g, ' ')}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-gray-500 dark:text-slate-400 tabular-nums flex-shrink-0">
+                    {(ip.count || 0).toLocaleString()}
+                  </span>
+                </div>
+              ))}
+              {ips.length > 6 && (
+                <div className="text-[10px] text-gray-500 dark:text-slate-500">+{ips.length - 6} more</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Locations */}
+        {locations.length > 0 && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-slate-400 mb-1.5">
+              Locations ({locations.length})
+            </div>
+            <div className="space-y-1">
+              {locations.slice(0, 6).map((loc, i) => {
+                const label = [loc.city, loc.country].filter(Boolean).join(', ') || '—';
+                return (
+                  <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-gray-800 dark:text-slate-200 truncate">{label}</span>
+                    <span className="text-gray-500 dark:text-slate-400 tabular-nums flex-shrink-0">
+                      {(loc.count || 0).toLocaleString()}
+                    </span>
+                  </div>
+                );
+              })}
+              {locations.length > 6 && (
+                <div className="text-[10px] text-gray-500 dark:text-slate-500">+{locations.length - 6} more</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Resources accessed */}
+        {resources.length > 0 && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-slate-400 mb-1.5">
+              Resources Accessed ({resources.length})
+            </div>
+            <div className="space-y-1">
+              {resources.slice(0, 6).map((r, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-gray-800 dark:text-slate-200 truncate" title={r.name || ''}>{r.name || '—'}</span>
+                  <span className="text-gray-500 dark:text-slate-400 tabular-nums flex-shrink-0">
+                    {(r.count || 0).toLocaleString()}
+                  </span>
+                </div>
+              ))}
+              {resources.length > 6 && (
+                <div className="text-[10px] text-gray-500 dark:text-slate-500">+{resources.length - 6} more</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Client apps */}
+        {clientApps.length > 0 && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-slate-400 mb-1.5">
+              Client Apps ({clientApps.length})
+            </div>
+            <div className="space-y-1">
+              {clientApps.slice(0, 6).map((a, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-gray-800 dark:text-slate-200 truncate" title={a.name || ''}>{a.name || '—'}</span>
+                  <span className="text-gray-500 dark:text-slate-400 tabular-nums flex-shrink-0">
+                    {(a.count || 0).toLocaleString()}
+                  </span>
+                </div>
+              ))}
+              {clientApps.length > 6 && (
+                <div className="text-[10px] text-gray-500 dark:text-slate-500">+{clientApps.length - 6} more</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {externalCount > 0 && (
+        <div className="mt-3 text-[11px] text-amber-700 dark:text-amber-400 flex items-start gap-1.5">
+          <svg className="w-3.5 h-3.5 mt-px flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z"/>
+          </svg>
+          <span>
+            This workload signs in from <span className="font-semibold">{externalCount} external IP{externalCount === 1 ? '' : 's'}</span> —
+            review whether public-internet authentication is expected. Most managed identities + workload-identity-federated
+            SPNs should authenticate only from Azure datacenter IPs.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Tab: OAuth Consents (AG-81) ──────────────────────────────────────
+//
+// Lists every consent grant where THIS SPN is the client_app — both
+// delegated (oauth2PermissionGrants) and application (appRoleAssignments)
+// shapes. Fetched live from /api/consent-grants?client_app_id=<this>.
+// Renders nothing dramatic when empty (most SPNs won't have OAuth grants
+// — only the ones that actually integrate with Microsoft Graph / Office
+// data do). For App Registration identities this is the most demo-
+// relevant tab — answers "who consented to what, when, with what scopes?"
+
+interface ConsentGrant {
+  id: number;
+  grant_type: 'delegated' | 'application' | string;
+  client_app_id: string;
+  client_display_name: string | null;
+  resource_app_id: string | null;
+  resource_display_name: string | null;
+  scopes: string[];
+  consent_type: 'AllPrincipals' | 'Principal' | string | null;
+  principal_id: string | null;
+  principal_display_name: string | null;
+  created_datetime: string | null;
+  last_activity_at: string | null;
+  risk_score: number;
+  risk_level: 'critical' | 'high' | 'medium' | 'low' | string;
+  high_risk_scopes: string[];
+  age_days: number | null;
+}
+
+function ConsentsTab({ data }: { data: WorkloadDetailData }) {
+  const [grants, setGrants] = useState<ConsentGrant[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Two possible identifiers to query against — try app_id first (the canonical
+  // OAuth client ID), fall back to the SPN's object_id. The API filters by
+  // client_app_id which the seeder + the future discovery path both populate
+  // with whichever of (app_id, object_id) is non-null.
+  const lookupId = data.detail?.app_id || data.detail?.object_id || data.detail?.identity_id;
+
+  useEffect(() => {
+    if (!lookupId) {
+      setGrants([]);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/consent-grants?client_app_id=${encodeURIComponent(lookupId)}&limit=100`)
+      .then(r => {
+        if (!r.ok) throw new Error('fetch_failed');
+        return r.json();
+      })
+      .then(d => { if (!cancelled) setGrants(d.grants || []); })
+      .catch(() => { if (!cancelled) setError('Could not load consent grants.'); });
+    return () => { cancelled = true; };
+  }, [lookupId]);
+
+  if (error) {
+    return <p className="text-xs text-red-600 dark:text-red-400">{error}</p>;
+  }
+  if (grants === null) {
+    return (
+      <div className="space-y-2">
+        <div className="h-4 w-1/2 bg-gray-100 dark:bg-slate-800 rounded animate-pulse" />
+        <div className="h-4 w-3/4 bg-gray-100 dark:bg-slate-800 rounded animate-pulse" />
+      </div>
+    );
+  }
+  if (grants.length === 0) {
+    return (
+      <div className="text-sm text-gray-500 dark:text-slate-400 italic">
+        No OAuth consent grants discovered for this identity.
+        <div className="text-xs mt-1 text-gray-400 dark:text-slate-500">
+          Source: <span className="font-mono">/oauth2PermissionGrants</span> (delegated)
+          + <span className="font-mono">/servicePrincipals/{'{id}'}/appRoleAssignments</span> (application)
+        </div>
+      </div>
+    );
+  }
+
+  // Sort by severity then age — highest risk first
+  const sevRank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+  const sorted = grants.slice().sort((a, b) => {
+    const r = (sevRank[b.risk_level] || 0) - (sevRank[a.risk_level] || 0);
+    return r !== 0 ? r : (b.age_days || 0) - (a.age_days || 0);
+  });
+
+  const sevPill = (lvl: string) => {
+    const cls =
+      lvl === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+      lvl === 'high'     ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' :
+      lvl === 'medium'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
+                           'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+    return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${cls}`}>{lvl}</span>;
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-gray-500 dark:text-slate-400">
+        {sorted.length} grant{sorted.length !== 1 ? 's' : ''} —
+        {' '}{sorted.filter(g => g.grant_type === 'application').length} application,
+        {' '}{sorted.filter(g => g.grant_type === 'delegated').length} delegated
+      </div>
+
+      <div className="overflow-x-auto border border-gray-200 dark:border-slate-700 rounded-lg">
+        <table className="w-full text-xs">
+          <thead className="bg-gray-50 dark:bg-slate-800 text-gray-500 dark:text-slate-400">
+            <tr>
+              <th className="text-left px-3 py-2 font-medium">Risk</th>
+              <th className="text-left px-3 py-2 font-medium">Resource</th>
+              <th className="text-left px-3 py-2 font-medium">Scopes</th>
+              <th className="text-left px-3 py-2 font-medium">Consent</th>
+              <th className="text-left px-3 py-2 font-medium">Approver</th>
+              <th className="text-right px-3 py-2 font-medium">Age</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+            {sorted.map(g => (
+              <tr key={g.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 align-top">
+                <td className="px-3 py-2">
+                  {sevPill(g.risk_level)}
+                  <div className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">
+                    score {g.risk_score}/100
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="text-gray-800 dark:text-slate-200 font-medium">
+                    {g.resource_display_name || g.resource_app_id || '—'}
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="flex flex-wrap gap-1 max-w-[420px]">
+                    {g.scopes.map((s, i) => {
+                      const isHigh = g.high_risk_scopes.includes(s);
+                      const cls = isHigh
+                        ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800'
+                        : 'bg-gray-50 dark:bg-slate-800 text-gray-600 dark:text-slate-300 border border-gray-200 dark:border-slate-700';
+                      return (
+                        <span key={i} className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${cls}`}>
+                          {s}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className={g.consent_type === 'AllPrincipals' ? 'text-orange-600 dark:text-orange-400 font-medium' : 'text-gray-600 dark:text-slate-300'}>
+                    {g.consent_type === 'AllPrincipals' ? 'Admin (tenant-wide)' :
+                     g.consent_type === 'Principal'     ? 'User' :
+                     g.consent_type || '—'}
+                  </div>
+                  <div className="text-[10px] text-gray-400 dark:text-slate-500">
+                    {g.grant_type}
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-gray-600 dark:text-slate-300">
+                  {g.principal_display_name || (g.consent_type === 'AllPrincipals' ? 'Tenant admin' : '—')}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {typeof g.age_days === 'number' ? (
+                    <span className={
+                      g.age_days > 365 ? 'text-red-600 dark:text-red-400 font-medium' :
+                      g.age_days > 180 ? 'text-amber-600 dark:text-amber-400' :
+                      'text-gray-600 dark:text-slate-300'
+                    }>
+                      {g.age_days}d
+                    </span>
+                  ) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="text-[10px] text-gray-400 dark:text-slate-500">
+        Source: Microsoft Graph <span className="font-mono">/oauth2PermissionGrants</span> +{' '}
+        <span className="font-mono">/servicePrincipals/{'{id}'}/appRoleAssignments</span> ·
+        Scope-breadth risk per CVSS-aligned scoring (high-risk scopes highlighted in red)
+      </div>
+    </div>
+  );
+}
+
 // ── Tab: Activity ────────────────────────────────────────────────────
 
 function ActivityTab({ data }: { data: WorkloadDetailData }) {
@@ -555,6 +924,9 @@ function ActivityTab({ data }: { data: WorkloadDetailData }) {
               </span>
             )}
           </div>
+
+          {/* Feature D — Sign-in Source IP intelligence (aggregated). */}
+          <SignInSourceIntelPanel intel={data.signin_intelligence} />
 
           {/* Recent sign-ins table */}
           {signins.length > 0 && (
@@ -1066,6 +1438,7 @@ const WorkloadIdentityDetail: React.FC = () => {
         <div className={activeTab === 'access_graph' ? '' : 'p-5'}>
           {activeTab === 'roles' && <RolesTab data={data} />}
           {activeTab === 'credentials' && <CredentialsTab data={data} />}
+          {activeTab === 'consents' && <ConsentsTab data={data} />}
           {activeTab === 'access_graph' && (
             <AccessGraphTab identityId={data.detail?.identity_id || data.detail?.app_object_id || data.detail?.app_id || data.detail?.object_id || id || ''} />
           )}

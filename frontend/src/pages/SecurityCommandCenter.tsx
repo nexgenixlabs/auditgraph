@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useCopilot } from '../contexts/CopilotContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+import AudienceBadge from '../components/AudienceBadge';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -53,6 +54,17 @@ interface FixRecommendation {
   status: string;
 }
 
+// SSOT: GET /api/remediation/generated — same source as Remediation Center page,
+// so the Command Center headline never disagrees with the page it links to.
+// (The separate /api/remediation-queue/summary endpoint covers the manual
+// workflow board, which is a different concept and almost always empty.)
+interface RemediationQueueSummary {
+  open: number;
+  critical: number;
+  in_progress: number;
+  completed_this_week: number;
+}
+
 interface ActivityEntry {
   id: number;
   action_type: string;
@@ -63,6 +75,12 @@ interface ActivityEntry {
 }
 
 // ─── Badge Maps ───────────────────────────────────────────────────
+
+// Cap the inline Top Risky Identities + Remediation Priority lists at the top
+// items so the page stays above-the-fold; "View All" still routes to the full
+// page (Identities / Remediation Center). Fetch limits are intentionally left
+// higher so the cap is purely a render concern.
+const ROW_CAP = 5;
 
 const SEVERITY_BADGE: Record<string, string> = {
   critical: 'bg-red-500/20 text-red-400 border border-red-500/30',
@@ -101,13 +119,6 @@ function scoreColor(score: number): string {
   return '#ef4444';
 }
 
-function scoreLabel(score: number): string {
-  if (score >= 80) return 'Good';
-  if (score >= 60) return 'Fair';
-  if (score >= 40) return 'Poor';
-  return 'Critical';
-}
-
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -125,6 +136,17 @@ export default function SecurityCommandCenter() {
   const { withConnection, selectedConnectionId } = useConnection();
   const { activeOrgId } = useAuth();
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
+  // Canonical Posture Score — the SAME number the CISO board renders
+  // (/api/dashboard/posture), so the Command Center can't disagree with the
+  // exec view. Previously this gauge read overview.posture_score which used a
+  // different formula (privileged %) and disagreed with the CISO's 100-(crit+high)%
+  // posture metric, causing the 93-vs-69 conflict. Kept on this page as a small
+  // header chip (Command Center is the OPS view; the headline is queue health).
+  const [cisoPostureScore, setCisoPostureScore] = useState<number | null>(null);
+  // Remediation Queue Health — Command Center's real headline metric as an
+  // OPS console: "what's in flight, what's stuck, what closed." SSOT:
+  // /api/remediation-queue/summary.
+  const [queueSummary, setQueueSummary] = useState<RemediationQueueSummary | null>(null);
   const [riskyIdentities, setRiskyIdentities] = useState<RiskyIdentity[]>([]);
   const [recommendations, setRecommendations] = useState<FixRecommendation[]>([]);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
@@ -135,15 +157,39 @@ export default function SecurityCommandCenter() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      // Single primary call + lazy-loaded lists in parallel
-      const [overviewRes, riskyRes, recsRes, activityRes] = await Promise.all([
+      // Single primary call + lazy-loaded lists + canonical posture score + queue summary in parallel
+      const [overviewRes, postureRes, queueRes, riskyRes, recsRes, activityRes] = await Promise.all([
         fetch(withConnection('/api/security/overview')),
+        fetch(withConnection('/api/dashboard/posture')),
+        fetch(withConnection('/api/remediation/generated')),
         fetch(withConnection('/api/identities?risk_level=critical&limit=10')),
         fetch(withConnection('/api/fix-recommendations?limit=10&status=open')),
         fetch(withConnection('/api/activity?limit=15')),
       ]);
 
       if (overviewRes.ok) setOverview(await overviewRes.json());
+
+      // Canonical posture score (SSOT — same field the CISO board uses).
+      // Fail-open: if this endpoint blips, gauge falls back to 0 (handled below)
+      // rather than disagreeing with the CISO board with a stale/divergent value.
+      if (postureRes.ok) {
+        try {
+          const p = await postureRes.json();
+          const s = typeof p?.posture_score === 'number' ? p.posture_score : null;
+          if (s !== null) setCisoPostureScore(s);
+        } catch { /* ignore */ }
+      }
+
+      // Remediation queue summary (SSOT — /api/remediation/generated.stats).
+      // Same source the Remediation Center page renders, so the two never
+      // disagree. Empty/error → card renders empty-state cleanly.
+      if (queueRes.ok) {
+        try {
+          const q = await queueRes.json();
+          const s = q && typeof q === 'object' ? q.stats : null;
+          if (s && typeof s === 'object') setQueueSummary(s as RemediationQueueSummary);
+        } catch { /* ignore */ }
+      }
 
       if (riskyRes.ok) {
         const d = await riskyRes.json();
@@ -222,7 +268,11 @@ export default function SecurityCommandCenter() {
   }
 
   // Derived metrics from overview
-  const postureScore = overview?.posture_score ?? 0;
+  // SSOT: prefer the canonical CISO posture score; fall back to 0 if not yet
+  // loaded (gauge component handles 0 cleanly). Do NOT fall back to
+  // overview.posture_score — that's a different metric (privileged %) and
+  // mixing the two is what caused the 93-vs-69 inconsistency.
+  const postureScore = cisoPostureScore !== null ? Math.round(cisoPostureScore) : 0;
   const find = overview?.findings || { critical: 0, high: 0, medium: 0, low: 0 };
   const attackPathCount = overview?.attack_paths?.identities_with_paths ?? 0;
   const cred = overview?.credentials || { total: 0, expired: 0, expiring_soon: 0 };
@@ -239,14 +289,23 @@ export default function SecurityCommandCenter() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Security Command Center</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-white">Security Command Center</h1>
+            <AudienceBadge label="OPS CONSOLE" variant="blue" />
+          </div>
           <p className="text-sm text-slate-400 mt-1">
-            Real-time security posture, risk analysis, and remediation priorities
+            Active risks and remediation queue — what needs action now
             {overview?.discovery_metadata?.data_as_of && (
               <span className="ml-3 text-slate-500">
                 Data as of: {new Date(overview.discovery_metadata.data_as_of).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </span>
             )}
+            <span className="ml-3 text-[11px] text-slate-500 hidden lg:inline">
+              Related:{' '}
+              <a href="/" className="text-blue-400 hover:text-blue-300 transition-colors">↗ Executive Posture</a>
+              <span className="mx-1 text-slate-600">·</span>
+              <a href="/dashboard" className="text-blue-400 hover:text-blue-300 transition-colors">↗ Risk Monitoring</a>
+            </span>
           </p>
         </div>
         <div className="flex gap-2">
@@ -284,11 +343,13 @@ export default function SecurityCommandCenter() {
         </div>
       )}
 
-      {/* Row 1: Posture Score Gauge + Summary Cards */}
+      {/* Row 1: Remediation Queue Health (ops headline) + Summary Cards.
+          Was the Posture Score gauge — that's the CISO board's headline. Command
+          Center's role is "what are we doing about it?" so the headline is queue
+          health. Posture is still surfaced as a small header chip + cross-link. */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Posture Score Gauge */}
         <div className="lg:col-span-4 bg-slate-800/60 border border-slate-700/50 rounded-xl p-6 flex flex-col items-center justify-center">
-          <PostureGauge score={postureScore} />
+          <RemediationQueueCard summary={queueSummary} posture={postureScore} />
         </div>
 
         {/* Summary Cards */}
@@ -354,7 +415,7 @@ export default function SecurityCommandCenter() {
           <div className="divide-y divide-slate-700/30">
             {riskyIdentities.length === 0 ? (
               <div className="px-4 py-6 text-center text-sm text-slate-500">No risky identities found</div>
-            ) : riskyIdentities.map((identity) => (
+            ) : riskyIdentities.slice(0, ROW_CAP).map((identity) => (
               <button
                 key={identity.identity_id}
                 onClick={() => navigate(`/identities/${identity.identity_id}`)}
@@ -396,7 +457,7 @@ export default function SecurityCommandCenter() {
                 <div className="text-sm text-slate-500">No remediation actions generated yet.</div>
                 <button onClick={() => navigate('/remediation')} className="text-xs text-blue-400 hover:text-blue-300 mt-1">Generate plan from findings →</button>
               </div>
-            ) : recommendations.map((rec) => (
+            ) : recommendations.slice(0, ROW_CAP).map((rec) => (
               <div key={rec.id} className="px-4 py-2.5 flex items-start gap-3">
                 <span className={`mt-0.5 px-2 py-0.5 text-[10px] font-medium rounded whitespace-nowrap ${SEVERITY_BADGE[rec.effort || 'medium'] || 'bg-slate-600 text-slate-300'}`}>
                   {(rec.effort || 'medium').toUpperCase()}
@@ -514,40 +575,81 @@ export default function SecurityCommandCenter() {
 
 // ─── Sub-components ───────────────────────────────────────────────
 
-function PostureGauge({ score }: { score: number }) {
-  const color = scoreColor(score);
-  const label = scoreLabel(score);
-  const radius = 60;
-  const circumference = Math.PI * radius;
-  const offset = circumference - (score / 100) * circumference;
+
+/**
+ * Remediation Queue Health — Command Center's headline metric as the ops view.
+ * Active = open + in_progress (in-flight items). Sub-stats break out the queue
+ * by status. A small posture chip + cross-link to Executive Posture preserves
+ * the SSOT score on this page without it being the headline. Empty queue gets
+ * a CTA so the page never dead-ends.
+ */
+function RemediationQueueCard({ summary, posture }: { summary: RemediationQueueSummary | null; posture: number }) {
+  const navigate = useNavigate();
+
+  if (!summary) {
+    return (
+      <div className="flex flex-col items-center w-full text-slate-500 text-xs">
+        <div className="h-20 w-20 rounded-full bg-slate-700/30 animate-pulse mb-2" />
+        Loading queue…
+      </div>
+    );
+  }
+
+  // /api/remediation/generated.stats shape: {open, critical, in_progress, completed_this_week}.
+  // "open" here already excludes in-progress/completed — it's the new+planned bucket.
+  const open = summary.open || 0;
+  const inProg = summary.in_progress || 0;
+  const completed = summary.completed_this_week || 0;
+  const crit = summary.critical || 0;
+  const active = open + inProg;
+
+  // Big-number color reflects urgency: red if any critical, amber if any active, emerald if clear
+  const headlineColor = crit > 0 ? '#ef4444' : active > 0 ? '#f59e0b' : '#22c55e';
+  const statusLabel = active === 0 && completed === 0 ? 'Nothing to remediate'
+                    : active === 0 ? 'All resolved this week'
+                    : crit > 0 ? 'Critical items waiting'
+                    : 'Items waiting';
 
   return (
-    <div className="flex flex-col items-center">
-      <svg width="160" height="100" viewBox="0 0 160 100">
-        <path d="M 10 90 A 60 60 0 0 1 150 90" fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
-        <path
-          d="M 10 90 A 60 60 0 0 1 150 90"
-          fill="none"
-          stroke={color}
-          strokeWidth="12"
-          strokeLinecap="round"
-          strokeDasharray={`${circumference}`}
-          strokeDashoffset={offset}
-          style={{ transition: 'stroke-dashoffset 1s ease-out' }}
-        />
-        <text x="80" y="78" textAnchor="middle" fill="white" fontSize="28" fontWeight="bold">{score}</text>
-        <text x="80" y="95" textAnchor="middle" fill={color} fontSize="12" fontWeight="500">{label}</text>
-      </svg>
-      <div className="text-xs text-slate-500 mt-1 flex items-center justify-center gap-1">
-        Identity Hygiene Score
-        <span className="relative group">
-          <span className="text-slate-600 cursor-help" style={{ fontSize: 14 }}>{'\u24D8'}</span>
-          <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block bg-slate-900 border border-slate-700 text-slate-200 text-[10px] px-2.5 py-1.5 rounded-md max-w-[280px] whitespace-normal z-50 shadow-lg pointer-events-none leading-relaxed">
-            Calculated as 100 minus the percentage of critical and high risk identities in your environment. A score of 100 means zero critical or high risk identities. Complements the posture score which measures attack surface across 7 pillars.
-          </span>
-        </span>
+    <div className="flex flex-col items-center w-full">
+      <div className="text-xs text-slate-400 uppercase tracking-wider font-medium mb-2">Remediation Queue</div>
+      <div className="text-5xl font-bold leading-none" style={{ color: headlineColor }}>{active}</div>
+      <div className="text-xs mt-1" style={{ color: headlineColor }}>{statusLabel}</div>
+
+      {(active > 0 || completed > 0) ? (
+        <div className="text-[11px] text-slate-500 mt-3 flex items-center gap-3">
+          <span>open <span className="text-amber-400 font-mono">{open}</span></span>
+          <span className="text-slate-700">·</span>
+          <span>in progress <span className="text-blue-400 font-mono">{inProg}</span></span>
+          <span className="text-slate-700">·</span>
+          <span>done this wk <span className="text-emerald-400 font-mono">{completed}</span></span>
+        </div>
+      ) : (
+        <div className="text-[11px] text-slate-500 mt-3">No items — risk graph is clean</div>
+      )}
+
+      {crit > 0 && (
+        <div className="text-[10px] text-red-400 mt-1">
+          {crit} critical {crit === 1 ? 'item' : 'items'} need immediate action
+        </div>
+      )}
+
+      <button
+        onClick={() => navigate('/remediation')}
+        className="text-[11px] text-blue-400 hover:text-blue-300 mt-3 transition-colors"
+      >
+        → Open Remediation Center
+      </button>
+
+      {/* Posture cross-reference — SSOT value preserved, but clearly framed as
+          "see Executive Posture for the board view" rather than competing for
+          headline space on the ops console. */}
+      <div className="mt-3 pt-3 border-t border-slate-700/40 w-full flex items-center justify-center gap-2 text-[10px] text-slate-500">
+        <span>Posture</span>
+        <span className="font-mono font-semibold" style={{ color: scoreColor(posture) }}>{posture}</span>
+        <span className="text-slate-700">·</span>
+        <a href="/" className="text-blue-400 hover:text-blue-300 transition-colors">↗ Executive Posture</a>
       </div>
-      <div className="text-[10px] text-slate-600 -mt-0.5">% of identities with clean governance status</div>
     </div>
   );
 }

@@ -120,7 +120,12 @@ export function AttackPathWidget({ identities, compact = false, attackPathCount:
               <div style={{ marginTop: 8, fontSize: 10, color: COLORS.textMuted, fontFamily: FONT.ui }}>
                 Blast radius: <span style={{ fontWeight: 600, color: COLORS.text }}>{topId.blast_radius_score}</span>
                 <br />
-                Risk score: <span style={{ fontWeight: 600, color: COLORS.text }}>{topId.risk_score}</span>
+                {/* CVSS-aligned 0-10 (industry standard) — proprietary score never shown */}
+                CVSS: <span style={{ fontWeight: 600, color: COLORS.text }} title="CVSS-aligned 0-10 severity (FIRST.org CVSS 3.1)">
+                  {typeof (topId as any).risk_score_cvss === 'number'
+                    ? (topId as any).risk_score_cvss.toFixed(1)
+                    : '—'}
+                </span>
               </div>
             )}
             <button onClick={() => navigate('/attack-simulator')} style={{

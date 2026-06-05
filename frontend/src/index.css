@@ -207,6 +207,14 @@
 [data-theme] .bg-gray-50      { background-color: var(--bg-surface); }
 [data-theme] .bg-gray-100     { background-color: var(--bg-elevated); }
 [data-theme] .bg-gray-200     { background-color: var(--bg-active); }
+/* Mid-gray fills (toggle off-states, dividers, disabled controls) — close
+   the auto-remap gap so settings tabs and modals don't show light-grey
+   patches on a dark page. Added as part of the component library audit. */
+[data-theme] .bg-gray-300     { background-color: var(--bg-active); }
+[data-theme] .bg-gray-400     { background-color: var(--bg-elevated); }
+[data-theme] .bg-gray-500     { background-color: var(--bg-elevated); }
+[data-theme] .bg-gray-600     { background-color: var(--bg-raised); }
+[data-theme] .bg-gray-700     { background-color: var(--bg-raised); }
 [data-theme] .bg-gray-800     { background-color: var(--bg-raised); }
 [data-theme] .bg-gray-900     { background-color: var(--bg-surface); }
 [data-theme] .bg-gray-950     { background-color: var(--bg-deep); }
@@ -266,6 +274,9 @@
 [data-theme] .text-gray-500   { color: var(--text-secondary); }
 [data-theme] .text-gray-400   { color: var(--text-tertiary); }
 [data-theme] .text-gray-300   { color: var(--text-tertiary); }
+/* Top-end gray text — used as accents / pill labels on dark surfaces. */
+[data-theme] .text-gray-100   { color: var(--text-primary); }
+[data-theme] .text-gray-200   { color: var(--text-primary); }
 [data-theme] .text-white       { color: var(--text-primary); }
 [data-theme] .text-slate-300  { color: var(--text-secondary); }
 [data-theme] .text-slate-400  { color: var(--text-secondary); }
@@ -318,6 +329,10 @@
 [data-theme] .border-gray-300 { border-color: var(--border-default); }
 [data-theme] .border-slate-600 { border-color: var(--border-default); }
 [data-theme] .border-slate-700 { border-color: var(--border-default); }
+/* divide-* (vertical/horizontal separators between flex/grid children) */
+[data-theme] .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: var(--border-subtle); }
+[data-theme] .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: var(--border-default); }
+[data-theme] .divide-gray-300 > :not([hidden]) ~ :not([hidden]) { border-color: var(--border-default); }
 
 /* Semantic border colors */
 [data-theme] .border-red-200     { border-color: var(--border-red); }

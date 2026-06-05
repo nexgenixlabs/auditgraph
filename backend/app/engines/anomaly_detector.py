@@ -74,6 +74,34 @@ class AnomalyDetector:
             ('off_hours_pim', self._detect_off_hours_pim),
             ('excessive_pim_usage', self._detect_excessive_pim_usage),
             ('excessive_api_permission', self._detect_excessive_api_permissions),
+            # AG-AI (2026-06-01): runaway AI agent detection — fires when an
+            # AI agent's signal profile triggers any policy violation or
+            # attack scenario. Composes existing ai_risk + ai_governance +
+            # ai_attack_scenarios modules so it stays in sync with the
+            # AI Security pages.
+            ('ai_agent_runaway', self._detect_ai_agent_runaway),
+            # AG-JML-Mover (2026-06-01): when department or job_title
+            # changes across runs AND any privileged roles from the prior
+            # job are still attached, surface as mover_stale_access. The
+            # "M" of JML observability — CIEM detects what IGA misses,
+            # without becoming IGA.
+            ('mover_stale_access', self._detect_mover_stale_access),
+            # AG-44 (2026-06-02): when an identity's agent_classification
+            # transitions from None/unknown to ai_agent or possible_ai_agent
+            # between scans, surface it as "new AI agent behavior". Demo
+            # story Step 1 — "This SPN started calling Azure Cognitive
+            # Services 6 days ago." Cross-run delta over the static
+            # classifier output already written by services/agent_classifier.
+            ('new_ai_agent_behavior', self._detect_new_ai_agent_behavior),
+            # AG-83 (2026-06-02): Continuous Trust Drift alerting.
+            # The Vercel post's pointed line: "Whether anyone is watching
+            # AFTER the approval happens." Surfaces new OAuth consent grants
+            # appearing between scans — the canonical signal that a tenant's
+            # trust surface has expanded since last review.
+            ('new_oauth_grant', self._detect_new_oauth_grant),
+            # AG-83: identity first appears in current run AND lands on
+            # critical/high — the day-zero risk pattern.
+            ('new_high_risk_identity', self._detect_new_high_risk_identity),
         ]
 
         for name, detector in detectors:
@@ -85,7 +113,7 @@ class AnomalyDetector:
                 except Exception:
                     pass
                 if name in ('off_hours_pim', 'excessive_pim_usage',
-                            'excessive_api_permission'):
+                            'excessive_api_permission', 'ai_agent_runaway'):
                     results = detector(current_run_id, settings)
                 else:
                     results = detector(current_run_id, previous_run_id)
@@ -140,6 +168,36 @@ class AnomalyDetector:
         for identity_id, role_name in rows:
             roles.setdefault(identity_id, []).append(role_name)
         return roles
+
+    def _get_run_identity_hr_fields(self, run_id: int) -> Dict[str, Dict]:
+        """Get HR-derived identity fields (department, job_title, manager_upn)
+        per identity for a run. Used by the mover-stale-access detector.
+
+        Returned dict is keyed by identity_id → {department, job_title,
+        manager_upn, display_name}. Missing fields default to empty string
+        so the diff comparison is case-stable.
+        """
+        cursor = self.db.conn.cursor()
+        cursor.execute("""
+            SELECT identity_id, display_name,
+                   COALESCE(department, ''), COALESCE(job_title, ''),
+                   COALESCE(manager_upn, ''), COALESCE(enabled, true)
+              FROM identities
+             WHERE discovery_run_id = %s
+        """, (run_id,))
+        rows = cursor.fetchall()
+        cursor.close()
+        return {
+            row[0]: {
+                'identity_id': row[0],
+                'display_name': row[1],
+                'department': row[2],
+                'job_title': row[3],
+                'manager_upn': row[4],
+                'enabled': bool(row[5]),
+            }
+            for row in rows
+        }
 
     def _get_run_entra_roles(self, run_id: int) -> Dict[str, List[str]]:
         """Get Entra role assignments per identity for a run."""
@@ -532,3 +590,666 @@ class AnomalyDetector:
             })
 
         return anomalies
+
+    # ── AI Agent Runaway Detection ────────────────────────────────────────
+
+    def _detect_ai_agent_runaway(self, current_run_id: int,
+                                 settings: Optional[Dict] = None) -> List[Dict]:
+        """Detect AI agents whose risk profile indicates 'runaway' behavior.
+
+        AG-AI (2026-06-01): for each AI agent identity in the current run,
+        evaluate the existing ai_risk signals + ai_governance policies +
+        ai_attack_scenarios chains. Emit an anomaly when:
+
+          (a) ANY attack scenario activates (critical → high severity)
+              — e.g. AI_DATA_EXFILTRATION requires sensitive_data_access
+              + unrestricted_egress, both deterministic from RBAC + scope.
+
+          (b) A high/critical policy fires for an agent that's also
+              dormant or ownerless — the "stewardless + powerful" pattern
+              that produces the runaway-agent risk story.
+
+        Composes existing modules (no duplication): same signals/policies/
+        scenarios the AI Security pages already render. This detector
+        promotes them into the standard Anomalies feed so they appear
+        alongside permission-escalation, credential-surge, etc.
+        """
+        from app.constants.ai_risk import detect_signals, aggregate_access_levels, compute_signal_score
+        from app.constants.ai_governance import evaluate_agent_policies
+        from app.constants.ai_attack_scenarios import evaluate_scenarios
+
+        anomalies: List[Dict] = []
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                       i.agent_identity_type, i.owner_display_name,
+                       i.credential_count, i.credential_risk,
+                       i.last_sign_in, i.last_activity_date, i.risk_score
+                  FROM identities i
+                 WHERE i.discovery_run_id = %s
+                   AND i.agent_identity_type IS NOT NULL
+            """, (current_run_id,))
+            agents = cursor.fetchall()
+        except Exception:
+            cursor.close()
+            return anomalies
+
+        # Pull the run's org_id so we can fetch active exceptions for this
+        # tenant only. Approved + non-expired exceptions suppress matching
+        # policy violations — anomalies must NOT fire for explicitly
+        # risk-accepted agents.
+        run_org_id = None
+        try:
+            cursor.execute("SELECT organization_id FROM discovery_runs WHERE id = %s", (current_run_id,))
+            row = cursor.fetchone()
+            if row:
+                run_org_id = row[0] if isinstance(row, (tuple, list)) else row.get('organization_id')
+        except Exception:
+            run_org_id = None
+        active_map: Dict = {}
+        if run_org_id is not None:
+            try:
+                active_excs = self.db.list_active_ai_governance_exceptions(run_org_id)
+                active_map = {
+                    (e['identity_id'], e['policy_id']): e.get('expires_at')
+                    for e in active_excs
+                }
+            except Exception:
+                active_map = {}
+
+        for row in agents:
+            db_id, identity_id, display_name, category, agent_type, \
+                owner_name, cred_count, cred_risk, last_signin, last_act, risk_score = row
+
+            # Fetch role assignments for signal computation
+            cursor.execute("""
+                SELECT role_name, scope, scope_type
+                  FROM role_assignments
+                 WHERE identity_db_id = %s
+            """, (db_id,))
+            role_rows = cursor.fetchall()
+            role_assignments = [
+                {'role_name': r[0], 'scope': r[1], 'scope_type': r[2]}
+                for r in role_rows
+            ]
+
+            agent_meta = {
+                'display_name': display_name,
+                'owner_display_name': owner_name,
+                'credential_count': cred_count or 0,
+                'credential_risk': cred_risk,
+                'last_sign_in': last_signin,
+                'last_activity_date': last_act,
+                'detected_platform': '',  # not yet wired
+            }
+            try:
+                access_levels = aggregate_access_levels(role_assignments)
+                fired = detect_signals(agent_meta, role_assignments, access_levels)
+            except Exception:
+                continue
+            if not fired:
+                continue
+
+            fired_keys = {s['key'] for s in fired}
+            try:
+                violations = evaluate_agent_policies(
+                    fired_keys,
+                    identity_id=identity_id,
+                    active_exceptions=active_map,
+                )
+                scenarios = evaluate_scenarios(fired_keys)
+            except Exception:
+                continue
+
+            # Drop suppressed violations — an approved exception means this
+            # policy fire is intentionally risk-accepted; anomalies should not
+            # surface it. Scenarios still fire because they may chain on signals
+            # unrelated to the policy under exception.
+            violations = [v for v in (violations or []) if not v.get('suppressed_by_exception')]
+
+            active_scenarios = [s for s in (scenarios or []) if s.get('active')] if scenarios else []
+            if not violations and not active_scenarios:
+                continue
+
+            # Compute composite CVSS score for the anomaly severity tier
+            try:
+                score_info = compute_signal_score(fired)
+                cvss = score_info.get('score') or 0
+            except Exception:
+                cvss = 0
+
+            if active_scenarios:
+                lead = active_scenarios[0]
+                lead_name = lead.get('title') or lead.get('name') or lead.get('key') or lead.get('id')
+                title = f"Runaway AI agent: {display_name} — {lead_name}"
+                severity = lead.get('severity') or 'critical'
+                desc = (
+                    f"AI agent crossed attack scenario \"{lead_name}\". "
+                    f"{lead.get('description', '')} "
+                    f"Composite signal score: {cvss}."
+                )
+            else:
+                top = max(violations, key=lambda v: {'critical': 3, 'high': 2, 'medium': 1, 'low': 0}.get((v.get('severity') or 'medium').lower(), 0))
+                top_name = top.get('name') or top.get('id') or top.get('policy_key')
+                title = f"AI agent policy violation: {display_name} — {top_name}"
+                severity = top.get('severity') or 'high'
+                desc = (
+                    f"AI agent violates governance policy \"{top_name}\". "
+                    f"{top.get('rationale') or top.get('description', '')} "
+                    f"Composite signal score: {cvss}."
+                )
+
+            anomalies.append({
+                'anomaly_type': 'ai_agent_runaway',
+                'severity': severity,
+                'identity_id': identity_id,
+                'identity_name': display_name,
+                'title': title,
+                'description': desc,
+                'details': {
+                    'agent_identity_type': agent_type,
+                    'identity_category': category,
+                    'cvss_score': cvss,
+                    'fired_signals': [
+                        {'key': s['key'], 'evidence': s.get('evidence', '')}
+                        for s in fired
+                    ],
+                    'policy_violations': [
+                        {'policy_id': v.get('id'), 'name': v.get('name'),
+                         'severity': v.get('severity'),
+                         'framework': v.get('framework', []),
+                         'remediation': v.get('remediation')}
+                        for v in (violations or [])
+                    ],
+                    'active_scenarios': [
+                        {'id': s.get('id'), 'name': s.get('name') or s.get('title'),
+                         'severity': s.get('severity'),
+                         'description': s.get('description')}
+                        for s in active_scenarios
+                    ],
+                    'owner_present': bool(owner_name),
+                },
+            })
+
+        cursor.close()
+        return anomalies
+
+    # ── JML Observability: Mover stale-access ─────────────────────────────
+
+    def _detect_mover_stale_access(self, current_run_id: int,
+                                   previous_run_id: int) -> List[Dict]:
+        """Detect identities whose department or job_title changed across
+        runs but whose privileged roles from the prior job are still
+        attached.
+
+        AG-JML (2026-06-01): the "Mover" half of JML observability.
+        AuditGraph doesn't write to HRIS / Workday / AD (that would be
+        IGA territory — SailPoint/Saviynt) — we just SURFACE the
+        observability gap: "Bharath moved Sales → Engineering 60 days
+        ago and still has Salesforce Sales Admin." The customer's
+        existing IGA (or manual offboarding) decides what to do.
+
+        The signal that makes this a real anomaly (vs noise) is the
+        INTERSECTION: roles that existed BEFORE the job change AND still
+        exist AFTER. A role granted post-move is the user's new job;
+        a role from the old job that lingered is the stale-access risk.
+        We only flag privileged roles to keep signal-to-noise high.
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            return anomalies
+
+        try:
+            prev_hr = self._get_run_identity_hr_fields(previous_run_id)
+            curr_hr = self._get_run_identity_hr_fields(current_run_id)
+        except Exception as e:
+            logger.warning("[mover_stale_access] HR field fetch failed: %s", e)
+            return anomalies
+
+        # Movers: identities present in both runs with any HR field change.
+        movers: Dict[str, Dict] = {}
+        for ident_id, curr in curr_hr.items():
+            prev = prev_hr.get(ident_id)
+            if not prev:
+                continue
+            dept_changed = (prev['department'] or '').strip().lower() != (curr['department'] or '').strip().lower()
+            title_changed = (prev['job_title'] or '').strip().lower() != (curr['job_title'] or '').strip().lower()
+            manager_changed = (prev['manager_upn'] or '').strip().lower() != (curr['manager_upn'] or '').strip().lower()
+            if not (dept_changed or title_changed or manager_changed):
+                continue
+            movers[ident_id] = {
+                'prev': prev,
+                'curr': curr,
+                'dept_changed': dept_changed,
+                'title_changed': title_changed,
+                'manager_changed': manager_changed,
+            }
+
+        if not movers:
+            return anomalies
+
+        # Only compare roles for the movers (small set; faster than fetching
+        # all run roles when only a few percent of identities moved).
+        prev_rbac = self._get_run_roles(previous_run_id)
+        curr_rbac = self._get_run_roles(current_run_id)
+        prev_entra = self._get_run_entra_roles(previous_run_id)
+        curr_entra = self._get_run_entra_roles(current_run_id)
+
+        for ident_id, mv in movers.items():
+            prev_roles = set(prev_rbac.get(ident_id, [])) | set(prev_entra.get(ident_id, []))
+            curr_roles = set(curr_rbac.get(ident_id, [])) | set(curr_entra.get(ident_id, []))
+            # Stale = present BEFORE and STILL present AFTER (intersection).
+            stale = prev_roles & curr_roles
+            # Filter to privileged only (CRITICAL_ROLES + HIGH_RISK_ROLES
+            # define what a CISO actually cares about for a movers query).
+            stale_priv = sorted(stale & (CRITICAL_ROLES | HIGH_RISK_ROLES))
+            if not stale_priv:
+                continue
+
+            # Severity: critical if any CRITICAL_ROLES survived the move,
+            # else high. This is the classic mover risk pattern.
+            sev = 'critical' if (stale & CRITICAL_ROLES) else 'high'
+
+            change_parts = []
+            if mv['dept_changed']:
+                change_parts.append(
+                    f"department: \"{mv['prev']['department'] or '(empty)'}\" → "
+                    f"\"{mv['curr']['department'] or '(empty)'}\""
+                )
+            if mv['title_changed']:
+                change_parts.append(
+                    f"title: \"{mv['prev']['job_title'] or '(empty)'}\" → "
+                    f"\"{mv['curr']['job_title'] or '(empty)'}\""
+                )
+            if mv['manager_changed']:
+                change_parts.append(
+                    f"manager: \"{mv['prev']['manager_upn'] or '(empty)'}\" → "
+                    f"\"{mv['curr']['manager_upn'] or '(empty)'}\""
+                )
+            change_summary = '; '.join(change_parts)
+
+            anomalies.append({
+                'anomaly_type': 'mover_stale_access',
+                'severity': sev,
+                'identity_id': ident_id,
+                'identity_name': mv['curr']['display_name'],
+                'title': f"Mover with stale access: {mv['curr']['display_name']}",
+                'description': (
+                    f"Identity moved ({change_summary}) since the prior scan, "
+                    f"but {len(stale_priv)} privileged role(s) from the prior "
+                    f"job are still attached: {', '.join(stale_priv[:5])}"
+                    + (f" (+{len(stale_priv) - 5} more)" if len(stale_priv) > 5 else "")
+                    + ". Review whether the user still needs these roles in "
+                    "their new role; remove or convert to PIM-eligible."
+                ),
+                'details': {
+                    'department_changed': mv['dept_changed'],
+                    'title_changed': mv['title_changed'],
+                    'manager_changed': mv['manager_changed'],
+                    'prev_department': mv['prev']['department'],
+                    'curr_department': mv['curr']['department'],
+                    'prev_job_title': mv['prev']['job_title'],
+                    'curr_job_title': mv['curr']['job_title'],
+                    'prev_manager_upn': mv['prev']['manager_upn'],
+                    'curr_manager_upn': mv['curr']['manager_upn'],
+                    'stale_privileged_roles': stale_priv,
+                    'frameworks': {
+                        'nist': ['AC-2 (Account Management)', 'AC-6 (Least Privilege)'],
+                        'cis': ['CIS Azure 1.22', 'CIS Azure 1.23'],
+                        'mitre': ['T1078.004'],
+                    },
+                },
+            })
+
+        return anomalies
+
+    def _detect_new_ai_agent_behavior(self, current_run_id: int,
+                                       previous_run_id: int) -> List[Dict]:
+        """Detect identities that flipped from non-AI to AI between scans.
+
+        AG-44 (2026-06-02): the temporal companion to the static
+        agent_classifier. The static classifier writes per-run snapshots
+        to agent_classifications (identity_db_id, discovery_run_id) →
+        (agent_identity_type, detected_platform, confidence, reason). This
+        detector compares the LATEST classification per identity_id across
+        the two runs and surfaces transitions:
+
+          previous: None / 'unknown'
+          current:  'ai_agent' or 'possible_ai_agent'
+
+        Why temporal: a SPN that was a vanilla automation account last
+        scan and now triggers ai_agent classification means SOMETHING
+        CHANGED — new role on Cognitive Services, new app_id match, new
+        AI workload binding. The demo narration is "This SPN started
+        calling Azure Cognitive Services 6 days ago", which is exactly
+        this transition.
+
+        Severity: critical when the new classification is high-confidence
+        ai_agent AND the identity holds any privileged role; else high
+        for ai_agent transitions; medium for possible_ai_agent.
+
+        NIST / CIS / MITRE framework refs included on the anomaly so the
+        compliance tab can map the finding to controls.
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            # First scan in the org's history — no baseline to compare
+            # against; static classifier output is the whole story.
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT identity_id, agent_identity_type, detected_platform,
+                       classification_confidence, classification_reason
+                  FROM agent_classifications
+                 WHERE discovery_run_id = %s
+            """, (previous_run_id,))
+            prev_map = {
+                r[0]: {
+                    'agent_identity_type': r[1],
+                    'detected_platform': r[2],
+                    'classification_confidence': float(r[3]) if r[3] is not None else 0.0,
+                    'classification_reason': r[4],
+                }
+                for r in cursor.fetchall()
+            }
+
+            cursor.execute("""
+                SELECT i.id, ac.identity_id, ac.agent_identity_type,
+                       ac.detected_platform, ac.classification_confidence,
+                       ac.classification_reason, i.display_name,
+                       i.identity_category, i.risk_level
+                  FROM agent_classifications ac
+                  JOIN identities i ON i.id = ac.identity_db_id
+                 WHERE ac.discovery_run_id = %s
+            """, (current_run_id,))
+            current_rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning("[new_ai_agent_behavior] fetch failed: %s", e)
+            cursor.close()
+            return anomalies
+
+        for row in current_rows:
+            (identity_db_id, identity_id, curr_type, curr_platform,
+             curr_conf, curr_reason, display_name, identity_category,
+             risk_level) = row
+            curr_type = (curr_type or '').lower()
+            if curr_type not in ('ai_agent', 'possible_ai_agent'):
+                continue
+
+            prev = prev_map.get(identity_id)
+            prev_type = (prev.get('agent_identity_type') if prev else None) or 'unknown'
+            prev_type = prev_type.lower()
+            # Only fire on TRANSITIONS — already-classified agents are
+            # the static classifier's job, not the temporal detector's.
+            if prev_type in ('ai_agent', 'possible_ai_agent'):
+                continue
+            # Also skip humans — ai_privileged_human is a different story.
+            if identity_category == 'human_user':
+                continue
+
+            # Severity:
+            #   critical = confirmed ai_agent + privileged risk + high confidence
+            #   high     = ai_agent (any other condition)
+            #   medium   = possible_ai_agent
+            risk_norm = (risk_level or '').lower()
+            curr_conf_f = float(curr_conf) if curr_conf is not None else 0.0
+            if curr_type == 'ai_agent' and curr_conf_f >= 0.8 and risk_norm in ('critical', 'high'):
+                sev = 'critical'
+            elif curr_type == 'ai_agent':
+                sev = 'high'
+            else:
+                sev = 'medium'
+
+            platform_phrase = (
+                f' on platform {curr_platform}' if curr_platform else ''
+            )
+            title = (
+                f"AI agent behavior emerged: {display_name or identity_id} "
+                f"(was {prev_type}, now {curr_type}{platform_phrase})"
+            )
+            description = (
+                f"Between the previous and current discovery, this identity "
+                f"transitioned from {prev_type} to {curr_type}{platform_phrase}. "
+                f"Classifier rationale: {curr_reason or 'no reason recorded'}."
+            )
+            anomalies.append({
+                'discovery_run_id': current_run_id,
+                'anomaly_type': 'new_ai_agent_behavior',
+                'severity': sev,
+                'identity_id': identity_id,
+                'identity_name': display_name,
+                'title': title,
+                'description': description,
+                'details': {
+                    'previous_agent_identity_type': prev_type,
+                    'current_agent_identity_type': curr_type,
+                    'current_classification_confidence': curr_conf_f,
+                    'current_classification_reason': curr_reason,
+                    'detected_platform': curr_platform,
+                    'previous_run_id': previous_run_id,
+                    'risk_level_at_emergence': risk_norm or None,
+                    'frameworks': {
+                        'nist': ['AC-2 (Account Management)', 'AC-6 (Least Privilege)',
+                                 'CM-3 (Configuration Change Control)'],
+                        'cis': ['CIS Azure 1.21'],
+                        'mitre': ['T1078.004 (Cloud Accounts)', 'T1098.001 (Additional Cloud Credentials)'],
+                    },
+                },
+            })
+
+        cursor.close()
+        return anomalies
+
+    def _detect_new_oauth_grant(self, current_run_id: int,
+                                 previous_run_id: int) -> List[Dict]:
+        """Surface OAuth consent grants that appeared between scans.
+
+        AG-83 (2026-06-02): the Vercel/Context.ai watching-after-approval
+        signal. AG-81 inventories consent_grants; AG-85 scores them by
+        publisher trust; this detector fires when a grant appears that
+        wasn't visible in the prior scan. That's the "someone granted
+        consent and nobody told the CISO" pattern.
+
+        Strategy: consent_grants is UPSERTed across runs (same natural key
+        gets touched each scan with discovery_run_id = latest), so a
+        simple "rows with discovery_run_id = current AND NOT in previous"
+        query won't work. Instead use created_datetime > previous_run.
+        completed_at as the boundary — any grant created after the prior
+        scan completed is one that wasn't in last snapshot's view.
+
+        Severity inherits from the consent_grant's own risk_level (which
+        compute_consent_risk already computed using scope tier + admin
+        consent + publisher trust + dormancy). Low-risk grants skipped
+        (would be noise — most low-risk grants are openid / profile /
+        email and shouldn't page anyone).
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT started_at, completed_at, organization_id
+                  FROM discovery_runs WHERE id = %s
+            """, (previous_run_id,))
+            prev_row = cursor.fetchone()
+            if not prev_row:
+                cursor.close()
+                return anomalies
+            prev_started, prev_completed, prev_org_id = prev_row
+            boundary = prev_completed or prev_started
+            if not boundary:
+                cursor.close()
+                return anomalies
+
+            cursor.execute("""
+                SELECT id, client_app_id, client_display_name,
+                       resource_app_id, resource_display_name, grant_type,
+                       consent_type, scopes, high_risk_scopes,
+                       risk_level, risk_score, created_datetime,
+                       publisher_name, verified_publisher
+                  FROM consent_grants
+                 WHERE organization_id = %s
+                   AND created_datetime IS NOT NULL
+                   AND created_datetime > %s
+                 ORDER BY created_datetime DESC
+            """, (prev_org_id, boundary))
+            new_grants = cursor.fetchall()
+        except Exception as e:
+            logger.warning("[new_oauth_grant] fetch failed: %s", e)
+            cursor.close()
+            return anomalies
+
+        for row in new_grants:
+            (cg_id, client_app_id, client_name, resource_app_id,
+             resource_name, grant_type, consent_type, scopes, hrs,
+             risk_level, risk_score, created_dt, pub_name, verified) = row
+
+            sev = (risk_level or '').lower()
+            if sev not in ('critical', 'high', 'medium'):
+                continue  # noise floor
+
+            client_label = client_name or client_app_id or 'unknown app'
+            resource_label = resource_name or 'unknown API'
+            scope_summary = ', '.join((hrs or [])[:3]) if hrs else (
+                ', '.join((scopes or [])[:3]) if scopes else 'no scopes recorded'
+            )
+            is_admin = consent_type == 'AllPrincipals' or grant_type == 'application'
+            consent_phrase = 'admin-consented (tenant-wide)' if is_admin else 'user-consented'
+
+            pub_phrase = ''
+            if pub_name and (pub_name or '').lower().startswith('microsoft'):
+                pub_phrase = ' Microsoft-published.'
+            elif verified is True:
+                pub_phrase = f' Verified publisher: {pub_name or "attested"}.'
+            elif verified is False:
+                pub_phrase = ' UNVERIFIED publisher — consent-phishing signature.'
+
+            title = (
+                f"New OAuth grant: {client_label} → {resource_label} "
+                f"({consent_phrase})"
+            )
+            description = (
+                f"A consent grant created after the previous scan was "
+                f"discovered this run. Scopes: {scope_summary}. "
+                f"Risk: {risk_level} (score {risk_score}/100).{pub_phrase}"
+            )
+            anomalies.append({
+                'discovery_run_id': current_run_id,
+                'anomaly_type': 'new_oauth_grant',
+                'severity': sev,
+                'identity_id': client_app_id,
+                'identity_name': client_label,
+                'title': title,
+                'description': description,
+                'details': {
+                    'consent_grant_id': cg_id,
+                    'client_app_id': client_app_id,
+                    'resource_app_id': resource_app_id,
+                    'resource_display_name': resource_label,
+                    'grant_type': grant_type,
+                    'consent_type': consent_type,
+                    'scopes': scopes or [],
+                    'high_risk_scopes': hrs or [],
+                    'risk_score': risk_score,
+                    'publisher_name': pub_name,
+                    'verified_publisher': verified,
+                    'created_datetime': created_dt.isoformat() if hasattr(created_dt, 'isoformat') else (str(created_dt) if created_dt else None),
+                    'frameworks': {
+                        'nist': ['AC-4 (Information Flow)', 'AC-6 (Least Privilege)',
+                                 'AU-2 (Audit Events)'],
+                        'cis': ['CIS Azure 5.1.1'],
+                        'mitre': ['T1550.001 (Application Access Token)',
+                                  'T1078.004 (Cloud Accounts)'],
+                    },
+                },
+            })
+
+        cursor.close()
+        return anomalies
+
+    def _detect_new_high_risk_identity(self, current_run_id: int,
+                                        previous_run_id: int) -> List[Dict]:
+        """Identity first appears in this run AND lands on critical/high.
+
+        AG-83: the "day-zero over-permissioning" pattern. A new SPN /
+        managed identity / human appearing already-privileged is a
+        provisioning signal — either a misconfigured intake or a bypass
+        of the change-control process.
+
+        Skips Microsoft-system identities (Microsoft adds + removes these
+        regularly; the noise would drown the real signal).
+        """
+        anomalies: List[Dict] = []
+        if previous_run_id is None:
+            return anomalies
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT identity_id FROM identities WHERE discovery_run_id = %s
+            """, (previous_run_id,))
+            prev_ids = {r[0] for r in cursor.fetchall()}
+
+            cursor.execute("""
+                SELECT identity_id, display_name, identity_category,
+                       risk_level, risk_score, created_datetime,
+                       agent_identity_type
+                  FROM identities
+                 WHERE discovery_run_id = %s
+                   AND COALESCE(is_microsoft_system, false) = false
+                   AND risk_level IN ('critical', 'high')
+            """, (current_run_id,))
+            curr_rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning("[new_high_risk_identity] fetch failed: %s", e)
+            cursor.close()
+            return anomalies
+
+        for row in curr_rows:
+            (identity_id, display_name, category, risk_level, risk_score,
+             created_dt, agent_type) = row
+            if identity_id in prev_ids:
+                continue
+            sev = (risk_level or '').lower()
+            label = display_name or identity_id or 'unknown identity'
+            agent_phrase = (f' Classified as {agent_type}.' if agent_type
+                            and agent_type != 'unknown' else '')
+            title = f"New {sev}-risk identity: {label}"
+            description = (
+                f"Identity first appeared in this scan and landed at "
+                f"{sev} risk (score {risk_score}/100). Category: "
+                f"{category or 'unknown'}.{agent_phrase} A new identity "
+                f"should not be critical or high on day one — verify the "
+                f"provisioning path."
+            )
+            anomalies.append({
+                'discovery_run_id': current_run_id,
+                'anomaly_type': 'new_high_risk_identity',
+                'severity': sev,
+                'identity_id': identity_id,
+                'identity_name': label,
+                'title': title,
+                'description': description,
+                'details': {
+                    'risk_level': risk_level,
+                    'risk_score': risk_score,
+                    'identity_category': category,
+                    'agent_identity_type': agent_type,
+                    'created_datetime': created_dt.isoformat() if hasattr(created_dt, 'isoformat') else (str(created_dt) if created_dt else None),
+                    'frameworks': {
+                        'nist': ['AC-2 (Account Management)',
+                                 'CM-3 (Configuration Change Control)'],
+                        'cis': ['CIS Azure 1.21'],
+                        'mitre': ['T1136.003 (Create Account: Cloud Account)'],
+                    },
+                },
+            })
+
+        cursor.close()
+        return anomalies
+

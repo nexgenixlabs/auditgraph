@@ -48,16 +48,44 @@ class CopilotGateway:
         self._checked = False
 
     def _get_service(self):
-        """Lazily initialize the CopilotService from the platform env key."""
+        """Lazily initialize the CopilotService from the platform env config.
+
+        Provider routing — COPILOT_PROVIDER selects backend:
+          anthropic (default) — requires ANTHROPIC_API_KEY
+          openai              — requires OPENAI_API_KEY (placeholder fallback)
+          ollama              — local LLM; needs `ollama serve` running
+        """
         if not self._checked:
             from app.services.copilot_service import CopilotService
-            api_key = os.getenv('ANTHROPIC_API_KEY', '').strip()
-            if api_key:
-                self._service = CopilotService(api_key)
+            provider = os.getenv('COPILOT_PROVIDER', 'anthropic').lower().strip()
+            if provider == 'ollama':
+                self._service = CopilotService('ollama-no-key-needed')
                 self._service_err = None
+            elif provider == 'openai':
+                oa_key = os.getenv('OPENAI_API_KEY', '').strip()
+                if oa_key:
+                    self._service = CopilotService(oa_key)
+                    self._service_err = None
+                else:
+                    self._service = None
+                    self._service_err = (
+                        'AI Copilot is not configured. COPILOT_PROVIDER=openai '
+                        'is set but OPENAI_API_KEY is missing. Add it to '
+                        '.env.local (or switch back to COPILOT_PROVIDER=anthropic).'
+                    )
             else:
-                self._service = None
-                self._service_err = 'AI Copilot is not configured by the platform administrator.'
+                api_key = os.getenv('ANTHROPIC_API_KEY', '').strip()
+                if api_key:
+                    self._service = CopilotService(api_key)
+                    self._service_err = None
+                else:
+                    self._service = None
+                    self._service_err = (
+                        'AI Copilot is not configured. Set one of: '
+                        'ANTHROPIC_API_KEY (production), '
+                        'OPENAI_API_KEY + COPILOT_PROVIDER=openai (fallback), '
+                        'or COPILOT_PROVIDER=ollama (local; heavy on Mac RAM).'
+                    )
             self._checked = True
         return self._service, self._service_err
 

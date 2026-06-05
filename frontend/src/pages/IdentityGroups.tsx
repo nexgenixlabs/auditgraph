@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { riskDisplay } from '../utils/riskDisplay';
 import { useConnection } from '../contexts/ConnectionContext';
 
 interface Group {
@@ -283,7 +284,7 @@ export default function IdentityGroups() {
                 <div className="font-semibold text-gray-900 text-sm mb-3">{g.name}</div>
                 <div className="space-y-3 text-xs">
                   <div className="flex justify-between"><span className="text-gray-500">Members</span><span className="font-bold text-gray-900">{g.member_count}</span></div>
-                  <div className="flex justify-between"><span className="text-gray-500">Avg Risk Score</span><span className="font-bold text-gray-900">{g.avg_risk_score}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Avg Risk Score</span><span className="font-bold text-gray-900">{/* CVSS-aligned 0-10 (2026-05-31 directive) */}{riskDisplay({ risk_score: g.avg_risk_score }) ?? '—'}</span></div>
                   <div>
                     <div className="text-gray-500 mb-1">Risk Distribution</div>
                     <RiskBar g={g} />
@@ -366,7 +367,7 @@ export default function IdentityGroups() {
 
                   {/* Avg risk */}
                   <div className="text-right w-16">
-                    <div className="text-sm font-bold text-gray-700">{g.avg_risk_score}</div>
+                    <div className="text-sm font-bold text-gray-700">{/* CVSS-aligned 0-10 (2026-05-31 directive) */}{riskDisplay({ risk_score: g.avg_risk_score }) ?? '—'}</div>
                     <div className="text-[10px] text-gray-400">avg risk</div>
                   </div>
 
@@ -482,7 +483,8 @@ export default function IdentityGroups() {
                                         : 'bg-blue-50 text-blue-700'
                                     }`}>{m.risk_level}</span>
                                   </td>
-                                  <td className="px-3 py-2 text-xs font-semibold text-gray-700">{m.risk_score}</td>
+                                  {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                                  <td className="px-3 py-2 text-xs font-semibold text-gray-700 tabular-nums" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">{riskDisplay(m) ?? '—'}</td>
                                   <td className="px-3 py-2 text-xs text-gray-500">{m.activity_status || '-'}</td>
                                   {canEdit && g.group_type === 'custom' && (
                                     <td className="px-3 py-2">

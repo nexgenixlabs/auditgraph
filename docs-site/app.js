@@ -10,6 +10,14 @@
 
   const NAV = [
     {
+      section: 'Trust',
+      icon: '🛡',
+      color: '#0ea5e9',
+      pages: [
+        { slug: 'trust', title: 'Trust Center' },
+      ],
+    },
+    {
       section: 'Getting Started',
       icon: '🚀',
       color: '#2563eb',

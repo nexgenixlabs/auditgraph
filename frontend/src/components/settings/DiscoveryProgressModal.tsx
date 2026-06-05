@@ -5,6 +5,16 @@ interface StageTimingEntry {
   elapsed: number;
 }
 
+interface LiveFinding {
+  identity_id?: string;
+  display_name?: string;
+  identity_type?: string;
+  risk_level?: 'critical' | 'high' | 'medium' | 'low' | string;
+  risk_score_cvss?: number;
+  headline?: string;
+  discovered_at_offset_s?: number;
+}
+
 interface SnapshotJob {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -22,6 +32,14 @@ interface SnapshotJob {
   connection_cloud?: string;
   stage_timings?: Record<string, StageTimingEntry>;
   estimated_remaining_seconds?: number | null;
+  // AG-PS — Progressive Scan: real-time risk breakdown + top findings
+  // streamed from the scan engine as identities classify. Updated at
+  // ~60% mark (post-risk-analysis). When empty the panel doesn't render.
+  critical_count?: number;
+  high_count?: number;
+  medium_count?: number;
+  low_count?: number;
+  live_findings?: LiveFinding[];
 }
 
 interface Props {
@@ -99,8 +117,12 @@ export function DiscoveryProgressModal({
             setSawRunning(true);
             if (d.active_job.status === 'failed') setFailed(true);
           } else if (sawRunning || pollCount > 3) {
-            // Job disappeared after running → completed
-            setCompleted(true);
+            // Job left the active set → completed. Adopt the finalized job
+            // record so we show the real identities_discovered count (the last
+            // in-flight poll still had 0 before the final metrics write).
+            if (d.last_job) setJob(d.last_job);
+            if (d.last_job?.status === 'failed') setFailed(true);
+            else setCompleted(true);
           }
         } else {
           // Poll org-level status for any active job
@@ -116,7 +138,12 @@ export function DiscoveryProgressModal({
             setSawRunning(true);
             if (activeJob.status === 'failed') setFailed(true);
           } else if (sawRunning || pollCount > 5) {
-            setCompleted(true);
+            // No active job → adopt the most recent (finalized) job so the
+            // summary shows the real counts, not the last in-flight 0.
+            const latest = (d.jobs || [])[0];
+            if (latest) setJob(latest);
+            if (latest?.status === 'failed') setFailed(true);
+            else setCompleted(true);
           }
         }
       } catch { /* ignore */ }
@@ -267,6 +294,73 @@ export function DiscoveryProgressModal({
           </div>
         )}
 
+        {/* AG-PS — Progressive Scan: live risk breakdown chips. Appears as
+            soon as the engine writes risk counts (around the 60% mark);
+            stays visible through completion. Real counts from this scan. */}
+        {((job?.critical_count || 0) + (job?.high_count || 0) + (job?.medium_count || 0) + (job?.low_count || 0)) > 0 && (
+          <div className="px-6 pb-3">
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              {(job?.critical_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 font-medium">
+                  {job?.critical_count} critical
+                </span>
+              )}
+              {(job?.high_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 font-medium">
+                  {job?.high_count} high
+                </span>
+              )}
+              {(job?.medium_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 font-medium">
+                  {job?.medium_count} medium
+                </span>
+              )}
+              {(job?.low_count || 0) > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 font-medium">
+                  {job?.low_count} low
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* AG-PS — Live findings ticker: top critical+high identities as they
+            classify. Sourced from real scan data (identity.risk_factors[0]
+            description). Renders nothing pre-classification. */}
+        {(job?.live_findings && job.live_findings.length > 0) && (
+          <div className="px-6 pb-3">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
+              <svg className="w-3 h-3 text-red-500" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" /></svg>
+              Live findings — top {job.live_findings.length} highest-risk
+            </div>
+            <div className="space-y-1 max-h-44 overflow-y-auto">
+              {job.live_findings.map((f, i) => {
+                const sevColor =
+                  f.risk_level === 'critical' ? 'bg-red-500' :
+                  f.risk_level === 'high'     ? 'bg-orange-500' :
+                  f.risk_level === 'medium'   ? 'bg-amber-500' :
+                  'bg-emerald-500';
+                return (
+                  <div key={i} className="flex items-center gap-2 text-[11px]">
+                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${sevColor}`} />
+                    {typeof f.discovered_at_offset_s === 'number' && (
+                      <span className="font-mono text-gray-400 dark:text-slate-500 tabular-nums w-9 flex-shrink-0 text-right">
+                        +{f.discovered_at_offset_s}s
+                      </span>
+                    )}
+                    <span className="text-gray-700 dark:text-slate-200 truncate flex-1" title={f.display_name || ''}>
+                      {f.display_name || f.identity_id}
+                    </span>
+                    <span className="text-gray-500 dark:text-slate-400 truncate max-w-[180px]" title={f.headline || ''}>
+                      {f.headline}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Error message */}
         {failed && job?.error_message && (
           <div className="px-6 pb-3">
@@ -286,25 +380,41 @@ export function DiscoveryProgressModal({
         )}
 
         {/* Completion summary */}
-        {completed && (
-          <div className="px-6 pb-3">
-            <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/40 rounded-lg px-4 py-3">
-              <div className="flex items-center gap-2">
-                <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-green-800 dark:text-green-300">
-                    Scan Complete — {identities.toLocaleString()} identit{identities !== 1 ? 'ies' : 'y'} discovered
-                  </p>
-                  <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
-                    Total scan time: {formatDuration(finalElapsed ?? elapsed)}
-                  </p>
+        {completed && (() => {
+          // P0-A (2026-05-30): show the actionable vs Microsoft-managed split
+          // when the backend provides it, so CISOs see the real number of
+          // identities they need to govern (not the raw scan count which
+          // includes ~1000+ Microsoft-internal service principals).
+          const actionable = (job as any)?.identities_actionable as number | undefined;
+          const msManaged = (job as any)?.identities_microsoft_managed as number | undefined;
+          const haveSplit = typeof actionable === 'number' && typeof msManaged === 'number' && (actionable + msManaged) > 0;
+          return (
+            <div className="px-6 pb-3">
+              <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/40 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  <div>
+                    <p className="text-sm font-medium text-green-800 dark:text-green-300">
+                      Scan Complete — {haveSplit
+                        ? `${actionable!.toLocaleString()} actionable identit${actionable === 1 ? 'y' : 'ies'}`
+                        : `${identities.toLocaleString()} identit${identities !== 1 ? 'ies' : 'y'} discovered`}
+                    </p>
+                    {haveSplit && msManaged! > 0 && (
+                      <p className="text-[11px] text-green-700 dark:text-green-400 mt-0.5">
+                        {msManaged!.toLocaleString()} Microsoft-managed system identit{msManaged === 1 ? 'y' : 'ies'} filtered from dashboards
+                      </p>
+                    )}
+                    <p className="text-xs text-green-700 dark:text-green-400 mt-0.5">
+                      Total scan time: {formatDuration(finalElapsed ?? elapsed)}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Footer */}
         <div className="px-6 py-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between">

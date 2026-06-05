@@ -5,6 +5,9 @@ import {
   formatDate,
   DataSource,
 } from './types';
+import StatusBadge from '../ui/StatusBadge';
+import EmptyState from '../ui/EmptyState';
+import { SEVERITY_HEX } from '../../constants/riskScoring';
 
 interface AnomaliesTabProps {
   anomalyData: { anomalies: any[]; count: number } | null;
@@ -22,27 +25,21 @@ export function AnomaliesTab({ anomalyData, anomalyLoading, data }: AnomaliesTab
           <div className="h-16 bg-gray-100 rounded-xl" />
         </div>
       ) : !anomalyData || anomalyData.anomalies.length === 0 ? (
-        <div className="text-center py-8">
-          <svg className="w-12 h-12 text-green-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <p className="text-sm text-gray-500">No anomalies detected for this identity in the current snapshot.</p>
-          <p className="text-xs text-gray-400 mt-2">Source: AuditGraph anomaly engine</p>
-        </div>
+        <EmptyState
+          title="No anomalies detected"
+          description="The AuditGraph anomaly engine ran on the current snapshot and found no unusual behavior for this identity. Anomalies include permission escalation, dormant reactivation, credential surges, and off-hours PIM activation."
+          icon={
+            <svg className="w-10 h-10 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
+        />
       ) : (
         anomalyData.anomalies.map((a: any) => {
-          const severityColors: Record<string, string> = {
-            critical: 'border-red-300 bg-red-50',
-            high: 'border-orange-300 bg-orange-50',
-            medium: 'border-yellow-300 bg-yellow-50',
-            low: 'border-blue-300 bg-blue-50',
-          };
-          const dotColors: Record<string, string> = {
-            critical: 'bg-red-500',
-            high: 'bg-orange-500',
-            medium: 'bg-yellow-400',
-            low: 'bg-blue-400',
-          };
+          // Severity-tinted card border/bg — colors come from the canonical
+          // SEVERITY_HEX so they match badges and charts elsewhere.
+          const sev = (['critical', 'high', 'medium', 'low'].includes(a.severity) ? a.severity : 'low') as 'critical' | 'high' | 'medium' | 'low';
+          const tint = SEVERITY_HEX[sev];
           const typeLabels: Record<string, string> = {
             permission_escalation: 'Permission Escalation',
             risk_score_spike: 'Risk Spike',
@@ -51,26 +48,29 @@ export function AnomaliesTab({ anomalyData, anomalyLoading, data }: AnomaliesTab
             off_hours_pim: 'Off-Hours PIM',
             excessive_pim_usage: 'Excessive PIM',
             ghost_identity: 'Ghost Identity',
+            mover_stale_access: 'Mover — Stale Access',
+            ai_agent_runaway: 'AI Agent — Runaway',
+            new_ai_agent_behavior: 'AI Agent — New Behavior',
+            excessive_api_permission: 'Excessive API Permission',
+            new_oauth_grant: 'New OAuth Grant',
+            new_high_risk_identity: 'New High-Risk Identity',
           };
           return (
-            <div key={a.id} className={`rounded-xl border p-4 ${severityColors[a.severity] || 'border-gray-200 bg-gray-50'}`}>
+            <div
+              key={a.id}
+              className="rounded-xl border p-4"
+              style={{ borderColor: `${tint}55`, backgroundColor: `${tint}11` }}
+            >
               <div className="flex items-start gap-3">
-                <span className={`w-3 h-3 rounded-full mt-1 flex-shrink-0 ${dotColors[a.severity] || 'bg-gray-400'}`} />
+                <span className="w-3 h-3 rounded-full mt-1 flex-shrink-0" style={{ backgroundColor: tint }} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-xs font-semibold uppercase text-gray-500">
                       {typeLabels[a.anomaly_type] || a.anomaly_type}
                     </span>
-                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                      a.severity === 'critical' ? 'bg-red-200 text-red-800' :
-                      a.severity === 'high' ? 'bg-orange-200 text-orange-800' :
-                      a.severity === 'medium' ? 'bg-yellow-200 text-yellow-800' :
-                      'bg-blue-200 text-blue-800'
-                    }`}>
-                      {a.severity}
-                    </span>
+                    <StatusBadge variant={sev} size="xs">{a.severity}</StatusBadge>
                     {!!a.resolved && (
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-100 text-green-700">Resolved</span>
+                      <StatusBadge variant="low" size="xs">Resolved</StatusBadge>
                     )}
                   </div>
                   <h4 className="text-sm font-medium text-gray-900">{a.title}</h4>

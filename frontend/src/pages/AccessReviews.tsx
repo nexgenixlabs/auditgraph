@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import EmptyState from '../components/ui/EmptyState';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 import { TIME_MS } from '../constants/metrics';
 
@@ -746,9 +747,7 @@ export default function AccessReviews() {
                 {reviewsLoading ? (
                   <div style={{ textAlign: 'center', padding: 40, color: AR.textMuted }}>Loading reviews...</div>
                 ) : reviews.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: 40, color: AR.textMuted, fontSize: 13 }}>
-                    No identities match the current filters
-                  </div>
+                  <EmptyState title="No identities match the current filters" description="Adjust the filter chips above or expand the date range." />
                 ) : (
                   <div style={{ display: 'flex', gap: 0 }}>
                     {/* Review Table */}

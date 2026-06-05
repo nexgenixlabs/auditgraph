@@ -10,6 +10,9 @@ import {
 } from '../constants/metrics';
 import { deriveIdentityState, STATE_COLORS } from '../constants/identityState';
 import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../utils/roleUtils';
+import StatusBadge from './ui/StatusBadge';
+import { FederatedCredentialsSection } from './identity-detail/CredentialsTab';
+import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../constants/activitySignals';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -67,6 +70,7 @@ interface IdentityDetail {
   effective_scope?: string;
   federated_workload_type?: string | null;
   federated_workload_name?: string | null;
+  has_federated_credentials?: boolean;
   associated_resource_name?: string | null;
   role_count?: number;
   effective_access?: string | null;
@@ -168,13 +172,23 @@ function relativeTime(d?: string | null): string {
   } catch { return ''; }
 }
 
-function RiskBadge({ level, score }: { level?: string; score?: number }) {
+function RiskBadge({ level, cvss }: { level?: string; score?: number; cvss?: number }) {
   const risk = safeLower(level);
+  // CVSS-aligned 0-10 (FIRST.org CVSS 3.1 severity rating bands) is the SOLE
+  // numeric score shown to users. Proprietary internal points are never surfaced
+  // — founder directive 2026-05-31.
   return (
     <div className="flex items-center gap-1">
-      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}
+            title="CVSS 3.1 severity band: 9.0+ CRITICAL · 7.0-8.9 HIGH · 4.0-6.9 MEDIUM · 0.1-3.9 LOW">
         {risk || '?'}
       </span>
+      {typeof cvss === 'number' && cvss > 0 && (
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-100 text-slate-700"
+              title="CVSS-aligned 0-10 severity score (industry standard, FIRST.org CVSS 3.1). Computed as MAX across contributing risk factors.">
+          CVSS {cvss.toFixed(1)}
+        </span>
+      )}
     </div>
   );
 }
@@ -203,6 +217,11 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
   const [credentials, setCredentials] = useState<CredentialItem[]>([]);
   const [scopeHierarchy, setScopeHierarchy] = useState<ScopeItem[]>([]);
   const [graphPermissions, setGraphPermissions] = useState<GraphPermission[]>([]);
+  // SSOT: full-detail Permissions tab shows BOTH graph_permissions AND
+  // app_roles (Application Role Assignments). Drawer must show both too or
+  // an SPN with 0 graph perms and N app roles looks empty here while the
+  // full-detail page shows assignments. Source: /api/identities/<id>.app_roles.
+  const [appRoles, setAppRoles] = useState<Array<Record<string, any>>>([]);
   const [owners, setOwners] = useState<OwnerInfo[]>([]);
   const [entraScopes, setEntraScopes] = useState<{ role_name: string; directory_scope: string; risk_level: string; is_removable?: boolean }[]>([]);
   const [enrichedRoles, setEnrichedRoles] = useState<EnrichedRole[]>([]);
@@ -231,6 +250,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
       if (detailData) {
         setDetail(detailData.identity || detailData);
         setGraphPermissions(detailData.graph_permissions || []);
+        setAppRoles(detailData.app_roles || []);
         setOwners(detailData.owners || []);
         setEnrichedRoles(detailData.roles || []);
         // Canonical role_usage from build_identity_state() — may be {} for
@@ -275,7 +295,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
             <h3 className="text-sm font-bold text-gray-900 truncate max-w-[280px]">
               {detail?.display_name || 'Loading…'}
             </h3>
-            {detail && <RiskBadge level={detail.risk_level} score={detail.risk_score} />}
+            {detail && <RiskBadge level={detail.risk_level} score={detail.risk_score} cvss={(detail as any).risk_score_cvss} />}
           </div>
           <p className="text-[10px] text-gray-400 font-mono mt-0.5">{identityId.substring(0, 24)}…</p>
         </div>
@@ -331,7 +351,7 @@ export default function IdentityDrawer({ identityId, onClose }: IdentityDrawerPr
             roleUsage={drawerRoleUsage}
           />
         ) : tab === 'api' ? (
-          <ApiPermsTab permissions={graphPermissions} />
+          <ApiPermsTab permissions={graphPermissions} appRoles={appRoles} detail={detail} />
         ) : tab === 'credentials' ? (
           <CredentialsTab credentials={credentials} detail={detail} />
         ) : tab === 'usage' ? (
@@ -843,12 +863,29 @@ function AccessTab({ roles, scopeHierarchy, entraScopes, enrichedRoles, detail, 
 
 // ─── Tab 3: API Permissions ───────────────────────────────────────
 
-function ApiPermsTab({ permissions }: { permissions: GraphPermission[] }) {
-  if (permissions.length === 0) {
-    return <p className="text-sm text-gray-400 text-center py-8">No Graph API permissions.</p>;
+function ApiPermsTab({ permissions, appRoles, detail }: { permissions: GraphPermission[]; appRoles: Array<Record<string, any>>; detail: IdentityDetail }) {
+  const hasGraph = permissions.length > 0;
+  const hasAppRoles = appRoles.length > 0;
+
+  // SSOT contextual empty state — if neither graph perms nor app role
+  // assignments exist, point the user to where the access actually lives
+  // so they don't think "this identity has no access" when really it has
+  // Azure RBAC roles in the Access tab.
+  if (!hasGraph && !hasAppRoles) {
+    const hasAzureRbac = (detail.role_count || 0) > 0 || (detail.assigned_roles || 0) > 0;
+    return (
+      <div className="text-center py-8 space-y-2">
+        <p className="text-sm text-gray-400">No Microsoft Graph API permissions or app role assignments.</p>
+        {hasAzureRbac && (
+          <p className="text-xs text-gray-500">
+            This identity holds Azure RBAC roles — see the <span className="font-medium">Access</span> tab.
+          </p>
+        )}
+      </div>
+    );
   }
 
-  // Group by resource_app
+  // Group graph perms by resource_app
   const grouped: Record<string, GraphPermission[]> = {};
   permissions.forEach(p => {
     const app = p.resource_app || 'Unknown';
@@ -860,28 +897,51 @@ function ApiPermsTab({ permissions }: { permissions: GraphPermission[] }) {
 
   return (
     <div className="space-y-4">
-      {Object.entries(grouped).map(([app, perms]) => (
-        <div key={app}>
-          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">{app} ({perms.length})</h4>
-          <div className="space-y-1">
-            {perms.map((p, idx) => {
-              const isDangerous = dangerPatterns.some(pat => p.permission_name.includes(pat));
-              return (
-                <div key={idx} className={`flex items-center justify-between text-xs rounded px-2.5 py-1.5 ${isDangerous ? 'bg-red-50' : 'bg-gray-50'}`}>
-                  <span className={`font-medium ${isDangerous ? 'text-red-700' : 'text-gray-900'}`}>{p.permission_name}</span>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
-                      p.permission_type === 'Application' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-600'
-                    }`}>
-                      {p.permission_type || 'Application'}
-                    </span>
-                  </div>
+      {hasGraph && (
+        <div>
+          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">Microsoft Graph API ({permissions.length})</h4>
+          <div className="space-y-3">
+            {Object.entries(grouped).map(([app, perms]) => (
+              <div key={app}>
+                {Object.keys(grouped).length > 1 && (
+                  <div className="text-[10px] text-gray-400 uppercase mb-1.5">{app} ({perms.length})</div>
+                )}
+                <div className="space-y-1">
+                  {perms.map((p, idx) => {
+                    const isDangerous = dangerPatterns.some(pat => p.permission_name.includes(pat));
+                    return (
+                      <div key={idx} className={`flex items-center justify-between text-xs rounded px-2.5 py-1.5 ${isDangerous ? 'bg-red-50' : 'bg-gray-50'}`}>
+                        <span className={`font-medium ${isDangerous ? 'text-red-700' : 'text-gray-900'}`}>{p.permission_name}</span>
+                        <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
+                          p.permission_type === 'Application' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-600'
+                        }`}>
+                          {p.permission_type || 'Application'}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         </div>
-      ))}
+      )}
+
+      {hasAppRoles && (
+        <div>
+          <h4 className="text-[10px] text-gray-500 uppercase font-semibold mb-2">Application Role Assignments ({appRoles.length})</h4>
+          <div className="space-y-1">
+            {appRoles.map((r, idx) => (
+              <div key={idx} className="text-xs bg-gray-50 rounded px-2.5 py-1.5">
+                <div className="font-medium text-gray-900">{r.resource_display_name || r.resource_id || 'App'}</div>
+                {r.resource_id && r.resource_display_name && (
+                  <div className="text-[10px] text-gray-500 mt-0.5 break-all">{r.resource_id}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -897,7 +957,22 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
     );
   }
 
+  // SSOT: even when there are no secrets/certificates, federated credentials
+  // (GitHub Actions OIDC, Azure Managed Identity issuer, etc.) are also
+  // "credentials" from a risk perspective and must be shown so the drawer
+  // doesn't disagree with the full-detail page.
   if (credentials.length === 0) {
+    if (detail.has_federated_credentials) {
+      return (
+        <div className="space-y-3">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+            No secrets or certificates registered, but this identity authenticates via
+            federated credentials. Deleting the federated trust will break upstream pipelines.
+          </div>
+          <FederatedCredentialsSection identityId={detail.identity_id} credentialCount={detail.credential_count ?? 0} />
+        </div>
+      );
+    }
     return <p className="text-sm text-gray-400 text-center py-8">No credentials registered.</p>;
   }
 
@@ -934,12 +1009,9 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
           <div key={idx} className={`border rounded-lg p-2.5 ${c.status === 'expired' ? 'border-red-200 bg-red-50/50' : 'border-gray-200'}`}>
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs font-medium text-gray-900">{c.display_name || c.credential_type}</span>
-              <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${
-                c.exposure_risk === 'critical' ? 'bg-red-100 text-red-700' :
-                c.exposure_risk === 'high' ? 'bg-orange-100 text-orange-700' :
-                c.exposure_risk === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                'bg-green-100 text-green-700'
-              }`}>{c.exposure_risk || c.status}</span>
+              <StatusBadge variant={(c.exposure_risk as 'critical' | 'high' | 'medium' | 'low') || 'neutral'} size="xs">
+                {c.exposure_risk || c.status}
+              </StatusBadge>
             </div>
             <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
               <div className="flex justify-between"><span className="text-gray-400">Type</span><span className="text-gray-700">{c.credential_type}</span></div>
@@ -963,6 +1035,12 @@ function CredentialsTab({ credentials, detail }: { credentials: CredentialItem[]
           </div>
         ))}
       </div>
+
+      {/* SSOT: also render federated credentials when present, so the drawer
+          never disagrees with the full-detail Credentials tab. */}
+      {detail.has_federated_credentials && (
+        <FederatedCredentialsSection identityId={detail.identity_id} credentialCount={detail.credential_count ?? credentials.length} />
+      )}
     </div>
   );
 }
@@ -1116,6 +1194,54 @@ function UsageTab({ detail, dormantStatus, roles, roleUsage }: { detail: Identit
           <span className="text-sm font-medium text-gray-700">{usageData.granted_vs_used.total_permissions}</span>
         </div>
       )}
+
+      {/* Feature D (2026-05-30): Last 3 Callers — source IP + target.
+          Answers the auditor's #1 question for SPNs: "where is this
+          actually used from?" — turns raw IPs into "GitHub Actions",
+          "Azure DevOps", "Terraform Cloud", etc. via classifyIpOrigin.
+          Data comes from identity_arm_connections (ARM activity log,
+          no Entra P2 dependency). */}
+      {(() => {
+        const conns = (detail as any).arm_connections as Array<{
+          event_timestamp?: string;
+          caller_ip_address?: string | null;
+          operation_short?: string;
+          resource_name?: string | null;
+          operation_name?: string;
+        }> | undefined;
+        if (!conns || conns.length === 0) return null;
+        return (
+          <div className="pt-3 mt-3 border-t border-gray-100">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2">
+              Last {Math.min(3, conns.length)} caller{conns.length === 1 ? '' : 's'} · ARM activity
+            </div>
+            <div className="space-y-1.5">
+              {conns.slice(0, 3).map((c, i) => {
+                const origin = c.caller_ip_address ? classifyIpOrigin(c.caller_ip_address) : null;
+                const when = c.event_timestamp ? new Date(c.event_timestamp) : null;
+                const whenStr = when
+                  ? Math.floor((Date.now() - when.getTime()) / 86_400_000) + 'd ago'
+                  : '—';
+                const target = c.resource_name || c.operation_short || c.operation_name || 'unknown';
+                return (
+                  <div key={i} className="flex items-center gap-2 text-[11px]">
+                    {origin && (
+                      <span
+                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border flex-shrink-0 ${IP_ORIGIN_COLORS[origin.kind]}`}
+                        title={`${c.caller_ip_address || ''}\n${origin.tooltip}`}
+                      >
+                        {origin.label}
+                      </span>
+                    )}
+                    <span className="text-gray-700 truncate flex-1" title={target}>{target}</span>
+                    <span className="text-gray-400 whitespace-nowrap" title={when?.toISOString()}>{whenStr}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -1127,13 +1253,13 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
   const structuredFactors = detail.risk_factors || [];
   const reasons = detail.risk_reasons || [];
 
-  type FactorCard = { id: number; code: string; description: string; points: number; severity: string; evidence: string; category: string };
+  type FactorCard = { id: number; code: string; description: string; points: number; severity: string; evidence: string; category: string; cis?: string[]; mitre?: string[]; cvss?: number };
 
   let factors: FactorCard[];
 
   if (structuredFactors.length > 0) {
     // V2 structured factors
-    factors = structuredFactors.map((f, idx) => ({
+    factors = structuredFactors.map((f: any, idx: number) => ({
       id: idx,
       code: f.code,
       description: f.description,
@@ -1141,6 +1267,9 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       severity: f.severity,
       evidence: f.evidence || '',
       category: f.category || 'unknown',
+      cis: f.cis || [],     // AG-E: CIS Azure/AWS/GCP control IDs
+      mitre: f.mitre || [], // AG-E: MITRE ATT&CK Cloud technique IDs
+      cvss: typeof f.cvss === 'number' ? f.cvss : undefined,  // AG-G
     }));
   } else {
     // Legacy: parse risk_reasons strings
@@ -1152,7 +1281,7 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       if (points >= 300) severity = 'critical';
       else if (points >= 200) severity = 'high';
       else if (points >= 100) severity = 'medium';
-      return { id: idx, code: '', description, points, severity, evidence: '', category: '' };
+      return { id: idx, code: '', description, points, severity, evidence: '', category: '', cis: [], mitre: [] };
     });
   }
 
@@ -1161,7 +1290,7 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       <div className="text-center py-8">
         <div className="text-3xl mb-2">&#9989;</div>
         <p className="text-sm text-gray-500">No risk factors identified.</p>
-        <p className="text-[10px] text-gray-400 mt-1">Risk score: {detail.risk_score ?? 0}</p>
+        <p className="text-[10px] text-gray-400 mt-1">CVSS: {(((detail as any).risk_score_cvss ?? 0) as number).toFixed(1)}</p>
       </div>
     );
   }
@@ -1180,7 +1309,7 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[10px] text-gray-500 uppercase font-semibold">Risk Factors ({factors.length})</h4>
-        <RiskBadge level={detail.risk_level} score={detail.risk_score} />
+        <RiskBadge level={detail.risk_level} score={detail.risk_score} cvss={(detail as any).risk_score_cvss} />
       </div>
 
       {factors.map(f => {
@@ -1192,10 +1321,37 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${s.badge}`}>{f.severity}</span>
                 {f.code && <span className="text-[9px] text-gray-400 font-mono">{f.code}</span>}
               </div>
-              <span className="text-xs font-mono text-gray-500">+{f.points}</span>
+              {/* CVSS-aligned 0-10 per factor (industry standard, severity-band-locked).
+                  Proprietary +points removed 2026-05-31 per founder directive — only
+                  NIST/CVSS/CIS/MITRE-recognized values shown to CISOs. */}
+              {typeof (f as any).cvss === 'number' && (f as any).cvss > 0 && (
+                <span className="text-xs font-mono font-semibold text-gray-700"
+                      title={`CVSS-aligned 0-10 (industry standard FIRST.org severity rating). Band: ${f.severity.toUpperCase()}.`}>
+                  {(f as any).cvss.toFixed(1)}
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-700 mt-1">{f.description}</p>
             {f.evidence && <p className="text-[10px] text-gray-400 mt-0.5 font-mono">{f.evidence}</p>}
+            {/* AG-E: framework chips — CIS Azure/AWS/GCP + MITRE ATT&CK Cloud */}
+            {((f as any).cis?.length > 0 || (f as any).mitre?.length > 0) && (
+              <div className="flex flex-wrap items-center gap-1 mt-2">
+                {((f as any).cis || []).map((c: string) => (
+                  <span key={`cis-${c}`}
+                        className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                        title={`Aligned to ${c} — CIS Foundations Benchmark`}>
+                    {c}
+                  </span>
+                ))}
+                {((f as any).mitre || []).map((m: string) => (
+                  <span key={`mitre-${m}`}
+                        className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200"
+                        title={`MITRE ATT&CK technique ${m} — Cloud Matrix`}>
+                    {m}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}

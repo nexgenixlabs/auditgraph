@@ -24,6 +24,14 @@ import {
 import Dashboard from './pages/Dashboard';
 import Identities from './pages/Identities';
 import IdentityDetail from './pages/IdentityDetail';
+import LifecycleJml from './pages/LifecycleJml';
+import ConnectedApps from './pages/ConnectedApps';
+import ShadowApps from './pages/ShadowApps';
+import AIAttackPaths from './pages/AIAttackPaths';
+import AIBoardScorecard from './pages/AIBoardScorecard';
+import AILifecycle from './pages/AILifecycle';
+import AIDataReachability from './pages/AIDataReachability';
+import Argus from './pages/Argus';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DriftHistory from './pages/DriftHistory';
@@ -51,6 +59,23 @@ import AppRegistrations from './pages/AppRegistrations';
 import IdentityCorrelation from './pages/IdentityCorrelation';
 import WorkloadIdentities from './pages/WorkloadIdentities';
 import AIAgents from './pages/AIAgents';
+// 5-pillar AI Security IA per AG-161. The standalone AIIdentityGraph,
+// AIAgentsStandalone, and AIPermissions pages are now wrapped inside these
+// pillars; legacy URLs redirect (see Route declarations below).
+import AIInventory from './pages/AIInventory';
+import AIAccess from './pages/AIAccess';
+import AIModelRegistry from './pages/AIModelRegistry';
+import AIFindings from './pages/AIFindings';
+import MultiHopXGraph from './pages/MultiHopXGraph';
+import AISupplyChain from './pages/AISupplyChain';
+import AIThreatConnectors from './pages/AIThreatConnectors';
+import IdentityTrust from './pages/IdentityTrust';
+import OwnershipCenter from './pages/OwnershipCenter';
+import PeerBenchmarking from './pages/PeerBenchmarking';
+import AIRuntime from './pages/AIRuntime';
+import AgentActivityTimeline from './pages/AgentActivityTimeline';
+import AIRisk from './pages/AIRisk';
+import AIGovernance from './pages/AIGovernance';
 import WorkloadIdentityDetail from './pages/WorkloadIdentityDetail';
 import Subscriptions from './pages/Subscriptions';
 import ClientBilling from './pages/ClientBilling';
@@ -78,6 +103,7 @@ import AcceptInvitation from './pages/AcceptInvitation';
 import OrganizationUsers from './pages/OrganizationUsers';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
+import Trust from './pages/Trust';
 import Documentation from './pages/Documentation';
 import SearchModal from './components/SearchModal';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -257,6 +283,7 @@ function AppContent() {
         {/* Phase 5: Public legal & documentation pages */}
         <Route path="/privacy" element={<PrivacyPolicy />} />
         <Route path="/terms" element={<TermsOfService />} />
+        <Route path="/trust" element={<Trust />} />
         <Route path="/docs" element={<Documentation />} />
 
         {/* Onboarding route - no nav bar, protected */}
@@ -318,7 +345,7 @@ function AppContent() {
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
                   <Route path="/identity-explorer" element={<Navigate to="/identity-explorer/humans" replace />} />
                   <Route path="/identity-explorer/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExplorer /></ErrorBoundary>} />
-                  <Route path="/identity-graph" element={<Navigate to="/identity-explorer/graph" replace />} />
+                  <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
                   <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
                   <Route path="/privilege-drift" element={<Navigate to="/drift-analysis" replace />} />
@@ -330,7 +357,50 @@ function AppContent() {
                   <Route path="/identities" element={<Navigate to="/identity-explorer/all" replace />} />
                   <Route path="/identities/compare" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityComparison /></ErrorBoundary>} />
                   <Route path="/identities/:id" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityDetail /></ErrorBoundary>} />
-                  <Route path="/ai-agents" element={<Navigate to="/identity-explorer/ai-agents" replace />} />
+                  {/* AG-173 / AG-85 narrative pages — CISO tile drill-downs */}
+                  <Route path="/lifecycle" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><LifecycleJml /></ErrorBoundary>} />
+                  <Route path="/connected-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ConnectedApps /></ErrorBoundary>} />
+                  {/* AG-86: Shadow App registry & flagging */}
+                  <Route path="/shadow-apps" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ShadowApps /></ErrorBoundary>} />
+                  {/* AG-184: Argus 7-layer EPIC — Layer 3 (Investigate) + Layer 5 (Explain Why) live */}
+                  <Route path="/argus" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Argus /></ErrorBoundary>} />
+                  {/* AG-178: AI Identity Attack Paths (cinematic chain) */}
+                  <Route path="/ai-risk/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAttackPaths /></ErrorBoundary>} />
+                  {/* AG-179: AI Board Scorecard */}
+                  <Route path="/board-scorecard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIBoardScorecard /></ErrorBoundary>} />
+                  {/* AG-181: AI Agent Lifecycle (J/M/L) */}
+                  <Route path="/ai-lifecycle" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AILifecycle /></ErrorBoundary>} />
+                  {/* AG-161: 5-pillar AI Security IA. Legacy routes below redirect into new pillars. */}
+                  <Route path="/ai-inventory" element={<Navigate to="/ai-inventory/graph" replace />} />
+                  <Route path="/ai-inventory/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIInventory /></ErrorBoundary>} />
+                  <Route path="/ai-access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAccess /></ErrorBoundary>} />
+                  {/* AG-180: Per-agent data reachability (PHI/PCI/PII/Source/HR/Financial/Confidential) */}
+                  <Route path="/ai-access/data-reachability" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIDataReachability /></ErrorBoundary>} />
+                  <Route path="/ai-runtime" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRuntime /></ErrorBoundary>} />
+                  {/* AG-T2.2: Model Registry approval workflow */}
+                  <Route path="/ai-runtime/model-registry" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIModelRegistry /></ErrorBoundary>} />
+                  {/* AG-T2.3: AI Findings catalog */}
+                  <Route path="/ai-findings" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIFindings /></ErrorBoundary>} />
+                  {/* AG-T3.1: Multi-hop XGRAPH (agent-to-agent reachability) */}
+                  <Route path="/ai-attack-paths/multi-hop" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><MultiHopXGraph /></ErrorBoundary>} />
+                  {/* AG-T3.2: AI Supply Chain dependency graph */}
+                  <Route path="/ai-runtime/supply-chain" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AISupplyChain /></ErrorBoundary>} />
+                  {/* AG-T4: Threat-source partner connectors */}
+                  <Route path="/ai-runtime/threat-connectors" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIThreatConnectors /></ErrorBoundary>} />
+                  {/* AG-WK2: Identity Trust org rollup page */}
+                  <Route path="/identity-trust" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityTrust /></ErrorBoundary>} />
+                  {/* AG-WK3.1: Ownership Center */}
+                  <Route path="/ownership" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><OwnershipCenter /></ErrorBoundary>} />
+                  {/* AG-WK7.A: Peer Benchmarking */}
+                  <Route path="/peer-benchmarking" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PeerBenchmarking /></ErrorBoundary>} />
+                  {/* AG-182: Per-agent forensic timeline + behavior baseline */}
+                  <Route path="/ai-runtime/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AgentActivityTimeline /></ErrorBoundary>} />
+                  <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />
+                  <Route path="/ai-governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIGovernance /></ErrorBoundary>} />
+                  {/* Legacy redirects — preserve bookmarks from before AG-161 */}
+                  <Route path="/ai-identity-graph" element={<Navigate to="/ai-inventory/graph" replace />} />
+                  <Route path="/ai-agents" element={<Navigate to="/ai-inventory/agents" replace />} />
+                  <Route path="/ai-permissions" element={<Navigate to="/ai-access" replace />} />
                   <Route path="/reports" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Reports /></ErrorBoundary>} />
                   <Route path="/compliance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><Compliance /></ErrorBoundary>} />
                   <Route path="/compliance-posture" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ComplianceDashboard /></ErrorBoundary>} />

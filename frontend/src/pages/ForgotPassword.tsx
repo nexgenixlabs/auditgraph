@@ -33,9 +33,7 @@ export default function ForgotPassword() {
     <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
       <div className="w-full max-w-md px-4">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-            AG
-          </div>
+          <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Reset Password</h1>
           <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
             Enter your email to receive a password reset link

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
+import EmptyState from '../components/ui/EmptyState';
 import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Theme-aware constants ───
@@ -637,7 +638,7 @@ export default function DataSecurity() {
                 {loading ? (
                   <tr><td colSpan={9} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>Loading...</td></tr>
                 ) : sorted.length === 0 ? (
-                  <tr><td colSpan={9} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>No resources found</td></tr>
+                  <tr><td colSpan={9}><EmptyState compact title="No resources found" description="Try clearing filters or running a discovery scan." /></td></tr>
                 ) : sorted.map(r => {
                   const isSelected = selectedResource?.resource_id === r.resource_id;
                   const keys = compKeys(r.resource_type);

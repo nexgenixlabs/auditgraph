@@ -172,6 +172,36 @@ def _scalar(cursor, default=None):
     return val if val is not None else default
 
 
+def _points_to_cvss_safe(points):
+    """LEGACY wrapper — kept for callers that haven't migrated to
+    _identity_cvss_safe(factors). Uses the old sum-curve, which over-rates
+    identities with many small factors. Prefer the factors-aware version."""
+    try:
+        from app.engines.risk_catalog import points_to_cvss
+        return points_to_cvss(int(points or 0))
+    except Exception:
+        return 0.0
+
+
+def _identity_cvss_safe(factors, fallback_points=0):
+    """AG-G + 2026-05-31 follow-up: compute identity CVSS as MAX across
+    factor severities (standard CVSS asset rollup). `factors` is the JSONB
+    list of {severity, points, code, ...} dicts stored on each identity.
+
+    Falls back to legacy points→CVSS curve when factors list is empty
+    (older snapshots before structured factors landed, or identities
+    classified by a non-factor-based rule). Falls back to 0.0 on any error
+    so callers never crash."""
+    try:
+        from app.engines.risk_catalog import identity_cvss_from_factors, points_to_cvss
+        if isinstance(factors, list) and len(factors) > 0:
+            return identity_cvss_from_factors(factors)
+        # Legacy fallback — use total proprietary points to derive CVSS
+        return points_to_cvss(int(fallback_points or 0))
+    except Exception:
+        return 0.0
+
+
 def _get_pillar_filter_sql(pillar: str) -> str:
     """Return SQL AND clause matching the attack-surface-score engine's
     pillar counting logic.  This ensures ?contributing_pillar=X returns
@@ -432,17 +462,22 @@ def get_ai_audit_log_handler():
 
 
 def _get_org_plan(db, org_id):
-    """Fetch the billing plan tier for an organization. Returns 'free' as default."""
+    """Fetch the billing plan tier for an organization. Returns 'free' as default.
+
+    Uses db._rollback() (not bare conn.rollback) on error so the RLS
+    session context is re-applied after rollback. Otherwise downstream
+    writes lose tenant context and fail RLS.
+    """
     if not org_id or org_id == -1:
         return 'free'
     try:
         cursor = db.conn.cursor()
-        cursor.execute("SELECT plan FROM tenants WHERE id = %s", (org_id,))
+        cursor.execute("SELECT plan FROM organizations WHERE id = %s", (org_id,))
         row = cursor.fetchone()
         cursor.close()
         return (row[0] if row and row[0] else 'free')
     except Exception:
-        try: db.conn.rollback()
+        try: db._rollback()
         except Exception: pass
         return 'free'
 
@@ -1726,7 +1761,12 @@ def get_identity_details(identity_id: str):
             "owner_display_name": row[22],
             "owner_count": int(row[23] or 0),
             # Risk scoring fields
+            # NOTE: `risk_score` is the internal proprietary additive total.
+            # It's kept for sort ordering + backward-compat but should NOT
+            # be rendered to users — only `risk_score_cvss` + severity bands
+            # are industry-standard (CVSS 3.1) and CISO-defensible.
             "risk_score": int(row[24] or 0),
+            "risk_score_cvss": _identity_cvss_safe(row[29] if row[29] else [], fallback_points=int(row[24] or 0)),
             "api_permission_count": int(row[25] or 0),
             "app_role_count": int(row[26] or 0),
             "ca_coverage_status": row[27] or None,
@@ -2700,6 +2740,58 @@ def get_identity_details(identity_id: str):
                 db.conn.rollback()
             except Exception:
                 pass
+
+        # Feature D variant for humans — surface last_observed_ip + source
+        # from directory_audit_log enrichment. This is the AuditGraph moat:
+        # we don't wait for P2 telemetry; we read what audit logs already
+        # carry (free/P1 retention, no premium license needed). When P2 is
+        # enabled the same envelope carries the aggregated buckets too.
+        signin_intel = {
+            'last_observed_ip': None,
+            'last_observed_ip_source': None,
+            'last_observed_ip_date': None,
+            'ips': [],
+            'locations': [],
+            'resources_accessed': [],
+            'client_apps': [],
+            'failure_count_30d': None,
+            'success_count_30d': None,
+            'total_events_30d': None,
+        }
+        try:
+            cursor.execute("SAVEPOINT id_signin_intel")
+            cursor.execute("""
+                SELECT last_observed_ip, last_observed_ip_source,
+                       last_observed_ip_date, last_observed_operation,
+                       signin_ips, signin_locations,
+                       signin_resources_accessed, signin_client_apps,
+                       signin_failure_count_30d, signin_success_count_30d,
+                       signin_total_events_30d
+                  FROM identities WHERE id = %s
+            """, (identity_db_id,))
+            srow = cursor.fetchone()
+            if srow:
+                signin_intel['last_observed_ip'] = srow[0]
+                signin_intel['last_observed_ip_source'] = srow[1]
+                signin_intel['last_observed_ip_date'] = (
+                    srow[2].isoformat() if srow[2] and hasattr(srow[2], 'isoformat') else srow[2]
+                )
+                signin_intel['last_observed_operation'] = srow[3]
+                signin_intel['ips'] = _parse_jsonb(srow[4]) or []
+                signin_intel['locations'] = _parse_jsonb(srow[5]) or []
+                signin_intel['resources_accessed'] = _parse_jsonb(srow[6]) or []
+                signin_intel['client_apps'] = _parse_jsonb(srow[7]) or []
+                signin_intel['failure_count_30d'] = srow[8]
+                signin_intel['success_count_30d'] = srow[9]
+                signin_intel['total_events_30d'] = srow[10]
+            cursor.execute("RELEASE SAVEPOINT id_signin_intel")
+        except Exception as e:
+            logger.debug("Identity signin_intelligence fetch skipped: %s", e)
+            try: cursor.execute("ROLLBACK TO SAVEPOINT id_signin_intel")
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+        identity['signin_intelligence'] = signin_intel
 
         return jsonify(
             {
@@ -4160,6 +4252,196 @@ def get_report_data():
         db.close()
 
 
+# ── AG-Hero-5: Auditor Pack (framework-mapped findings) ──────────────────────
+
+def get_auditor_pack_frameworks():
+    """List frameworks the Auditor Pack can generate for (UI dropdown)."""
+    from app.engines.auditor_frameworks import list_frameworks
+    return jsonify({"frameworks": list_frameworks()})
+
+
+def get_auditor_pack_data():
+    """Return framework-mapped findings for the Auditor Pack PDF.
+
+    Query params:
+      framework: soc2 | hipaa | pci | iso27001 | cis (default soc2)
+
+    Output shape:
+      {
+        framework: {name, version, publisher, scope_note},
+        organization: {name, slug},
+        snapshot: {id, completed_at, identities_total},
+        controls: [
+          {
+            id, title, description,
+            findings_count,
+            findings: [
+              {identity_id, display_name, risk_level, risk_score_cvss,
+               factor_code, factor_description, evidence, severity,
+               mitre: [...]}
+            ]
+          }
+        ],
+        summary: {total_controls, controls_with_findings, total_findings,
+                  critical_count, high_count, medium_count, low_count}
+      }
+    """
+    from app.engines.auditor_frameworks import get_framework, map_factor_to_controls, AUDITOR_FRAMEWORKS
+    from app.engines.risk_catalog import RISK_FACTOR_CATALOG
+
+    framework_code = (request.args.get('framework') or 'soc2').lower()
+    if framework_code not in AUDITOR_FRAMEWORKS:
+        return jsonify({
+            "error": f"Unknown framework '{framework_code}'. Supported: {sorted(AUDITOR_FRAMEWORKS.keys())}"
+        }), 400
+
+    fw = get_framework(framework_code)
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({"error": "No completed discovery runs found"}), 404
+
+        # Pull identities with non-empty risk_factors for the latest snapshot
+        cursor.execute("""
+            SELECT i.identity_id, i.display_name, i.risk_level, i.risk_score,
+                   i.risk_factors, i.identity_category
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND COALESCE(jsonb_array_length(i.risk_factors), 0) > 0
+              AND COALESCE(i.is_microsoft_system, FALSE) = FALSE
+            ORDER BY i.risk_score DESC
+            LIMIT 5000
+        """, (run_ids,))
+        identity_rows = cursor.fetchall()
+
+        # Snapshot metadata — derive identities_total from the row count we
+        # already pulled (no schema dependency on a missing column).
+        cursor.execute("""
+            SELECT id, completed_at FROM discovery_runs WHERE id = ANY(%s)
+            ORDER BY id DESC LIMIT 1
+        """, (run_ids,))
+        snap_row = cursor.fetchone()
+        snapshot = {
+            "id": snap_row[0] if snap_row else None,
+            "completed_at": snap_row[1].isoformat() if snap_row and snap_row[1] else None,
+            "identities_total": len(identity_rows),
+        }
+
+        # Organization name
+        org_id = _org_id()
+        org_name = None
+        if org_id:
+            cursor.execute("SELECT name FROM organizations WHERE id = %s", (org_id,))
+            r = cursor.fetchone()
+            org_name = r[0] if r else None
+        cursor.close()
+
+        # Build per-control findings list. Walk each identity's risk_factors,
+        # determine which framework controls each factor maps to, append.
+        controls_list = fw.get("controls") or []
+
+        # CIS framework: auto-derive controls from RISK_FACTOR_CATALOG cis tags
+        if framework_code == "cis":
+            cis_to_meta = {}
+            for code, meta in RISK_FACTOR_CATALOG.items():
+                for cis_id in (meta.get("cis") or []):
+                    if cis_id not in cis_to_meta:
+                        cis_to_meta[cis_id] = {
+                            "id": cis_id,
+                            "title": cis_id,  # CIS IDs are descriptive enough as titles
+                            "description": f"CIS Foundations Benchmark control {cis_id}",
+                            "cis_map": [cis_id],
+                        }
+            controls_list = sorted(cis_to_meta.values(), key=lambda c: c["id"])
+
+        # Index controls by id for fast lookup, init findings list
+        controls_index = {c["id"]: {**c, "findings": []} for c in controls_list}
+
+        total_findings = 0
+        sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+        for row in identity_rows:
+            identity_id, display_name, risk_level, risk_score, factors, identity_category = row
+            if not isinstance(factors, list):
+                continue
+            cvss = _identity_cvss_safe(factors, fallback_points=int(risk_score or 0))
+            for factor in factors:
+                if not isinstance(factor, dict):
+                    continue
+                factor_cis = factor.get("cis") or []
+                # Old factors (pre-batch-E) won't have cis tags — derive from catalog
+                if not factor_cis:
+                    code = factor.get("code")
+                    if code and code in RISK_FACTOR_CATALOG:
+                        factor_cis = RISK_FACTOR_CATALOG[code].get("cis") or []
+                mapped_ctrl_ids = map_factor_to_controls(factor_cis, framework_code)
+                if not mapped_ctrl_ids:
+                    continue
+                sev = (factor.get("severity") or "info").lower()
+                if sev in sev_counts:
+                    sev_counts[sev] += 1
+                finding = {
+                    "identity_id": identity_id,
+                    "display_name": display_name,
+                    "identity_category": identity_category,
+                    "risk_level": risk_level,
+                    "risk_score_cvss": cvss,  # industry-standard score only
+                    "factor_code": factor.get("code"),
+                    "factor_description": factor.get("description"),
+                    "evidence": factor.get("evidence", ""),
+                    "severity": sev,
+                    "mitre": factor.get("mitre") or (
+                        RISK_FACTOR_CATALOG.get(factor.get("code", ""), {}).get("mitre") or []
+                    ),
+                }
+                for ctrl_id in mapped_ctrl_ids:
+                    if ctrl_id in controls_index:
+                        controls_index[ctrl_id]["findings"].append(finding)
+                        total_findings += 1
+
+        # Sort controls by ID and add findings_count
+        controls_out = []
+        for ctrl in sorted(controls_index.values(), key=lambda c: c["id"]):
+            ctrl["findings_count"] = len(ctrl["findings"])
+            controls_out.append(ctrl)
+
+        result = {
+            "framework": {
+                "code": framework_code,
+                "name": fw["name"],
+                "version": fw["version"],
+                "publisher": fw["publisher"],
+                "scope_note": fw["scope_note"],
+            },
+            "organization": {"id": org_id, "name": org_name},
+            "snapshot": snapshot,
+            "controls": controls_out,
+            "summary": {
+                "total_controls": len(controls_out),
+                "controls_with_findings": sum(1 for c in controls_out if c["findings_count"] > 0),
+                "total_findings": total_findings,
+                "critical_count": sev_counts["critical"],
+                "high_count": sev_counts["high"],
+                "medium_count": sev_counts["medium"],
+                "low_count": sev_counts["low"],
+            },
+            "disclaimer": (
+                "AuditGraph automated evidence — auditor review required. "
+                "This pack is a first-pass artifact mapping identity findings "
+                "to framework controls; it does not replace independent audit testing."
+            ),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _log(db, 'auditor_pack_generated', f'Auditor Pack generated for {framework_code.upper()}',
+             {'framework': framework_code, 'total_findings': total_findings,
+              'controls_with_findings': result['summary']['controls_with_findings']})
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 def get_activity():
     """Get activity log entries with optional filtering, org-scoped."""
     db = _db()
@@ -4943,6 +5225,11 @@ def _identity_list_select():
             i.secret_expiry_status,
             COALESCE(i.federated_cred_count, 0) as federated_cred_count,
             i.owner_resolved,
+            -- AG-G follow-up (2026-05-31): risk_factors JSONB needed for
+            -- severity-MAX CVSS rollup. Without it the list endpoint falls
+            -- back to legacy points→CVSS curve which can disagree with the
+            -- per-identity severity badge.
+            i.risk_factors as risk_factors_jsonb,
             -- Humans enrichment (AG-160)
             i.mfa_status,
             i.mfa_methods,
@@ -4955,6 +5242,11 @@ def _identity_list_select():
             i.last_activity_date,
             i.last_activity_source,
             i.last_activity_confidence,
+
+            -- AG-86: Shadow App verdict so the inventory badge renders
+            -- without a follow-up query.
+            COALESCE(i.is_shadow_app, FALSE) AS is_shadow_app,
+            i.shadow_reasons,
 
             COALESCE(
                 (SELECT wse.created_datetime
@@ -4976,7 +5268,23 @@ def _identity_list_select():
                 WHEN i.last_sign_in IS NOT NULL
                     THEN 'graph_sign_in_activity'
                 ELSE 'static_analysis_only'
-            END AS auth_source
+            END AS auth_source,
+
+            -- P0-A (2026-05-30): expose access_paths derivation so the UI can
+            -- show "174 direct · 949 via group" instead of conflating both
+            -- into a single inflated count. Backed by the access_paths JSONB
+            -- populated in _collect_relevant_principal_ids.
+            (jsonb_array_length(COALESCE(i.access_paths->'direct_rbac',      '[]'::jsonb)) > 0) AS has_direct_rbac_path,
+            (jsonb_array_length(COALESCE(i.access_paths->'direct_entra',     '[]'::jsonb)) > 0) AS has_direct_entra_path,
+            (jsonb_array_length(COALESCE(i.access_paths->'pim_eligible',     '[]'::jsonb)) > 0) AS has_pim_eligible_path,
+            (jsonb_array_length(COALESCE(i.access_paths->'group_membership', '[]'::jsonb)) > 0) AS has_group_inherited_path,
+            CASE
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'direct_rbac',  '[]'::jsonb)) > 0 THEN 'direct'
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'direct_entra', '[]'::jsonb)) > 0 THEN 'direct'
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'pim_eligible', '[]'::jsonb)) > 0 THEN 'direct'
+                WHEN jsonb_array_length(COALESCE(i.access_paths->'group_membership', '[]'::jsonb)) > 0 THEN 'group_inherited'
+                ELSE 'none'
+            END AS access_depth
         FROM identities i
         LEFT JOIN discovery_runs dr_sub ON dr_sub.id = i.discovery_run_id
     """
@@ -5080,6 +5388,13 @@ def _map_identity_row(row):
         "owner_display_name": row.get('owner_display_name'),
         "owner_count": int(row.get('owner_count') or 0),
         "risk_score": int(row.get('risk_score') or 0),
+        # Industry-standard CVSS-aligned score: MAX of factor severities (CVSS asset rollup).
+        # Falls back to legacy points→CVSS curve when factors list is empty.
+        # `risk_score` (internal) kept only for backward-compat — never rendered to users.
+        "risk_score_cvss": _identity_cvss_safe(
+            row.get('risk_factors_jsonb') or row.get('risk_factors') or [],
+            fallback_points=int(row.get('risk_score') or 0)
+        ),
         "api_permission_count": int(row.get('api_permission_count') or 0),
         "app_role_count": int(row.get('app_role_count') or 0),
         "graph_max_risk": row.get('graph_max_risk') or "info",
@@ -5156,10 +5471,22 @@ def _map_identity_row(row):
         "job_title": row.get('job_title'),
         "upn": row.get('upn'),
         "dependency_impact": row.get('dependency_impact'),
+        # Access path classification (P0-A 2026-05-30)
+        "has_direct_rbac_path": bool(row.get('has_direct_rbac_path', False)),
+        "has_direct_entra_path": bool(row.get('has_direct_entra_path', False)),
+        "has_pim_eligible_path": bool(row.get('has_pim_eligible_path', False)),
+        "has_group_inherited_path": bool(row.get('has_group_inherited_path', False)),
+        "access_depth": row.get('access_depth') or 'none',
         "observed_last_used": _isoformat_safe(row.get('observed_last_used')),
         "last_signin_at": _isoformat_safe(row.get('last_signin_at')),
         "last_signin_ip": row.get('last_signin_ip'),
         "auth_source": row.get('auth_source') or "static_analysis_only",
+        # AG-86: Shadow App badge data
+        "is_shadow_app": bool(row.get('is_shadow_app', False)),
+        "shadow_reasons": (
+            row.get('shadow_reasons') if isinstance(row.get('shadow_reasons'), list)
+            else (json.loads(row.get('shadow_reasons')) if isinstance(row.get('shadow_reasons'), str) and row.get('shadow_reasons') else [])
+        ),
     }
 
     # ── Effective last-used & federated activity override ──────────────
@@ -5167,10 +5494,16 @@ def _map_identity_row(row):
     def _parse_dt_map(v):
         if not v:
             return None
+        # Normalize to a tz-aware UTC datetime so a later max() / comparison
+        # never mixes naive + aware (TypeError "can't compare offset-naive
+        # and offset-aware datetimes" — observed when DB returns tz-aware
+        # rows but a sibling string field strips tz on parse).
+        from datetime import timezone as _tz_aware
         if hasattr(v, 'timestamp'):
-            return v
+            return v if v.tzinfo else v.replace(tzinfo=_tz_aware.utc)
         try:
-            return _dt_map.fromisoformat(str(v).replace('Z', '+00:00').replace('+00:00', ''))
+            parsed = _dt_map.fromisoformat(str(v).replace('Z', '+00:00'))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=_tz_aware.utc)
         except (ValueError, TypeError):
             return None
 
@@ -7129,6 +7462,156 @@ def _compute_compliance_metrics(cursor, run_ids):
         (max(total_with_creds - no_credential_rotation, 0) / max(total_with_creds, 1)) * 100
     )
 
+    # ── AG-T1.2: AI-specific compliance metrics (NIST AI RMF / ISO 42001 / EU AI Act) ──
+    # All counts use the same _scalar helper + run_ids filter as the human/NHI
+    # metrics above. AI agents are identified by agent_classifications rows.
+
+    # ai_agents_total — count of AI agents (any AI classification)
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND i.deleted_at IS NULL
+    """, (run_ids,))
+    ai_agents_total = _scalar(cursor, 0)
+
+    # ai_agents_no_owner — AI agents missing an owner attribution
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND (ac.owner_display_name_at_classify IS NULL OR ac.owner_display_name_at_classify = '')
+        AND i.deleted_at IS NULL
+    """, (run_ids,))
+    ai_agents_no_owner = _scalar(cursor, 0)
+
+    # ai_agents_with_kv_admin — AI agents holding KV Admin/Secrets Officer
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN role_assignments ra ON ra.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(ra.role_name) IN (
+            'key vault administrator', 'key vault secrets officer', 'key vault certificates officer'
+        )
+    """, (run_ids,))
+    ai_agents_with_kv_admin = _scalar(cursor, 0)
+
+    # ai_agents_with_blob_owner — AI agents holding Storage Blob Data Owner
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN role_assignments ra ON ra.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(ra.role_name) = 'storage blob data owner'
+    """, (run_ids,))
+    ai_agents_with_blob_owner = _scalar(cursor, 0)
+
+    # ai_agents_with_subscription_owner — AI agents with Owner at sub scope
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN role_assignments ra ON ra.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(ra.role_name) IN ('owner','contributor','user access administrator')
+        AND ra.scope LIKE '/subscriptions/%%'
+        AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'
+    """, (run_ids,))
+    ai_agents_with_subscription_owner = _scalar(cursor, 0)
+
+    # ai_agents_reaching_phi / pci / pii — from agent_data_reachability
+    def _ai_reachers(cls):
+        cursor.execute("""
+            SELECT COUNT(DISTINCT identity_db_id) FROM agent_data_reachability
+            WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+              AND data_classification = %s
+              AND est_records > 0
+        """, (cls,))
+        return _scalar(cursor, 0)
+    try:
+        cursor.execute("SAVEPOINT _ai_reach_sp")
+        ai_agents_reaching_phi = _ai_reachers('PHI')
+        ai_agents_reaching_pci = _ai_reachers('PCI')
+        ai_agents_reaching_pii = _ai_reachers('PII')
+        cursor.execute("RELEASE SAVEPOINT _ai_reach_sp")
+    except Exception:
+        try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_reach_sp")
+        except Exception: pass
+        ai_agents_reaching_phi = ai_agents_reaching_pci = ai_agents_reaching_pii = 0
+
+    # ai_agents_no_telemetry — AI agents with zero activity events in last 30d
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND NOT EXISTS (
+            SELECT 1 FROM agent_activity_events ae
+            WHERE ae.identity_db_id = i.id
+              AND ae.occurred_at >= NOW() - INTERVAL '30 days'
+        )
+    """, (run_ids,))
+    ai_agents_no_telemetry = _scalar(cursor, 0)
+
+    # ai_high_risk_agents — AI agents at critical or high risk
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(COALESCE(i.risk_level, '')) IN ('critical', 'high')
+    """, (run_ids,))
+    ai_high_risk_agents = _scalar(cursor, 0)
+
+    # ai_agents_public_endpoint — AI agents whose reachable Cog Services account
+    # is public-network-exposed (raw posture signal).
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT i.id) FROM identities i
+        JOIN agent_classifications ac ON ac.identity_db_id = i.id
+        JOIN azure_cognitive_services_accounts csa
+          ON csa.resource_id = ac.account_resource_id
+         AND csa.organization_id = i.organization_id
+        WHERE i.discovery_run_id = ANY(%s)
+        {HIDE_MICROSOFT_SQL}
+        AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+        AND LOWER(COALESCE(csa.public_network_access, '')) = 'enabled'
+    """, (run_ids,))
+    ai_agents_public_endpoint = _scalar(cursor, 0)
+
+    # ai_lifecycle_events_unresolved — AI drift events not yet acknowledged
+    cursor.execute("""
+        SELECT COUNT(*) FROM ai_agent_lifecycle_events
+        WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+          AND resolved = FALSE
+    """)
+    ai_lifecycle_events_unresolved = _scalar(cursor, 0)
+
+    # ai_models_unverified — model deployments whose vendor isn't on an approved
+    # list. The approval signal lives on a future model_registry table (Tier 2.2).
+    # Until that lands, count CUSTOM/fine-tuned models since they're the only
+    # ones a registry would gate. This is a real signal, not a placeholder.
+    cursor.execute("""
+        SELECT COUNT(*) FROM azure_ai_model_deployments
+        WHERE organization_id = current_setting('app.current_organization_id', true)::integer
+          AND (
+              LOWER(COALESCE(model_name, '')) LIKE '%%-ft-%%'
+              OR LOWER(COALESCE(model_format, '')) NOT IN ('openai', 'azureopenai', 'microsoft')
+          )
+    """)
+    ai_models_unverified = _scalar(cursor, 0)
+
     return {
         't0_count': t0_count,
         'dormant_privileged': dormant_privileged,
@@ -7145,6 +7628,20 @@ def _compute_compliance_metrics(cursor, run_ids):
         'access_reviews_completed': access_reviews_completed,
         'managed_identity_pct': managed_identity_pct,
         'credential_rotation_compliance_pct': credential_rotation_compliance_pct,
+        # AG-T1.2 AI-specific
+        'ai_agents_total': ai_agents_total,
+        'ai_agents_no_owner': ai_agents_no_owner,
+        'ai_agents_with_kv_admin': ai_agents_with_kv_admin,
+        'ai_agents_with_blob_owner': ai_agents_with_blob_owner,
+        'ai_agents_with_subscription_owner': ai_agents_with_subscription_owner,
+        'ai_agents_reaching_phi': ai_agents_reaching_phi,
+        'ai_agents_reaching_pci': ai_agents_reaching_pci,
+        'ai_agents_reaching_pii': ai_agents_reaching_pii,
+        'ai_agents_no_telemetry': ai_agents_no_telemetry,
+        'ai_high_risk_agents': ai_high_risk_agents,
+        'ai_agents_public_endpoint': ai_agents_public_endpoint,
+        'ai_lifecycle_events_unresolved': ai_lifecycle_events_unresolved,
+        'ai_models_unverified': ai_models_unverified,
     }
 
 
@@ -8762,6 +9259,56 @@ def get_dashboard_posture():
             except Exception:
                 pass
 
+        # AG-A: Unify posture_anomalies with the persistent `anomalies` table.
+        # Previously only drift-derived anomalies were surfaced — leaving
+        # thousands of AnomalyDetector findings (ghost_identity, risk_score_spike,
+        # permission_escalation, credential_surge, dormant_reactivation) invisible
+        # to the Executive Posture widget. Merge both sources, dedupe by
+        # (type, identity_id), prefer the persistent record's id so the widget
+        # links navigate correctly. Also expose unresolved_count so the badge
+        # reflects the TRUE total, not just the truncated top-25 array length.
+        anomalies_unresolved_total = len(posture_anomalies)
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) FROM anomalies
+                WHERE organization_id = %s AND resolved = false
+            """, (org_id,))
+            anomalies_unresolved_total = (cursor.fetchone()[0] or 0) + len(posture_anomalies)
+            cursor.execute("""
+                SELECT id, anomaly_type, severity, identity_id, identity_name, created_at
+                FROM anomalies
+                WHERE organization_id = %s AND resolved = false
+                ORDER BY
+                    CASE severity
+                        WHEN 'critical' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3
+                        WHEN 'low' THEN 4
+                        ELSE 5
+                    END,
+                    created_at DESC
+                LIMIT 25
+            """, (org_id,))
+            _seen_keys = {(a.get('type'), a.get('identity_id')) for a in posture_anomalies}
+            for _r in cursor.fetchall():
+                _key = (_r[1], _r[3])
+                if _key in _seen_keys:
+                    continue
+                _seen_keys.add(_key)
+                posture_anomalies.append({
+                    "id": _r[0],
+                    "type": _r[1],
+                    "severity": _r[2],
+                    "identity_id": _r[3],
+                    "identity_name": _r[4] or 'Unknown',
+                    "created_at": _r[5].isoformat() if _r[5] else None,
+                })
+        except Exception:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                pass
+
         # A3: Score trend delta
         score_trend = None
         if previous_posture_score and previous_posture_score > 0:
@@ -8787,6 +9334,150 @@ def get_dashboard_posture():
             "inactive_admin_count": dormant_priv_count,
             "disabled_live_rbac_count": ghost_count,
         }
+
+        # AG-T1.1 / AG-T1.5: dollar exposure for board-level comprehension.
+        # We compute THREE scopes so the Business Impact card is unambiguous
+        # about WHO can reach the data:
+        #
+        #   total           — ALL classified data in the tenant (org-wide
+        #                     baseline; what's at stake if anything is breached).
+        #   ai_reachable    — only $ that AI agents have RBAC reach to
+        #                     (the AI-ISPM moat — prompt-injection blast radius).
+        #   nhi_reachable   — $ that ANY non-human identity (SPN / MI / AI)
+        #                     has RBAC reach to (workload identity attack surface).
+        #
+        # All three pull from breach_cost_factors so the figures are
+        # consistent and citation-backed. Fail-soft: any sub-query that
+        # errors → that scope's exposure is absent rather than fabricated.
+        try:
+            from app.engines.scoring.breach_cost import aggregate_exposure, format_dollar_short
+
+            def _band(agg_result):
+                if not agg_result or agg_result.get('covered', 0) <= 0:
+                    return None
+                return {
+                    'low':  float(agg_result['total_exposure_low']),
+                    'mid':  float(agg_result['total_exposure_mid']),
+                    'high': float(agg_result['total_exposure_high']),
+                    'low_display':  format_dollar_short(agg_result['total_exposure_low']),
+                    'mid_display':  format_dollar_short(agg_result['total_exposure_mid']),
+                    'high_display': format_dollar_short(agg_result['total_exposure_high']),
+                    'total_records': agg_result['total_records'],
+                }
+
+            # ── Scope 1: TOTAL — every classified data resource in the tenant ──
+            cursor.execute("""
+                SELECT data_classification, SUM(record_count_estimate) AS est_records
+                FROM (
+                    SELECT data_classification, record_count_estimate FROM azure_storage_accounts
+                      WHERE organization_id = %s AND data_classification IS NOT NULL
+                    UNION ALL
+                    SELECT data_classification, record_count_estimate FROM azure_sql_databases
+                      WHERE organization_id = %s AND data_classification IS NOT NULL
+                    UNION ALL
+                    SELECT data_classification, record_count_estimate FROM azure_cosmos_databases
+                      WHERE organization_id = %s AND data_classification IS NOT NULL
+                ) classified
+                GROUP BY data_classification
+            """, (org_id, org_id, org_id))
+            classified_rows = [
+                {'data_classification': r[0], 'est_records': r[1] or 0}
+                for r in cursor.fetchall()
+            ]
+            total_agg = aggregate_exposure(db, classified_rows)
+            total_band = _band(total_agg)
+
+            # ── Scope 2: AI-REACHABLE — what AI agents have RBAC into ──
+            # agent_data_reachability is keyed (agent × classification).
+            # If two agents reach the SAME classified resource we must NOT
+            # sum their records — the data exposure is the resource itself,
+            # not the agent count. Take MAX per classification to avoid
+            # double-counting (within a class, the highest reach is the
+            # blast radius — multiple agents reaching it doesn't add records).
+            ai_band = None
+            try:
+                cursor.execute("SAVEPOINT _ai_reach_sp_bi")
+                cursor.execute("""
+                    SELECT data_classification, MAX(est_records) AS recs
+                      FROM agent_data_reachability
+                     WHERE organization_id = %s
+                     GROUP BY data_classification
+                """, (org_id,))
+                ai_rows = [
+                    {'data_classification': r[0], 'est_records': r[1] or 0}
+                    for r in cursor.fetchall() if (r[1] or 0) > 0
+                ]
+                ai_band = _band(aggregate_exposure(db, ai_rows))
+                cursor.execute("RELEASE SAVEPOINT _ai_reach_sp_bi")
+            except Exception:
+                try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_reach_sp_bi")
+                except Exception: pass
+
+            # ── Scope 3: NHI-REACHABLE — every service principal / managed
+            # identity / AI agent that holds RBAC into a classified resource.
+            # We join role_assignments → resource (storage/sql/cosmos) so
+            # the count reflects ACTUAL RBAC reach, not just identity type.
+            nhi_band = None
+            try:
+                cursor.execute("SAVEPOINT _nhi_reach_sp_bi")
+                cursor.execute("""
+                    WITH classified_resources AS (
+                        SELECT resource_id, data_classification,
+                               record_count_estimate AS recs
+                          FROM azure_storage_accounts
+                         WHERE organization_id = %s AND data_classification IS NOT NULL
+                        UNION ALL
+                        SELECT resource_id, data_classification, record_count_estimate
+                          FROM azure_sql_databases
+                         WHERE organization_id = %s AND data_classification IS NOT NULL
+                        UNION ALL
+                        SELECT resource_id, data_classification, record_count_estimate
+                          FROM azure_cosmos_databases
+                         WHERE organization_id = %s AND data_classification IS NOT NULL
+                    )
+                    SELECT cr.data_classification, MAX(cr.recs) AS recs
+                      FROM classified_resources cr
+                     WHERE EXISTS (
+                         SELECT 1 FROM role_assignments ra
+                         JOIN identities i ON i.id = ra.identity_db_id
+                         WHERE i.organization_id = %s
+                           AND i.discovery_run_id = ANY(%s)
+                           AND LOWER(COALESCE(i.identity_category,'')) IN
+                               ('service_principal','managed_identity_system','managed_identity_user')
+                           AND NOT COALESCE(i.is_microsoft_system, false)
+                           AND ra.scope = cr.resource_id
+                     )
+                     GROUP BY cr.data_classification
+                """, (org_id, org_id, org_id, org_id, run_ids))
+                nhi_rows = [
+                    {'data_classification': r[0], 'est_records': r[1] or 0}
+                    for r in cursor.fetchall() if (r[1] or 0) > 0
+                ]
+                nhi_band = _band(aggregate_exposure(db, nhi_rows))
+                cursor.execute("RELEASE SAVEPOINT _nhi_reach_sp_bi")
+            except Exception as _exc_nhi:
+                logger.debug("nhi exposure skipped: %s", _exc_nhi)
+                try: cursor.execute("ROLLBACK TO SAVEPOINT _nhi_reach_sp_bi")
+                except Exception: pass
+
+            if total_band:
+                # Back-compat: existing UI reads `estimated_exposure` as the
+                # headline number; we keep that pointing at TOTAL but add
+                # explicit `scope='total'` and a `by_scope` breakdown so
+                # the new UI can render all three.
+                business_impact['estimated_exposure'] = {
+                    **total_band,
+                    'scope': 'total',
+                    'scope_label': 'Total classified-data exposure (org-wide)',
+                    'classified_resource_count': len(classified_rows),
+                }
+                business_impact['exposure_by_scope'] = {
+                    'total': total_band,
+                    'ai_reachable':  ai_band,
+                    'nhi_reachable': nhi_band,
+                }
+        except Exception as _exp_err:
+            logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
 
         return jsonify({
             "current_run": current_run,
@@ -8818,6 +9509,7 @@ def get_dashboard_posture():
             "attack_path_total": _attack_path_total,
             "attack_path_source_count": _attack_path_source_count,
             "anomalies": posture_anomalies,
+            "anomalies_unresolved_count": anomalies_unresolved_total,
             "drift": drift,
             "p2_enabled": db.get_setting('p2_telemetry_enabled', 'false', organization_id=org_id) == 'true',
             # AG-43/44: flat aliases for frontend trend rendering
@@ -10135,10 +10827,154 @@ def get_identity_keyvault_access(identity_id):
         db.close()
 
 
+# ── PIM hygiene: standing-privileged-without-PIM detector ─────────────────
+#
+# Microsoft Zero Trust + NIST AC-6 + CIS Azure 1.22/1.23 all say privileged
+# roles should be PIM-eligible (just-in-time, time-bound, approval-gated)
+# rather than standing/permanent assignments. This list defines the roles
+# we flag when held as standing — sourced from Microsoft's privileged-roles
+# documentation + the existing T0/T1 classification in azure_discovery.py.
+
+_PRIV_ENTRA_ROLES_FOR_PIM = {
+    'global administrator', 'privileged role administrator',
+    'privileged authentication administrator', 'security administrator',
+    'user administrator', 'application administrator',
+    'cloud application administrator', 'hybrid identity administrator',
+    'authentication administrator', 'conditional access administrator',
+    'exchange administrator', 'sharepoint administrator',
+    'teams administrator', 'intune administrator',
+    'helpdesk administrator', 'domain name administrator',
+    'external identity provider administrator', 'compliance administrator',
+    'security operator', 'global reader',
+}
+_PRIV_ARM_ROLES_FOR_PIM = {
+    'owner', 'user access administrator', 'contributor',
+    'role based access control administrator',
+    'key vault administrator', 'key vault secrets officer',
+    'key vault crypto officer', 'storage blob data owner',
+    'storage account contributor', 'network contributor',
+    'security admin',
+}
+
+
+def _scope_type_from_path(scope: str) -> str:
+    """Derive scope_type from an Azure RBAC scope path."""
+    if not scope or scope == '/':
+        return 'directory'
+    parts = [p for p in scope.split('/') if p]
+    lower = [p.lower() for p in parts]
+    if 'resourcegroups' in lower:
+        i = lower.index('resourcegroups')
+        return 'resource_group' if len(parts) == i + 2 else 'resource'
+    if lower and lower[0] == 'subscriptions' and len(parts) == 2:
+        return 'subscription'
+    return 'other'
+
+
+def _compute_should_be_pim(cursor, identity_db_id, pim_eligible_list):
+    """Identify standing privileged role assignments that Microsoft best
+    practice recommends be PIM-eligible (just-in-time, time-bound).
+
+    Standing roles come from two tables:
+      - entra_role_assignments        (directory roles, e.g. Global Admin)
+      - identity_subscription_access  (ARM RBAC at sub/RG/resource scope)
+    PIM-eligible alt comes from identities.access_paths.pim_eligible JSONB
+    (the SSOT until pim_eligible_assignments backfill ships).
+
+    Returns list of findings; each is a dict with role, scope, kind,
+    has_pim_alt, severity, recommendation, frameworks. Empty if none —
+    caller renders nothing.
+    """
+    standing = []  # rows of (role_name, scope, role_type_label)
+
+    # Entra directory standing assignments
+    try:
+        cursor.execute("""
+            SELECT role_name, COALESCE(directory_scope, '/'), 'entra'
+              FROM entra_role_assignments
+             WHERE identity_db_id = %s
+        """, (identity_db_id,))
+        standing.extend(cursor.fetchall() or [])
+    except Exception:
+        pass
+
+    # ARM RBAC standing assignments
+    try:
+        cursor.execute("""
+            SELECT rbac_role, COALESCE(scope, '/'), 'azure'
+              FROM identity_subscription_access
+             WHERE identity_db_id = %s
+        """, (identity_db_id,))
+        standing.extend(cursor.fetchall() or [])
+    except Exception:
+        pass
+
+    pim_alt_roles = {
+        ((e.get('role') or '').lower().strip())
+        for e in (pim_eligible_list or [])
+    }
+
+    findings = []
+    seen = set()  # dedupe (role, scope) so inherited+direct don't double-list
+    for role_name, scope, role_type in standing:
+        rn = (role_name or '').lower().strip()
+        rt = (role_type or '').lower()
+        scope_type = _scope_type_from_path(scope)
+        is_priv = False
+        if rt == 'entra' and rn in _PRIV_ENTRA_ROLES_FOR_PIM:
+            is_priv = True
+        elif rt == 'azure' and rn in _PRIV_ARM_ROLES_FOR_PIM:
+            # Contributor is huge at sub/RG, modest at resource scope —
+            # only flag at sub/RG (resource-scoped contributor is common
+            # and PIM doesn't always make sense there).
+            if rn == 'contributor' and scope_type not in ('subscription', 'resource_group'):
+                continue
+            is_priv = True
+        if not is_priv:
+            continue
+        key = (rn, scope)
+        if key in seen:
+            continue
+        seen.add(key)
+        has_pim_alt = rn in pim_alt_roles
+        findings.append({
+            'role_name': role_name,
+            'scope': scope,
+            'scope_type': scope_type,
+            'kind': 'entra' if rt == 'entra' else 'azure',
+            'has_pim_alt': has_pim_alt,
+            'severity': 'high',
+            'recommendation': (
+                'Remove this redundant standing assignment — a PIM-eligible '
+                'equivalent already exists for the same role. Standing access '
+                'bypasses the PIM activation/approval workflow and defeats '
+                'the purpose of having PIM configured.'
+            ) if has_pim_alt else (
+                'Convert this standing assignment to PIM-eligible. '
+                'Microsoft best practice (Zero Trust) and NIST AC-6 require '
+                'privileged roles to use just-in-time activation with '
+                'time-bound access (≤8h) and approval. Configure in '
+                'Entra admin center → Identity Governance → '
+                'Privileged Identity Management.'
+            ),
+            'frameworks': {
+                'cis': (
+                    ['CIS Azure 1.23'] if rt == 'entra'
+                    else ['CIS Azure 1.22']
+                ),
+                'nist': ['AC-6 (Least Privilege)', 'AC-2 (Account Management)'],
+                'mitre': ['T1078.004', 'T1098.003'],
+            },
+        })
+    return findings
+
+
 def get_identity_pim_data(identity_id):
     """
     Get PIM (Privileged Identity Management) data for an identity.
-    Returns eligible assignments, activation history, and overuse metrics.
+    Returns eligible assignments, activation history, overuse metrics, and
+    the should_be_pim list (standing privileged assignments that violate
+    Microsoft's PIM best-practice guidance).
     """
     db = _db()
     cursor = db.conn.cursor()
@@ -10160,6 +10996,43 @@ def get_identity_pim_data(identity_id):
         identity_db_id = row[0]
         pim_data = db.get_pim_data(identity_db_id)
 
+        # AG-PIM-FALLBACK (2026-05-30): When the dedicated
+        # `pim_eligible_assignments` table has no rows for this identity but
+        # `identities.access_paths.pim_eligible` does (which drives the
+        # "6 PIM" count in the access-depth strip), surface those entries so
+        # the PIM tab is consistent with the count. The dedicated-table
+        # backfill is a separate discovery-side investigation; this fallback
+        # is what unblocks the user-visible inconsistency today.
+        if not pim_data.get("eligible_assignments"):
+            cursor.execute("""
+                SELECT COALESCE(access_paths->'pim_eligible', '[]'::jsonb)
+                FROM identities WHERE id = %s
+            """, (identity_db_id,))
+            ap_row = cursor.fetchone()
+            ap_pim = ap_row[0] if ap_row else []
+            if ap_pim:
+                # If the snapshot was taken after the access_paths enrichment
+                # (assignment_type, member_type, end_datetime keys present),
+                # use the real values; otherwise default sensibly so the row
+                # still renders rather than crashing the table.
+                pim_data["eligible_assignments"] = [
+                    {
+                        "role_name": e.get("role", ""),
+                        "directory_scope": e.get("scope", "/"),
+                        "assignment_type": e.get("assignment_type") or "time_bound_eligible",
+                        "member_type": e.get("member_type") or "Direct",
+                        "start_datetime": None,
+                        "end_datetime": e.get("end_datetime"),
+                        "role_definition_id": e.get("role_definition_id"),
+                        "_source": "access_paths_fallback",
+                    }
+                    for e in ap_pim
+                ]
+                logging.getLogger(__name__).info(
+                    "[PIM_FALLBACK] identity_id=%s synthesized %d eligible from access_paths",
+                    identity_id, len(ap_pim)
+                )
+
         # Serialize datetimes
         for item in pim_data["eligible_assignments"]:
             for key in ("start_datetime", "end_datetime"):
@@ -10170,6 +11043,24 @@ def get_identity_pim_data(identity_id):
             for key in ("activation_start", "activation_end", "created_datetime"):
                 if item.get(key) and hasattr(item[key], "isoformat"):
                     item[key] = item[key].isoformat()
+
+        # PIM hygiene: standing privileged assignments that should be PIM-eligible.
+        # Computed at API time from identity_roles + access_paths.pim_eligible
+        # so it stays fresh against re-scans without a schema migration.
+        try:
+            cursor.execute("""
+                SELECT COALESCE(access_paths->'pim_eligible', '[]'::jsonb)
+                  FROM identities WHERE id = %s
+            """, (identity_db_id,))
+            ap_row = cursor.fetchone()
+            pim_alt = ap_row[0] if ap_row else []
+            pim_data["should_be_pim"] = _compute_should_be_pim(
+                cursor, identity_db_id, pim_alt
+            )
+        except Exception:
+            # Fail-soft: missing identity_roles / access_paths shouldn't 500
+            # the PIM tab. Surface an empty array; existing UI handles it.
+            pim_data["should_be_pim"] = []
 
         return jsonify(pim_data)
 
@@ -15511,6 +16402,620 @@ def get_dashboard_anomalies():
         db.close()
 
 
+def get_dashboard_jml_snapshot():
+    """GET /api/dashboard/jml-snapshot — Joiner / Mover / Leaver counts.
+
+    AG-JML (2026-06-01): CIEM-style observability of the JML lifecycle
+    WITHOUT becoming an IGA tool. Composes existing signals (no new
+    detection beyond mover_stale_access) into the joiner/mover/leaver
+    framing every auditor recognizes:
+
+      - Joiners: identities created in the last 30 days with privileged
+        role assignments (the "joiner-with-Owner" risk pattern).
+      - Movers: open mover_stale_access anomalies (department/title
+        changed AND prior privileged roles still attached).
+      - Leavers: ghost_identity anomalies (disabled in cloud, role
+        assignments retained) — pure leaver tail.
+
+    Returns counts + top-N samples per bucket so a dashboard tile can
+    render "12 joiners · 3 movers · 5 leavers" with deep-links into
+    /identities filtered views.
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'joiners': {'count': 0, 'top': []},
+                'movers':  {'count': 0, 'top': []},
+                'leavers': {'count': 0, 'top': []},
+                'reason': 'no_completed_run',
+            })
+
+        # Joiners: created in last 30 days with critical/high risk
+        # (i.e. they came in with elevated access — joiner-risk pattern).
+        cursor.execute("""
+            SELECT identity_id, display_name, risk_level, created_datetime
+              FROM identities
+             WHERE discovery_run_id = ANY(%s)
+               AND organization_id = %s
+               AND created_datetime >= NOW() - INTERVAL '30 days'
+               AND risk_level IN ('critical', 'high')
+               AND COALESCE(is_microsoft_system, false) = false
+             ORDER BY created_datetime DESC NULLS LAST
+             LIMIT 5
+        """, (run_ids, org_id))
+        joiner_top = [
+            {
+                'identity_id': r[0],
+                'display_name': r[1],
+                'risk_level': r[2],
+                'created_at': r[3].isoformat() if r[3] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT count(*) FROM identities
+             WHERE discovery_run_id = ANY(%s) AND organization_id = %s
+               AND created_datetime >= NOW() - INTERVAL '30 days'
+               AND risk_level IN ('critical', 'high')
+               AND COALESCE(is_microsoft_system, false) = false
+        """, (run_ids, org_id))
+        joiner_count = int(cursor.fetchone()[0] or 0)
+
+        # Movers: open mover_stale_access anomalies — DISTINCT identities,
+        # not raw anomaly records (each ghost can have multiple records as
+        # detectors fire every run).
+        cursor.execute("""
+            WITH ranked AS (
+              SELECT identity_id, identity_name, severity, title, created_at,
+                     ROW_NUMBER() OVER (PARTITION BY identity_id
+                                        ORDER BY created_at DESC NULLS LAST) AS rn
+                FROM anomalies
+               WHERE organization_id = %s
+                 AND anomaly_type = 'mover_stale_access'
+                 AND resolved = false
+            )
+            SELECT identity_id, identity_name, severity, title, created_at
+              FROM ranked WHERE rn = 1
+             ORDER BY created_at DESC NULLS LAST LIMIT 5
+        """, (org_id,))
+        mover_top = [
+            {
+                'identity_id': r[0],
+                'display_name': r[1],
+                'severity': r[2],
+                'title': r[3],
+                'detected_at': r[4].isoformat() if r[4] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT count(DISTINCT identity_id) FROM anomalies
+             WHERE organization_id = %s
+               AND anomaly_type = 'mover_stale_access'
+               AND resolved = false
+        """, (org_id,))
+        mover_count = int(cursor.fetchone()[0] or 0)
+
+        # Leavers: ghost identities visible in the LATEST run only. AG-JML
+        # truth fix (2026-06-02): we used to count anomaly records, which
+        # accumulate across runs (one row per identity per detection). For
+        # the CISO dashboard tile + this drill-down to agree, count UNIQUE
+        # disabled-but-privileged identities in the latest snapshot — the
+        # same definition the CISO "ghost accounts" metric uses.
+        cursor.execute("""
+            SELECT i.identity_id, i.display_name, 'critical' AS severity,
+                   CONCAT('Ghost identity: ', i.display_name, ' (disabled) retains role(s)') AS title,
+                   i.created_datetime AS created_at
+              FROM identities i
+             WHERE i.discovery_run_id = ANY(%s)
+               AND i.organization_id = %s
+               AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL)
+               AND (
+                    EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                    OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+               )
+             ORDER BY i.created_datetime DESC NULLS LAST
+             LIMIT 5
+        """, (run_ids, org_id))
+        leaver_top = [
+            {
+                'identity_id': r[0],
+                'display_name': r[1],
+                'severity': r[2],
+                'title': r[3],
+                'detected_at': r[4].isoformat() if r[4] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT count(DISTINCT i.identity_id) FROM identities i
+             WHERE i.discovery_run_id = ANY(%s)
+               AND i.organization_id = %s
+               AND (i.enabled = FALSE OR i.deleted_at IS NOT NULL)
+               AND (
+                    EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
+                    OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
+               )
+        """, (run_ids, org_id))
+        leaver_count = int(cursor.fetchone()[0] or 0)
+
+        cursor.close()
+        return jsonify({
+            'joiners': {'count': joiner_count, 'top': joiner_top},
+            'movers':  {'count': mover_count,  'top': mover_top},
+            'leavers': {'count': leaver_count, 'top': leaver_top},
+        })
+    except Exception as e:
+        logger.warning("get_dashboard_jml_snapshot error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({
+            'joiners': {'count': 0, 'top': []},
+            'movers':  {'count': 0, 'top': []},
+            'leavers': {'count': 0, 'top': []},
+            'error': 'internal',
+        })
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# AG-81: OAuth Consent Grant Inventory & Risk Scoring
+# ──────────────────────────────────────────────────────────────────
+
+def list_consent_grants_handler():
+    """GET /api/consent-grants — list consent grants for the current org.
+
+    Query params: risk_level, grant_type, client_app_id, limit, offset.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        risk_level = (request.args.get('risk_level') or '').strip().lower() or None
+        grant_type = (request.args.get('grant_type') or '').strip().lower() or None
+        client_app_id = (request.args.get('client_app_id') or '').strip() or None
+        limit = _safe_query_int('limit', 100, 500)
+        offset = _safe_query_int('offset', 0, 100000)
+        grants = db.list_consent_grants(
+            org_id,
+            risk_level=risk_level if risk_level in ('critical','high','medium','low') else None,
+            grant_type=grant_type if grant_type in ('delegated','application') else None,
+            client_app_id=client_app_id,
+            limit=limit, offset=offset,
+        )
+        return jsonify({'grants': grants, 'count': len(grants)})
+    finally:
+        db.close()
+
+
+def get_consent_scenarios_handler():
+    """GET /api/connected-apps/scenarios — multi-scenario consent risk surface.
+
+    The Vercel/Context.ai playbook is only ONE shape of OAuth consent risk.
+    For CISOs whose grants are mostly Microsoft + verified publishers, the
+    Vercel signature returns zero and the page looks empty — which is
+    misleading. The remaining risk has shifted to scope creep, dormancy,
+    supply-chain post-compromise, and shadow-IT productivity tools.
+
+    Returns one entry per scenario with a count + top-N sample grants +
+    "why it matters" + framework refs. The UI renders these as a
+    scenario menu (think a Splunk savedsearch list for consent risk).
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT id, grant_type, client_app_id, client_display_name,
+                   resource_app_id, resource_display_name, scopes,
+                   consent_type, risk_level, risk_score, age_days,
+                   verified_publisher, publisher_name, created_datetime,
+                   high_risk_scopes, last_activity_at
+              FROM consent_grants
+             WHERE organization_id = %s
+        """, (org_id,))
+        cols = [c[0] for c in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+    except Exception as e:
+        logger.warning("scenarios fetch failed: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        rows = []
+    finally:
+        db.close()
+
+    def _is_admin(r):
+        return r.get('consent_type') == 'AllPrincipals' or r.get('grant_type') == 'application'
+
+    def _is_microsoft(r):
+        return (r.get('publisher_name') or '').lower().startswith('microsoft')
+
+    def _has_offline_access(r):
+        return any((s or '').strip() == 'offline_access' for s in (r.get('scopes') or []))
+
+    def _summarise(r):
+        return {
+            'id': r.get('id'),
+            'client_app_id': r.get('client_app_id'),
+            'client_display_name': r.get('client_display_name'),
+            'resource_display_name': r.get('resource_display_name'),
+            'publisher_name': r.get('publisher_name'),
+            'verified_publisher': r.get('verified_publisher'),
+            'risk_level': r.get('risk_level'),
+            'risk_score': r.get('risk_score'),
+            'age_days': r.get('age_days'),
+            'high_risk_scopes': r.get('high_risk_scopes') or [],
+            'has_offline_access': _has_offline_access(r),
+            'consent_type': r.get('consent_type'),
+        }
+
+    scenarios = []
+
+    # 1. VERCEL — unverified + admin + high-risk + (offline_access amplifies)
+    vercel_matches = []
+    for r in rows:
+        if r.get('publisher_name') and _is_microsoft(r):
+            continue
+        if r.get('verified_publisher') is True:
+            continue
+        if not _is_admin(r):
+            continue
+        if not (r.get('high_risk_scopes') or []):
+            continue
+        vercel_matches.append(_summarise(r))
+    vercel_matches.sort(key=lambda m: (
+        -1 if m['has_offline_access'] else 0,
+        -(m.get('risk_score') or 0),
+    ))
+    scenarios.append({
+        'key': 'vercel',
+        'name': 'Vercel / Context.ai (2024-25)',
+        'tagline': 'The OAuth consent-phishing playbook',
+        'signature': [
+            'Unverified publisher',
+            'Admin-consented (tenant-wide)',
+            'High-risk scope (Mail.*, Files.*, Sites.*, Directory.*)',
+            'offline_access amplifies (refresh-token persistence)',
+        ],
+        'why_it_matters': (
+            'A single admin click on an unverified app hands the attacker a '
+            'refresh token that outlives password resets, MFA upgrades, and '
+            'the consenting user\'s employment.'
+        ),
+        'count': len(vercel_matches),
+        'top': vercel_matches[:5],
+        'frameworks': {
+            'mitre': ['T1550.001', 'T1078.004'],
+            'cis': ['CIS Azure 5.1.1'],
+        },
+    })
+
+    # 2. MOVEIT / SUPPLY-CHAIN — verified vendor with EXCESSIVE scope. The
+    # publisher is legit but the scope is broader than the app's stated
+    # purpose. Heuristic: ≥3 high-risk scopes on a non-Microsoft grant.
+    moveit_matches = []
+    for r in rows:
+        if _is_microsoft(r):
+            continue
+        hrs = r.get('high_risk_scopes') or []
+        if len(hrs) < 3:
+            continue
+        if r.get('verified_publisher') is not True:
+            continue  # already covered by Vercel scenario
+        moveit_matches.append(_summarise(r))
+    moveit_matches.sort(key=lambda m: -(len(m.get('high_risk_scopes') or [])))
+    scenarios.append({
+        'key': 'moveit',
+        'name': 'MOVEit / Cl0p (2023)',
+        'tagline': 'Supply-chain compromise of a legitimately installed app',
+        'signature': [
+            'Verified publisher (trust was earned)',
+            'Excessive scope (3+ high-risk scopes)',
+            'Long-tenured grant (the trust persisted past the compromise)',
+        ],
+        'why_it_matters': (
+            'When a legitimately-installed SaaS gets backdoored upstream, '
+            'every grant you ever gave it is now attacker reach. Verification '
+            'is not a permanent safety guarantee — it\'s a point-in-time check.'
+        ),
+        'count': len(moveit_matches),
+        'top': moveit_matches[:5],
+        'frameworks': {
+            'mitre': ['T1195.002', 'T1078.004'],
+            'cis': ['CIS Azure 5.1.1'],
+        },
+    })
+
+    # 3. STORM-0558 — Microsoft-published app with broad Mail/Outlook scope.
+    # The Microsoft signing-key compromise meant tokens for these specific
+    # apps could be forged externally.
+    storm_matches = []
+    STORM_HIGH_VALUE_SCOPES = {
+        'mail.read', 'mail.readwrite', 'mail.send', 'mail.readbasic',
+        'mail.readwrite.shared', 'mail.read.shared',
+        'directory.read.all', 'directory.readwrite.all',
+        'files.read.all', 'files.readwrite.all',
+    }
+    for r in rows:
+        if not _is_microsoft(r):
+            continue
+        scopes = [(s or '').lower().strip() for s in (r.get('scopes') or [])]
+        if not any(s in STORM_HIGH_VALUE_SCOPES for s in scopes):
+            continue
+        if not _is_admin(r):
+            continue
+        storm_matches.append(_summarise(r))
+    storm_matches.sort(key=lambda m: -(m.get('risk_score') or 0))
+    scenarios.append({
+        'key': 'storm0558',
+        'name': 'Storm-0558 (2023)',
+        'tagline': 'Microsoft signing key compromise → cross-tenant token forgery',
+        'signature': [
+            'Microsoft-published',
+            'Admin-consented',
+            'Broad Mail.*/Files.*/Directory.* scope',
+        ],
+        'why_it_matters': (
+            'Microsoft-published does not equal safe. Storm-0558 demonstrated '
+            'that a compromise of Microsoft\'s consumer signing key let an '
+            'adversary forge tokens for Microsoft-published apps across every '
+            'tenant. Your defense is scope minimization, not publisher trust.'
+        ),
+        'count': len(storm_matches),
+        'top': storm_matches[:5],
+        'frameworks': {
+            'mitre': ['T1550.001', 'T1606.001'],
+            'cis': ['CIS Azure 1.13', 'CIS Azure 5.1.1'],
+        },
+    })
+
+    # 4. NOBELIUM / DORMANT — long-lived grants with no recent activity.
+    # Even verified vendors can go silent (acquired, abandoned, dormant).
+    dormant_matches = []
+    for r in rows:
+        if (r.get('age_days') or 0) < 180:
+            continue
+        if r.get('risk_level') not in ('critical', 'high'):
+            continue
+        if not _is_admin(r):
+            continue
+        dormant_matches.append(_summarise(r))
+    dormant_matches.sort(key=lambda m: -(m.get('age_days') or 0))
+    scenarios.append({
+        'key': 'nobelium_dormant',
+        'name': 'NOBELIUM / dormant grants (2020-now)',
+        'tagline': 'Long-lived authorization, no recent activity, full reach if compromised',
+        'signature': [
+            'Grant > 180 days old',
+            'Admin-consented (tenant-wide)',
+            'High-risk scope',
+            'No business owner of record',
+        ],
+        'why_it_matters': (
+            'The grants you forgot about are the ones that bite hardest. '
+            'NOBELIUM (SolarWinds aftermath) leveraged exactly this pattern — '
+            'trusted vendors get acquired or backdoored, and the dormant '
+            'consent grants stay live as a persistence mechanism.'
+        ),
+        'count': len(dormant_matches),
+        'top': dormant_matches[:5],
+        'frameworks': {
+            'mitre': ['T1078.004', 'T1195.002'],
+            'cis': ['CIS Azure 5.1.1'],
+        },
+    })
+
+    # 5. SHADOW-IT productivity — recently-created grant for an AI/automation
+    # tool without a clear intake record. Self-served by an admin for
+    # personal productivity, often never reviewed.
+    shadow_matches = []
+    SHADOW_TOOL_HINTS = ('ai', 'copilot', 'gpt', 'claude', 'anthropic',
+                         'automation', 'zapier', 'make.com', 'n8n',
+                         'powerautomate', 'flow', 'productivity')
+    for r in rows:
+        if (r.get('age_days') or 999) > 90:
+            continue
+        if r.get('risk_level') not in ('critical', 'high'):
+            continue
+        name_low = ((r.get('client_display_name') or '') + ' ' +
+                    (r.get('publisher_name') or '')).lower()
+        if not any(h in name_low for h in SHADOW_TOOL_HINTS):
+            continue
+        shadow_matches.append(_summarise(r))
+    shadow_matches.sort(key=lambda m: -(m.get('risk_score') or 0))
+    scenarios.append({
+        'key': 'shadow_productivity',
+        'name': 'Shadow productivity (ongoing)',
+        'tagline': 'Admin self-serves consent for an AI/automation tool',
+        'signature': [
+            'Created in last 90 days',
+            'High-risk scope',
+            'Name suggests AI / automation / productivity tool',
+            'No intake / change-control record',
+        ],
+        'why_it_matters': (
+            'The most common breach precondition isn\'t exotic — it\'s an '
+            'admin clicking yes on a productivity tool they wanted, then '
+            'forgetting. Surfacing this as a scenario gives the CISO a path '
+            'to "approved tool registry" maturity.'
+        ),
+        'count': len(shadow_matches),
+        'top': shadow_matches[:5],
+        'frameworks': {
+            'nist': ['CM-3 (Configuration Change Control)'],
+            'mitre': ['T1078.004'],
+        },
+    })
+
+    return jsonify({
+        'scenarios': scenarios,
+        'totals': {
+            'scenarios': len(scenarios),
+            'matched_grants': sum(s['count'] for s in scenarios),
+        },
+    })
+
+
+def get_vercel_scenario_grants_handler():
+    """GET /api/connected-apps/vercel-scenario — find OAuth grants matching the
+    Vercel/Context.ai breach signature.
+
+    AG-84 sales asset. The signature observed in the public postmortems:
+      1. Publisher is NOT verified (no Microsoft Verified Publisher attestation)
+      2. Admin consent (consentType=AllPrincipals OR grant_type=application)
+      3. High-risk scope (Mail.* / Files.* / Sites.* / Directory.* etc.)
+      4. offline_access (refresh-token persistence that survives password rotation)
+
+    Returns matched grants with the rationale per grant so the user can
+    see which preconditions fired. This is the "Run Vercel scenario"
+    button on the Connected Apps page.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        cursor = db.conn.cursor()
+        # Pull all grants for the org with the fields we need to evaluate.
+        cursor.execute("""
+            SELECT id, grant_type, client_app_id, client_display_name,
+                   resource_app_id, resource_display_name, scopes,
+                   consent_type, risk_level, risk_score, age_days,
+                   verified_publisher, publisher_name, created_datetime,
+                   high_risk_scopes
+              FROM consent_grants
+             WHERE organization_id = %s
+        """, (org_id,))
+        cols = [c[0] for c in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+
+        matched = []
+        for r in rows:
+            reasons = []
+            # 1. Unverified publisher (or unknown, treated as suspect when
+            #    combined with other indicators)
+            is_microsoft = (r.get('publisher_name') or '').lower().startswith('microsoft')
+            vp = r.get('verified_publisher')
+            if is_microsoft or vp is True:
+                continue  # Microsoft / verified — not Vercel-like
+            if vp is False:
+                reasons.append('Unverified publisher')
+            else:
+                reasons.append('Publisher not attested')
+            # 2. Admin consent (tenant-wide blast radius)
+            if r.get('consent_type') == 'AllPrincipals' or r.get('grant_type') == 'application':
+                reasons.append('Admin-consented (tenant-wide)')
+            else:
+                continue  # User-only consent — not Vercel-like
+            # 3. High-risk scope
+            hrs = r.get('high_risk_scopes') or []
+            if hrs:
+                reasons.append(f"High-risk scope: {', '.join(hrs[:3])}{' …' if len(hrs) > 3 else ''}")
+            else:
+                continue  # No high-risk scope — not Vercel-like
+            # 4. offline_access (refresh-token persistence)
+            scopes = r.get('scopes') or []
+            if any((s or '').strip() == 'offline_access' for s in scopes):
+                reasons.append('Includes offline_access (refresh-token persistence)')
+            # offline_access is the amplifier — flag higher when present
+            # but a grant without it can still match if 1-3 fire.
+
+            ts = r.get('created_datetime')
+            matched.append({
+                'id': r['id'],
+                'client_app_id': r['client_app_id'],
+                'client_display_name': r.get('client_display_name'),
+                'resource_display_name': r.get('resource_display_name'),
+                'publisher_name': r.get('publisher_name'),
+                'verified_publisher': vp,
+                'consent_type': r.get('consent_type'),
+                'grant_type': r.get('grant_type'),
+                'risk_level': r.get('risk_level'),
+                'risk_score': r.get('risk_score'),
+                'age_days': r.get('age_days'),
+                'high_risk_scopes': hrs,
+                'has_offline_access': any((s or '').strip() == 'offline_access' for s in scopes),
+                'created_datetime': ts.isoformat() if ts else None,
+                'reasons': reasons,
+            })
+
+        # Sort by amplifier presence and severity
+        matched.sort(key=lambda m: (
+            -1 if m['has_offline_access'] else 0,
+            -(m.get('risk_score') or 0),
+            -(m.get('age_days') or 0),
+        ))
+
+        # Headline metrics
+        return jsonify({
+            'matched': matched,
+            'matched_count': len(matched),
+            'with_offline_access': sum(1 for m in matched if m['has_offline_access']),
+            'scenario': {
+                'name': 'Vercel / Context.ai OAuth consent breach',
+                'signature': [
+                    'Unverified publisher (no Microsoft Verified Publisher attestation)',
+                    'Admin-consented (tenant-wide)',
+                    'High-risk scope (Mail.* / Files.* / Sites.* / Directory.*)',
+                    'offline_access — refresh-token persistence',
+                ],
+                'why_it_matters': (
+                    'A single admin click on an unverified app hands the attacker a refresh '
+                    'token that outlives password resets, MFA upgrades, and the consenting '
+                    'user\'s employment.'
+                ),
+            },
+        })
+    except Exception as e:
+        logger.warning("vercel scenario error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'matched': [], 'matched_count': 0, 'error': 'scenario_failed'}), 200
+    finally:
+        db.close()
+
+
+def get_dashboard_connected_app_risk():
+    """GET /api/dashboard/connected-app-risk — CISO tile summary.
+
+    Returns severity breakdown + admin-vs-user split + age stats +
+    top risky apps. The visual story is "Who said yes to what, when,
+    and is it still necessary?" — the exact Vercel-breach question.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        summary = db.get_connected_app_risk_summary(org_id)
+        top = db.list_top_risky_connected_apps(org_id, limit=5)
+        # Cross-link a representative grant per top app so the UI can
+        # deep-link to /identities/<client_app_id> or the consent detail.
+        return jsonify({
+            'summary': summary,
+            'top_risky_apps': top,
+        })
+    except Exception as e:
+        logger.warning("get_dashboard_connected_app_risk error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({
+            'summary': {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0,
+                        'admin_consents': 0, 'user_consents': 0,
+                        'verified_publisher_grants': 0, 'unverified_publisher_grants': 0,
+                        'unverified_high_risk_grants': 0, 'publisher_unknown_grants': 0,
+                        'application_grants': 0, 'delegated_grants': 0,
+                        'avg_age_days': 0, 'over_180_days': 0, 'unique_apps': 0},
+            'top_risky_apps': [],
+            'error': 'internal',
+        })
+    finally:
+        db.close()
+
+
 # ── Phase 42: API Key Management ─────────────────────────────────
 
 def get_api_keys_list():
@@ -16994,6 +18499,66 @@ def get_onboarding_status():
             'checklist_total': len(checklist),
             'org_name': org_name,
         })
+    finally:
+        db.close()
+
+
+def get_onboarding_first_finding():
+    """GET /api/onboarding/first-finding — the "magical moment" deep-link.
+
+    After the wizard kicks off the first scan + the live-finding modal
+    completes, the frontend calls this to find the single highest-risk
+    identity from that run and deep-links to /identities/<id>. Turns
+    "your scan completed" into "your first critical finding is HERE".
+
+    Returns:
+      200 {identity_id, display_name, risk_level, risk_score_cvss}
+      200 {identity_id: null}  — when no critical/high identity exists
+                                (caller falls through to /dashboard)
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'identity_id': None, 'reason': 'no_completed_run'})
+        # Pick the single most-critical identity from the latest run.
+        # Prefer risk_score_cvss (when populated) for the rank within
+        # severity, fall back to legacy risk_score. Skip Microsoft-
+        # managed identities — they aren't actionable findings for a
+        # CISO and surfacing one as the "first finding" would be a
+        # demo own-goal.
+        cursor.execute("""
+            SELECT identity_id, display_name, risk_level, risk_score
+              FROM identities
+             WHERE discovery_run_id = ANY(%s)
+               AND organization_id = %s
+               AND risk_level IN ('critical', 'high')
+               AND COALESCE(is_microsoft_system, false) = false
+             ORDER BY CASE risk_level
+                        WHEN 'critical' THEN 4
+                        WHEN 'high' THEN 3
+                        ELSE 0 END DESC,
+                      COALESCE(risk_score, 0) DESC NULLS LAST
+             LIMIT 1
+        """, (run_ids, org_id))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'identity_id': None, 'reason': 'no_critical_or_high'})
+        return jsonify({
+            'identity_id': row[0],
+            'display_name': row[1],
+            'risk_level': row[2],
+            'risk_score': int(row[3] or 0),
+        })
+    except Exception as e:
+        logger.warning("get_onboarding_first_finding error: %s", e)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'identity_id': None, 'reason': 'error'})
     finally:
         db.close()
 
@@ -23167,6 +24732,496 @@ get_spn_lineage = get_identity_lineage
 
 
 # ──────────────────────────────────────────────────────────
+# AG-150: Dedicated federated-credentials endpoint
+# ──────────────────────────────────────────────────────────
+
+# Trust posture for known OIDC issuers. Subject patterns that bypass
+# org/repo/branch pinning are flagged as "permissive".
+_FED_ISSUER_RISK = {
+    'token.actions.githubusercontent.com': {
+        'issuer_type': 'github_actions',
+        'trust_basis': 'OIDC, GitHub-signed JWT bound to a specific repo + ref/environment.',
+        'required_pins': ['repo:<org>/<repo>:ref:refs/heads/<branch>', 'or repo:<org>/<repo>:environment:<env>'],
+        'permissive_patterns': ['repo:*:*', 'repo:<org>/<repo>:*', 'repo:<org>/<repo>:ref:*'],
+    },
+    'app.terraform.io': {
+        'issuer_type': 'terraform_cloud',
+        'trust_basis': 'OIDC, HCP-signed JWT bound to an organization/project/workspace.',
+        'required_pins': ['organization:<org>:project:<proj>:workspace:<ws>:run_phase:<phase>'],
+        'permissive_patterns': ['organization:*', 'organization:<org>:project:*'],
+    },
+    'vstoken.dev.azure.com': {
+        'issuer_type': 'azure_devops',
+        'trust_basis': 'OIDC, ADO-signed JWT bound to a service connection.',
+        'required_pins': ['sc://<org>/<proj>/<service-connection>'],
+        'permissive_patterns': ['sc://<org>/<proj>/*'],
+    },
+}
+
+
+def _classify_federated_risk(issuer: str, subject: str, audiences) -> dict:
+    """Compute risk posture for one federated credential.
+
+    Returns:
+        risk_level: 'low' | 'medium' | 'high' | 'critical'
+        reasons: list[str] — human-readable findings
+        framework_refs: dict — CIS/NIST/MITRE control IDs
+    """
+    issuer = (issuer or '').lower()
+    subject = subject or ''
+    audiences_list = audiences if isinstance(audiences, list) else []
+
+    reasons = []
+    level = 'low'
+
+    # Find which known issuer this matches (substring)
+    known = None
+    for host, meta in _FED_ISSUER_RISK.items():
+        if host in issuer:
+            known = meta
+            break
+
+    if not known:
+        reasons.append(f'Unrecognized issuer ({issuer or "empty"}) — verify this is an approved IdP.')
+        level = 'high'
+    else:
+        # Subject must contain at least one pin token.
+        # The simplest signal: wildcard or empty subject after the prefix.
+        if not subject:
+            reasons.append('Subject is empty — any token from this IdP can assume the identity.')
+            level = 'critical'
+        elif '*' in subject:
+            reasons.append(f'Subject contains a wildcard ("{subject}") — broader trust than recommended.')
+            level = 'high'
+        elif known['issuer_type'] == 'github_actions':
+            if not (subject.startswith('repo:') and (':ref:' in subject or ':environment:' in subject)):
+                reasons.append('GitHub subject lacks ref or environment pin — any branch/PR can assume the identity.')
+                level = 'high' if level == 'low' else level
+        elif known['issuer_type'] == 'terraform_cloud':
+            if ':workspace:' not in subject:
+                reasons.append('Terraform subject lacks workspace pin — any workspace in the org can assume.')
+                level = 'high' if level == 'low' else level
+
+    # Audience hygiene
+    if not audiences_list:
+        reasons.append('No audience restriction set — token can be replayed against any AAD endpoint.')
+        level = 'medium' if level == 'low' else level
+    elif any(a == '*' or a == 'api://AzureADTokenExchange/*' for a in audiences_list):
+        reasons.append('Audience is wildcarded — replay risk.')
+        level = 'high' if level in ('low', 'medium') else level
+
+    if not reasons:
+        reasons.append('Subject is pinned to a specific workload and audience is restricted.')
+
+    return {
+        'risk_level': level,
+        'reasons': reasons,
+        'framework_refs': {
+            'nist': ['IA-5', 'AC-2(7)'],
+            'cis_azure': ['1.21'],
+            'mitre': ['T1606.001'],
+        },
+    }
+
+
+def get_identity_federated_credentials(identity_id: str):
+    """GET /api/identities/<identity_id>/federated-credentials
+
+    AG-150: Dedicated endpoint so the Credentials tab can render the
+    federated section without paying for the full lineage payload.
+    Returns the credentials list + per-credential risk posture +
+    a top-level summary suitable for a CISO-facing card.
+    """
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({
+                'identity_id': identity_id,
+                'credentials': [],
+                'summary': {'total': 0, 'critical': 0, 'high': 0},
+                'last_collected_at': None,
+            })
+
+        # Look up the identity by external id (not numeric db id).
+        cursor.execute("""
+            SELECT id, has_federated_credentials, federated_cred_count
+            FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+            ORDER BY discovery_run_id DESC
+            LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = row['id'] if isinstance(row, dict) else row[0]
+        flag = row['has_federated_credentials'] if isinstance(row, dict) else row[1]
+        count = row['federated_cred_count'] if isinstance(row, dict) else row[2]
+
+        # Prefer richer federated_credentials table (AG-148 Graph fetch).
+        creds = []
+        last_collected = None
+        try:
+            cursor.execute("""
+                SELECT fc.credential_id, fc.name, fc.issuer, fc.subject,
+                       fc.audiences, fc.issuer_type, fc.description,
+                       fc.collected_at
+                FROM federated_credentials fc
+                WHERE fc.identity_db_id = %s
+                ORDER BY fc.name
+            """, (db_id,))
+            for r in cursor.fetchall():
+                aud = r['audiences'] if isinstance(r['audiences'], list) else []
+                risk = _classify_federated_risk(r['issuer'], r['subject'], aud)
+                creds.append({
+                    'credential_id': r['credential_id'],
+                    'name': r['name'],
+                    'issuer': r['issuer'],
+                    'subject': r['subject'],
+                    'audiences': aud,
+                    'issuer_type': r['issuer_type'],
+                    'description': r['description'],
+                    'risk_level': risk['risk_level'],
+                    'reasons': risk['reasons'],
+                    'framework_refs': risk['framework_refs'],
+                })
+                col = r.get('collected_at')
+                if col and (last_collected is None or col > last_collected):
+                    last_collected = col
+        except Exception:
+            cursor.connection.rollback()
+
+        # Fallback: legacy credentials table.
+        if not creds:
+            try:
+                cursor.execute("""
+                    SELECT key_id, display_name, issuer, subject
+                    FROM credentials
+                    WHERE identity_db_id = %s AND credential_type = 'federated'
+                    ORDER BY display_name
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    issuer = r['issuer']
+                    subject = r['subject']
+                    risk = _classify_federated_risk(issuer, subject, [])
+                    cls = None
+                    try:
+                        from app.engines.discovery.azure_discovery import AzureDiscoveryEngine
+                        cls = AzureDiscoveryEngine._classify_federated_credential(issuer or '', subject or '')
+                    except Exception:
+                        pass
+                    creds.append({
+                        'credential_id': r['key_id'],
+                        'name': r['display_name'],
+                        'issuer': issuer,
+                        'subject': subject,
+                        'audiences': [],
+                        'issuer_type': (cls or {}).get('federated_workload_type', 'external_oidc'),
+                        'description': None,
+                        'risk_level': risk['risk_level'],
+                        'reasons': risk['reasons'],
+                        'framework_refs': risk['framework_refs'],
+                    })
+            except Exception:
+                cursor.connection.rollback()
+
+        # Summary
+        summary = {
+            'total': len(creds),
+            'critical': sum(1 for c in creds if c['risk_level'] == 'critical'),
+            'high': sum(1 for c in creds if c['risk_level'] == 'high'),
+            'medium': sum(1 for c in creds if c['risk_level'] == 'medium'),
+            'low': sum(1 for c in creds if c['risk_level'] == 'low'),
+            'flag_set': bool(flag),
+            'count_field': int(count or 0),
+        }
+
+        return jsonify({
+            'identity_id': identity_id,
+            'credentials': creds,
+            'summary': summary,
+            'last_collected_at': last_collected.isoformat() if last_collected and hasattr(last_collected, 'isoformat') else None,
+        })
+    except Exception as e:
+        logger.error(f"federated-credentials endpoint failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────
+# AG-86: Shadow App Detection — Approved Apps Registry + verdicts
+# ──────────────────────────────────────────────────────────
+
+def list_approved_apps_handler():
+    """GET /api/approved-apps — list this org's approved app registry."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT id, app_id, display_name, publisher_name, app_category,
+                   match_kind, notes, is_seeded, created_at, updated_at,
+                   added_by_user_id
+            FROM approved_apps
+            WHERE organization_id = %s
+            ORDER BY is_seeded DESC, display_name ASC NULLS LAST
+        """, (_org_id(),))
+        rows = []
+        for r in cursor.fetchall():
+            rows.append({
+                'id': r['id'],
+                'app_id': r['app_id'],
+                'display_name': r['display_name'],
+                'publisher_name': r['publisher_name'],
+                'app_category': r['app_category'],
+                'match_kind': r['match_kind'],
+                'notes': r['notes'],
+                'is_seeded': bool(r['is_seeded']),
+                'added_by_user_id': r['added_by_user_id'],
+                'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+                'updated_at': r['updated_at'].isoformat() if r['updated_at'] else None,
+            })
+        return jsonify({'approved_apps': rows, 'total': len(rows)})
+    except Exception as e:
+        logger.error(f"list_approved_apps failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def add_approved_app_handler():
+    """POST /api/approved-apps — admin-only. Body: {app_id?, publisher_name?,
+    display_name?, match_kind, app_category?, notes?}."""
+    payload = request.get_json(silent=True) or {}
+    match_kind = (payload.get('match_kind') or 'app_id').strip().lower()
+    if match_kind not in ('app_id', 'publisher', 'display_name_prefix'):
+        return jsonify({'error': 'Invalid match_kind'}), 400
+
+    app_id = (payload.get('app_id') or '').strip() or None
+    display_name = (payload.get('display_name') or '').strip() or None
+    publisher_name = (payload.get('publisher_name') or '').strip() or None
+
+    if match_kind == 'app_id' and not app_id:
+        return jsonify({'error': 'app_id required when match_kind=app_id'}), 400
+    if match_kind == 'publisher' and not publisher_name:
+        return jsonify({'error': 'publisher_name required when match_kind=publisher'}), 400
+    if match_kind == 'display_name_prefix' and not display_name:
+        return jsonify({'error': 'display_name required when match_kind=display_name_prefix'}), 400
+
+    category = (payload.get('app_category') or 'general').strip().lower()
+    notes = (payload.get('notes') or '').strip() or None
+
+    user = getattr(g, 'current_user', None)
+    user_id = user.get('id') if user else None
+
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            INSERT INTO approved_apps
+                (organization_id, app_id, display_name, publisher_name,
+                 app_category, match_kind, notes, added_by_user_id, is_seeded)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+            ON CONFLICT (organization_id, app_id) WHERE app_id IS NOT NULL
+            DO UPDATE SET
+                display_name   = EXCLUDED.display_name,
+                publisher_name = EXCLUDED.publisher_name,
+                app_category   = EXCLUDED.app_category,
+                notes          = EXCLUDED.notes,
+                updated_at     = NOW()
+            RETURNING id, app_id, display_name
+        """, (_org_id(), app_id, display_name, publisher_name,
+              category, match_kind, notes, user_id))
+        new_row = cursor.fetchone()
+        db.commit()
+        _log(db, 'approved_app_added',
+             f"Approved app added: {display_name or app_id or publisher_name}",
+             {'match_kind': match_kind, 'category': category})
+        return jsonify({
+            'id': new_row['id'],
+            'app_id': new_row['app_id'],
+            'display_name': new_row['display_name'],
+        }), 201
+    except Exception as e:
+        logger.error(f"add_approved_app failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def delete_approved_app_handler(app_row_id: int):
+    """DELETE /api/approved-apps/<id> — admin only."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            DELETE FROM approved_apps
+            WHERE id = %s AND organization_id = %s
+            RETURNING display_name, app_id, is_seeded
+        """, (app_row_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        db.commit()
+        _log(db, 'approved_app_removed',
+             f"Approved app removed: {row['display_name'] or row['app_id']}",
+             {'was_seeded': bool(row['is_seeded'])})
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"delete_approved_app failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def list_shadow_apps_handler():
+    """GET /api/shadow-apps — list identities flagged is_shadow_app."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({'shadow_apps': [], 'total': 0})
+
+        cursor.execute("""
+            SELECT i.identity_id, i.display_name, i.publisher_name,
+                   i.verified_publisher, i.created_datetime,
+                   i.risk_level, i.risk_score,
+                   COALESCE(i.shadow_reasons, '[]'::jsonb) AS shadow_reasons,
+                   COALESCE(ac.platform, '') AS ai_platform
+            FROM identities i
+            LEFT JOIN agent_classifications ac
+                   ON ac.identity_db_id = i.id
+                  AND ac.discovery_run_id = i.discovery_run_id
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.organization_id = %s
+              AND COALESCE(i.is_shadow_app, FALSE) = TRUE
+            ORDER BY i.created_datetime DESC NULLS LAST
+            LIMIT 500
+        """, (run_ids, _org_id()))
+        rows = []
+        for r in cursor.fetchall():
+            reasons = r['shadow_reasons']
+            if isinstance(reasons, str):
+                try: reasons = json.loads(reasons)
+                except Exception: reasons = []
+            rows.append({
+                'identity_id': r['identity_id'],
+                'display_name': r['display_name'],
+                'publisher_name': r['publisher_name'],
+                'verified_publisher': r['verified_publisher'],
+                'created_datetime': r['created_datetime'].isoformat() if r['created_datetime'] else None,
+                'risk_level': r['risk_level'],
+                'risk_score': int(r['risk_score'] or 0),
+                'reasons': reasons if isinstance(reasons, list) else [],
+                'ai_platform': r['ai_platform'] or None,
+            })
+        return jsonify({'shadow_apps': rows, 'total': len(rows)})
+    except Exception as e:
+        logger.error(f"list_shadow_apps failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def shadow_apps_stats_handler():
+    """GET /api/shadow-apps/stats — CISO dashboard summary."""
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({
+                'total': 0, 'new_30d': 0, 'with_high_scope': 0,
+                'ai_classified': 0, 'by_category': {},
+            })
+
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE COALESCE(i.is_shadow_app, FALSE) = TRUE) AS total,
+              COUNT(*) FILTER (
+                  WHERE COALESCE(i.is_shadow_app, FALSE) = TRUE
+                    AND i.created_datetime > NOW() - INTERVAL '30 days'
+              ) AS new_30d,
+              COUNT(*) FILTER (
+                  WHERE COALESCE(i.is_shadow_app, FALSE) = TRUE
+                    AND EXISTS (
+                        SELECT 1 FROM agent_classifications ac
+                        WHERE ac.identity_db_id = i.id
+                          AND ac.discovery_run_id = i.discovery_run_id
+                          AND ac.platform IS NOT NULL
+                          AND ac.platform <> ''
+                    )
+              ) AS ai_classified
+            FROM identities i
+            WHERE i.discovery_run_id = ANY(%s)
+              AND i.organization_id = %s
+        """, (run_ids, _org_id()))
+        agg = cursor.fetchone()
+
+        return jsonify({
+            'total': int(agg['total'] or 0),
+            'new_30d': int(agg['new_30d'] or 0),
+            'ai_classified': int(agg['ai_classified'] or 0),
+        })
+    except Exception as e:
+        logger.error(f"shadow_apps_stats failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def approve_shadow_app_handler(identity_id: str):
+    """POST /api/shadow-apps/<identity_id>/approve — flips shadow → approved
+    by adding the identity to approved_apps. One-click acknowledge."""
+    user = getattr(g, 'current_user', None)
+    user_id = user.get('id') if user else None
+    db = Database(_tenant_id())
+    try:
+        cursor = db.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id())
+        cursor.execute("""
+            SELECT id, identity_id, display_name, publisher_name
+            FROM identities
+            WHERE identity_id = %s AND discovery_run_id = ANY(%s)
+              AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        cursor.execute("""
+            INSERT INTO approved_apps
+                (organization_id, app_id, display_name, publisher_name,
+                 app_category, match_kind, added_by_user_id, is_seeded)
+            VALUES (%s, %s, %s, %s, 'general', 'app_id', %s, FALSE)
+            ON CONFLICT (organization_id, app_id) WHERE app_id IS NOT NULL
+            DO UPDATE SET updated_at = NOW()
+        """, (_org_id(), row['identity_id'], row['display_name'],
+              row['publisher_name'], user_id))
+
+        # Clear the verdict on this identity across all runs.
+        cursor.execute("""
+            UPDATE identities
+               SET is_shadow_app = FALSE, shadow_reasons = NULL
+             WHERE identity_id = %s AND organization_id = %s
+        """, (identity_id, _org_id()))
+        db.commit()
+        _log(db, 'shadow_app_approved',
+             f"Shadow app approved: {row['display_name']}",
+             {'identity_id': identity_id})
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"approve_shadow_app failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────
 # App Registration Audit (Phase 74)
 # ──────────────────────────────────────────────────────────
 
@@ -23722,15 +25777,32 @@ def copilot_chat():
         try:
             response_text = service.ask(message, messages_history, db, org_id=org_id)
         except Exception as e:
-            try: db.conn.rollback()
-            except Exception: pass
             logger.error(f"AI copilot service error: {e}", exc_info=True)
-            try:
-                db._rollback()
+            try: db._rollback()
             except Exception:
                 try: db.conn.rollback()
                 except Exception: pass
-                pass
+            # Treat known "needs API credits / invalid key" failures as a
+            # configuration issue, not a runtime error. Surfaces a clean
+            # placeholder bubble in the UI instead of raw SDK error text.
+            err_text = str(e).lower()
+            cfg_markers = (
+                'credit balance', 'insufficient_quota', 'invalid_api_key',
+                'invalid api key', 'authentication', 'unauthorized',
+                'incorrect api key', 'no_api_key',
+            )
+            if any(m in err_text for m in cfg_markers):
+                return jsonify({
+                    'error': 'not_configured',
+                    'response': (
+                        'AuditGraph Argus is in placeholder mode — no AI '
+                        'credentials are wired up yet. Add ANTHROPIC_API_KEY '
+                        '(or OPENAI_API_KEY with COPILOT_PROVIDER=openai) to '
+                        '.env.local and restart the backend to activate.'
+                    ),
+                    'conversation_id': None,
+                    'suggestions': [],
+                })
             return jsonify({'error': f'AI service error: {type(e).__name__}: {e}'}), 502
 
         # Save conversation
@@ -25536,6 +27608,11 @@ def get_identity_subscriptions(identity_id):
                 'scope': s['scope'],
                 'scope_type': s['scope_type'],
                 'risk_level': s['risk_level'],
+                # Feature E: per-role last-used. Sourced from ARM Activity
+                # Log via update_role_last_used_from_arm + propagation step.
+                # NULL when the role has never been exercised (or before
+                # ARM lookback completes on a fresh tenant).
+                'last_activity': s.get('last_activity'),
             })
         result = sorted(by_sub.values(), key=lambda x: x['subscription_name'] or '')
         return jsonify({'subscriptions': result, 'count': len(result)})
@@ -25669,7 +27746,49 @@ def get_snapshot_job_status(connection_id):
     admin_db = Database(_admin_reason='snapshot_job_status')
     try:
         job = admin_db.get_active_snapshot_job(connection_id, org_id=_org_id())
-        return jsonify({'active_job': job})
+        resp = {'active_job': job}
+        if not job:
+            # active_job goes null at completion before the modal captures the
+            # finalized counts; expose the most recent job so the UI can render
+            # the real identities_discovered total instead of the in-flight 0.
+            resp['last_job'] = admin_db.get_latest_snapshot_job(connection_id, org_id=_org_id())
+
+        # P0-A (2026-05-30): enrich job with the actionable vs Microsoft-managed
+        # split so the scan-complete modal can say "2,044 actionable +
+        # 1,082 Microsoft-managed filtered" instead of just "3,126 identities
+        # discovered" (which is technically true but misleads CISOs — they think
+        # they need to govern 3,126 identities when really 1,082 are auto-managed
+        # by Microsoft and filtered out of all dashboards).
+        target_job = job or resp.get('last_job')
+        if target_job and target_job.get('discovery_run_id'):
+            try:
+                cur = admin_db.conn.cursor()
+                cur.execute(
+                    """
+                    SELECT
+                      COUNT(*) AS total,
+                      COUNT(*) FILTER (
+                        WHERE COALESCE(is_microsoft_system, false) = false
+                      ) AS actionable,
+                      COUNT(*) FILTER (
+                        WHERE COALESCE(is_microsoft_system, false) = true
+                      ) AS microsoft_managed
+                    FROM identities
+                    WHERE discovery_run_id = %s
+                    """,
+                    (target_job['discovery_run_id'],),
+                )
+                row = cur.fetchone()
+                cur.close()
+                if row:
+                    target_job['identities_total'] = int(row[0] or 0)
+                    target_job['identities_actionable'] = int(row[1] or 0)
+                    target_job['identities_microsoft_managed'] = int(row[2] or 0)
+            except Exception:
+                # Fail-open: existing identities_discovered field is still valid
+                pass
+
+        return jsonify(resp)
     finally:
         admin_db.close()
 
@@ -27854,6 +29973,20 @@ def get_workload_detail(workload_id):
                 result['anomalies'] = anomalies_list
             if p2_enabled and recent_signins:
                 result['recent_signins'] = recent_signins
+            # Feature D — aggregated sign-in source-IP intelligence.
+            # Surface the already-collected signin_ips / signin_locations /
+            # signin_resources_accessed / signin_client_apps JSONB columns
+            # as a structured object the UI can render. Each list entry is
+            # {ip|city|country|name, classification?, count}.
+            result['signin_intelligence'] = {
+                'ips': _parse_jsonb(identity.get('signin_ips')),
+                'locations': _parse_jsonb(identity.get('signin_locations')),
+                'resources_accessed': _parse_jsonb(identity.get('signin_resources_accessed')),
+                'client_apps': _parse_jsonb(identity.get('signin_client_apps')),
+                'failure_count_30d': identity.get('signin_failure_count_30d'),
+                'success_count_30d': identity.get('signin_success_count_30d'),
+                'total_events_30d': identity.get('signin_total_events_30d'),
+            }
             return jsonify(result)
     finally:
         db.close()
@@ -30333,6 +32466,33 @@ def get_graph_visualization_handler():
                 except Exception: pass
                 pass
 
+        # ── AI classification enrichment ───────────────────────────────
+        # Join agent_classifications via identity DB id so AI-tagged nodes
+        # can be styled differently in the graph (teal border + AI badge).
+        ai_meta = {}  # identity_id → {agent_identity_type, confidence, platform}
+        if identity_ids:
+            try:
+                cursor.execute("""
+                    SELECT DISTINCT ON (i.identity_id)
+                           i.identity_id, ac.agent_identity_type,
+                           ac.classification_confidence, ac.detected_platform
+                    FROM agent_classifications ac
+                    JOIN identities i ON i.id = ac.identity_db_id
+                    WHERE i.identity_id = ANY(%s)
+                      AND ac.agent_identity_type IN ('ai_agent', 'ai_privileged_human', 'possible_ai_agent')
+                    ORDER BY i.identity_id, i.discovery_run_id DESC
+                """, (identity_ids,))
+                for r in cursor.fetchall():
+                    ai_meta[r['identity_id']] = {
+                        'agent_identity_type':      r['agent_identity_type'],
+                        'classification_confidence': r['classification_confidence'],
+                        'detected_platform':        r['detected_platform'],
+                    }
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                pass
+
         # ── Enrich subscriptions ───────────────────────────────────────
         sub_guid_map = {}  # nid → guid
         for nid in node_ids:
@@ -30593,14 +32753,24 @@ def get_graph_visualization_handler():
         # ── Build final nodes ──────────────────────────────────────────
         nodes = []
         for nid in sorted(node_ids):
-            nodes.append({
+            node_obj = {
                 'id': nid,
                 'type': _final_type(nid),
                 'label': _label(nid),
                 'risk_level': _risk_level(nid),
                 'is_attack_path': nid in attack_path_nodes,
                 'tooltip': _tooltip(nid),
-            })
+            }
+            # Tag AI-classified identities so the UI can render a teal border
+            # and route clicks to the AI investigate drawer.
+            ai = ai_meta.get(nid)
+            if ai:
+                node_obj['is_ai_agent']   = True
+                node_obj['ai_agent_type'] = ai['agent_identity_type']
+                node_obj['ai_platform']   = ai['detected_platform']
+                if ai.get('classification_confidence') is not None:
+                    node_obj['ai_confidence'] = ai['classification_confidence']
+            nodes.append(node_obj)
 
         # ── Enforce limits ─────────────────────────────────────────────
         truncated = False
@@ -32057,6 +34227,7 @@ def get_attack_paths_list():
         limit (int, default 50, max 100)
         severity (critical|high|medium|low)
         path_type (PRIVILEGE_ESCALATION|KEYVAULT_SECRET_ACCESS|...)
+        source_entity_type (ai_agent|service_principal|human_user|...) — AG-178
         connection_id (int, optional — filter to specific cloud connection)
     """
     db = None
@@ -32066,6 +34237,7 @@ def get_attack_paths_list():
         limit = min(request.args.get('limit', 50, type=int), 100)
         severity = request.args.get('severity', '')
         path_type = request.args.get('path_type', '')
+        source_entity_type = request.args.get('source_entity_type', '').strip().lower()
         conn_id = _connection_id()
 
         org_id = _org_id()
@@ -32083,6 +34255,11 @@ def get_attack_paths_list():
         if path_type:
             conditions.append("ap.path_type = %s")
             params.append(path_type)
+        if source_entity_type:
+            # AG-178: filter to ai_agent (or other) source_entity_type for the
+            # /ai-risk/attack-paths page that consumes the cinematic chain.
+            conditions.append("ap.source_entity_type = %s")
+            params.append(source_entity_type)
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -32308,6 +34485,718 @@ def trigger_attack_path_analysis():
             'stats': stats,
         })
     finally:
+        db.close()
+
+
+# ================================================================
+# Argus L3 — Attack Path Investigator (AG-187)
+# ================================================================
+
+def argus_investigate_attack_path_handler():
+    """POST /api/argus/investigate-attack-path
+
+    Body: {source_query, target_query, prefer_persisted}
+
+    Resolves the user's free-text source/target descriptors against the
+    identity + resource catalog, then returns the strongest matching row
+    from ``attack_paths``. With ``prefer_persisted=false`` we additionally
+    run a live :class:`AttackPathEngine.analyze` if nothing is persisted.
+
+    Returns the dict produced by :func:`investigate_attack_path` (always
+    HTTP 200 — the ``found`` flag drives the UI). Validation errors are
+    HTTP 400; the handler never throws.
+    """
+    from app.engines.argus.attack_path_investigator import investigate_attack_path
+    from psycopg2.extras import RealDictCursor
+
+    data = request.get_json(silent=True) or {}
+    source_query = data.get('source_query')
+    target_query = data.get('target_query')
+    prefer_persisted = data.get('prefer_persisted', True)
+
+    if source_query is not None and not isinstance(source_query, str):
+        return jsonify({'error': 'source_query must be a string'}), 400
+    if target_query is not None and not isinstance(target_query, str):
+        return jsonify({'error': 'target_query must be a string'}), 400
+    if not isinstance(prefer_persisted, bool):
+        return jsonify({'error': 'prefer_persisted must be boolean'}), 400
+
+    source_query = source_query.strip() if isinstance(source_query, str) else None
+    target_query = target_query.strip() if isinstance(target_query, str) else None
+    if not source_query and not target_query:
+        return jsonify({
+            'error': 'at least one of source_query or target_query is required',
+        }), 400
+
+    org_id = _org_id()
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = investigate_attack_path(
+                cursor, org_id,
+                source_query=source_query,
+                target_query=target_query,
+                prefer_persisted=prefer_persisted,
+            )
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the investigation for the auditor pack.
+        try:
+            _log(db, 'argus_investigate_attack_path',
+                 f'Argus L3 investigate: source={source_query!r} target={target_query!r}',
+                 {
+                     'source_query': source_query,
+                     'target_query': target_query,
+                     'prefer_persisted': prefer_persisted,
+                     'found': bool(result.get('found')) if isinstance(result, dict) else False,
+                     'fallback_used': bool(result.get('fallback_used')) if isinstance(result, dict) else False,
+                     'resolution_confidence': result.get('resolution_confidence') if isinstance(result, dict) else None,
+                     'duration_ms': duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        # Attach timing so the UI can show "investigated in <Xms>".
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_investigate_attack_path failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'found': False,
+            'path': None,
+            'source_resolved': None,
+            'target_resolved': None,
+            'resolution_confidence': 'low',
+            'fallback_used': False,
+            'why': f'investigation error: {type(exc).__name__}',
+        }), 200
+    finally:
+        db.close()
+
+
+# ================================================================
+# AG-185 (Argus Layer 1): Natural-Language Query handler
+# ================================================================
+
+# Allow-list of fields the NL-query handler is permitted to surface back
+# to the query builder. Anything outside this set is either a synthetic
+# field (we expand it in-handler) or an injection attempt (we drop it).
+_NL_REAL_QUERY_FIELDS = frozenset({
+    'display_name', 'identity_type', 'identity_category', 'cloud', 'status',
+    'enabled', 'is_federated', 'risk_level', 'risk_score', 'activity_status',
+    'credential_count', 'credential_status', 'credential_risk',
+    'owner_count', 'api_permission_count', 'app_role_count',
+    'pim_eligible_count', 'has_permanent_assignment', 'ca_coverage_status',
+    'ca_mfa_enforced', 'permission_plane', 'access_tier',
+    'rbac_role_count', 'entra_role_count', 'privilege_tier',
+})
+
+# Fields the NL engine emits that aren't (yet) in QUERY_FIELD_MAP. The
+# handler rewrites these into either an existing real field or a custom
+# SQL fragment before calling _build_advanced_query_where. Keeping the
+# list explicit keeps the engine pure (no DB knowledge) and the handler
+# auditable.
+_NL_SYNTHETIC_FIELD_REWRITE = {
+    'agent_identity_type': "COALESCE(i.agent_identity_type, '')",
+}
+
+
+def _nl_split_filters(filters: list):
+    """Partition NL filters into:
+        - query_conditions  : list of {field, operator, value} for the
+                              advanced query builder
+        - role_filters      : list of {op, value} for has_role_contains
+                              (handler-applied as EXISTS subquery)
+        - sort_field        : optional sort override
+        - meta              : non-filter intent (e.g. posture_drop_reason)
+        - extra_sql_parts   : (sql_fragment, params) tuples for synthetic
+                              real-column fields not in QUERY_FIELD_MAP
+        - unknown_fields    : list[str] of fields we couldn't translate
+    """
+    from app.engines.argus.nl_query import (
+        SYNTHETIC_FIELD_HAS_ROLE_NAME,
+        SYNTHETIC_FIELD_HAS_ROLE_CONTAINS,
+        SYNTHETIC_FIELD_SORT_ORDER,
+        SYNTHETIC_FIELD_META,
+    )
+
+    query_conditions = []
+    role_filters = []
+    sort_field = None
+    meta = None
+    extra_sql_parts = []
+    unknown_fields = []
+
+    for f in filters or []:
+        field = f.get('field')
+        op = f.get('op') or f.get('operator', 'equals')
+        value = f.get('value')
+
+        if field == SYNTHETIC_FIELD_META:
+            meta = value
+            continue
+        if field == SYNTHETIC_FIELD_SORT_ORDER:
+            if isinstance(value, str) and value in QUERY_SORT_ALLOWLIST:
+                sort_field = value
+            continue
+        if field in (SYNTHETIC_FIELD_HAS_ROLE_NAME,
+                     SYNTHETIC_FIELD_HAS_ROLE_CONTAINS):
+            role_filters.append({'op': op, 'value': value,
+                                 'exact': field == SYNTHETIC_FIELD_HAS_ROLE_NAME})
+            continue
+        if field in _NL_REAL_QUERY_FIELDS:
+            query_conditions.append({'field': field, 'operator': op, 'value': value})
+            continue
+        if field in _NL_SYNTHETIC_FIELD_REWRITE:
+            sql_field = _NL_SYNTHETIC_FIELD_REWRITE[field]
+            try:
+                op_sql = QUERY_OPERATORS.get(op)
+                if not op_sql:
+                    unknown_fields.append(field)
+                    continue
+                if op in ('contains', 'not_contains'):
+                    extra_sql_parts.append((op_sql.format(field=sql_field),
+                                            [f"%{str(value).lower()}%"]))
+                elif op in ('in', 'not_in'):
+                    if not isinstance(value, list):
+                        unknown_fields.append(field)
+                        continue
+                    extra_sql_parts.append((op_sql.format(field=sql_field), [list(value)]))
+                elif op in ('is_empty', 'is_not_empty'):
+                    extra_sql_parts.append((op_sql.format(field=sql_field), []))
+                else:
+                    extra_sql_parts.append((op_sql.format(field=sql_field), [value]))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("nl_query: synthetic rewrite failed field=%s: %s", field, exc)
+                unknown_fields.append(field)
+            continue
+
+        unknown_fields.append(field)
+
+    return query_conditions, role_filters, sort_field, meta, extra_sql_parts, unknown_fields
+
+
+def _nl_role_filter_sql(role_filters: list) -> tuple:
+    """Build EXISTS(...) SQL covering both role_assignments and
+    entra_role_assignments for the supplied role-name filters.
+
+    Returns ('', []) when no role filters were supplied. Multiple
+    role_filters are AND-ed (intersect) at the SQL level - within each
+    one the 'in' operator OR-s its values.
+    """
+    if not role_filters:
+        return '', []
+
+    parts = []
+    params = []
+    for rf in role_filters:
+        op = rf.get('op', 'contains')
+        value = rf.get('value')
+        exact = bool(rf.get('exact'))
+
+        if op == 'in':
+            if not isinstance(value, list) or not value:
+                continue
+            placeholders = ', '.join(['%s'] * len(value))
+            patterns = [f"%{str(v).lower()}%" for v in value]
+            # Match either the ARM role table or the Entra role table.
+            sql = f"""(
+                EXISTS (
+                    SELECT 1 FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                      AND LOWER(ra.role_name) LIKE ANY (ARRAY[{placeholders}])
+                )
+                OR EXISTS (
+                    SELECT 1 FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                      AND LOWER(era.role_name) LIKE ANY (ARRAY[{placeholders}])
+                )
+            )"""
+            parts.append(sql)
+            params.extend(patterns)
+            params.extend(patterns)
+            continue
+
+        if value is None:
+            continue
+        val_str = str(value)
+        if exact:
+            sql = """(
+                EXISTS (
+                    SELECT 1 FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                      AND LOWER(ra.role_name) = LOWER(%s)
+                )
+                OR EXISTS (
+                    SELECT 1 FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                      AND LOWER(era.role_name) = LOWER(%s)
+                )
+            )"""
+            parts.append(sql)
+            params.extend([val_str, val_str])
+        else:
+            like = f"%{val_str.lower()}%"
+            sql = """(
+                EXISTS (
+                    SELECT 1 FROM role_assignments ra
+                    WHERE ra.identity_db_id = i.id
+                      AND LOWER(ra.role_name) LIKE %s
+                )
+                OR EXISTS (
+                    SELECT 1 FROM entra_role_assignments era
+                    WHERE era.identity_db_id = i.id
+                      AND LOWER(era.role_name) LIKE %s
+                )
+            )"""
+            parts.append(sql)
+            params.extend([like, like])
+
+    if not parts:
+        return '', []
+    return ' AND ' + ' AND '.join(parts), params
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AG-T1.4: Argus L1 NL Query — server-side executors for AI-ISPM meta intents
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _nl_execute_ai_meta(meta_value, org_id, connection_id, limit, offset):
+    """Server-side executor for AI-ISPM meta-intents.
+
+    Returns {'identities': [...], 'count': N} for known meta values.
+    Returns None when the meta value isn't ours — caller falls back to
+    the regular meta_route response.
+    """
+    if not meta_value or org_id is None:
+        return None
+    if isinstance(meta_value, str) and meta_value.startswith('data_reachability_class_'):
+        cls = meta_value.replace('data_reachability_class_', '', 1)
+        return _nl_execute_reachability_meta(cls, org_id, connection_id, limit, offset)
+    if meta_value == 'multi_model_threshold_3':
+        return _nl_execute_multi_model_meta(org_id, connection_id, limit, offset)
+    if meta_value == 'scope_subscription':
+        return _nl_execute_subscription_owner_meta(org_id, connection_id, limit, offset)
+    if meta_value == 'oauth_dangerous_graph_permissions':
+        return _nl_execute_dangerous_oauth_meta(org_id, limit, offset)
+    return None
+
+
+def _nl_execute_reachability_meta(cls, org_id, connection_id, limit, offset):
+    """AI agents reaching a given data classification."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        if not run_ids:
+            return {'identities': [], 'count': 0}
+        cursor.execute(
+            """
+            SELECT DISTINCT i.id, i.identity_id, i.display_name, i.risk_level,
+                   COALESCE(i.risk_score, 0), COALESCE(i.identity_category, ''),
+                   adr.est_records, adr.write_resource_count
+              FROM identities i
+              JOIN agent_classifications ac ON ac.identity_db_id = i.id
+              JOIN agent_data_reachability adr ON adr.identity_db_id = i.id
+             WHERE i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+               AND NOT COALESCE(i.is_microsoft_system, false)
+               AND i.deleted_at IS NULL
+               AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+               AND UPPER(adr.data_classification) = UPPER(%s)
+               AND COALESCE(adr.est_records, 0) > 0
+             ORDER BY adr.est_records DESC NULLS LAST
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, run_ids, cls, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1], 'display_name': r[2] or r[1],
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4],
+             'identity_category': r[5],
+             'reason': f"{'Writes to' if (r[7] or 0) > 0 else 'Reads'} {cls} "
+                       f"({(r[6] or 0):,} records)"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _nl_execute_multi_model_meta(org_id, connection_id, limit, offset):
+    """AI agents tied to ≥3 distinct model deployments."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        if not run_ids:
+            return {'identities': [], 'count': 0}
+        cursor.execute(
+            """
+            WITH model_counts AS (
+                SELECT ac.identity_db_id, COUNT(DISTINCT aimd.model_name) AS n
+                  FROM agent_classifications ac
+                  JOIN azure_ai_model_deployments aimd
+                    ON aimd.account_resource_id = ac.account_resource_id
+                   AND aimd.organization_id = ac.organization_id
+                 WHERE ac.organization_id = %s
+                 GROUP BY ac.identity_db_id
+                HAVING COUNT(DISTINCT aimd.model_name) >= 3
+            )
+            SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                   COALESCE(i.risk_score, 0), COALESCE(i.identity_category, ''),
+                   mc.n
+              FROM identities i
+              JOIN model_counts mc ON mc.identity_db_id = i.id
+             WHERE i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+               AND NOT COALESCE(i.is_microsoft_system, false)
+               AND i.deleted_at IS NULL
+             ORDER BY mc.n DESC, i.risk_score DESC
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, org_id, run_ids, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1], 'display_name': r[2] or r[1],
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4],
+             'identity_category': r[5],
+             'reason': f"Uses {r[6]} distinct models"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _nl_execute_subscription_owner_meta(org_id, connection_id, limit, offset):
+    """AI agents holding Owner / Contributor / UAA at subscription scope.
+
+    Uses ROW_NUMBER() rather than DISTINCT — DISTINCT + ORDER BY on a
+    non-projected column is invalid SQL; the window approach is the
+    Postgres-idiomatic way to "keep one row per identity, pick highest
+    risk".
+    """
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, org_id, connection_id)
+        if not run_ids:
+            return {'identities': [], 'count': 0}
+        cursor.execute(
+            """
+            WITH ranked AS (
+                SELECT i.id, i.identity_id, i.display_name, i.risk_level,
+                       COALESCE(i.risk_score, 0) AS risk_score,
+                       COALESCE(i.identity_category, '') AS identity_category,
+                       ra.role_name, ra.scope,
+                       ROW_NUMBER() OVER (PARTITION BY i.id ORDER BY ra.role_name) AS rn
+                  FROM identities i
+                  JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                  JOIN role_assignments ra ON ra.identity_db_id = i.id
+                 WHERE i.organization_id = %s
+                   AND i.discovery_run_id = ANY(%s)
+                   AND NOT COALESCE(i.is_microsoft_system, false)
+                   AND i.deleted_at IS NULL
+                   AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+                   AND LOWER(ra.role_name) IN ('owner', 'contributor', 'user access administrator')
+                   AND ra.scope LIKE '/subscriptions/%%'
+                   AND ra.scope NOT LIKE '/subscriptions/%%/resourceGroups/%%'
+            )
+            SELECT id, identity_id, display_name, risk_level, risk_score,
+                   identity_category, role_name, scope
+              FROM ranked WHERE rn = 1
+             ORDER BY risk_score DESC
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, run_ids, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1], 'display_name': r[2] or r[1],
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4],
+             'identity_category': r[5],
+             'reason': f"Holds {r[6]} at subscription scope"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def _nl_execute_dangerous_oauth_meta(org_id, limit, offset):
+    """OAuth consent grants carrying critical/high risk Graph scopes."""
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT id, client_app_id, client_display_name, risk_level, risk_score, scopes
+              FROM consent_grants
+             WHERE organization_id = %s
+               AND LOWER(COALESCE(risk_level, '')) IN ('critical', 'high')
+             ORDER BY risk_score DESC NULLS LAST
+             LIMIT %s OFFSET %s
+            """,
+            (org_id, limit, offset),
+        )
+        items = [
+            {'id': r[0], 'identity_id': r[1] or str(r[0]),
+             'display_name': r[2] or r[1] or 'OAuth app',
+             'risk_level': r[3] or 'unknown', 'risk_score': r[4] or 0,
+             'identity_category': 'oauth_app',
+             'reason': f"Scopes: {', '.join((r[5] or [])[:3])}"}
+            for r in cursor.fetchall()
+        ]
+        return {'identities': items, 'count': len(items)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def argus_nl_query_handler():
+    """POST /api/argus/nl-query - Argus Layer 1 (AG-185).
+
+    Body: {"query": "<plain English question>", "limit": <int?>, "offset": <int?>}
+
+    Pipeline:
+        1. translate_nl_query() converts text -> filter structure (or None)
+        2. Synthetic fields are expanded into query-builder conditions +
+           a role-name EXISTS clause
+        3. The identity-list SQL is built using the same scaffolding the
+           /api/identities/query handler uses (latest run IDs, subscription
+           filter, hide-microsoft filter)
+        4. Response is {filters_interpreted, identities, count, why}
+
+    Honest empty state: if translate_nl_query returns None the response
+    has filters_interpreted=null and identities=[] - we never run an
+    unscoped query to "guess" what the user meant.
+    """
+    from app.engines.argus.nl_query import translate_nl_query
+
+    data = request.get_json(silent=True) or {}
+    text = data.get('query', '')
+    if not isinstance(text, str):
+        return jsonify({'error': 'query must be a string'}), 400
+    text = text.strip()
+    if not text:
+        return jsonify({'error': 'query is required'}), 400
+    if len(text) > 500:
+        return jsonify({'error': 'query too long (max 500 chars)'}), 400
+
+    try:
+        limit = int(data.get('limit', 100))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'limit must be an integer'}), 400
+    try:
+        offset = int(data.get('offset', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'offset must be an integer'}), 400
+    if limit < 1 or limit > MAX_LIMIT:
+        return jsonify({'error': f'limit must be 1..{MAX_LIMIT}'}), 400
+    if offset < 0:
+        return jsonify({'error': 'offset must be >= 0'}), 400
+
+    translation = translate_nl_query(text)
+
+    # Honest empty-state - we recognised nothing.
+    if translation is None:
+        return jsonify({
+            'query': text,
+            'filters_interpreted': None,
+            'identities': [],
+            'count': 0,
+            'total': 0,
+            'why': (
+                "Argus could not match this question to a known intent or "
+                "keyword. Try one of the suggested shortcuts (e.g. "
+                "'AI agents with KV admin', 'Ownerless AI agents') or use "
+                "the advanced query builder."
+            ),
+            'confidence': None,
+            'intent': None,
+        })
+
+    filters = translation.get('filters', []) or []
+    (query_conditions, role_filters, sort_field,
+     meta, extra_sql_parts, unknown_fields) = _nl_split_filters(filters)
+
+    # Meta-intent — for several AI-ISPM meta values we execute the query
+    # server-side so the chip immediately returns identities + counts
+    # (no need for the UI to dispatch to a meta_route). For meta values
+    # that genuinely point at a different endpoint (e.g. OAuth scenarios),
+    # we still return the empty body + meta_route hint.
+    if meta:
+        _ai_meta_results = _nl_execute_ai_meta(meta, _org_id(), _connection_id(), limit, offset)
+        if _ai_meta_results is not None:
+            return jsonify({
+                'query': text,
+                'filters_interpreted': filters,
+                'identities': _ai_meta_results['identities'],
+                'count': _ai_meta_results['count'],
+                'total': _ai_meta_results['count'],
+                'why': translation.get('description'),
+                'confidence': translation.get('confidence'),
+                'intent': translation.get('intent'),
+                'meta_question': meta,
+            })
+        return jsonify({
+            'query': text,
+            'filters_interpreted': filters,
+            'identities': [],
+            'count': 0,
+            'total': 0,
+            'why': translation.get('description'),
+            'confidence': translation.get('confidence'),
+            'intent': translation.get('intent'),
+            'meta_question': meta,
+            'meta_route': translation.get('meta_route'),
+        })
+
+    db = _db()
+    cursor = db.conn.cursor()
+    try:
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({
+                'query': text,
+                'filters_interpreted': filters,
+                'identities': [],
+                'count': 0,
+                'total': 0,
+                'why': 'No completed discovery runs in this organization yet.',
+                'confidence': translation.get('confidence'),
+                'intent': translation.get('intent'),
+            })
+
+        # Build base query (identical scaffolding to query_identities())
+        query = _identity_list_select() + " WHERE i.discovery_run_id = ANY(%s)"
+        params = [run_ids]
+        query, params = _apply_sub_filter(query, params, cursor,
+                                          _org_id(), _connection_id())
+        query += HIDE_MICROSOFT_SQL
+
+        # Wrap the translated conditions in a single AND-group so the
+        # advanced query helper handles operator dispatch, type
+        # coercion, and the field allow-list check for us.
+        try:
+            if query_conditions:
+                adv_where, adv_params = _build_advanced_query_where(
+                    [{'conditions': query_conditions}])
+                query += adv_where
+                params.extend(adv_params)
+        except ValueError as exc:
+            logger.info("nl_query: query-builder rejected conditions: %s", exc)
+            return jsonify({
+                'query': text,
+                'filters_interpreted': filters,
+                'identities': [],
+                'count': 0,
+                'total': 0,
+                'why': f'Could not translate filter: {exc}',
+                'confidence': 'low',
+                'intent': translation.get('intent'),
+            })
+
+        # Synthetic real-column fields (e.g. agent_identity_type)
+        for sql_part, sql_params in extra_sql_parts:
+            query += ' AND ' + sql_part
+            params.extend(sql_params)
+
+        # Role-name EXISTS clauses
+        role_sql, role_params = _nl_role_filter_sql(role_filters)
+        if role_sql:
+            query += role_sql
+            params.extend(role_params)
+
+        # Total count BEFORE sort/limit so the UI can show "47 results".
+        count_sql = f"SELECT COUNT(*) FROM ({query}) sub"
+        cursor.execute(count_sql, params)
+        total = _scalar(cursor, 0) or 0
+
+        # Sort: explicit override > risk-level desc (default)
+        effective_sort = sort_field if sort_field in QUERY_SORT_ALLOWLIST else None
+        if effective_sort:
+            query += f" ORDER BY {QUERY_SORT_ALLOWLIST[effective_sort]} DESC NULLS LAST, i.display_name"
+        else:
+            query += """ ORDER BY CASE i.risk_level
+                WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
+                i.display_name"""
+
+        query += " LIMIT %s OFFSET %s"
+        params.extend([int(limit), int(offset)])
+        cursor.execute(query, params)
+        rows = rows_as_dicts(cursor)
+        identities = [_map_identity_row(row) for row in rows]
+
+        why_parts = [translation.get('description') or '']
+        if unknown_fields:
+            why_parts.append(
+                f"(skipped unsupported fields: {', '.join(sorted(set(unknown_fields)))})"
+            )
+        why = ' '.join(p for p in why_parts if p).strip()
+
+        # Activity-log the NL query so the auditor pack has a record.
+        try:
+            _log(db, 'argus_nl_query',
+                 f'Argus NL query: {text[:120]}',
+                 {
+                     'query': text,
+                     'intent': translation.get('intent'),
+                     'confidence': translation.get('confidence'),
+                     'total': int(total),
+                     'returned': len(identities),
+                     'unknown_fields': unknown_fields or None,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        return jsonify({
+            'query': text,
+            'filters_interpreted': filters,
+            'identities': identities,
+            'count': len(identities),
+            'total': int(total),
+            'why': why,
+            'confidence': translation.get('confidence'),
+            'intent': translation.get('intent'),
+            'unknown_fields': unknown_fields or None,
+            'limit': limit,
+            'offset': offset,
+            'has_more': (offset + len(identities)) < int(total),
+        })
+    except Exception as exc:
+        logger.warning("argus_nl_query failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'query': text,
+            'filters_interpreted': None,
+            'identities': [],
+            'count': 0,
+            'total': 0,
+            'why': f'NL query failed: {type(exc).__name__}',
+            'confidence': 'low',
+            'intent': None,
+        }), 200
+    finally:
+        try: cursor.close()
+        except Exception: pass
         db.close()
 
 
@@ -35645,6 +38534,25 @@ def create_invitation_handler():
 
     db = Database(organization_id=org_id)
     try:
+        # AG-USERMGMT: enforce per-org allowed_email_domains whitelist if the
+        # org has configured one. Stored as a list under organizations.settings
+        # JSONB. Empty list / unset = no restriction (open invitations).
+        # Superadmins bypass this check (cross-org admin).
+        if not g.current_user.get('is_superadmin'):
+            org_settings = db.get_organization_settings(org_id) or {}
+            allowed = org_settings.get('allowed_email_domains') or []
+            allowed = [str(d).strip().lower().lstrip('@') for d in allowed if d]
+            if allowed:
+                email_domain = email.rsplit('@', 1)[-1].lower()
+                if email_domain not in allowed:
+                    return jsonify({
+                        'error': (
+                            f'Email domain "{email_domain}" is not allowed for this organization. '
+                            f'Permitted: {", ".join(allowed)}'
+                        ),
+                        'code': 'email_domain_not_allowed',
+                    }), 400
+
         # Check if user already exists
         existing = db.get_user_by_username(email)
         if existing:
@@ -35675,6 +38583,81 @@ def create_invitation_handler():
         return jsonify({'invitation': safe}), 201
     finally:
         db.close()
+
+
+# AG-USERMGMT: org-admin endpoints to read/update a safe-listed slice of
+# organization.settings. Currently surfaces allowed_email_domains so admins
+# can manage the invitation whitelist without superadmin privileges.
+# Distinct from update_organization_handler (superadmin-only, whole-org CRUD).
+_ORG_ADMIN_SETTINGS_ALLOWED_KEYS = {
+    'allowed_email_domains',
+}
+
+
+def get_org_admin_settings_handler():
+    """GET /api/organization/settings — current org's admin-editable settings."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    db = Database(organization_id=org_id)
+    try:
+        s = db.get_organization_settings(org_id) or {}
+        out = {k: s.get(k) for k in _ORG_ADMIN_SETTINGS_ALLOWED_KEYS}
+        # Normalize allowed_email_domains to a list of strings
+        domains = out.get('allowed_email_domains')
+        if not isinstance(domains, list):
+            domains = []
+        out['allowed_email_domains'] = [str(d).strip().lower().lstrip('@') for d in domains if d]
+        return jsonify({'settings': out})
+    finally:
+        db.close()
+
+
+def update_org_admin_settings_handler():
+    """PUT /api/organization/settings — update safe-listed org settings."""
+    org_id = g.current_user.get('organization_id')
+    if not org_id:
+        return jsonify({'error': 'No organization context'}), 400
+    data = request.get_json(silent=True) or {}
+    # Validate each provided key
+    parsed: dict = {}
+    if 'allowed_email_domains' in data:
+        raw = data.get('allowed_email_domains')
+        if raw is None:
+            parsed['allowed_email_domains'] = []
+        elif isinstance(raw, list):
+            cleaned = []
+            for d in raw:
+                if not d:
+                    continue
+                s = str(d).strip().lower().lstrip('@')
+                # Reject anything that doesn't look like a bare domain
+                if not s or ' ' in s or '/' in s or '@' in s:
+                    return jsonify({
+                        'error': f'Invalid domain: {d!r}. Use bare domains like "acme.com" (no leading @, no protocol).',
+                    }), 400
+                if s.count('.') < 1:
+                    return jsonify({'error': f'Domain must contain at least one dot: {d!r}'}), 400
+                if s not in cleaned:
+                    cleaned.append(s)
+            parsed['allowed_email_domains'] = cleaned
+        else:
+            return jsonify({'error': 'allowed_email_domains must be a list of strings'}), 400
+
+    if not parsed:
+        return jsonify({'error': 'No supported keys provided'}), 400
+
+    # Use the BYPASSRLS admin role to update organizations (organizations
+    # table has no RLS but the app user lacks write grants on it).
+    admin_db = Database(_admin_reason='org_admin_settings_update')
+    try:
+        existing = admin_db.get_organization_by_id(org_id) or {}
+        merged = {**(existing.get('settings') or {}), **parsed}
+        admin_db.update_organization(org_id, settings=merged)
+        out = {k: merged.get(k) for k in _ORG_ADMIN_SETTINGS_ALLOWED_KEYS}
+        return jsonify({'settings': out})
+    finally:
+        admin_db.close()
 
 
 def revoke_invitation_handler(invitation_id):
@@ -38504,6 +41487,4113 @@ def _build_evidence_text(signal_type, platform, display_name, app_id):
 
 
 # ============================================================
+# MVP-1: AI Identity Governance — Enriched Endpoints
+# ============================================================
+
+
+def get_ai_agents_enriched():
+    """GET /api/ai-agents/enriched — AI agents with access-type columns.
+
+    Returns the same data as get_agent_identities() plus per-identity
+    access classification: model_access, key_vault_access, data_access,
+    telemetry, internet_egress, and risk score breakdown.
+
+    Query params: same as /api/agent-identities + include_possible.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        aggregate_access_levels,
+        compute_ai_risk_dimensions,
+        compute_ai_risk_score,
+        severity_from_score,
+    )
+
+    db = _db()
+    try:
+        page = max(1, _safe_query_int('page', 1))
+        per_page = min(500, max(1, _safe_query_int('per_page', 100)))
+        include_possible = request.args.get('include_possible', 'true').lower() == 'true'
+
+        type_filter = "ac.agent_identity_type = 'ai_agent'"
+        if include_possible:
+            type_filter = "ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')"
+
+        platform = request.args.get('platform', 'all')
+        platform_filter = ""
+        params = []
+        if platform and platform != 'all':
+            platform_filter = " AND ac.detected_platform = %s"
+            params.append(platform)
+
+        cursor = db.conn.cursor()
+
+        # Count
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) i.id
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+        """, params)
+        total = _scalar(cursor, 0)
+
+        offset = (page - 1) * per_page
+        cursor.execute(f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (i.identity_id)
+                    i.id as db_id,
+                    i.identity_id,
+                    i.display_name,
+                    COALESCE(i.identity_category, '') as identity_category,
+                    i.risk_score,
+                    i.risk_level,
+                    i.activity_status,
+                    i.last_sign_in,
+                    i.credential_count,
+                    i.credential_risk,
+                    i.owner_display_name,
+                    i.privilege_tier,
+                    i.blast_radius_score,
+                    i.last_activity_date,
+                    i.last_activity_source,
+                    ac.agent_identity_type,
+                    ac.classification_confidence,
+                    ac.classification_reason,
+                    ac.detected_platform,
+                    ac.last_service_principal_sign_in
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE {type_filter}{platform_filter}
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT %s OFFSET %s
+        """, params + [per_page, offset])
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Batch fetch role assignments for all identities
+        db_ids = []
+        id_map = {}  # db_id -> identity_id
+        for row in rows:
+            item = dict(zip(columns, row))
+            db_ids.append(item['db_id'])
+            id_map[item['db_id']] = item['identity_id']
+
+        # Fetch role assignments for all agents in one query
+        role_data = {}  # identity_id -> list of role dicts
+        if db_ids:
+            try:
+                cursor.execute("SAVEPOINT _enriched_roles")
+                cursor.execute("""
+                    SELECT ra.identity_db_id, ra.role_name, ra.scope,
+                           ra.last_used_at,
+                           COUNT(ra.id) OVER (PARTITION BY ra.identity_db_id) as total_roles
+                    FROM role_assignments ra
+                    WHERE ra.identity_db_id = ANY(%s)
+                """, (db_ids,))
+                for r in cursor.fetchall():
+                    iid = id_map.get(r[0], str(r[0]))
+                    if iid not in role_data:
+                        role_data[iid] = []
+                    role_data[iid].append({
+                        'role_name': r[1] or '',
+                        'scope': r[2] or '',
+                        'last_used_at': r[3].isoformat() if r[3] else None,
+                    })
+                cursor.execute("RELEASE SAVEPOINT _enriched_roles")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT _enriched_roles")
+                except Exception:
+                    pass
+
+        cursor.close()
+
+        items = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            identity_id = item['identity_id']
+
+            # Serialize datetimes
+            for dt_field in ('last_sign_in', 'last_service_principal_sign_in', 'last_activity_date'):
+                if item.get(dt_field) and hasattr(item[dt_field], 'isoformat'):
+                    item[dt_field] = item[dt_field].isoformat()
+
+            item['risk_score'] = int(item.get('risk_score') or 0)
+            item['credential_count'] = int(item.get('credential_count') or 0)
+            item['blast_radius_score'] = int(item.get('blast_radius_score') or 0) if item.get('blast_radius_score') is not None else None
+            item['classification_confidence'] = float(item.get('classification_confidence') or 0.0)
+
+            # Compute access levels from role assignments
+            roles = role_data.get(identity_id, [])
+            access_levels = aggregate_access_levels(roles)
+            item['model_access'] = access_levels['model_access']
+            item['key_vault_access'] = access_levels['key_vault_access']
+            item['data_access'] = access_levels['data_access']
+            item['telemetry'] = access_levels['telemetry']
+            item['internet_egress'] = access_levels['internet_egress']
+
+            # AI-specific risk breakdown
+            dimensions = compute_ai_risk_dimensions(access_levels)
+            ai_risk = compute_ai_risk_score(dimensions)
+            item['ai_risk_score'] = ai_risk
+            item['ai_risk_severity'] = severity_from_score(ai_risk)
+            item['risk_dimensions'] = {
+                k: {'score': round(v, 2), 'level': access_levels.get(k, 'none')}
+                for k, v in dimensions.items()
+            }
+
+            # Effective last active (same logic as get_agent_identities)
+            last_act = item.get('last_activity_date')
+            sp_sign_in = item.get('last_service_principal_sign_in')
+            last_sign = item.get('last_sign_in')
+            if last_act:
+                item['effective_last_active'] = last_act
+            elif last_sign:
+                item['effective_last_active'] = last_sign
+            elif sp_sign_in:
+                item['effective_last_active'] = sp_sign_in
+            else:
+                item['effective_last_active'] = None
+
+            # Role summary
+            item['role_count'] = len(roles)
+            # AG-162: expose role names so frontend can filter by role
+            # (e.g., click "Contributor" in AI Access → filter to agents holding Contributor).
+            item['role_names'] = sorted({r['role_name'] for r in roles if r.get('role_name')})
+
+            # Remove internal db_id from response
+            item.pop('db_id', None)
+            items.append(item)
+
+        return jsonify({
+            'items': items,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+        })
+    except Exception as e:
+        logger.error("get_ai_agents_enriched failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_agent_investigate(identity_id):
+    """GET /api/ai-agents/<id>/investigate — full investigation data for AI drawer.
+
+    Returns 7 sections:
+    1. Identity Summary
+    2. Permission Intelligence (access categories + roles)
+    3. Blast Radius (reachable resources, subscriptions)
+    4. Evidence Chain (classification signals)
+    5. AI Permission Graph data (nodes + edges for @xyflow/react)
+    6. Attack Path Preview
+    7. Remediation Recommendations
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        aggregate_access_levels,
+        compute_ai_risk_dimensions,
+        compute_ai_risk_score,
+        severity_from_score,
+        confidence_label,
+        classify_role_access,
+        REMEDIATION_P0_THRESHOLD,
+        REMEDIATION_P1_THRESHOLD,
+        # Phase 1.5: signal-sum scoring (NIST/CVSS/MITRE-aligned) — same model
+        # the AI Inventory graph uses, surfaced in the drawer for consistency.
+        detect_signals,
+        compute_signal_score,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        # Resolve identity
+        cursor.execute("""
+            SELECT i.id, i.display_name, i.identity_type,
+                   COALESCE(i.identity_category, '') as identity_category,
+                   i.risk_score, i.risk_level, i.activity_status,
+                   i.last_sign_in, i.credential_count, i.credential_risk,
+                   i.credential_expiration, i.owner_display_name, i.owner_count,
+                   i.enabled, i.app_id, i.object_id, i.privilege_tier,
+                   i.blast_radius_score, i.primary_subscription_id,
+                   i.additional_subscription_count, i.pim_eligible_count,
+                   i.ca_coverage_status, i.last_activity_date, i.last_activity_source,
+                   i.agent_identity_type
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        cols = [desc[0] for desc in cursor.description]
+        identity = dict(zip(cols, ident))
+        db_id = identity['id']
+
+        # Serialize datetimes
+        for dt_field in ('last_sign_in', 'credential_expiration', 'last_activity_date'):
+            if identity.get(dt_field) and hasattr(identity[dt_field], 'isoformat'):
+                identity[dt_field] = identity[dt_field].isoformat()
+
+        # ── 1. Identity Summary ──
+        # Get classification info
+        cursor.execute("""
+            SELECT agent_identity_type, classification_confidence,
+                   classification_reason, detected_platform, pattern_version,
+                   classified_at
+            FROM agent_classifications
+            WHERE identity_db_id = %s
+            ORDER BY classified_at DESC LIMIT 1
+        """, (db_id,))
+        class_row = cursor.fetchone()
+        classification = None
+        if class_row:
+            classification = {
+                'agent_identity_type': class_row[0],
+                'confidence': float(class_row[1] or 0),
+                'confidence_label': confidence_label(float(class_row[1] or 0)),
+                'reason': class_row[2],
+                'platform': class_row[3],
+                'pattern_version': class_row[4],
+                'classified_at': class_row[5].isoformat() if class_row[5] else None,
+            }
+
+        summary = {
+            'identity_id': identity_id,
+            'display_name': identity.get('display_name'),
+            'identity_category': identity.get('identity_category'),
+            'identity_type': identity.get('identity_type'),
+            'risk_score': int(identity.get('risk_score') or 0),
+            'risk_level': identity.get('risk_level'),
+            'activity_status': identity.get('activity_status'),
+            'enabled': identity.get('enabled'),
+            'owner_display_name': identity.get('owner_display_name'),
+            'owner_count': int(identity.get('owner_count') or 0),
+            'credential_count': int(identity.get('credential_count') or 0),
+            'credential_risk': identity.get('credential_risk'),
+            'privilege_tier': identity.get('privilege_tier'),
+            'classification': classification,
+        }
+
+        # ── 2. Permission Intelligence ──
+        cursor.execute("""
+            SELECT ra.id, ra.role_name, ra.scope, ra.scope_type,
+                   ra.resource_type, ra.resource_name, ra.last_used_at,
+                   ra.risk_level as role_risk_level
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = %s
+        """, (db_id,))
+        ra_cols = [desc[0] for desc in cursor.description]
+        ra_rows = cursor.fetchall()
+
+        roles = []
+        role_dicts_for_agg = []
+        for ra_row in ra_rows:
+            ra = dict(zip(ra_cols, ra_row))
+            if ra.get('last_used_at') and hasattr(ra['last_used_at'], 'isoformat'):
+                ra['last_used_at'] = ra['last_used_at'].isoformat()
+            # Classify this role into access categories
+            access_cats = classify_role_access(ra.get('role_name', ''), ra.get('scope', ''))
+            ra['access_categories'] = {k: v for k, v in access_cats.items() if v is not None}
+            roles.append(ra)
+            role_dicts_for_agg.append({'role_name': ra.get('role_name', ''), 'scope': ra.get('scope', '')})
+
+        access_levels = aggregate_access_levels(role_dicts_for_agg)
+        dimensions = compute_ai_risk_dimensions(access_levels)
+        ai_risk = compute_ai_risk_score(dimensions)
+
+        # Phase 1.7: parse ARM scope → (resource_type_label, resource_name) and
+        # group distinct resources per access category. Answers the user's
+        # "shows Owner but on WHAT?" question.
+        import re as _re
+        _RESOURCE_LABELS = {
+            'Microsoft.KeyVault/vaults':                          'Key Vault',
+            'Microsoft.Storage/storageAccounts':                  'Storage Account',
+            'Microsoft.CognitiveServices/accounts':               'Azure AI / Cognitive',
+            'Microsoft.MachineLearningServices/workspaces':       'Azure ML Workspace',
+            'Microsoft.DocumentDB/databaseAccounts':              'Cosmos DB',
+            'Microsoft.Sql/servers':                              'SQL Server',
+            'Microsoft.Sql/servers/databases':                    'SQL Database',
+            'Microsoft.Web/sites':                                'App Service',
+            'Microsoft.ContainerService/managedClusters':         'AKS Cluster',
+            'Microsoft.Logic/workflows':                          'Logic App',
+            'Microsoft.Automation/automationAccounts':            'Automation Account',
+            'Microsoft.DataFactory/factories':                    'Data Factory',
+        }
+        def _parse_scope(s: str):
+            """Return (resource_type_label, resource_name, scope_kind)."""
+            if not s:                       return ('Unknown', '', 'unknown')
+            if s == '/':                    return ('Tenant Root', '/', 'tenant')
+            if s.startswith('/providers/Microsoft.Management'):
+                return ('Management Group', s.rsplit('/', 1)[-1], 'mg')
+            m = _re.match(r'^/subscriptions/([^/]+)(?:/resourceGroups/([^/]+)(?:/providers/([^/]+)/([^/]+)/([^/]+))?)?$', s)
+            if not m:                       return ('Unknown', s, 'unknown')
+            _sub, rg, prov, rtype, rname = m.groups()
+            if rname and prov and rtype:
+                label = _RESOURCE_LABELS.get(f'{prov}/{rtype}', f'{prov.replace("Microsoft.", "")}/{rtype}')
+                return (label, rname, 'resource')
+            if rg:                          return ('Resource Group', rg, 'rg')
+            return ('Subscription', _sub or '', 'sub')
+
+        # Group: per access category, distinct list of (type_label, name)
+        # plus a flat "resources touched" list grouped by type.
+        from collections import OrderedDict
+        resources_by_category: dict[str, list[dict]] = {
+            'model_access': [], 'key_vault_access': [], 'data_access': [],
+            'telemetry': [], 'internet_egress': [], 'broad_privilege': [],
+        }
+        seen_in_cat: dict[str, set] = {k: set() for k in resources_by_category}
+        # Aggregate across types for "Resources Touched" panel
+        resources_by_type: 'OrderedDict[str, list[dict]]' = OrderedDict()
+        seen_global: set = set()
+
+        for ra in roles:
+            rtype_label, rname, kind = _parse_scope(ra.get('scope') or '')
+            ra['parsed_resource_type'] = rtype_label
+            ra['parsed_resource_name'] = rname
+            cats = ra.get('access_categories') or {}
+            for cat_key in resources_by_category:
+                if cats.get(cat_key) and rname:
+                    key = (rtype_label, rname)
+                    if key not in seen_in_cat[cat_key]:
+                        seen_in_cat[cat_key].add(key)
+                        resources_by_category[cat_key].append({
+                            'resource_type':  rtype_label,
+                            'resource_name':  rname,
+                            'level':          cats[cat_key],
+                            'role_name':      ra.get('role_name'),
+                        })
+            if rname:
+                k2 = (rtype_label, rname)
+                if k2 not in seen_global:
+                    seen_global.add(k2)
+                    resources_by_type.setdefault(rtype_label, []).append({
+                        'resource_name': rname,
+                        'role_names':    [ra.get('role_name')] if ra.get('role_name') else [],
+                    })
+                else:
+                    # append role_name to existing entry
+                    for entry in resources_by_type.get(rtype_label, []):
+                        if entry['resource_name'] == rname:
+                            rn = ra.get('role_name')
+                            if rn and rn not in entry['role_names']:
+                                entry['role_names'].append(rn)
+                            break
+
+        # Phase 1.5: compute CVSS-aligned signal-sum score (same model the
+        # Inventory graph uses). This is the canonical AI risk score —
+        # ai_risk_score above is retained for backward compatibility but the
+        # drawer renders cvss_* as primary.
+        agent_meta_for_signals = {
+            'display_name':                    identity.get('display_name'),
+            'detected_platform':               (classification or {}).get('platform'),
+            'owner_display_name':              identity.get('owner_display_name'),
+            'credential_risk':                 identity.get('credential_risk'),
+            'last_sign_in':                    identity.get('last_sign_in'),
+            'last_activity_date':              identity.get('last_activity_date'),
+        }
+        fired = detect_signals(agent_meta_for_signals, role_dicts_for_agg, access_levels)
+        signal_pkg = compute_signal_score(fired)
+
+        # AG-166: attach real-world incident precedents to each fired signal.
+        try:
+            from app.constants.role_threat_intel import incidents_for_signal
+            for _sig in signal_pkg.get('breakdown', []):
+                _incs = incidents_for_signal(_sig.get('key', ''))
+                if _incs:
+                    _sig['incidents'] = [
+                        {'name': i['name'], 'year': i['year'], 'summary': i['summary'],
+                         'mitre': i['mitre'], 'cve': i.get('cve'), 'source_url': i['source_url']}
+                        for i in _incs
+                    ]
+        except Exception:
+            pass
+
+        permissions = {
+            'roles': roles,
+            'role_count': len(roles),
+            'access_levels': access_levels,
+            'risk_dimensions': {
+                k: {'score': round(v, 2), 'level': access_levels.get(k, 'none')}
+                for k, v in dimensions.items()
+            },
+            'ai_risk_score': ai_risk,
+            'ai_risk_severity': severity_from_score(ai_risk),
+            # Phase 1.5: canonical CVSS-aligned score + breakdown
+            'cvss_score':     signal_pkg['score'],
+            'cvss_severity':  signal_pkg['severity'],
+            'signal_breakdown': signal_pkg['breakdown'],
+            # Phase 1.7: actual resources behind each access category, so the
+            # UI can render "Owner on Azure ML workspace foo" instead of just
+            # "Model Access: Owner".
+            'resources_by_category': resources_by_category,
+            'resources_by_type':     [
+                {'resource_type': k, 'resources': v}
+                for k, v in resources_by_type.items()
+            ],
+            # Phase 2.1: model deployments reachable via this agent's RBAC scope
+            # (architecture-derived — no logs). Populated below.
+            'model_deployments': [],
+        }
+
+        # ── Phase 2.1: link role scopes → discovered model deployments ──
+        # An agent "uses" a model if it holds any role at or above the
+        # Cognitive Services account that hosts the deployment.
+        try:
+            cs_account_scopes = [
+                ra.get('scope') for ra in roles
+                if ra.get('scope') and 'Microsoft.CognitiveServices/accounts/' in ra.get('scope')
+            ]
+            if cs_account_scopes:
+                # Normalize each scope to the account resource id (strip any sub-resource)
+                import re as _re2
+                acct_ids = set()
+                for sc in cs_account_scopes:
+                    m = _re2.match(r'^(.*/providers/Microsoft\.CognitiveServices/accounts/[^/]+)', sc)
+                    if m:
+                        acct_ids.add(m.group(1))
+                if acct_ids:
+                    cursor.execute("""
+                        SELECT DISTINCT d.account_name, d.deployment_name, d.model_name,
+                               d.model_version, d.sku_name, d.sku_capacity, d.account_resource_id
+                        FROM azure_ai_model_deployments d
+                        WHERE d.organization_id = %s
+                          AND d.account_resource_id = ANY(%s)
+                        ORDER BY d.account_name, d.model_name
+                    """, (org_id, list(acct_ids)))
+                    permissions['model_deployments'] = [
+                        {
+                            'account_name':    r[0],
+                            'deployment_name': r[1],
+                            'model_name':      r[2],
+                            'model_version':   r[3],
+                            'sku_name':        r[4],
+                            'sku_capacity':    r[5],
+                        }
+                        for r in cursor.fetchall()
+                    ]
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+
+        # ── Phase 2.2: Network exposure → egress verdict (architecture-only) ──
+        # For each resource the agent touches, read its network posture from the
+        # azure_* tables and derive an egress verdict. This replaces the prior
+        # substring heuristic for the Internet Egress category. No logs needed.
+        def _exposure_verdict(public_access, default_action, pe_count, public_blob=None):
+            """Map raw network posture → (verdict, severity). Normalizes SDK enum
+            string forms like 'NetworkRuleAction.ALLOW' → 'allow'."""
+            def _norm(v):
+                s = (str(v) if v is not None else '').lower()
+                return s.rsplit('.', 1)[-1] if '.' in s else s
+            pa = _norm(public_access)
+            da = _norm(default_action)
+            pe = pe_count or 0
+            # Public network explicitly enabled, or default action allows all
+            if pa == 'enabled' or da == 'allow' or public_blob is True:
+                return ('Public (internet-reachable)', 'concerning')
+            # Locked down: deny by default + has private endpoints
+            if da == 'deny' and pe > 0:
+                return ('Private Endpoint only', 'healthy')
+            if da == 'deny':
+                return ('Restricted (firewall allowlist)', 'borderline')
+            if pe > 0:
+                return ('Private Endpoint present', 'healthy')
+            return ('Unknown', 'unknown')
+
+        # Collect distinct full resource scopes the agent touches
+        touched_scopes = sorted({ra.get('scope') for ra in roles if ra.get('scope')})
+        exposure_by_resource = {}   # resource_id → {verdict, severity, resource_type}
+        worst_egress = ('Unknown', 'unknown')
+        _sev_rank = {'concerning': 3, 'borderline': 2, 'healthy': 1, 'unknown': 0}
+        if touched_scopes:
+            try:
+                # Storage accounts
+                cursor.execute("""
+                    SELECT resource_id, default_network_action, private_endpoint_count, public_blob_access
+                    FROM azure_storage_accounts
+                    WHERE organization_id = %s AND resource_id = ANY(%s)
+                """, (org_id, touched_scopes))
+                for rid, da, pe, pb in cursor.fetchall():
+                    v = _exposure_verdict(None, da, pe, pb)
+                    exposure_by_resource[rid] = {'verdict': v[0], 'severity': v[1], 'resource_type': 'Storage Account'}
+                # Key vaults
+                cursor.execute("""
+                    SELECT resource_id, public_network_access, default_network_action, private_endpoint_count
+                    FROM azure_key_vaults
+                    WHERE organization_id = %s AND resource_id = ANY(%s)
+                """, (org_id, touched_scopes))
+                for rid, pa, da, pe in cursor.fetchall():
+                    v = _exposure_verdict(pa, da, pe)
+                    exposure_by_resource[rid] = {'verdict': v[0], 'severity': v[1], 'resource_type': 'Key Vault'}
+                # Cognitive services accounts — match on account prefix of scope
+                cursor.execute("""
+                    SELECT resource_id, public_network_access, network_acls_default_action, private_endpoint_count
+                    FROM azure_cognitive_services_accounts
+                    WHERE organization_id = %s
+                """, (org_id,))
+                cs_rows = cursor.fetchall()
+                for sc in touched_scopes:
+                    for rid, pa, da, pe in cs_rows:
+                        if sc.startswith(rid):
+                            v = _exposure_verdict(pa, da, pe)
+                            exposure_by_resource[sc] = {'verdict': v[0], 'severity': v[1], 'resource_type': 'Azure AI / Cognitive'}
+                            break
+                # Worst egress rollup
+                for info in exposure_by_resource.values():
+                    if _sev_rank.get(info['severity'], 0) > _sev_rank.get(worst_egress[1], 0):
+                        worst_egress = (info['verdict'], info['severity'])
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
+        permissions['network_exposure'] = {
+            'by_resource': [
+                {'resource_id': k, 'resource_name': k.rsplit('/', 1)[-1], **v}
+                for k, v in exposure_by_resource.items()
+            ],
+            'worst_egress_verdict':  worst_egress[0],
+            'worst_egress_severity': worst_egress[1],
+            'resources_evaluated':   len(exposure_by_resource),
+        }
+
+        # ── 3. Blast Radius ──
+        blast_radius = None
+        try:
+            br_result = db.get_blast_radius_for_identity(db_id)
+            if br_result:
+                blast_radius = br_result
+        except Exception:
+            pass
+
+        if not blast_radius:
+            blast_radius = {
+                'reachable_resource_count': 0,
+                'reachable_subscription_count': 0,
+                'reachable_resource_group_count': 0,
+                'sensitive_resource_count': 0,
+                'privilege_escalation_paths': 0,
+                'identity_exposure_level': 'Unknown',
+                'risk_score': 0,
+                'resource_breakdown': {},
+            }
+
+        # ── 4. Evidence Chain ──
+        # Reuse the evidence logic from get_agent_evidence
+        evidence_signals = []
+        if classification:
+            signal_type = (classification.get('reason') or '').split(':')[0].strip() or 'unknown'
+            evidence_signals.append({
+                'signal_type': signal_type,
+                'confidence': classification.get('confidence', 0),
+                'platform': classification.get('platform'),
+                'evidence_text': _build_evidence_text(
+                    signal_type,
+                    classification.get('platform'),
+                    identity.get('display_name'),
+                    identity.get('app_id'),
+                ),
+                'is_primary': True,
+            })
+
+            # Check for corroborating role signals
+            from app.engines.discovery.agent_pattern_loader import match_roles, _role_names_set, _scope_patterns_lower
+            if role_dicts_for_agg:
+                role_platform, role_conf = match_roles(role_dicts_for_agg)
+                if role_platform and signal_type != 'role_scope_match':
+                    ai_role_names = [r['role_name'] for r in role_dicts_for_agg if r['role_name'] in _role_names_set]
+                    if not ai_role_names:
+                        # Check scope patterns
+                        for r in role_dicts_for_agg:
+                            for pat in _scope_patterns_lower:
+                                if pat in (r.get('scope', '') or '').lower():
+                                    ai_role_names.append(r['role_name'])
+                                    break
+                    if ai_role_names:
+                        evidence_signals.append({
+                            'signal_type': 'role_scope_match',
+                            'confidence': role_conf,
+                            'platform': role_platform,
+                            'evidence_text': f"Has {len(ai_role_names)} AI-related role(s): {', '.join(ai_role_names[:3])}",
+                            'is_primary': False,
+                        })
+
+        evidence = {
+            'signals': evidence_signals,
+            'signal_count': len(evidence_signals),
+        }
+
+        # ── 5. AI Permission Graph ──
+        # Build @xyflow/react compatible nodes and edges
+        graph_nodes = []
+        graph_edges = []
+
+        # Center node: the identity
+        graph_nodes.append({
+            'id': f'identity-{identity_id}',
+            'type': 'identity',
+            'data': {
+                'label': identity.get('display_name', 'Unknown'),
+                'identity_category': identity.get('identity_category'),
+                'risk_score': int(identity.get('risk_score') or 0),
+                'platform': classification.get('platform') if classification else None,
+            },
+            'position': {'x': 0, 'y': 0},
+        })
+
+        # Role nodes + edges
+        seen_roles = set()
+        for i, ra in enumerate(roles):
+            role_name = ra.get('role_name', f'Role-{i}')
+            role_key = f"role-{role_name.replace(' ', '_')}-{i}"
+            if role_key not in seen_roles:
+                seen_roles.add(role_key)
+                graph_nodes.append({
+                    'id': role_key,
+                    'type': 'role',
+                    'data': {
+                        'label': role_name,
+                        'scope': ra.get('scope', ''),
+                        'last_used_at': ra.get('last_used_at'),
+                        'access_categories': ra.get('access_categories', {}),
+                    },
+                    'position': {'x': 0, 'y': 0},
+                })
+                graph_edges.append({
+                    'id': f'edge-identity-{role_key}',
+                    'source': f'identity-{identity_id}',
+                    'target': role_key,
+                    'type': 'assigned_role',
+                    'data': {'role_name': role_name},
+                })
+
+                # Resource node from scope
+                scope = ra.get('scope', '')
+                if scope:
+                    resource_key = f"resource-{hash(scope) & 0xFFFFFFFF}"
+                    if resource_key not in seen_roles:
+                        seen_roles.add(resource_key)
+                        # Extract resource name from scope
+                        scope_parts = scope.split('/')
+                        resource_label = scope_parts[-1] if scope_parts else scope
+                        graph_nodes.append({
+                            'id': resource_key,
+                            'type': 'resource',
+                            'data': {
+                                'label': resource_label,
+                                'scope': scope,
+                                'resource_type': ra.get('resource_type', ''),
+                            },
+                            'position': {'x': 0, 'y': 0},
+                        })
+                    graph_edges.append({
+                        'id': f'edge-{role_key}-{resource_key}',
+                        'source': role_key,
+                        'target': resource_key,
+                        'type': 'grants_access',
+                    })
+
+        graph = {
+            'nodes': graph_nodes,
+            'edges': graph_edges,
+            'node_count': len(graph_nodes),
+            'edge_count': len(graph_edges),
+        }
+
+        # ── 6. Attack Path Preview ──
+        attack_paths = []
+        try:
+            cursor2 = db.conn.cursor()
+            cursor2.execute("SAVEPOINT _inv_attacks")
+            cursor2.execute("""
+                SELECT path_id, severity, risk_score, path_nodes,
+                       source_entity_id, target_entity_id,
+                       source_display_name, target_display_name,
+                       technique_id, technique_name
+                FROM attack_paths
+                WHERE source_entity_id = %s
+                   OR target_entity_id = %s
+                ORDER BY risk_score DESC
+                LIMIT 10
+            """, (identity_id, identity_id))
+            ap_cols = [desc[0] for desc in cursor2.description]
+            for ap_row in cursor2.fetchall():
+                ap = dict(zip(ap_cols, ap_row))
+                if ap.get('path_nodes') and isinstance(ap['path_nodes'], str):
+                    import json as _json
+                    try:
+                        ap['path_nodes'] = _json.loads(ap['path_nodes'])
+                    except (ValueError, TypeError):
+                        pass
+                attack_paths.append(ap)
+            cursor2.execute("RELEASE SAVEPOINT _inv_attacks")
+            cursor2.close()
+        except Exception:
+            try:
+                cursor2.execute("ROLLBACK TO SAVEPOINT _inv_attacks")
+            except Exception:
+                pass
+
+        # ── 7. Remediation Recommendations ──
+        risk_score = int(identity.get('risk_score') or 0)
+        remediation = {'actions': [], 'priority': 'p2'}
+        if risk_score >= REMEDIATION_P0_THRESHOLD:
+            remediation['priority'] = 'p0'
+            remediation['actions'].append({
+                'priority': 0,
+                'description': 'Immediate review — AI agent identity in Critical risk tier.',
+                'auto_fixable': False,
+            })
+        elif risk_score >= REMEDIATION_P1_THRESHOLD:
+            remediation['priority'] = 'p1'
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'Review elevated-risk AI agent identity within this sprint.',
+                'auto_fixable': False,
+            })
+
+        # Credential-specific recommendations
+        cred_risk = identity.get('credential_risk', '')
+        if cred_risk == 'expired':
+            remediation['actions'].append({
+                'priority': 0,
+                'description': 'Rotate expired credential for AI agent identity.',
+                'auto_fixable': True,
+            })
+        elif cred_risk == 'expiring_soon':
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'Schedule credential rotation before expiry.',
+                'auto_fixable': True,
+            })
+
+        # Overprivileged access recommendations
+        if access_levels.get('model_access') in ('owner', 'contributor'):
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'AI agent has elevated model access — review for least privilege.',
+                'auto_fixable': False,
+            })
+        if access_levels.get('key_vault_access') in ('administrator', 'secrets_officer'):
+            remediation['actions'].append({
+                'priority': 0,
+                'description': 'AI agent has Key Vault write access — high credential exfiltration risk.',
+                'auto_fixable': False,
+            })
+
+        # Owner check
+        if (identity.get('owner_count') or 0) == 0:
+            remediation['actions'].append({
+                'priority': 1,
+                'description': 'No owner assigned — orphaned AI agent identity.',
+                'auto_fixable': False,
+            })
+
+        cursor.close()
+
+        return jsonify({
+            'summary': summary,
+            'permissions': permissions,
+            'blast_radius': blast_radius,
+            'evidence': evidence,
+            'graph': graph,
+            'attack_paths': attack_paths,
+            'remediation': remediation,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_agent_investigate failed for %s: %s", identity_id, e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_agents_permissions(identity_id):
+    """GET /api/ai-agents/<id>/permissions — detailed permission intelligence.
+
+    Returns all role assignments with access categorization and risk scoring.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        classify_role_access,
+        aggregate_access_levels,
+        compute_ai_risk_dimensions,
+        compute_ai_risk_score,
+        severity_from_score,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'No discovery data'}), 404
+
+        # Resolve identity
+        cursor.execute("""
+            SELECT i.id, i.display_name
+            FROM identities i
+            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, run_ids))
+        ident = cursor.fetchone()
+        if not ident:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+
+        db_id = ident[0]
+
+        # Get all role assignments
+        cursor.execute("""
+            SELECT ra.id, ra.role_name, ra.role_definition_name,
+                   ra.scope, ra.scope_type,
+                   ra.resource_type, ra.resource_name,
+                   ra.last_used_at, ra.risk_level,
+                   ra.why_critical
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = %s
+            ORDER BY ra.role_name
+        """, (db_id,))
+        ra_cols = [desc[0] for desc in cursor.description]
+        ra_rows = cursor.fetchall()
+        cursor.close()
+
+        roles = []
+        role_dicts_for_agg = []
+        for ra_row in ra_rows:
+            ra = dict(zip(ra_cols, ra_row))
+            if ra.get('last_used_at') and hasattr(ra['last_used_at'], 'isoformat'):
+                ra['last_used_at'] = ra['last_used_at'].isoformat()
+            access_cats = classify_role_access(ra.get('role_name', ''), ra.get('scope', ''))
+            ra['access_categories'] = {k: v for k, v in access_cats.items() if v is not None}
+            roles.append(ra)
+            role_dicts_for_agg.append({'role_name': ra.get('role_name', ''), 'scope': ra.get('scope', '')})
+
+        access_levels = aggregate_access_levels(role_dicts_for_agg)
+        dimensions = compute_ai_risk_dimensions(access_levels)
+        ai_risk = compute_ai_risk_score(dimensions)
+
+        return jsonify({
+            'identity_id': identity_id,
+            'display_name': ident[1],
+            'roles': roles,
+            'role_count': len(roles),
+            'access_levels': access_levels,
+            'risk_dimensions': {
+                k: {'score': round(v, 2), 'level': access_levels.get(k, 'none')}
+                for k, v in dimensions.items()
+            },
+            'ai_risk_score': ai_risk,
+            'ai_risk_severity': severity_from_score(ai_risk),
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_agents_permissions failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_ai_security_stats():
+    """GET /api/ai-security/stats — aggregate stats for the AI Security section.
+
+    Returns counts, risk distributions, and top-risk agents for dashboards.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import severity_from_score
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Agent counts by type
+        cursor.execute("""
+            SELECT agent_identity_type, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) ac.agent_identity_type
+                FROM agent_classifications ac
+                JOIN identities i ON i.id = ac.identity_db_id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY agent_identity_type
+        """)
+        type_counts = {row[0]: row[1] for row in cursor.fetchall()}
+
+        # Risk distribution
+        cursor.execute("""
+            SELECT risk_level, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) i.risk_level
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY risk_level
+        """)
+        risk_dist = {row[0] or 'unknown': row[1] for row in cursor.fetchall()}
+
+        # Platform distribution
+        cursor.execute("""
+            SELECT detected_platform, COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) ac.detected_platform
+                FROM agent_classifications ac
+                JOIN identities i ON i.id = ac.identity_db_id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            GROUP BY detected_platform
+            ORDER BY count DESC
+        """)
+        platform_dist = {row[0] or 'unknown': row[1] for row in cursor.fetchall()}
+
+        # Top 5 highest risk AI agents
+        cursor.execute("""
+            SELECT * FROM (
+                SELECT DISTINCT ON (i.identity_id)
+                    i.identity_id,
+                    i.display_name,
+                    i.risk_score,
+                    i.risk_level,
+                    ac.detected_platform,
+                    ac.classification_confidence
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            ORDER BY risk_score DESC NULLS LAST
+            LIMIT 5
+        """)
+        top_cols = [desc[0] for desc in cursor.description]
+        top_risk = [dict(zip(top_cols, row)) for row in cursor.fetchall()]
+        for item in top_risk:
+            item['risk_score'] = int(item.get('risk_score') or 0)
+            item['classification_confidence'] = float(item.get('classification_confidence') or 0.0)
+
+        # Average risk score
+        cursor.execute("""
+            SELECT AVG(risk_score)::int FROM (
+                SELECT DISTINCT ON (i.identity_id) i.risk_score
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+        """)
+        avg_risk = _scalar(cursor, 0)
+
+        # AI agents with no human owner — the governance gap surfaced on the
+        # Executive Posture "AI Identity Risk" tile. Counts AI agents whose
+        # COALESCE(owner_count, 0) = 0 (no resolved owner on the identity).
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (i.identity_id) COALESCE(i.owner_count, 0) AS oc
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND i.deleted_at IS NULL
+                ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) deduped
+            WHERE oc = 0
+        """)
+        no_owner_count = _scalar(cursor, 0)
+
+        cursor.close()
+
+        total_agents = type_counts.get('ai_agent', 0) + type_counts.get('possible_ai_agent', 0)
+
+        return jsonify({
+            'total_ai_agents': total_agents,
+            'total_ai_privileged_humans': type_counts.get('ai_privileged_human', 0),
+            'type_counts': type_counts,
+            'risk_distribution': risk_dist,
+            'platform_distribution': platform_dist,
+            'top_risk_agents': top_risk,
+            'avg_risk_score': avg_risk or 0,
+            'avg_risk_severity': severity_from_score(float(avg_risk or 0)),
+            'ai_agents_no_owner': no_owner_count or 0,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_security_stats failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def _role_incident_count(role_name: str) -> int:
+    """AG-166: documented real-world breach count for a role (0 if none)."""
+    try:
+        from app.constants.role_threat_intel import incident_count_for_role
+        return incident_count_for_role(role_name)
+    except Exception:
+        return 0
+
+
+def get_ai_permissions_overview():
+    """GET /api/ai-security/permissions — org-wide AI permission analysis.
+
+    Returns aggregated permission data across all AI agents for the
+    AI Permissions page.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        classify_role_access,
+        MODEL_ACCESS_ROLES,
+        KEY_VAULT_ACCESS_ROLES,
+        DATA_ACCESS_ROLES,
+        TELEMETRY_ACCESS_ROLES,
+        BROAD_PRIVILEGE_ROLES,
+        assess_tone,
+        synthesize_findings,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Get all AI agent DB ids
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id) i.id, i.identity_id, i.display_name, i.risk_score
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agents = cursor.fetchall()
+        agent_db_ids = [a[0] for a in agents]
+
+        if not agent_db_ids:
+            cursor.close()
+            return jsonify({
+                'agents_with_model_access': 0,
+                'agents_with_key_vault_access': 0,
+                'agents_with_data_access': 0,
+                'agents_with_telemetry': 0,
+                'agents_with_internet_egress': 0,
+                'agents_with_broad_privilege': 0,
+                'total_agents': 0,
+                'role_frequency': [],
+                'overprivileged_agents': [],
+                'assessments': {},
+                'findings': synthesize_findings({}, 0, 0),
+            })
+
+        # Get all role assignments for these agents
+        cursor.execute("""
+            SELECT ra.identity_db_id, ra.role_name, ra.scope
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = ANY(%s)
+        """, (agent_db_ids,))
+
+        # Count agents per access category
+        agents_model = set()
+        agents_kv = set()
+        agents_data = set()
+        agents_telemetry = set()
+        agents_egress = set()
+        agents_broad = set()
+        role_freq = {}
+
+        for row in cursor.fetchall():
+            db_id_val, role_name, scope = row[0], row[1] or '', row[2] or ''
+            cats = classify_role_access(role_name, scope)
+
+            if cats['model_access']:
+                agents_model.add(db_id_val)
+            if cats['key_vault_access']:
+                agents_kv.add(db_id_val)
+            if cats['data_access']:
+                agents_data.add(db_id_val)
+            if cats['telemetry']:
+                agents_telemetry.add(db_id_val)
+            if cats['internet_egress']:
+                agents_egress.add(db_id_val)
+            if role_name in BROAD_PRIVILEGE_ROLES:
+                agents_broad.add(db_id_val)
+
+            role_freq[role_name] = role_freq.get(role_name, 0) + 1
+
+        # Sort role frequency
+        sorted_roles = sorted(role_freq.items(), key=lambda x: x[1], reverse=True)[:20]
+
+        # Find overprivileged agents (broad privilege + AI classification)
+        overprivileged = []
+        agent_map = {a[0]: {'identity_id': a[1], 'display_name': a[2], 'risk_score': int(a[3] or 0)} for a in agents}
+        for db_id_val in agents_broad:
+            if db_id_val in agent_map:
+                overprivileged.append(agent_map[db_id_val])
+        overprivileged.sort(key=lambda x: x['risk_score'], reverse=True)
+
+        cursor.close()
+
+        # AG-162: per-metric tone assessment + plain-English findings.
+        total_n = len(agents)
+        metrics = {
+            'model_access':     assess_tone('model_access',     len(agents_model),     total_n),
+            'key_vault_access': assess_tone('key_vault_access', len(agents_kv),        total_n),
+            'data_access':      assess_tone('data_access',      len(agents_data),      total_n),
+            'telemetry':        assess_tone('telemetry',        len(agents_telemetry), total_n),
+            'internet_egress':  assess_tone('internet_egress',  len(agents_egress),    total_n),
+            'broad_privilege':  assess_tone('broad_privilege',  len(agents_broad),     total_n),
+        }
+        findings = synthesize_findings(metrics, total_n, overprivileged)
+
+        return jsonify({
+            'agents_with_model_access': len(agents_model),
+            'agents_with_key_vault_access': len(agents_kv),
+            'agents_with_data_access': len(agents_data),
+            'agents_with_telemetry': len(agents_telemetry),
+            'agents_with_internet_egress': len(agents_egress),
+            'agents_with_broad_privilege': len(agents_broad),
+            'total_agents': total_n,
+            # AG-166: include real-world incident count per role so the UI can
+            # surface "this role was abused in N documented breaches".
+            'role_frequency': [
+                {'role_name': r, 'count': c, 'incident_count': _role_incident_count(r)}
+                for r, c in sorted_roles
+            ],
+            'overprivileged_agents': overprivileged[:10],
+            # AG-162: assessment context for each card + plain-English findings
+            'assessments': metrics,
+            'findings': findings,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_permissions_overview failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AG-167: Actual endpoint reach (AI Runtime Phase 1)
+# ============================================================
+
+def get_ai_agent_actual_access(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/actual-access — what an AI agent is
+    really touching, based on the telemetry we currently ingest.
+
+    Phase 1 scope (per AG-167):
+      - Pulls `role_assignments.last_used_at` (when populated) per role
+      - Marks each touched scope with its inferred resource_type
+      - Returns an explicit coverage notice listing telemetry sources we DON'T
+        yet ingest (sign-in logs, Activity Log, Graph audit) so users never
+        mistake "no data" for "no activity"
+
+    Phase 2 (separate ticket) will ingest the missing sources.
+    """
+    import re
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Resolve identity_id → latest identity row
+        cursor.execute("""
+            SELECT DISTINCT ON (identity_id)
+                id, identity_id, display_name, last_sign_in, last_activity_date
+            FROM identities
+            WHERE identity_id = %s
+              AND deleted_at IS NULL
+            ORDER BY identity_id, discovery_run_id DESC
+        """, (identity_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return jsonify({'error': 'Identity not found'}), 404
+        db_id, ident_id, display_name, last_sign_in, last_activity_date = row
+
+        # All role assignments + their last_used_at
+        cursor.execute("""
+            SELECT role_name, scope, last_used_at
+            FROM role_assignments
+            WHERE identity_db_id = %s
+            ORDER BY last_used_at DESC NULLS LAST
+        """, (db_id,))
+        role_rows = cursor.fetchall()
+        cursor.close()
+
+        # Classify scope → resource_type (cheap regex over ARM scope strings)
+        def infer_resource_type(scope: str) -> str:
+            if not scope:
+                return 'Unknown'
+            if scope == '/':
+                return 'Tenant Root'
+            if scope.startswith('/providers/Microsoft.Management'):
+                return 'Management Group'
+            m = re.match(r'^/subscriptions/[^/]+(?:/resourceGroups/[^/]+(?:/providers/([^/]+)/([^/]+)/[^/]+)?)?$', scope)
+            if not m:
+                return 'Unknown'
+            if not m.group(1):
+                return 'Subscription' if '/resourceGroups/' not in scope else 'Resource Group'
+            provider, rtype = m.group(1), m.group(2)
+            # Friendly labels for the common types AI agents touch
+            label = f"{provider.replace('Microsoft.', '')}/{rtype}"
+            mapping = {
+                'Microsoft.KeyVault/vaults': 'Key Vault',
+                'Microsoft.Storage/storageAccounts': 'Storage Account',
+                'Microsoft.CognitiveServices/accounts': 'Azure AI / Cognitive',
+                'Microsoft.MachineLearningServices/workspaces': 'Azure ML Workspace',
+                'Microsoft.DocumentDB/databaseAccounts': 'Cosmos DB',
+                'Microsoft.Sql/servers': 'SQL Server',
+                'Microsoft.Web/sites': 'App Service',
+                'Microsoft.ContainerService/managedClusters': 'AKS Cluster',
+            }
+            return mapping.get(f'{provider}/{rtype}', label)
+
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        window_days = 30
+        window_start = now - _dt.timedelta(days=window_days)
+
+        roles_with_usage = 0
+        in_window = 0
+        resources_touched = []
+        for role_name, scope, last_used in role_rows:
+            entry = {
+                'role_name':     role_name or 'Unknown',
+                'scope':         scope or '',
+                'resource_type': infer_resource_type(scope or ''),
+                'last_used_at':  last_used.isoformat() if last_used else None,
+                'in_window':     bool(last_used and last_used >= window_start),
+            }
+            if last_used is not None:
+                roles_with_usage += 1
+                if entry['in_window']:
+                    in_window += 1
+            resources_touched.append(entry)
+
+        # Architecture-derived access — AuditGraph's core principle is to
+        # infer from the cloud control plane, not from runtime telemetry
+        # (70% of orgs don't configure sign-in / activity logs). Telemetry,
+        # if available, CONFIRMS what we already derived from architecture.
+        coverage = {
+            'roles_total':              len(role_rows),
+            'roles_with_usage_data':    roles_with_usage,
+            'roles_used_in_window':     in_window,
+            'window_days':              window_days,
+            'architecture_sources': [
+                'rbac_assignments',
+                'role_scope_usage',  # last_used_at when populated by Azure
+            ],
+            'telemetry_optional': [
+                # These would CONFIRM but are not required:
+                'sign_in_logs',
+                'azure_activity_log',
+                'graph_audit_log',
+            ],
+            'notice': (
+                'Access derived from your cloud architecture (RBAC + resource scope). '
+                'When usage telemetry is available we surface last-used timestamps to '
+                'confirm activity; absence of telemetry does NOT mean an agent is inactive — '
+                'the access path is always derived from architecture.'
+            ),
+        }
+
+        return jsonify({
+            'identity': {
+                'identity_id':         ident_id,
+                'display_name':        display_name,
+                'last_sign_in':        last_sign_in.isoformat() if last_sign_in else None,
+                'last_activity_date':  last_activity_date.isoformat() if last_activity_date else None,
+            },
+            'window_days':       window_days,
+            'resources_touched': resources_touched,
+            'coverage':          coverage,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_agent_actual_access failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AG-163: AI Inventory clustered graph
+# ============================================================
+
+# Cluster priority — when an agent touches multiple resource types we want to
+# assign it to the cluster that best characterises its blast radius. Vaults
+# (secret material) outrank Data (storage) outrank Network (egress) outrank
+# Models. Keep these in sync with the frontend cluster definitions.
+_INVENTORY_CLUSTER_PRIORITY = ['vaults', 'data', 'network', 'models']
+
+_INVENTORY_CLUSTERS = [
+    {'id': 'cluster:vaults',  'cluster': 'vaults',  'label': 'Vaults',  'description': 'Key Vault secrets / certs / keys'},
+    {'id': 'cluster:data',    'cluster': 'data',    'label': 'Data',    'description': 'Storage / SQL / Cosmos data plane'},
+    {'id': 'cluster:network', 'cluster': 'network', 'label': 'Network', 'description': 'Internet-facing resources'},
+    {'id': 'cluster:models',  'cluster': 'models',  'label': 'Models',  'description': 'Azure AI / ML / OpenAI / Cognitive'},
+]
+
+# Map access-dimension key → cluster name for primary_cluster assignment
+_DIMENSION_TO_CLUSTER = {
+    'key_vault_access': 'vaults',
+    'data_access':      'data',
+    'internet_egress':  'network',
+    'model_access':     'models',
+}
+
+# Edge color based on highest privilege the agent holds in its primary cluster.
+# Mirrors the frontend severity palette.
+_EDGE_COLOR_BY_LEVEL = {
+    # vaults
+    'administrator':  '#ef4444',
+    'secrets_officer':'#ef4444',
+    'secrets_user':   '#fb923c',
+    # data
+    'owner':          '#ef4444',
+    'contributor':    '#fb923c',
+    'data_reader_writer': '#facc15',
+    'data_reader':    '#facc15',
+    # network
+    'unrestricted':   '#ef4444',
+    'restricted':     '#facc15',
+    'blocked':        '#22c55e',
+    # models
+    'developer':      '#fb923c',
+    'user':           '#facc15',
+    # generic
+    'full_access':    '#ef4444',
+    'reader':         '#facc15',
+    'none':           '#475569',
+}
+
+
+def _why_top_risk(agent_id: int, role_rows: list[tuple], display_name: str) -> str:
+    """Build a 1-sentence WHY for a top-risk agent from its role assignments."""
+    from app.constants.ai_risk import BROAD_PRIVILEGE_ROLES
+    roles = [r for r in role_rows if r[0] == agent_id]
+    if not roles:
+        return f'No active role assignments detected for {display_name}'
+    # Highlight broad privileges first
+    broad = [r[1] for r in roles if r[1] in BROAD_PRIVILEGE_ROLES]
+    if broad:
+        scope = roles[0][2] or 'tenant scope'
+        scope_short = scope.split('/')[2] if scope.startswith('/subscriptions/') else 'subscription'
+        return f'Holds {broad[0]} on {scope_short} — full control of all resources beneath this scope'
+    # Otherwise pick the most-privileged named role
+    role_names = sorted({r[1] for r in roles if r[1]})
+    top = role_names[0] if role_names else 'an unknown role'
+    extra = f' + {len(role_names)-1} more' if len(role_names) > 1 else ''
+    return f'Holds {top}{extra} — review whether least-privilege scope applies'
+
+
+def get_ai_inventory_graph():
+    """GET /api/ai-security/inventory-graph — clustered AI agent inventory graph.
+
+    Returns the data the AI Inventory page uses to render a force-directed
+    relationship map (replacing the prior wall-of-circles). Structure:
+
+      stats        — 3 KPIs for the page header strip
+      clusters     — 4 fixed clusters (vaults, data, network, models)
+      agents       — per-agent: id, label, platform, risk_score, primary_cluster,
+                     edge_color, edge_label, severity
+      top_risks    — top 5 by risk_score, each with a generated WHY sentence
+
+    All data live from `agent_classifications` + `role_assignments`. Tenant
+    scoping inherits from RLS (organization_id column + rowsecurity=t).
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import (
+        aggregate_access_levels,
+        # AG-164: signal-sum scoring (NIST + CVSS v3.1 + MITRE-aligned)
+        detect_signals,
+        compute_signal_score,
+        classify_role_access,
+        BROAD_PRIVILEGE_ROLES,
+        KEY_VAULT_WEIGHTS,
+        DATA_ACCESS_WEIGHTS,
+        INTERNET_EGRESS_WEIGHTS,
+        MODEL_ACCESS_WEIGHTS,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Resolve the tenant label for the graph center node — org name, plus
+        # connection label when a specific connection is in context (multi-tenant
+        # architecture: customers want to see WHICH connector this graph is for).
+        org_id = _org_id()
+        conn_id = _connection_id()
+        tenant_label = 'Your Tenant'
+        try:
+            cursor.execute("SELECT name FROM organizations WHERE id = %s", (org_id,))
+            _r = cursor.fetchone()
+            org_name = _r[0] if _r else None
+            conn_label = None
+            if conn_id:
+                cursor.execute("SELECT label FROM cloud_connections WHERE id = %s AND organization_id = %s",
+                               (conn_id, org_id))
+                _c = cursor.fetchone()
+                conn_label = _c[0] if _c else None
+            if org_name and conn_label:
+                tenant_label = f"{org_name} · {conn_label}"
+            elif org_name:
+                tenant_label = org_name
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+
+        # Pull AI-classified agents (one row per identity_id, latest run).
+        # AG-164: extra columns needed for signal detection (telemetry, ownership,
+        # credentials, last activity) — drives the no_telemetry / dormant_agent /
+        # expired_credential / no_owner signals.
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id)
+                i.id, i.identity_id, i.display_name, i.risk_score,
+                ac.agent_identity_type, ac.detected_platform,
+                i.owner_display_name, i.credential_risk,
+                i.last_sign_in, i.last_activity_date,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agent_rows = cursor.fetchall()
+        if not agent_rows:
+            cursor.close()
+            return jsonify({
+                'tenant_label': tenant_label,
+                'clusters': _INVENTORY_CLUSTERS,
+                'agents': [],
+                'stats': {'total_agents': 0, 'critical_agents': 0,
+                          'with_subscription_owner': 0, 'with_kv_admin_or_blob_owner': 0},
+                'top_risks': [],
+            })
+
+        agent_db_ids = [r[0] for r in agent_rows]
+
+        # Pull all role assignments for these agents
+        cursor.execute("""
+            SELECT ra.identity_db_id, ra.role_name, ra.scope
+            FROM role_assignments ra
+            WHERE ra.identity_db_id = ANY(%s)
+        """, (agent_db_ids,))
+        role_rows = cursor.fetchall()
+        cursor.close()
+
+        # Group roles by agent for downstream lookups
+        roles_by_agent: dict[int, list[dict]] = {}
+        for db_id, role_name, scope in role_rows:
+            roles_by_agent.setdefault(db_id, []).append({
+                'role_name': role_name or '',
+                'scope':     scope or '',
+            })
+
+        # Build per-agent payload
+        agents_out = []
+        cluster_counts = {c['cluster']: 0 for c in _INVENTORY_CLUSTERS}
+        cluster_critical = {c['cluster']: 0 for c in _INVENTORY_CLUSTERS}
+        critical_total = 0
+        with_sub_owner = 0
+        with_kv_admin_or_blob_owner = 0
+
+        for row in agent_rows:
+            (db_id, identity_id, display_name, _legacy_score, agent_type, platform,
+             owner_name, cred_risk, last_sign_in, last_activity, sp_sign_in) = row
+            agent_roles = roles_by_agent.get(db_id, [])
+            access = aggregate_access_levels(agent_roles)
+
+            # AG-164: signal-sum scoring (CVSS-aligned 0–10 + per-signal breakdown)
+            agent_meta = {
+                'display_name':                    display_name,
+                'detected_platform':               platform,
+                'owner_display_name':              owner_name,
+                'credential_risk':                 cred_risk,
+                'last_sign_in':                    last_sign_in,
+                'last_activity_date':              last_activity,
+                'last_service_principal_sign_in': sp_sign_in,
+            }
+            fired = detect_signals(agent_meta, agent_roles, access)
+            score_pkg = compute_signal_score(fired)
+            score = score_pkg['score']
+            severity = score_pkg['severity']
+            breakdown = score_pkg['breakdown']
+
+            # Assign to primary cluster — highest-weighted dimension that's non-none
+            weight_maps = {
+                'vaults':  (KEY_VAULT_WEIGHTS,        access.get('key_vault_access', 'none')),
+                'data':    (DATA_ACCESS_WEIGHTS,      access.get('data_access', 'none')),
+                'network': (INTERNET_EGRESS_WEIGHTS,  access.get('internet_egress', 'none')),
+                'models':  (MODEL_ACCESS_WEIGHTS,     access.get('model_access', 'none')),
+            }
+            best_cluster = None
+            best_weight = -1.0
+            for cname in _INVENTORY_CLUSTER_PRIORITY:
+                wmap, lvl = weight_maps[cname]
+                w = wmap.get(lvl, 0.0)
+                if w > best_weight:
+                    best_weight = w
+                    best_cluster = cname
+            # If everything is "none", fall back to models (visual placement)
+            if best_weight <= 0:
+                best_cluster = 'models'
+
+            level_for_edge = weight_maps[best_cluster][1]
+            edge_color = _EDGE_COLOR_BY_LEVEL.get(level_for_edge, '#475569')
+            edge_label = level_for_edge.replace('_', ' ').title() if level_for_edge != 'none' else 'No access'
+
+            cluster_counts[best_cluster] += 1
+            if severity == 'critical':
+                cluster_critical[best_cluster] += 1
+                critical_total += 1
+
+            # KPI flags
+            role_names = [r['role_name'] for r in agent_roles]
+            scopes = [r['scope'] for r in agent_roles]
+            if any(rn in BROAD_PRIVILEGE_ROLES for rn in role_names) and any(
+                    s.count('/') == 2 and s.startswith('/subscriptions/') for s in scopes):
+                with_sub_owner += 1
+            if 'Key Vault Administrator' in role_names or 'Storage Blob Data Owner' in role_names:
+                with_kv_admin_or_blob_owner += 1
+
+            agents_out.append({
+                'id':              identity_id,
+                'label':           display_name or identity_id,
+                'platform':        platform or 'unknown',
+                'agent_type':      agent_type,
+                'risk_score':      score,            # AG-164: CVSS-aligned 0–10
+                'severity':        severity,
+                'primary_cluster': best_cluster,
+                'edge_color':      edge_color,
+                'edge_label':      edge_label,
+                'access':          access,
+                # AG-164: signal-level breakdown — drives the "Risk Breakdown"
+                # tooltip in the AI Inventory drawer / top-5 panel.
+                'signal_count':    len(breakdown),
+                'top_signals':     [{'key': s['key'], 'title': s['title'],
+                                     'weight': s['weight'], 'mitre': s['mitre']}
+                                    for s in breakdown[:3]],
+            })
+
+        # Sort agents within each cluster by risk DESC for stable layout
+        agents_out.sort(key=lambda a: (a['primary_cluster'], -a['risk_score']))
+
+        # Enrich clusters with counts
+        clusters_out = []
+        for c in _INVENTORY_CLUSTERS:
+            clusters_out.append({
+                **c,
+                'agent_count':    cluster_counts[c['cluster']],
+                'critical_count': cluster_critical[c['cluster']],
+            })
+
+        # Top 5 risks — sorted by signal-derived score, WHY built from top signals.
+        top_sorted = sorted(agents_out, key=lambda a: -a['risk_score'])[:5]
+        top_risks = []
+        for a in top_sorted:
+            top_titles = [s['title'] for s in a.get('top_signals', [])[:2]]
+            why = ' · '.join(top_titles) if top_titles else 'No risk signals detected'
+            top_risks.append({
+                'id':        a['id'],
+                'label':     a['label'],
+                'platform':  a['platform'],
+                'score':     a['risk_score'],
+                'severity':  a['severity'],
+                'why':       why,
+                # Surface MITRE techniques on the top-5 card for at-a-glance defensibility
+                'mitre':     sorted({m for s in a.get('top_signals', []) for m in (s.get('mitre') or [])}),
+            })
+
+        return jsonify({
+            'tenant_label': tenant_label,
+            'clusters': clusters_out,
+            'agents':   agents_out,
+            'stats': {
+                'total_agents':                 len(agents_out),
+                'critical_agents':              critical_total,
+                'with_subscription_owner':      with_sub_owner,
+                'with_kv_admin_or_blob_owner':  with_kv_admin_or_blob_owner,
+            },
+            'top_risks': top_risks,
+        })
+    except Exception as e:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        logger.error("get_ai_inventory_graph failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# ============================================================
+# AG-179 (Tier 1B): Trust Score + Board Scorecard handlers
+# ============================================================
+
+def get_agent_trust_score_handler(identity_id: str):
+    """GET /api/ai-security/trust-score/<identity_id>
+
+    Returns the 5-dimension Trust Score for one AI agent. No fake data —
+    returns 404 if the identity doesn't exist or isn't an AI agent.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        # AG-WK2(2026-06-05): Trust Score now applies to ALL non-human
+        # identities (SPNs, MIs, AI agents). The 9-dim engine returns NONE
+        # for dims that don't apply to non-AI NHIs (model_exposure,
+        # supply_chain) — that's correct behavior, not a missing value.
+        # Humans use a different trust model (MFA, password age, etc) —
+        # they're rejected with a friendly 400.
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name,
+                   i.identity_category,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s
+              AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id(), run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        # Reject humans + guests (different trust model — Week 3+)
+        human_categories = {'human_user', 'guest'}
+        is_nhi = row['identity_category'] not in human_categories
+        ai_types = {'ai_agent', 'possible_ai_agent', 'ai_privileged_human'}
+        is_ai = row['agent_identity_type'] in ai_types
+        if not (is_nhi or is_ai):
+            return jsonify({'error': 'Identity Trust not available for human users yet'}), 400
+
+        from app.engines.scoring.agent_trust_scorer import compute_agent_trust
+        result = compute_agent_trust(cursor, row['id'])
+        result['identity_id'] = row['identity_id']
+        result['display_name'] = row['display_name']
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"trust-score handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-WK7.A: Peer Benchmarking
+# ============================================================
+
+def get_peer_benchmarks_handler():
+    """GET /api/peer-benchmarking/snapshot
+
+    Returns this org's metrics + peer percentile bands per industry/size.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'metrics': []})
+        industry      = request.args.get('industry', 'tech')
+        org_size_band = request.args.get('size_band', 'mid_500_5000')
+        from app.engines.benchmarking.peer_benchmarking import get_org_benchmarks
+        return jsonify(get_org_benchmarks(db, org_id, industry, org_size_band))
+    except Exception as e:
+        logger.error(f"peer benchmarking failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_peer_benchmarks_seed_handler():
+    """POST /api/peer-benchmarking/seed-demo
+
+    Demo-only: seed synthetic peer snapshots so the page has comparison
+    data. Idempotent — replays the same deterministic distribution.
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    db = _db()
+    try:
+        from app.engines.benchmarking.peer_benchmarking import (
+            snapshot_org, seed_synthetic_peers, recompute_aggregates
+        )
+        # 1) snapshot the requesting org's current numbers
+        org_id = _org_id()
+        snap = snapshot_org(db, org_id,
+                             industry=request.args.get('industry', 'tech'),
+                             org_size_band=request.args.get('size_band', 'mid_500_5000'))
+        # 2) seed synthetic peer bucket (uses its own admin DB; bypasses RLS)
+        seed = seed_synthetic_peers(db)
+        # 3) recompute aggregates (admin DB — reads across orgs)
+        agg = recompute_aggregates()
+        return jsonify({'snapshot': snap, 'seed': seed, 'aggregates': agg})
+    except Exception as e:
+        logger.error(f"peer benchmarking seed failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-WK3.1: Ownership Center
+# ============================================================
+
+def get_ownership_summary_handler():
+    """GET /api/ownership/summary — headline metrics for Ownership Center."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'total_nhi': 0, 'active_assigned': 0, 'unowned': 0,
+                            'pct_owned': 0, 'expiring_soon': 0, 'exceptions': 0})
+        from app.engines.ownership.ownership_center import get_ownership_summary
+        return jsonify(get_ownership_summary(db, org_id))
+    except Exception as e:
+        logger.error(f"ownership summary failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_unowned_nhis_handler():
+    """GET /api/ownership/unowned — NHIs without an active owner assignment."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'items': [], 'total_unowned': 0, 'total_nhis': 0, 'pct_unowned': 0})
+        try:
+            limit = min(int(request.args.get('limit', 200)), 1000)
+        except (TypeError, ValueError):
+            limit = 200
+        from app.engines.ownership.ownership_center import list_unowned_nhis
+        return jsonify(list_unowned_nhis(db, org_id, limit))
+    except Exception as e:
+        logger.error(f"unowned NHIs failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ownership_assignments_handler():
+    """GET /api/ownership/assignments — active ownership assignments."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'items': []})
+        status = request.args.get('status')
+        from app.engines.ownership.ownership_center import list_assignments
+        return jsonify({'items': list_assignments(db, org_id, status)})
+    except Exception as e:
+        logger.error(f"ownership assignments failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ownership_assign_handler():
+    """POST /api/ownership/assign — assign or update owner for one NHI."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    identity_id = (data.get('identity_id') or '').strip()
+    owner_display_name = (data.get('owner_display_name') or '').strip()
+    if not identity_id or not owner_display_name:
+        return jsonify({'error': 'identity_id and owner_display_name are required'}), 400
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ownership.ownership_center import assign_owner
+        result = assign_owner(
+            db, org_id, identity_id,
+            owner_display_name=owner_display_name,
+            owner_email=data.get('owner_email'),
+            owner_user_id=data.get('owner_user_id'),
+            delegate_display_name=data.get('delegate_display_name'),
+            delegate_user_id=data.get('delegate_user_id'),
+            assignment_reason=data.get('assignment_reason'),
+            expires_at=data.get('expires_at'),
+            assigned_by_user_id=user.get('id'),
+        )
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"ownership assign failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_identity_trust_rollup_handler():
+    """GET /api/identity-trust/rollup
+
+    Org-wide Identity Trust rollup across all NHIs (SPNs + MIs + AI).
+    Drives the new Identity Trust page (Week 2 of the brand/IA pivot).
+
+    Query params:
+      threshold — Trust score below which an identity counts as "low trust"
+                  (default 50)
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        try:
+            threshold = max(0, min(int(request.args.get('threshold', 50)), 100))
+        except (TypeError, ValueError):
+            threshold = 50
+        from app.engines.scoring.agent_trust_scorer import compute_org_trust_rollup
+        return jsonify(compute_org_trust_rollup(cursor, org_id, threshold))
+    except Exception as e:
+        logger.error(f"identity-trust rollup failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_board_scorecard_handler():
+    """GET /api/ai-security/board-scorecard
+
+    Returns the 5 KPIs + distribution + top-10 worst for the current tenant.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        from app.engines.scoring.board_scorecard_engine import compute_board_scorecard
+        result = compute_board_scorecard(cursor, _org_id())
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"board-scorecard handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_board_scorecard_history_handler():
+    """GET /api/ai-security/board-scorecard/history?days=180
+
+    Returns persisted historical snapshots for trend rendering.
+    """
+    days = min(request.args.get('days', 180, type=int), 365)
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT snapshot_date, total_agents,
+                   with_owner_pct, with_telemetry_pct, private_network_pct,
+                   least_privilege_pct, policy_compliant_pct,
+                   distribution_strong, distribution_good,
+                   distribution_elevated, distribution_critical,
+                   exceptions_pending
+            FROM ai_board_scorecard_snapshots
+            WHERE organization_id = %s
+              AND snapshot_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+            ORDER BY snapshot_date ASC
+        """, (_org_id(), days))
+        history = []
+        for r in cursor.fetchall():
+            row = dict(r)
+            row['snapshot_date'] = row['snapshot_date'].isoformat() if row['snapshot_date'] else None
+            history.append(row)
+        return jsonify({'history': history, 'days': days})
+    except Exception as e:
+        logger.error(f"board-scorecard history handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-189 (Argus Layer 5): Risk Score Waterfall handler
+# ============================================================
+
+def get_explain_risk_score_handler(identity_id: str):
+    """GET /api/argus/explain-risk-score/<identity_id>
+
+    Returns a per-signal waterfall decomposition of the identity's risk
+    score: every fired signal, the points it contributes, and the concrete
+    graph evidence (role + scope + since DATE) that triggers it. Honesty
+    contract enforced by the engine — no fabricated weights, no invented
+    MITRE / CIS / NIST tags. 404 when the identity is not found in the
+    caller's organization scope.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        org_id = _org_id()
+        if org_id is None:
+            # Superadmin without an org override — cannot resolve a single
+            # identity unambiguously. Require X-Tenant-Id (handled upstream)
+            # or an explicit org context.
+            return jsonify({'error': 'Organization context required'}), 400
+
+        run_ids = _latest_run_ids(cursor, organization_id=org_id)
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        cursor.execute(
+            """
+            SELECT i.id
+              FROM identities i
+             WHERE i.identity_id = %s
+               AND i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+             ORDER BY i.discovery_run_id DESC
+             LIMIT 1
+            """,
+            (identity_id, org_id, run_ids),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        identity_db_id = int(row['id'] if isinstance(row, dict) else row[0])
+
+        from app.engines.argus.explain_risk_score import explain_risk_score
+        result = explain_risk_score(cursor, identity_db_id, org_id)
+        if result is None:
+            return jsonify({'error': 'Identity not found'}), 404
+        return jsonify(result)
+    except Exception as e:
+        logger.error("explain-risk-score handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db:
+            db.close()
+
+
+# ================================================================
+# Argus L2 — Security Reasoner (AG-186)
+# ================================================================
+
+def argus_reasoner_handler():
+    """POST /api/argus/reason
+
+    Body: {"question_type": str, "use_cache": bool (optional, default True)}
+
+    Runs a 3-5 sub-query reasoning chain against the canonical AG-180
+    + AG-178 + RBAC + posture tables, then synthesises a board-ready
+    narrative with cited evidence. No LLM, no fake answers — if a sub-query
+    returns 0 the narrative says so explicitly.
+
+    Supported question_types: highest_business_risk, phi_exposure,
+    ownership_gaps, recent_intake_risk, oauth_scope_sprawl, posture_drop.
+
+    Returns HTTP 200 with the result dict (the engine encodes degraded
+    confidence rather than throwing). Validation errors are 400.
+    """
+    from app.engines.argus.reasoner import reason_about, QUESTION_TYPES
+    from psycopg2.extras import RealDictCursor
+
+    data = request.get_json(silent=True) or {}
+    question_type = data.get('question_type')
+    use_cache = data.get('use_cache', True)
+
+    if not isinstance(question_type, str) or not question_type:
+        return jsonify({
+            'error': 'question_type is required',
+            'supported': list(QUESTION_TYPES),
+        }), 400
+    if question_type not in QUESTION_TYPES:
+        return jsonify({
+            'error': f"unsupported question_type '{question_type}'",
+            'supported': list(QUESTION_TYPES),
+        }), 400
+    if not isinstance(use_cache, bool):
+        return jsonify({'error': 'use_cache must be boolean'}), 400
+
+    org_id = _org_id()
+    if org_id is None:
+        # Superadmin without an org context — reasoning is tenant-scoped.
+        return jsonify({
+            'error': 'Organization context required for Argus reasoning',
+        }), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = reason_about(
+                cursor, org_id, question_type,
+                use_cache=use_cache,
+            )
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the reasoning request for the auditor pack.
+        try:
+            _log(db, 'argus_reason',
+                 f"Argus L2 reason: {question_type}",
+                 {
+                     'question_type': question_type,
+                     'use_cache': use_cache,
+                     'cached': bool(result.get('cached')) if isinstance(result, dict) else False,
+                     'confidence': result.get('confidence') if isinstance(result, dict) else None,
+                     'evidence_count': len(result.get('evidence') or []) if isinstance(result, dict) else 0,
+                     'duration_ms': duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_reasoner failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'question': '(error)',
+            'conclusion': (
+                f"Argus could not complete the reasoning request "
+                f"({type(exc).__name__}). The graph may be mid-refresh — "
+                f"try again after the next discovery run."
+            ),
+            'evidence': [],
+            'framework_refs': {'nist': [], 'cis_azure': [], 'mitre': []},
+            'confidence': 'low',
+            'question_type': question_type,
+            'cached': False,
+        }), 200
+    finally:
+        db.close()
+
+
+# ============================================================
+# AG-188 (Argus Layer 4): Board / CISO Advisor — "What should I fix this week?"
+# ============================================================
+
+def argus_ciso_advisor_handler():
+    """GET /api/argus/recommendations
+
+    Returns the top 5 ranked remediation priorities for the caller's
+    organization, computed by :func:`recommend_fixes` from live signal
+    aggregates over the latest discovery run per active cloud connection.
+
+    Shape: see ``app.engines.argus.ciso_advisor.recommend_fixes`` docstring.
+    Honesty contract: when nothing fires the response is ``{priorities: [],
+    message: 'No critical fixes recommended.'}`` — never invented data.
+
+    Errors return HTTP 200 with the healthy-state shape so the UI never sees
+    a malformed payload (matches the pattern set by L3 investigate-attack-path).
+    """
+    from app.engines.argus.ciso_advisor import recommend_fixes
+    from psycopg2.extras import RealDictCursor
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None:
+            # Superadmin without an org override — cannot recommend without
+            # tenant scope. Require X-Tenant-Id (handled upstream) or an
+            # explicit org context.
+            return jsonify({'error': 'Organization context required'}), 400
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = recommend_fixes(cursor, org_id)
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the recommendation pull for the auditor pack.
+        try:
+            priorities = result.get('priorities') if isinstance(result, dict) else []
+            _log(db, 'argus_ciso_advisor',
+                 f'Argus L4 recommendations pulled ({len(priorities)} priorities)',
+                 {
+                     'priority_count': len(priorities),
+                     'top_signal': (priorities[0].get('signal')
+                                    if priorities else None),
+                     'duration_ms': duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_ciso_advisor failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({
+            'priorities':       [],
+            'message':          f'Recommendation engine error: {type(exc).__name__}',
+            'method':           'signal_aggregate_ranking',
+            'total_identities': 0,
+            'generated_at':     datetime.now(timezone.utc).isoformat(),
+        }), 200
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# AG-191 (Argus Layer 7): Executive Storytelling handler
+# ============================================================
+
+def argus_exec_narrative_handler():
+    """GET /api/argus/executive-summary?topic=<topic>
+
+    Returns a board-ready, one-paragraph executive narrative for the
+    requested ``topic`` (see :data:`SUPPORTED_TOPICS` in the engine).
+    The engine pulls from the canonical
+    ``ai_board_scorecard_snapshots`` table — no fabricated stats, no
+    hardcoded answer values. Trend over 30 days is included only when
+    at least two snapshots exist in the window; otherwise the
+    ``trend_delta_pct`` keys are omitted entirely.
+
+    Query params:
+        topic (str, required): one of
+            ``ai_agents_secure`` | ``nhi_secure``
+            | ``oauth_secure`` | ``overall_posture``.
+
+    Response: see ``app.engines.argus.exec_narrative`` module docstring.
+    """
+    from app.engines.argus.exec_narrative import (
+        tell_executive_story, SUPPORTED_TOPICS,
+    )
+    from psycopg2.extras import RealDictCursor
+
+    topic = (request.args.get('topic') or '').strip().lower()
+    if not topic:
+        return jsonify({
+            'error': 'topic is required',
+            'supported_topics': list(SUPPORTED_TOPICS),
+        }), 400
+    if topic not in SUPPORTED_TOPICS:
+        return jsonify({
+            'error': f"unsupported topic '{topic}'",
+            'supported_topics': list(SUPPORTED_TOPICS),
+        }), 400
+
+    org_id = _org_id()
+    if org_id is None:
+        # Superadmin without an org override — the narrative must always
+        # name a tenant or it would conflate orgs. Require an explicit
+        # X-Tenant-Id override (handled by the middleware).
+        return jsonify({'error': 'Organization context required'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            result = tell_executive_story(cursor, org_id, topic)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the question for the auditor pack.
+        try:
+            _log(
+                db,
+                'argus_executive_summary',
+                f"Argus L7 executive summary: topic={topic}",
+                {
+                    'topic': topic,
+                    'reason': result.get('reason'),
+                    'score': (result.get('stats') or {}).get('score'),
+                    'total': (result.get('stats') or {}).get('total'),
+                    'has_trend': 'trend_delta_pct' in (result.get('stats') or {}),
+                },
+            )
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_executive_summary failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# AG-192 (Argus XGRAPH): Cross-identity reach analysis
+# ============================================================
+
+def argus_cross_graph_handler():
+    """GET /api/argus/who-can-reach?classification=PHI
+
+    Returns the cohort rollup for "which identities can reach this data
+    classification" — see :func:`app.engines.argus.cross_graph.traverse_for_data_class`
+    for the response shape. Honesty contract: empty cohort returns zeros +
+    ``confidence='low'`` plus a non-null ``why`` reason; ``total_records_exposed``
+    is ``None`` when any contributing resource has unknown record counts.
+
+    Always returns HTTP 200 (the ``confidence`` / ``why`` fields drive the
+    UI's empty state). Validation errors are HTTP 400.
+    """
+    from app.engines.argus.cross_graph import traverse_for_data_class
+    from psycopg2.extras import RealDictCursor
+
+    classification = request.args.get('classification') or ''
+    classification = classification.strip()
+    if not classification:
+        return jsonify({'error': "query parameter 'classification' is required"}), 400
+
+    org_id = _org_id()
+    if org_id is None:
+        # Superadmin without an X-Tenant-Id override — we can't scope.
+        return jsonify({'error': 'Organization context required'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            start = time.time()
+            result = traverse_for_data_class(cursor, org_id, classification)
+            duration_ms = int((time.time() - start) * 1000)
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+        # Activity log — record the cross-graph query for the auditor pack.
+        try:
+            _log(db, 'argus_cross_graph',
+                 f"Argus XGRAPH who-can-reach: classification={classification!r}",
+                 {
+                     'classification':        classification,
+                     'total_identities':      (result or {}).get('total_identities', 0),
+                     'resources_in_class':    (result or {}).get('resources_in_class', 0),
+                     'confidence':            (result or {}).get('confidence'),
+                     'duration_ms':           duration_ms,
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        if isinstance(result, dict):
+            result['duration_ms'] = duration_ms
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("argus_cross_graph failed: %s", exc, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        # Honest empty response — never invent counts on error.
+        return jsonify({
+            'classification':        classification.upper(),
+            'by_category':           {
+                'human_user':        0,
+                'service_principal': 0,
+                'ai_agent':          0,
+                'oauth_app':         0,
+            },
+            'total_identities':      0,
+            'common_path':           [{'node_type': 'identity', 'label': 'Identity'}],
+            'total_records_exposed': None,
+            'top_resources':         [],
+            'confidence':            'low',
+            'why':                   f'investigation error: {type(exc).__name__}',
+            'resources_in_class':    0,
+        }), 200
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# AG-190 (Argus Layer 6): What-If Simulator handler
+# ============================================================
+
+def argus_what_if_handler():
+    """POST /api/argus/what-if/role-removal
+
+    Body: {identity_id: '<external GUID>', role_assignment_id: <int>}
+
+    Projects the agent's risk score WITHOUT a specified role assignment.
+    The role is NOT deleted — this is a read-only architectural projection
+    against the existing scoring catalog (RISK_SIGNALS + detect_signals).
+
+    Returns the dict produced by :func:`simulate_role_removal`. 404 when
+    the identity or role assignment is not found in the caller's org.
+    Always carries `confidence='projected'` + a `warning` string so the UI
+    can render the "architectural projection" caveat verbatim.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        from app.engines.argus.what_if import simulate_role_removal
+
+        data = request.get_json(silent=True) or {}
+        identity_external_id = data.get('identity_id')
+        role_assignment_id = data.get('role_assignment_id')
+
+        if not isinstance(identity_external_id, str) or not identity_external_id.strip():
+            return jsonify({'error': 'identity_id (string) is required'}), 400
+        try:
+            ra_id = int(role_assignment_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'role_assignment_id (int) is required'}), 400
+
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+
+        org_id = _org_id()
+        if org_id is None:
+            return jsonify({'error': 'Organization context required'}), 400
+
+        run_ids = _latest_run_ids(cursor, organization_id=org_id)
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        # Resolve external identity_id → identities.id, scoped to org + latest run
+        cursor.execute(
+            """
+            SELECT i.id
+              FROM identities i
+             WHERE i.identity_id = %s
+               AND i.organization_id = %s
+               AND i.discovery_run_id = ANY(%s)
+             ORDER BY i.discovery_run_id DESC
+             LIMIT 1
+            """,
+            (identity_external_id.strip(), org_id, run_ids),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        identity_db_id = int(row['id'] if isinstance(row, dict) else row[0])
+
+        result = simulate_role_removal(
+            cursor=cursor,
+            identity_db_id=identity_db_id,
+            role_assignment_id=ra_id,
+            organization_id=org_id,
+        )
+        if result is None:
+            return jsonify({'error': 'Role assignment not found for this identity'}), 404
+
+        # Activity log — record the what-if for the auditor pack.
+        try:
+            _log(db, 'argus_what_if_role_removal',
+                 f"Argus L6 what-if: remove role_assignment_id={ra_id} "
+                 f"from identity={identity_external_id}",
+                 {
+                     'identity_id':        identity_external_id,
+                     'role_assignment_id': ra_id,
+                     'role_name':          result.get('role_assignment', {}).get('role_name'),
+                     'scope':              result.get('role_assignment', {}).get('scope'),
+                     'current_score':      result.get('current_score'),
+                     'projected_score':    result.get('projected_score'),
+                     'reduction_pct':      result.get('reduction_pct'),
+                     'removed_signals':    [s.get('signal') for s in result.get('removed_signals') or []],
+                     'removed_paths':      len(result.get('removed_paths') or []),
+                 })
+        except Exception:
+            try: db.conn.rollback()
+            except Exception: pass
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error("argus_what_if handler failed: %s", e, exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db:
+            db.close()
+
+
+# ============================================================
+# ============================================================
+# AG-180 (Tier 2A): Data Reachability handlers
+# ============================================================
+
+def get_ai_agent_data_reachability_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/data-reachability
+
+    Returns per-classification rollup of resources this AI agent can reach.
+    No fake data — empty list if the agent has no classified resource access.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({'by_classification': [], 'total_resources': 0, 'total_records': 0})
+
+        # AG-FIX(2026-06-05): prefer agent_classifications, fallback to identities col.
+        cursor.execute("""
+            SELECT i.id, i.identity_id, i.display_name,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id(), run_ids))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.ai.data_reachability_engine import get_agent_data_reachability
+        from app.engines.scoring.breach_cost import compute_exposure, aggregate_exposure, format_dollar_short
+        rollups = get_agent_data_reachability(cursor, row['id'], _org_id())
+        total_resources = sum(r.get('resource_count', 0) for r in rollups)
+        total_records = sum(r.get('est_records', 0) or 0 for r in rollups)
+
+        # AG-T1.1: enrich each classification with dollar exposure band
+        for r in rollups:
+            exp = compute_exposure(db, r.get('data_classification'), r.get('est_records'))
+            r['exposure'] = {
+                'has_factor': exp['has_factor'],
+                'low':  float(exp['estimated_exposure_low']),
+                'mid':  float(exp['estimated_exposure_mid']),
+                'high': float(exp['estimated_exposure_high']),
+                'low_display':  format_dollar_short(exp['estimated_exposure_low']),
+                'mid_display':  format_dollar_short(exp['estimated_exposure_mid']),
+                'high_display': format_dollar_short(exp['estimated_exposure_high']),
+                'source': exp['source'],
+                'source_year': exp['source_year'],
+                'cost_per_record_mid': float(exp['cost_per_record_mid']),
+            }
+
+        agg = aggregate_exposure(db, rollups)
+        return jsonify({
+            'identity_id': row['identity_id'],
+            'display_name': row['display_name'],
+            'by_classification': rollups,
+            'total_resources': total_resources,
+            'total_records': total_records if total_records > 0 else None,
+            # AG-T1.1: aggregate dollar exposure for this agent
+            'total_exposure': {
+                'low':  float(agg['total_exposure_low']),
+                'mid':  float(agg['total_exposure_mid']),
+                'high': float(agg['total_exposure_high']),
+                'low_display':  format_dollar_short(agg['total_exposure_low']),
+                'mid_display':  format_dollar_short(agg['total_exposure_mid']),
+                'high_display': format_dollar_short(agg['total_exposure_high']),
+                'covered_classes':   agg['covered'],
+                'uncovered_classes': agg['uncovered'],
+            } if agg['covered'] > 0 else None,
+        })
+    except Exception as e:
+        logger.error(f"data-reachability handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_data_security_summary_handler():
+    """GET /api/data-security — aggregate classified-data posture for the org."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({'classifications': [], 'agents_with_reachability': 0, 'total_classified_resources': 0})
+
+        cursor.execute("""
+            SELECT data_classification,
+                   COUNT(*) AS resource_count,
+                   COUNT(*) FILTER (WHERE classification_source = 'tag') AS tag_sourced,
+                   COUNT(*) FILTER (WHERE classification_source = 'name_pattern') AS pattern_sourced,
+                   SUM(record_count_estimate) AS est_records
+            FROM (
+                SELECT data_classification, classification_source, record_count_estimate FROM azure_storage_accounts
+                  WHERE organization_id = %s AND data_classification IS NOT NULL
+                UNION ALL
+                SELECT data_classification, classification_source, record_count_estimate FROM azure_sql_databases
+                  WHERE organization_id = %s AND data_classification IS NOT NULL
+                UNION ALL
+                SELECT data_classification, classification_source, record_count_estimate FROM azure_cosmos_databases
+                  WHERE organization_id = %s AND data_classification IS NOT NULL
+            ) AS all_classified
+            GROUP BY data_classification
+            ORDER BY resource_count DESC
+        """, (_org_id(), _org_id(), _org_id()))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT COUNT(DISTINCT identity_db_id) AS agents_with_reachability
+            FROM agent_data_reachability
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+        """, (_org_id(), run_ids))
+        agg = cursor.fetchone()
+
+        # AG-T1.1: enrich each classification with dollar exposure
+        from app.engines.scoring.breach_cost import compute_exposure, aggregate_exposure, format_dollar_short
+        for r in rows:
+            exp = compute_exposure(db, r.get('data_classification'), r.get('est_records'))
+            r['exposure'] = {
+                'has_factor': exp['has_factor'],
+                'low':  float(exp['estimated_exposure_low']),
+                'mid':  float(exp['estimated_exposure_mid']),
+                'high': float(exp['estimated_exposure_high']),
+                'low_display':  format_dollar_short(exp['estimated_exposure_low']),
+                'mid_display':  format_dollar_short(exp['estimated_exposure_mid']),
+                'high_display': format_dollar_short(exp['estimated_exposure_high']),
+                'source': exp['source'],
+                'cost_per_record_mid': float(exp['cost_per_record_mid']),
+            }
+        org_agg = aggregate_exposure(db, [
+            {'data_classification': r['data_classification'], 'est_records': r.get('est_records')}
+            for r in rows
+        ])
+
+        return jsonify({
+            'classifications': rows,
+            'agents_with_reachability': int(agg['agents_with_reachability'] or 0),
+            'total_classified_resources': sum(r['resource_count'] for r in rows),
+            'total_exposure': {
+                'low':  float(org_agg['total_exposure_low']),
+                'mid':  float(org_agg['total_exposure_mid']),
+                'high': float(org_agg['total_exposure_high']),
+                'low_display':  format_dollar_short(org_agg['total_exposure_low']),
+                'mid_display':  format_dollar_short(org_agg['total_exposure_mid']),
+                'high_display': format_dollar_short(org_agg['total_exposure_high']),
+                'covered_classes':   org_agg['covered'],
+                'uncovered_classes': org_agg['uncovered'],
+            } if org_agg['covered'] > 0 else None,
+        })
+    except Exception as e:
+        logger.error(f"data-security handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def classify_resource_handler(resource_id: str):
+    """POST /api/resources/<resource_id>/classify — admin override.
+    Body: {classification: 'PHI'|'PCI'|...}
+    """
+    payload = request.get_json(silent=True) or {}
+    classification = (payload.get('classification') or '').strip().upper()
+    from app.constants.data_classification import ALL_CLASSES
+    if classification not in ALL_CLASSES:
+        return jsonify({'error': f'Invalid classification; must be one of {ALL_CLASSES}'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        for table in ('azure_storage_accounts', 'azure_sql_databases', 'azure_cosmos_databases'):
+            cursor.execute(f"""
+                UPDATE {table}
+                   SET data_classification = %s,
+                       classification_source = 'override',
+                       classification_confidence = 'high'
+                 WHERE organization_id = %s AND resource_id = %s
+            """, (classification, _org_id(), resource_id))
+        db.conn.commit()
+        _log(db, 'data_classification_override',
+             f'Resource {resource_id} classified as {classification}',
+             {'resource_id': resource_id, 'classification': classification})
+        return jsonify({'ok': True, 'classification': classification})
+    except Exception as e:
+        logger.error(f"classify-resource failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def auto_classify_resources_handler():
+    """POST /api/resources/auto-classify — kick off auto-classifier batch.
+    Walks unclassified storage/SQL/Cosmos and classifies via name + tag patterns.
+    """
+    db = _db()
+    try:
+        from app.engines.ai.data_reachability_engine import classify_undiscovered_resources
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if not run_ids:
+            return jsonify({'classified': 0, 'reason': 'no runs'})
+        updated = classify_undiscovered_resources(db, run_ids[0], _org_id())
+        return jsonify({'classified': updated})
+    except Exception as e:
+        logger.error(f"auto-classify failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-181 (Tier 2C): AI Lifecycle handlers
+# ============================================================
+
+def get_ai_agent_lifecycle_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/lifecycle — event history for one agent."""
+    limit = min(request.args.get('limit', 100, type=int), 500)
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, agent_identity_type FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+        engine = AILifecycleEngine(db)
+        events = engine.get_lifecycle_for_identity(row['id'], _org_id(), limit=limit)
+        return jsonify({'events': events, 'identity_id': identity_id})
+    except Exception as e:
+        logger.error(f"lifecycle handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_agent_drift_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/drift — current-vs-prev run diff."""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        run_ids = _latest_run_ids(cursor, _org_id())
+        if len(run_ids) < 1:
+            return jsonify({'drift_events': [], 'summary': {'total': 0}})
+        current_run = run_ids[0]
+        prev_run = run_ids[1] if len(run_ids) > 1 else None
+
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+        engine = AILifecycleEngine(db)
+        result = engine.get_drift_for_identity(row['id'], current_run, prev_run, _org_id())
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"drift handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_jml_snapshot_handler():
+    """GET /api/dashboard/ai-jml-snapshot — joiners/movers/leavers for AI agents."""
+    days = min(request.args.get('window_days', 7, type=int), 90)
+    db = _db()
+    try:
+        from app.engines.ai.ai_lifecycle_engine import AILifecycleEngine
+        engine = AILifecycleEngine(db)
+        result = engine.get_jml_snapshot(_org_id(), window_days=days)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"ai-jml-snapshot failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-T2.1: AI Abuse Scenarios — handlers
+# ============================================================
+
+def get_ai_agent_abuse_scenarios_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/abuse-scenarios
+
+    Returns the 5 abuse scenarios computed for one AI agent — what could
+    happen under prompt injection / credential theft / owner departure /
+    tool abuse / supply-chain compromise.
+
+    Architecture-derived; no telemetry required.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs yet'}), 404
+
+        # AG-FIX(2026-06-05): prefer agent_classifications, fallback to identities col.
+        cursor.execute("""
+            SELECT i.id,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, org_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent', 'possible_ai_agent', 'ai_privileged_human'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.ai.abuse_scenarios import compute_abuse_scenarios
+        result = compute_abuse_scenarios(db, row['id'], org_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"abuse_scenarios handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_abuse_scenarios_rollup_handler():
+    """GET /api/ai-security/abuse-scenarios/rollup
+
+    Org-wide rollup: for each scenario, returns the worst-affected agents
+    + severity counts. Feeds the AI Risk page hero panel.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai.abuse_scenarios import compute_abuse_scenarios_org_rollup
+        result = compute_abuse_scenarios_org_rollup(db, org_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"abuse_scenarios rollup handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-T2.2: AI Model Registry — approval workflow
+# ============================================================
+
+def get_ai_model_registry_handler():
+    """GET /api/ai-security/model-registry — list all discovered models
+    + their approval state.
+
+    Response: {models: [...], summary: {...}, computed_at}
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'models': [], 'summary': {}})
+        from app.engines.ai import model_registry as mr
+        models = mr.list_registry(db, org_id)
+        summary = mr.get_summary(models)
+        from datetime import datetime, timezone
+        return jsonify({
+            'models': models,
+            'summary': summary,
+            'computed_at': datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"model_registry list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_model_registry_submit_handler():
+    """POST /api/ai-security/model-registry/submit — request review for a model.
+
+    Body: {model_name, model_format?, model_version?, justification?}
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    model_name = (data.get('model_name') or '').strip()
+    if not model_name:
+        return jsonify({'error': 'model_name is required'}), 400
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+
+    db = _db()
+    try:
+        from app.engines.ai import model_registry as mr
+        out = mr.submit_for_review(
+            db, org_id,
+            model_name,
+            data.get('model_format'),
+            data.get('model_version'),
+            requested_by=user.get('username') or user.get('email') or 'unknown',
+            justification=(data.get('justification') or '').strip() or None,
+        )
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"model_registry submit failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_model_registry_decide_handler():
+    """POST /api/ai-security/model-registry/decide — approve or reject.
+
+    Body: {model_name, model_format?, model_version?, decision:'approved'|'rejected',
+           review_notes?, expires_at?:ISO8601}
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Only admins/security_admins can approve models'}), 403
+    data = request.get_json(silent=True) or {}
+    model_name = (data.get('model_name') or '').strip()
+    decision   = (data.get('decision') or '').strip()
+    if not model_name or decision not in ('approved', 'rejected'):
+        return jsonify({'error': "model_name + decision in ('approved','rejected') required"}), 400
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+
+    db = _db()
+    try:
+        from app.engines.ai import model_registry as mr
+        out = mr.decide_review(
+            db, org_id,
+            model_name,
+            data.get('model_format'),
+            data.get('model_version'),
+            decision,
+            reviewed_by=user.get('username') or user.get('email') or 'unknown',
+            review_notes=(data.get('review_notes') or '').strip() or None,
+            expires_at=data.get('expires_at'),
+        )
+        if not out:
+            return jsonify({'error': 'Model not found in approvals table — submit for review first'}), 404
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"model_registry decide failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-T3.1: Multi-hop XGRAPH — Agent A → Agent B → Resource
+# ============================================================
+
+def get_multihop_reachability_handler():
+    """GET /api/argus/multi-hop-reachability
+
+    Query params:
+      source       — identity_id of source AI agent (optional; default: all agents)
+      classification — filter chains by terminal classification (PHI|PCI|PII|...)
+      max_depth    — BFS depth cap (default 4, max 6)
+      max_chains   — pagination cap on returned chains (default 200)
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'chains': [], 'chain_count': 0,
+                            'by_severity': {'critical':0,'high':0,'medium':0,'low':0}})
+        try:
+            max_depth = min(int(request.args.get('max_depth', 4)), 6)
+        except (TypeError, ValueError):
+            max_depth = 4
+        try:
+            max_chains = min(int(request.args.get('max_chains', 200)), 500)
+        except (TypeError, ValueError):
+            max_chains = 200
+        from app.engines.ai.multihop_xgraph import trace_multihop
+        result = trace_multihop(
+            db, org_id,
+            source_identity_id=request.args.get('source') or None,
+            max_depth=max_depth,
+            classification_filter=request.args.get('classification') or None,
+            max_chains=max_chains,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"multihop reachability failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-T4: Threat-source partner connectors
+# ============================================================
+
+def post_threat_signal_ingest_handler():
+    """POST /api/ai-security/threat-signals?vendor=<vendor>
+
+    Body: vendor-specific payload (dispatched to the right adapter).
+
+    Hardening (PROD-AUDIT F-001):
+      - Role gated: only admin/security_admin can ingest (prevents low-priv
+        users from tainting the Findings catalog).
+      - Payload size capped at 256 KB to bound attacker DoS.
+      - Per-org-per-minute rate limit so a compromised credential can't
+        spam thousands of signals.
+    """
+    # Role gate
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Insufficient permissions to ingest threat signals'}), 403
+
+    # Payload size cap (request.content_length is best-effort; raw read is the backstop)
+    if (request.content_length or 0) > 262_144:
+        return jsonify({'error': 'Payload too large (max 256 KB)'}), 413
+
+    # Rate limit: per (org, vendor) per minute
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+    vendor = request.args.get('vendor', '').strip()
+    if not vendor:
+        return jsonify({'error': 'vendor query param required'}), 400
+
+    try:
+        from app.security.sso_security import check_sso_rate_limit  # reuses the existing in-memory rate-limiter
+        rate_key = f"threat_signal_ingest:{org_id}:{vendor}"
+        if not check_sso_rate_limit(rate_key, max_attempts=120, window_sec=60):
+            return jsonify({'error': 'Rate limit exceeded (120 signals/min per vendor)'}), 429
+    except Exception:
+        # Rate-limit module missing — fail open in dev but log
+        logger.warning("rate-limit module unavailable; ingesting without throttle")
+
+    db = _db()
+    try:
+        payload = request.get_json(silent=True) or {}
+        from app.engines.ai.threat_connectors import (
+            ingest_signals, SUPPORTED_VENDORS, verify_webhook_signature
+        )
+        if vendor not in SUPPORTED_VENDORS:
+            return jsonify({'error': f'Unknown vendor. Supported: {list(SUPPORTED_VENDORS)}'}), 400
+
+        # AG-PROD-H2 (2026-06-05): HMAC signature verification when the
+        # connector has a webhook_secret configured. Soft-passes if no
+        # secret is set (lets customers receive signals while bootstrapping).
+        provided_sig = request.headers.get('X-AG-Signature')
+        body_bytes = request.get_data() or b''
+        sig_ok, sig_reason = verify_webhook_signature(
+            db, org_id, vendor, body_bytes, provided_sig)
+        if not sig_ok:
+            logger.warning("webhook signature rejected vendor=%s reason=%s",
+                            vendor, sig_reason)
+            return jsonify({'error': f'Webhook signature failed: {sig_reason}'}), 401
+
+        result = ingest_signals(db, org_id, vendor, payload)
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"threat signal ingest failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_threat_signals_handler():
+    """GET /api/ai-security/threat-signals — list signals with filters."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'signals': [], 'total': 0})
+        from app.engines.ai.threat_connectors import list_signals
+        items = list_signals(
+            db, org_id,
+            identity_id=request.args.get('identity_id'),
+            vendor=request.args.get('vendor'),
+            severity=request.args.get('severity'),
+            limit=min(int(request.args.get('limit', 200)), 1000),
+        )
+        by_vendor: dict = {}
+        by_type:   dict = {}
+        by_sev = {'critical':0,'high':0,'medium':0,'low':0,'info':0}
+        for s in items:
+            by_vendor[s['vendor']] = by_vendor.get(s['vendor'], 0) + 1
+            by_type[s['signal_type']] = by_type.get(s['signal_type'], 0) + 1
+            if s['severity'] in by_sev: by_sev[s['severity']] += 1
+        return jsonify({'signals': items, 'total': len(items),
+                        'by_vendor': by_vendor, 'by_signal_type': by_type,
+                        'by_severity': by_sev})
+    except Exception as e:
+        logger.error(f"threat signals list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_threat_connectors_handler():
+    """GET /api/ai-security/threat-connectors — connector health page."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'connectors': [], 'supported': []})
+        from app.engines.ai.threat_connectors import get_connector_health, SUPPORTED_VENDORS
+        return jsonify({
+            'connectors': get_connector_health(db, org_id),
+            'supported':  list(SUPPORTED_VENDORS),
+        })
+    except Exception as e:
+        logger.error(f"threat connectors list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_threat_connector_upsert_handler():
+    """POST /api/ai-security/threat-connectors — register or update a connector."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    vendor = (data.get('vendor') or '').strip()
+    display_name = (data.get('display_name') or '').strip() or vendor
+    if not vendor:
+        return jsonify({'error': 'vendor required'}), 400
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai.threat_connectors import upsert_connector, SUPPORTED_VENDORS
+        if vendor not in SUPPORTED_VENDORS:
+            return jsonify({'error': f'Unknown vendor. Supported: {list(SUPPORTED_VENDORS)}'}), 400
+        out = upsert_connector(db, org_id, vendor, display_name,
+                                is_enabled=bool(data.get('is_enabled', True)),
+                                config=data.get('config'),
+                                webhook_secret=data.get('webhook_secret'))
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"threat connector upsert failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_agent_supply_chain_handler(identity_id: str):
+    """GET /api/ai-security/supply-chain/<identity_id>
+
+    Returns the supply chain dependency tree (model + plugin + vector_db
+    + external_api + tool) rooted at one AI agent + aggregate risk.
+    """
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            return jsonify({'error': 'No discovery runs'}), 404
+        cursor.execute("""
+            -- AG-FIX(2026-06-05): prefer agent_classifications, fallback to identities col.
+            SELECT i.id,
+                   COALESCE(ac.agent_identity_type, i.agent_identity_type) AS agent_identity_type
+            FROM identities i
+            LEFT JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.identity_id = %s AND i.organization_id = %s
+              AND i.discovery_run_id = ANY(%s)
+            ORDER BY i.discovery_run_id DESC LIMIT 1
+        """, (identity_id, org_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+        if row['agent_identity_type'] not in ('ai_agent','possible_ai_agent','ai_privileged_human'):
+            return jsonify({'error': 'Not an AI agent'}), 400
+
+        from app.engines.ai.supply_chain import get_agent_supply_chain
+        return jsonify(get_agent_supply_chain(db, org_id, row['id']))
+    except Exception as e:
+        logger.error(f"agent supply chain failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_org_supply_chain_rollup_handler():
+    """GET /api/ai-security/supply-chain — org-wide rollup."""
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'agents': [], 'agent_count': 0, 'by_kind': []})
+        from app.engines.ai.supply_chain import get_org_supply_chain_rollup
+        return jsonify(get_org_supply_chain_rollup(db, org_id))
+    except Exception as e:
+        logger.error(f"org supply chain rollup failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_invocation_graph_handler():
+    """GET /api/ai-security/invocation-graph
+
+    Returns nodes + edges for the agent-invocation visualization.
+    No traversal — just the raw graph.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'nodes': [], 'edges': []})
+        from app.engines.ai.multihop_xgraph import invocation_graph
+        return jsonify(invocation_graph(db, org_id))
+    except Exception as e:
+        logger.error(f"invocation graph failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_findings_handler():
+    """GET /api/ai-security/findings — list AI findings from security_findings.
+
+    Query params: status, severity, finding_type, limit, refresh=1 to
+    recompose before returning.
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'findings': [], 'summary': {}})
+        from app.engines.ai import findings as F
+        if (request.args.get('refresh') or '').lower() in ('1', 'true', 'yes'):
+            F.compose_ai_findings(db, org_id)
+        items = F.list_ai_findings(
+            db, org_id,
+            status=request.args.get('status'),
+            severity=request.args.get('severity'),
+            finding_type=request.args.get('finding_type'),
+            limit=min(int(request.args.get('limit', 200)), 1000),
+        )
+        # Summary counts
+        sev = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        by_type: dict = {}
+        by_status: dict = {}
+        for f in items:
+            s = f.get('severity')
+            if s in sev: sev[s] += 1
+            t = f.get('finding_type')
+            by_type[t] = by_type.get(t, 0) + 1
+            st = f.get('status') or 'open'
+            by_status[st] = by_status.get(st, 0) + 1
+        return jsonify({
+            'findings': items,
+            'summary': {
+                'total': len(items),
+                'by_severity': sev,
+                'by_type': by_type,
+                'by_status': by_status,
+            },
+        })
+    except Exception as e:
+        logger.error(f"ai-findings list failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_findings_recompose_handler():
+    """POST /api/ai-security/findings/recompose — re-run detectors + upsert."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai import findings as F
+        result = F.compose_ai_findings(db, org_id)
+        # Strip raw findings array for the recompose response — caller can
+        # re-GET to see them. Returns counts only.
+        result.pop('findings', None)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"ai-findings recompose failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def patch_ai_finding_status_handler(finding_id: str):
+    """PATCH /api/ai-security/findings/<finding_id>/status
+
+    Body: {"status": "acknowledged"|"suppressed"|"resolved"|"open"}
+    """
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin', 'auditor'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get('status') or '').strip()
+    if new_status not in ('open', 'acknowledged', 'suppressed', 'resolved'):
+        return jsonify({'error': "status must be one of: open|acknowledged|suppressed|resolved"}), 400
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'Org context required'}), 400
+        from app.engines.ai import findings as F
+        ok = F.update_ai_finding_status(
+            db, org_id, finding_id, new_status,
+            changed_by=user.get('username') or user.get('email') or 'unknown',
+        )
+        if not ok:
+            return jsonify({'error': 'Finding not found'}), 404
+        return jsonify({'status': new_status})
+    except Exception as e:
+        logger.error(f"ai-finding status failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def post_ai_model_registry_revoke_handler():
+    """POST /api/ai-security/model-registry/revoke — revoke approval."""
+    user = getattr(g, 'current_user', None) or {}
+    if user.get('role') not in ('admin', 'security_admin'):
+        return jsonify({'error': 'Only admins/security_admins can revoke'}), 403
+    data = request.get_json(silent=True) or {}
+    model_name = (data.get('model_name') or '').strip()
+    if not model_name:
+        return jsonify({'error': 'model_name is required'}), 400
+    org_id = _org_id()
+    if org_id is None or org_id == -1:
+        return jsonify({'error': 'Org context required'}), 400
+
+    db = _db()
+    try:
+        from app.engines.ai import model_registry as mr
+        out = mr.revoke(
+            db, org_id,
+            model_name,
+            data.get('model_format'),
+            data.get('model_version'),
+            reviewed_by=user.get('username') or user.get('email') or 'unknown',
+            notes=(data.get('notes') or '').strip() or None,
+        )
+        if not out:
+            return jsonify({'error': 'Model approval not found'}), 404
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"model_registry revoke failed: {e}", exc_info=True)
+        try: db._rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-182 (Tier 3A): Activity Timeline + Behavior Baseline handlers
+# ============================================================
+
+def get_ai_agent_activity_timeline_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/activity-timeline?hours=24"""
+    hours = min(request.args.get('hours', 24, type=int), 720)
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+        engine = AgentBehaviorEngine(db)
+        events = engine.get_timeline_for_identity(row['id'], _org_id(), hours=hours)
+        return jsonify({'events': events, 'identity_id': identity_id, 'hours': hours})
+    except Exception as e:
+        logger.error(f"activity-timeline failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_agent_baseline_handler(identity_id: str):
+    """GET /api/ai-agents/<identity_id>/baseline"""
+    db = _db()
+    try:
+        from psycopg2.extras import RealDictCursor
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id FROM identities
+            WHERE identity_id = %s AND organization_id = %s
+            ORDER BY discovery_run_id DESC LIMIT 1
+        """, (identity_id, _org_id()))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Identity not found'}), 404
+
+        from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+        engine = AgentBehaviorEngine(db)
+        baseline = engine.get_baseline_for_identity(row['id'], _org_id())
+        if not baseline:
+            return jsonify({'baseline': None, 'still_learning': True, 'identity_id': identity_id})
+        return jsonify({'baseline': baseline, 'still_learning': not baseline.get('is_active', False), 'identity_id': identity_id})
+    except Exception as e:
+        logger.error(f"baseline failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+def get_ai_agent_anomalies_handler():
+    """GET /api/ai-agents/activity/anomalies?limit=20"""
+    limit = min(request.args.get('limit', 20, type=int), 100)
+    db = _db()
+    try:
+        from app.engines.ai.agent_behavior_engine import AgentBehaviorEngine
+        engine = AgentBehaviorEngine(db)
+        anomalies = engine.get_recent_anomalies(_org_id(), limit=limit)
+        return jsonify({'anomalies': anomalies, 'total': len(anomalies)})
+    except Exception as e:
+        logger.error(f"agent anomalies failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AI Governance pillar — policy compliance
+# ============================================================
+
+def get_ai_governance():
+    """GET /api/ai-security/governance — evaluate every AI agent against the
+    governance policy catalog and return compliance posture.
+
+    Architecture-only: reuses the same signals the risk score is built from,
+    so each policy is a cheap pass/fail check. No telemetry, no extra Azure calls.
+
+    Returns:
+      summary  — overall_compliance_pct, total_agents, agents_in_violation, total_violations
+      policies — per-policy compliance: violating_count, compliant_count, compliance_pct,
+                 severity, framework, top_violators[]
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import aggregate_access_levels, detect_signals
+    from app.constants.ai_governance import (
+        AI_GOVERNANCE_POLICIES, POLICY_ORDER, policy_list, severity_rank,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+
+        # Fetch active exceptions ONCE so per-agent eval is just a dict lookup.
+        # Keyed by (identity_id, policy_id) → expires_at ISO string. Approved
+        # + not-yet-expired exceptions suppress matching violations.
+        try:
+            active_excs = db.list_active_ai_governance_exceptions(_org_id())
+        except Exception:
+            active_excs = []
+        active_map = {
+            (e['identity_id'], e['policy_id']): e.get('expires_at')
+            for e in active_excs
+        }
+        exception_approver = {
+            (e['identity_id'], e['policy_id']): e.get('approved_by_name')
+            for e in active_excs
+        }
+
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id)
+                i.id, i.identity_id, i.display_name, ac.detected_platform,
+                i.owner_display_name, i.credential_risk,
+                i.last_sign_in, i.last_activity_date,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agent_rows = cursor.fetchall()
+        agent_db_ids = [r[0] for r in agent_rows]
+
+        # Per-policy accumulators — split violating vs exception so the UI can
+        # show "X violating + Y under exception" inline.
+        per_policy = {
+            pid: {'violating': [], 'exception': []}
+            for pid in POLICY_ORDER
+        }
+        agents_in_violation = set()
+        total_violations = 0
+        exceptions_active = 0
+
+        if agent_db_ids:
+            cursor.execute("""
+                SELECT ra.identity_db_id, ra.role_name, ra.scope
+                FROM role_assignments ra WHERE ra.identity_db_id = ANY(%s)
+            """, (agent_db_ids,))
+            roles_by_agent = {}
+            for db_id, rn, sc in cursor.fetchall():
+                roles_by_agent.setdefault(db_id, []).append({'role_name': rn or '', 'scope': sc or ''})
+
+            for row in agent_rows:
+                (db_id, identity_id, display_name, platform, owner_name, cred_risk,
+                 last_sign_in, last_activity, sp_sign_in) = row
+                agent_roles = roles_by_agent.get(db_id, [])
+                access = aggregate_access_levels(agent_roles)
+                meta = {
+                    'display_name': display_name, 'detected_platform': platform,
+                    'owner_display_name': owner_name, 'credential_risk': cred_risk,
+                    'last_sign_in': last_sign_in, 'last_activity_date': last_activity,
+                    'last_service_principal_sign_in': sp_sign_in,
+                }
+                fired = {s['key'] for s in detect_signals(meta, agent_roles, access)}
+                agent_violated = False
+                for pid in POLICY_ORDER:
+                    if AI_GOVERNANCE_POLICIES[pid]['signal_key'] in fired:
+                        exc_key = (identity_id, pid)
+                        violator_entry = {
+                            'identity_id': identity_id,
+                            'display_name': display_name or identity_id,
+                        }
+                        if exc_key in active_map:
+                            # Approved exception in force — record under exception bucket
+                            violator_entry['exception_expires_at'] = active_map[exc_key]
+                            violator_entry['approved_by_name'] = exception_approver.get(exc_key)
+                            per_policy[pid]['exception'].append(violator_entry)
+                            exceptions_active += 1
+                        else:
+                            per_policy[pid]['violating'].append(violator_entry)
+                            total_violations += 1
+                            agent_violated = True
+                if agent_violated:
+                    agents_in_violation.add(identity_id)
+
+        cursor.close()
+        total_agents = len(agent_rows)
+
+        policies_out = []
+        for pid in POLICY_ORDER:
+            pol = AI_GOVERNANCE_POLICIES[pid]
+            violators = per_policy[pid]['violating']
+            exception_agents = per_policy[pid]['exception']
+            v_count = len(violators)
+            exc_count = len(exception_agents)
+            # Compliance counts an exception-protected agent as compliant for
+            # this policy — it's been formally risk-accepted.
+            compliant = max(0, total_agents - v_count)
+            compliance_pct = round((compliant / total_agents) * 100, 1) if total_agents else 100.0
+            policies_out.append({
+                'policy_id':       pid,
+                'name':            pol['name'],
+                'severity':        pol['severity'],
+                'framework':       pol['framework'],
+                'rationale':       pol['rationale'],
+                'remediation':     pol['remediation'],
+                'violating_count': v_count,
+                'exception_count': exc_count,
+                'compliant_count': compliant,
+                'compliance_pct':  compliance_pct,
+                'top_violators':   sorted(violators, key=lambda x: x['display_name'])[:10],
+                'exception_agents': sorted(exception_agents, key=lambda x: x['display_name'])[:10],
+            })
+        # Sort: most-violated + highest severity first
+        policies_out.sort(key=lambda p: (-p['violating_count'], -severity_rank(p['severity'])))
+
+        # Overall compliance = mean of per-policy compliance (every policy weighted equally)
+        overall = round(sum(p['compliance_pct'] for p in policies_out) / len(policies_out), 1) if policies_out else 100.0
+
+        return jsonify({
+            'summary': {
+                'total_agents':            total_agents,
+                'agents_in_violation':     len(agents_in_violation),
+                'total_violations':        total_violations,
+                'exceptions_active':       exceptions_active,
+                'policy_count':            len(POLICY_ORDER),
+                'overall_compliance_pct':  overall,
+            },
+            'policies': policies_out,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_governance failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AI Governance exception workflow — risk-accepted policy waivers
+# ============================================================
+
+# Valid policy IDs accepted on the create endpoint. Cross-checked against the
+# in-process catalog at request time so the catalog stays the single source of truth.
+_AI_EXCEPTION_MAX_EXPIRES_DAYS = 365
+_AI_EXCEPTION_DEFAULT_EXPIRES_DAYS = 90
+
+
+def list_ai_governance_exceptions_handler():
+    """GET /api/ai-security/governance/exceptions — list exceptions for the org.
+
+    Optional query params: status, policy_id, identity_id.
+    Available to any authed user; admin gates are enforced on write endpoints.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    db = _db()
+    try:
+        status = (request.args.get('status') or '').strip() or None
+        policy_id = (request.args.get('policy_id') or '').strip() or None
+        identity_id = (request.args.get('identity_id') or '').strip() or None
+        rows = db.list_ai_governance_exceptions(
+            _org_id(), status=status, policy_id=policy_id, identity_id=identity_id,
+        )
+        return jsonify({'exceptions': rows, 'total': len(rows)})
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("list_ai_governance_exceptions_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def create_ai_governance_exception_handler():
+    """POST /api/ai-security/governance/exceptions — request a new exception.
+
+    Body: identity_id (str), policy_id (str), justification (str ≥20 chars),
+          business_owner (str), expires_in_days (int 1-365, default 90).
+    Status starts as 'pending' — needs admin approval to take effect.
+    Resolves identity_db_id from identity_id + latest run.
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    from app.constants.ai_governance import AI_GOVERNANCE_POLICIES
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    body = request.get_json(silent=True) or {}
+    identity_id = (body.get('identity_id') or '').strip()
+    policy_id = (body.get('policy_id') or '').strip()
+    justification = (body.get('justification') or '').strip()
+    business_owner = (body.get('business_owner') or '').strip()
+    try:
+        expires_in_days = int(body.get('expires_in_days', _AI_EXCEPTION_DEFAULT_EXPIRES_DAYS))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'expires_in_days must be an integer'}), 400
+
+    # Validate inputs cheaply before any DB work
+    if not identity_id:
+        return jsonify({'error': 'identity_id required'}), 400
+    if not policy_id or policy_id not in AI_GOVERNANCE_POLICIES:
+        return jsonify({'error': 'invalid policy_id'}), 400
+    if len(justification) < 20:
+        return jsonify({'error': 'justification must be at least 20 characters'}), 400
+    if not business_owner:
+        return jsonify({'error': 'business_owner required'}), 400
+    if expires_in_days < 1 or expires_in_days > _AI_EXCEPTION_MAX_EXPIRES_DAYS:
+        return jsonify({'error': f'expires_in_days must be between 1 and {_AI_EXCEPTION_MAX_EXPIRES_DAYS}'}), 400
+
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'error': 'organization context required'}), 400
+
+        # Resolve identity_db_id from the latest discovery run so the FK
+        # references a current row, not a deleted one. Idempotent — if the
+        # agent has been re-discovered, we pick its newest row.
+        cursor = db.conn.cursor()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({'error': 'no discovery data — run a scan first'}), 400
+        cursor.execute("""
+            SELECT id FROM identities
+             WHERE identity_id = %s
+               AND discovery_run_id = ANY(%s)
+             ORDER BY discovery_run_id DESC
+             LIMIT 1
+        """, (identity_id, run_ids))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return jsonify({'error': 'identity not found'}), 404
+        identity_db_id = row[0] if isinstance(row, (tuple, list)) else row.get('id')
+
+        # Compute expires_at using Postgres NOW() so the timestamp matches the
+        # comparison done at expiry sweep time.
+        from datetime import datetime, timedelta, timezone
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+
+        created = db.create_ai_governance_exception(
+            org_id,
+            identity_db_id=identity_db_id,
+            identity_id=identity_id,
+            policy_id=policy_id,
+            justification=justification,
+            business_owner=business_owner,
+            requested_by=_current_user_id(),
+            expires_at=expires_at,
+        )
+        if not created:
+            return jsonify({'error': 'failed to create exception'}), 500
+
+        _log(db, 'ai_governance_exception_requested',
+             f"Exception requested for {identity_id} · policy {policy_id}",
+             metadata={
+                 'exception_id': created.get('id'),
+                 'identity_id': identity_id,
+                 'policy_id': policy_id,
+                 'expires_in_days': expires_in_days,
+             })
+        return jsonify(created), 201
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("create_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def approve_ai_governance_exception_handler(exc_id):
+    """POST /api/ai-security/governance/exceptions/<exc_id>/approve — admin approval."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    db = _db()
+    try:
+        org_id = _org_id()
+        updated = db.approve_ai_governance_exception(
+            exc_id, org_id, approved_by=_current_user_id(),
+        )
+        if not updated:
+            return jsonify({'error': 'exception not found or not pending'}), 404
+        _log(db, 'ai_governance_exception_approved',
+             f"Approved exception {exc_id} for {updated.get('identity_id')} · policy {updated.get('policy_id')}",
+             metadata={'exception_id': exc_id})
+        return jsonify(updated)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("approve_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def reject_ai_governance_exception_handler(exc_id):
+    """POST /api/ai-security/governance/exceptions/<exc_id>/reject — admin denial."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    body = request.get_json(silent=True) or {}
+    reason = (body.get('reason') or '').strip()
+    if not reason:
+        return jsonify({'error': 'reason required'}), 400
+    db = _db()
+    try:
+        org_id = _org_id()
+        updated = db.reject_ai_governance_exception(
+            exc_id, org_id, rejected_by=_current_user_id(), reason=reason,
+        )
+        if not updated:
+            return jsonify({'error': 'exception not found or not pending'}), 404
+        _log(db, 'ai_governance_exception_rejected',
+             f"Rejected exception {exc_id} for {updated.get('identity_id')} · policy {updated.get('policy_id')}",
+             metadata={'exception_id': exc_id, 'reason': reason})
+        return jsonify(updated)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("reject_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def revoke_ai_governance_exception_handler(exc_id):
+    """POST /api/ai-security/governance/exceptions/<exc_id>/revoke — early revocation of approved exception."""
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+    db = _db()
+    try:
+        org_id = _org_id()
+        updated = db.revoke_ai_governance_exception(
+            exc_id, org_id, revoked_by=_current_user_id(),
+        )
+        if not updated:
+            return jsonify({'error': 'exception not found or not approved'}), 404
+        _log(db, 'ai_governance_exception_revoked',
+             f"Revoked exception {exc_id} for {updated.get('identity_id')} · policy {updated.get('policy_id')}",
+             metadata={'exception_id': exc_id})
+        return jsonify(updated)
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("revoke_ai_governance_exception_handler failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AI Runtime pillar — fleet view of where AI executes
+# ============================================================
+
+def get_ai_runtime_fleet():
+    """GET /api/ai-security/runtime — fleet-level view of the AI runtime layer:
+    platforms in use, model deployments reachable across the org, network-exposure
+    rollup, and telemetry coverage. Architecture-derived; no telemetry required
+    (telemetry coverage itself is reported as an observability metric).
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # ── Platform distribution (where AI runs) ──
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id) ac.detected_platform
+            FROM identities i JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false) AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        plat_counts = {}
+        total_agents = 0
+        for (plat,) in cursor.fetchall():
+            total_agents += 1
+            key = plat or 'unknown'
+            plat_counts[key] = plat_counts.get(key, 0) + 1
+        platforms = sorted(
+            [{'platform': k, 'agent_count': v} for k, v in plat_counts.items()],
+            key=lambda x: -x['agent_count'],
+        )
+
+        # ── Models in use (deployments discovered org-wide) ──
+        cursor.execute("""
+            SELECT model_name, COUNT(DISTINCT account_resource_id) AS accounts,
+                   COUNT(*) AS deployments, MAX(sku_capacity) AS max_capacity
+            FROM azure_ai_model_deployments
+            WHERE organization_id = %s
+            GROUP BY model_name
+            ORDER BY deployments DESC, model_name
+        """, (org_id,))
+        models = [
+            {'model_name': r[0], 'account_count': r[1], 'deployment_count': r[2], 'max_capacity': r[3]}
+            for r in cursor.fetchall()
+        ]
+        cursor.execute("""
+            SELECT COUNT(*) , COUNT(DISTINCT account_resource_id)
+            FROM azure_ai_model_deployments WHERE organization_id = %s
+        """, (org_id,))
+        _md = cursor.fetchone()
+        total_deployments, total_accounts = (_md[0] or 0), (_md[1] or 0)
+
+        # ── Network exposure rollup across AI-relevant resources ──
+        # Cognitive accounts (always discovered for AI); storage/KV when present.
+        exposure_rollup = {'public': 0, 'restricted': 0, 'private': 0, 'unknown': 0}
+        cursor.execute("""
+            SELECT public_network_access, network_acls_default_action, private_endpoint_count
+            FROM azure_cognitive_services_accounts WHERE organization_id = %s
+        """, (org_id,))
+        for pa, da, pe in cursor.fetchall():
+            pa = (pa or '').lower(); da = (da or '').lower(); pe = pe or 0
+            if pa == 'enabled' or da == 'allow':
+                exposure_rollup['public'] += 1
+            elif da == 'deny' and pe > 0:
+                exposure_rollup['private'] += 1
+            elif da == 'deny':
+                exposure_rollup['restricted'] += 1
+            elif pe > 0:
+                exposure_rollup['private'] += 1
+            else:
+                exposure_rollup['unknown'] += 1
+
+        # ── Telemetry coverage (observability metric, NOT a risk gate) ──
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE has_telem) AS with_telem,
+              COUNT(*) AS total
+            FROM (
+              SELECT DISTINCT ON (i.identity_id)
+                (i.last_sign_in IS NOT NULL OR i.last_activity_date IS NOT NULL
+                 OR ac.last_service_principal_sign_in IS NOT NULL) AS has_telem
+              FROM identities i JOIN agent_classifications ac ON ac.identity_db_id = i.id
+              WHERE ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+                AND NOT COALESCE(i.is_microsoft_system, false) AND i.deleted_at IS NULL
+              ORDER BY i.identity_id, i.discovery_run_id DESC
+            ) t
+        """)
+        _tc = cursor.fetchone()
+        telem_with, telem_total = (_tc[0] or 0), (_tc[1] or 0)
+        telemetry_coverage_pct = round((telem_with / telem_total) * 100, 1) if telem_total else 0.0
+
+        cursor.close()
+        return jsonify({
+            'summary': {
+                'total_agents':            total_agents,
+                'platform_count':          len(platforms),
+                'distinct_models':         len(models),
+                'total_deployments':       total_deployments,
+                'cognitive_accounts':      total_accounts,
+                'public_egress_resources': exposure_rollup['public'],
+                'telemetry_coverage_pct':  telemetry_coverage_pct,
+            },
+            'platforms':       platforms,
+            'models':          models,
+            'network_exposure': exposure_rollup,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_runtime_fleet failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
+# AI Risk pillar — attack scenarios
+# ============================================================
+
+def get_ai_risk_scenarios():
+    """GET /api/ai-security/risk — evaluate AI agents against the attack-scenario
+    catalog. Scenarios are signal COMBINATIONS (e.g. data access + egress =
+    exfiltration path). Architecture-derived; reuses computed signals, no telemetry.
+
+    Returns:
+      summary   — exploitable_agents, total_scenarios, by_severity
+      scenarios — per-scenario: affected_count, severity, narrative, mitre,
+                  prevented_by, top_affected[]
+    """
+    from app.config import FEATURE_AI_AGENT_GOVERNANCE
+    if not FEATURE_AI_AGENT_GOVERNANCE:
+        return jsonify({'error': 'Not found'}), 404
+
+    from app.constants.ai_risk import aggregate_access_levels, detect_signals
+    from app.constants.ai_attack_scenarios import (
+        AI_ATTACK_SCENARIOS, SCENARIO_ORDER, evaluate_scenarios, severity_rank,
+    )
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (i.identity_id)
+                i.id, i.identity_id, i.display_name, ac.detected_platform,
+                i.owner_display_name, i.credential_risk,
+                i.last_sign_in, i.last_activity_date,
+                ac.last_service_principal_sign_in
+            FROM identities i
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent', 'ai_privileged_human')
+              AND NOT COALESCE(i.is_microsoft_system, false)
+              AND i.deleted_at IS NULL
+            ORDER BY i.identity_id, i.discovery_run_id DESC
+        """)
+        agent_rows = cursor.fetchall()
+        agent_db_ids = [r[0] for r in agent_rows]
+
+        per_scenario = {sid: [] for sid in SCENARIO_ORDER}
+        exploitable_agents = set()
+        by_severity = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+
+        if agent_db_ids:
+            cursor.execute("""
+                SELECT ra.identity_db_id, ra.role_name, ra.scope
+                FROM role_assignments ra WHERE ra.identity_db_id = ANY(%s)
+            """, (agent_db_ids,))
+            roles_by_agent = {}
+            for db_id, rn, sc in cursor.fetchall():
+                roles_by_agent.setdefault(db_id, []).append({'role_name': rn or '', 'scope': sc or ''})
+
+            for row in agent_rows:
+                (db_id, identity_id, display_name, platform, owner_name, cred_risk,
+                 last_sign_in, last_activity, sp_sign_in) = row
+                agent_roles = roles_by_agent.get(db_id, [])
+                access = aggregate_access_levels(agent_roles)
+                meta = {
+                    'display_name': display_name, 'detected_platform': platform,
+                    'owner_display_name': owner_name, 'credential_risk': cred_risk,
+                    'last_sign_in': last_sign_in, 'last_activity_date': last_activity,
+                    'last_service_principal_sign_in': sp_sign_in,
+                }
+                fired = {s['key'] for s in detect_signals(meta, agent_roles, access)}
+                scenarios = evaluate_scenarios(fired)
+                if scenarios:
+                    exploitable_agents.add(identity_id)
+                for sc in scenarios:
+                    per_scenario[sc['id']].append({
+                        'identity_id': identity_id, 'display_name': display_name or identity_id,
+                    })
+
+        cursor.close()
+
+        scenarios_out = []
+        for sid in SCENARIO_ORDER:
+            sc = AI_ATTACK_SCENARIOS[sid]
+            affected = per_scenario[sid]
+            if affected:
+                by_severity[sc['severity']] = by_severity.get(sc['severity'], 0) + len(affected)
+            scenarios_out.append({
+                'scenario_id':    sid,
+                'name':           sc['name'],
+                'severity':       sc['severity'],
+                'narrative':      sc['narrative'],
+                'mitre':          sc['mitre'],
+                'prevented_by':   sc['prevented_by'],
+                'affected_count': len(affected),
+                'top_affected':   sorted(affected, key=lambda x: x['display_name'])[:10],
+            })
+        # Most-affected + highest severity first
+        scenarios_out.sort(key=lambda x: (-x['affected_count'], -severity_rank(x['severity'])))
+
+        return jsonify({
+            'summary': {
+                'total_agents':        len(agent_rows),
+                'exploitable_agents':  len(exploitable_agents),
+                'scenario_types':      sum(1 for s in scenarios_out if s['affected_count'] > 0),
+                'by_severity':         by_severity,
+            },
+            'scenarios': scenarios_out,
+        })
+    except Exception as e:
+        try: db.conn.rollback()
+        except Exception: pass
+        logger.error("get_ai_risk_scenarios failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+# ============================================================
 # Phase 2A: Entra Group Scanner
 # ============================================================
 
@@ -39853,9 +46943,21 @@ def get_start_here_summary():
 def get_p2_status():
     """P2 telemetry status for the current org's connections.
 
+    AG-117 (2026-06-02): split the single 'p2_capable' boolean into TWO
+    states so the Settings UI can tell users:
+      - License detected AND consent granted        → green (working)
+      - License detected, consent NOT granted yet   → amber (action req)
+      - License absent                              → gray (n/a)
+
     Returns:
-        p2_capable: true if any connection has_p2_license=true
-        p2_enabled: true if p2_telemetry_enabled setting is 'true'
+        p2_capable:        true if any connection has_p2_license=true
+        p2_consent_granted: true if any connection has_p2_license=true AND
+                             its last sign-in API call succeeded; false if
+                             license exists but every call returned 403;
+                             null if license absent (no consent to grant).
+        consent_url:       direct link to the Azure consent page for the
+                             primary connector — paste-able for the admin.
+        p2_enabled:        true if p2_telemetry_enabled setting is 'true'
     """
     db = _db()
     org = _org_id()
@@ -39865,16 +46967,54 @@ def get_p2_status():
     try:
         cursor = db.conn.cursor()
         cursor.execute(
-            "SELECT COALESCE(bool_or(has_p2_license), false) FROM cloud_connections WHERE organization_id = %s",
+            """
+            SELECT COALESCE(bool_or(has_p2_license), false),
+                   COALESCE(bool_or(p2_consent_granted), false),
+                   COALESCE(bool_or(has_p2_license), false) AND
+                   NOT COALESCE(bool_or(p2_consent_granted), false) AS needs_consent
+              FROM cloud_connections WHERE organization_id = %s
+            """,
             (org,)
         )
-        p2_capable = bool(cursor.fetchone()[0])
+        row = cursor.fetchone()
+        p2_capable = bool(row[0])
+        # consent_granted is only meaningful when license exists. If no
+        # license, return null (the UI uses null vs true/false to choose
+        # between "n/a" and the amber/green states).
+        if not p2_capable:
+            p2_consent_granted = None
+            consent_url = None
+        else:
+            # bool_or returns false if ALL rows are false/null. When the
+            # column doesn't exist yet (pre-migration) this defaults to
+            # false → "needs consent" UI. After the next discovery scan
+            # touches the column it'll flip to true.
+            p2_consent_granted = bool(row[1])
+            cursor.execute(
+                """
+                SELECT azure_directory_id, client_id
+                  FROM cloud_connections
+                 WHERE organization_id = %s AND has_p2_license = true
+                 ORDER BY id LIMIT 1
+                """,
+                (org,)
+            )
+            primary = cursor.fetchone()
+            if primary and primary[0] and primary[1]:
+                consent_url = (
+                    f"https://login.microsoftonline.com/{primary[0]}/adminconsent"
+                    f"?client_id={primary[1]}"
+                )
+            else:
+                consent_url = None
         cursor.close()
 
         p2_enabled = db.get_setting('p2_telemetry_enabled', 'false', organization_id=org) == 'true'
 
         return jsonify({
             'p2_capable': p2_capable,
+            'p2_consent_granted': p2_consent_granted,
+            'consent_url': consent_url,
             'p2_enabled': p2_enabled,
         })
     finally:

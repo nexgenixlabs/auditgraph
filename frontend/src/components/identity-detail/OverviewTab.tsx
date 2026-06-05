@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { riskDisplay, CVSS_TOOLTIP } from '../../utils/riskDisplay';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -21,6 +22,167 @@ import {
 } from './types';
 import { OWNER_STATUS_CONFIG, TIME_MS } from '../../constants/metrics';
 import { normalizeScore } from '../../utils/identityRiskScore';
+import StatusBadge from '../ui/StatusBadge';
+import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../../constants/activitySignals';
+import { COLORS } from '../../constants/ciso';
+
+// IPv6-aware IP formatting. The old "slice(0,20)+…" approach turned
+// 2603:80a0:2140:23d:5cab:eecc:7989:9aa2 into "2603:80a0:2140:23d:5…"
+// which looks like garbage data — the trailing hextets are the
+// distinguishing part. Show first 2 + last 2 hextets so each IP stays
+// uniquely recognizable at a glance.
+function formatIpDisplay(ip: string): string {
+  if (!ip) return '—';
+  if (ip.includes(':') && ip.length > 24) {
+    const parts = ip.split(':').filter(Boolean);
+    if (parts.length >= 4) {
+      return `${parts.slice(0, 2).join(':')}…${parts.slice(-2).join(':')}`;
+    }
+  }
+  return ip;
+}
+
+// Feature D (humans variant). AuditGraph's "no P2 telemetry required" angle
+// applies here: directory_audit_log already carries the initiator's IP for
+// any admin operation, so we get a real "last seen from" signal on free/P1
+// tenants. When P2 is enabled the same envelope carries the aggregated
+// bucket arrays (ips / locations / etc) — both render in this panel.
+function SourceIpIntelBanner({
+  intel,
+}: {
+  intel?: NonNullable<IdentityDetailsResponse['identity']['signin_intelligence']>;
+}) {
+  if (!intel) return null;
+  const hasLast = !!intel.last_observed_ip;
+  const ips = (intel.ips || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  const locations = (intel.locations || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0));
+  if (!hasLast && ips.length === 0 && locations.length === 0) return null;
+
+  const sourceLabel: Record<string, string> = {
+    directory_audit_log: 'directory audit log',
+    arm_activity_log: 'ARM Activity Log',
+  };
+  const src = intel.last_observed_ip_source || '';
+  const srcLabel = sourceLabel[src] || src;
+
+  return (
+    <div
+      className="rounded-xl p-4 mb-2"
+      style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}` }}
+    >
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <svg className="w-4 h-4" fill="none" stroke={COLORS.purple} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <span className="text-sm font-semibold" style={{ color: COLORS.text }}>
+            Source IP Intelligence
+          </span>
+          <span className="text-[10px]" style={{ color: COLORS.textMuted }}>
+            behavior-evidence · no P2 required
+          </span>
+        </div>
+        {typeof intel.total_events_30d === 'number' && intel.total_events_30d > 0 && (
+          <span className="text-[11px]" style={{ color: COLORS.textSecondary }}>
+            {intel.total_events_30d.toLocaleString()} events / 30d
+          </span>
+        )}
+      </div>
+
+      {hasLast && (
+        <div className="flex items-center gap-2 flex-wrap text-xs mb-2">
+          <span style={{ color: COLORS.textSecondary }}>Last observed from</span>
+          <span
+            className="font-mono font-medium"
+            style={{ color: COLORS.text }}
+            title={intel.last_observed_ip || ''}
+          >
+            {formatIpDisplay(intel.last_observed_ip || '')}
+          </span>
+          {srcLabel && (
+            <span
+              className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide"
+              style={{ background: 'rgba(139,92,246,0.12)', color: COLORS.purple, border: `1px solid ${COLORS.purple}33` }}
+            >
+              {srcLabel}
+            </span>
+          )}
+          {intel.last_observed_ip_date && (
+            <span style={{ color: COLORS.textMuted }}>
+              · {new Date(intel.last_observed_ip_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+            </span>
+          )}
+          {intel.last_observed_operation && (
+            <span style={{ color: COLORS.textMuted }}>
+              · {intel.last_observed_operation}
+            </span>
+          )}
+        </div>
+      )}
+
+      {(ips.length > 0 || locations.length > 0) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 pt-2"
+             style={{ borderTop: `1px solid ${COLORS.border}` }}>
+          {ips.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: COLORS.textMuted }}>
+                Top IPs ({ips.length})
+              </div>
+              <div className="space-y-0.5">
+                {ips.slice(0, 4).map((ip, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span
+                      className="font-mono"
+                      style={{ color: COLORS.text }}
+                      title={ip.ip}
+                    >
+                      {formatIpDisplay(ip.ip)}
+                    </span>
+                    <span className="tabular-nums" style={{ color: COLORS.textSecondary }}>
+                      {(ip.count || 0).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+                {ips.length > 4 && (
+                  <div className="text-[10px]" style={{ color: COLORS.textMuted }}>+{ips.length - 4} more</div>
+                )}
+              </div>
+            </div>
+          )}
+          {locations.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: COLORS.textMuted }}>
+                Locations ({locations.length})
+              </div>
+              <div className="space-y-0.5">
+                {locations.slice(0, 4).map((loc, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate" style={{ color: COLORS.text }}>
+                      {[loc.city, loc.country].filter(Boolean).join(', ') || '—'}
+                    </span>
+                    <span className="tabular-nums" style={{ color: COLORS.textSecondary }}>
+                      {(loc.count || 0).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+                {locations.length > 4 && (
+                  <div className="text-[10px]" style={{ color: COLORS.textMuted }}>+{locations.length - 4} more</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!hasLast && ips.length === 0 && locations.length === 0 && (
+        <div className="text-[11px]" style={{ color: COLORS.textMuted }}>
+          No sign-in or audit-log evidence captured yet — runs on next discovery cycle.
+        </div>
+      )}
+    </div>
+  );
+}
 
 export interface CorrelatedAccount {
   id: number;
@@ -500,8 +662,21 @@ export default function OverviewTab({
   pimData,
   onTabChange,
 }: OverviewTabProps) {
+  // Progressive disclosure — the always-visible above-the-fold view is
+  // the top triage signal: warnings, security posture (4-quadrant), and the
+  // hero stats grid. Everything else (activity sources, sign-in history,
+  // risk trajectory chart, effective scope, contextual panels, risk reasons)
+  // is collapsed by default and reachable in one click. Avoids the
+  // 10-section scrolling wall the founder flagged on 2026-05-30.
+  const [showAllSections, setShowAllSections] = useState(false);
   return (
     <div className="space-y-6">
+      {/* Feature D — Source IP Intelligence (banner; renders only when
+          last_observed_ip OR aggregated buckets have data). Sits near the
+          top so the "where is this identity authenticating from" answer is
+          immediate, not buried below ten sections. */}
+      <SourceIpIntelBanner intel={identity.signin_intelligence} />
+
       {/* Correlated Accounts / Zombie Warning */}
       {correlatedAccounts && correlatedAccounts.accounts.length > 1 && (
         <div>
@@ -550,14 +725,9 @@ export default function OverviewTab({
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">Zombie</span>
                   )}
                   {acct.risk_level && (
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                      acct.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
-                      acct.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                      acct.risk_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                      'bg-green-100 text-green-700'
-                    }`}>
+                    <StatusBadge variant={acct.risk_level as 'critical' | 'high' | 'medium' | 'low'} size="xs" pill>
                       {acct.risk_level}
-                    </span>
+                    </StatusBadge>
                   )}
                 </div>
               ))}
@@ -803,6 +973,68 @@ export default function OverviewTab({
         </div>
       </div>
 
+      {/* Hero stats — always visible. Lifted from the bottom of the tab so
+          the most-scanned metrics aren't hidden behind a "show more" click.
+          Mirrors the original 4-card grid (Roles / API Perms / Credentials /
+          Owners) — clicking each routes to the matching tab. */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <button onClick={() => onTabChange('roles')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{(data?.roles || []).length}</div>
+          <div className="text-xs text-gray-500 mt-1">Total Roles</div>
+        </button>
+        <button onClick={() => onTabChange('permissions')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{(data?.graph_permissions || []).length}</div>
+          <div className="text-xs text-gray-500 mt-1">API Permissions</div>
+        </button>
+        <button onClick={() => onTabChange('credentials')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{identity.credential_count ?? 0}</div>
+          <div className="text-xs text-gray-500 mt-1">Credentials</div>
+        </button>
+        <button onClick={() => onTabChange('ownership')} className="bg-gray-50 rounded-xl p-4 text-center hover:bg-gray-100 transition">
+          <div className="text-2xl font-bold text-gray-900">{(data?.owners || []).length}</div>
+          <div className="text-xs text-gray-500 mt-1">Owners</div>
+        </button>
+      </div>
+
+      {/* Risk reasons — top 3 always visible. Full list inside expanded view. */}
+      {identity.risk_reasons && identity.risk_reasons.length > 0 && (
+        <div>
+          <div className="text-sm font-semibold text-gray-900 mb-2">Risk Reasons</div>
+          <ul className="space-y-2">
+            {identity.risk_reasons.slice(0, 3).map((r, idx) => (
+              <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
+                <span className="text-red-500 mt-0.5 flex-shrink-0">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </span>
+                {r}
+              </li>
+            ))}
+          </ul>
+          {identity.risk_reasons.length > 3 && !showAllSections && (
+            <button
+              onClick={() => setShowAllSections(true)}
+              className="text-xs font-medium text-blue-600 hover:text-blue-700 mt-2"
+            >
+              + {identity.risk_reasons.length - 3} more reasons & full activity / scope / context →
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Progressive disclosure toggle */}
+      <div className="flex justify-center">
+        <button
+          onClick={() => setShowAllSections(v => !v)}
+          className="text-xs font-medium text-blue-600 hover:text-blue-700 px-3 py-1.5 rounded-md hover:bg-blue-50 transition"
+        >
+          {showAllSections ? '↑ Hide detailed sections' : '↓ Show all activity, scope & context details'}
+        </button>
+      </div>
+
+      {/* ──── Detailed sections (collapsed by default) ──── */}
+      {showAllSections && (<>
       {/* Rule 4: Activity Source panel — shows data source hierarchy */}
       {!!(identity as any).activity_sources && (
         <div className="border border-gray-200 rounded-xl p-4">
@@ -967,17 +1199,41 @@ export default function OverviewTab({
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-left text-gray-400 text-[10px] uppercase tracking-wider">
+                      <th className="pb-1.5 pr-3">Caller</th>
                       <th className="pb-1.5 pr-3">Source IP</th>
-                      <th className="pb-1.5 pr-3">Target Service</th>
-                      <th className="pb-1.5">Timestamp</th>
+                      <th className="pb-1.5 pr-3">Target</th>
+                      <th className="pb-1.5">When</th>
                     </tr>
                   </thead>
                   <tbody>
                     {connections.map((c, i) => {
                       const ts = c.event_timestamp ? formatRelativeTime(c.event_timestamp) : null;
+                      // Feature D (2026-05-30): classify IP into known origin
+                      // (GitHub Actions / Azure DevOps / Terraform Cloud / etc)
+                      // so auditors can see what KIND of caller this was,
+                      // not just an opaque IP string.
+                      const origin = c.caller_ip_address
+                        ? classifyIpOrigin(c.caller_ip_address)
+                        : null;
                       return (
                         <tr key={i} className="border-t border-gray-100">
-                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px]">{c.caller_ip_address || '\u2014'}</td>
+                          <td className="py-1.5 pr-3">
+                            {origin && origin.kind !== 'unknown' ? (
+                              <span
+                                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border ${IP_ORIGIN_COLORS[origin.kind]}`}
+                                title={origin.tooltip}
+                              >
+                                {origin.label}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-gray-400" title={origin?.tooltip}>
+                                {origin?.label || '\u2014'}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px] whitespace-nowrap" title={c.caller_ip_address || ''}>
+                            {formatIpDisplay(c.caller_ip_address || '')}
+                          </td>
                           <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.resource_name || c.operation_short}</td>
                           <td className="py-1.5 text-gray-600 whitespace-nowrap" title={ts?.full}>{ts?.relative || '\u2014'}</td>
                         </tr>
@@ -1058,8 +1314,9 @@ export default function OverviewTab({
             <div className="flex items-center gap-2 text-[10px] text-gray-500">
               <span>{riskHistory.length} runs</span>
               <span className="text-gray-300">|</span>
-              <span>
-                {normalizeScore(riskHistory[0].risk_score, 10).toFixed(1)} → {normalizeScore(riskHistory[riskHistory.length - 1].risk_score, 10).toFixed(1)}/10
+              <span title={CVSS_TOOLTIP}>
+                {/* CVSS 0-10 (industry standard) — proprietary score never shown */}
+                {riskDisplay(riskHistory[0]) ?? '—'} → {riskDisplay(riskHistory[riskHistory.length - 1]) ?? '—'} CVSS
                 {riskHistory[riskHistory.length - 1].risk_score > riskHistory[0].risk_score
                   ? <span className="text-red-500 ml-1">↑</span>
                   : riskHistory[riskHistory.length - 1].risk_score < riskHistory[0].risk_score
@@ -1094,7 +1351,10 @@ export default function OverviewTab({
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full" style={{ backgroundColor: levelColor[p.risk_level] || '#6b7280' }} />
-                        <span className="font-semibold">{p.risk_score}</span>
+                        {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                        <span className="font-semibold tabular-nums" title={CVSS_TOOLTIP}>
+                          {riskDisplay(p) ?? '—'}
+                        </span>
                         <span className="capitalize text-gray-400">{p.risk_level}</span>
                       </div>
                     </div>
@@ -1275,14 +1535,10 @@ export default function OverviewTab({
                   <span className="text-sm font-medium text-gray-800">{srv.server_name}</span>
                   <span className="text-xs text-gray-400 ml-2">{srv.server_type}</span>
                 </div>
-                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                  srv.risk_level === 'critical' ? 'bg-red-100 text-red-700' :
-                  srv.risk_level === 'high' ? 'bg-orange-100 text-orange-700' :
-                  'bg-green-100 text-green-700'
-                }`}>
+                <StatusBadge variant={(srv.risk_level === 'critical' || srv.risk_level === 'high') ? srv.risk_level : 'low'} size="sm" pill>
                   {srv.risk_level === 'critical' ? 'Mixed Auth + Open FW' :
                    srv.risk_level === 'high' ? 'Mixed Auth' : 'AAD-Only'}
-                </span>
+                </StatusBadge>
               </div>
             ))}
           </div>
@@ -1368,14 +1624,14 @@ export default function OverviewTab({
       {/* Authentication History */}
       <AuthHistorySection identityId={identity.identity_id as string} />
 
-      {/* Risk reasons */}
-      <div>
-        <div className="text-sm font-semibold text-gray-900 mb-2">Risk Reasons</div>
-        {identity.risk_reasons && identity.risk_reasons.length > 0 ? (
+      {/* Full risk reasons (when expanded) — top 3 already shown above. */}
+      {identity.risk_reasons && identity.risk_reasons.length > 3 && (
+        <div>
+          <div className="text-sm font-semibold text-gray-900 mb-2">All Risk Reasons ({identity.risk_reasons.length})</div>
           <ul className="space-y-2">
-            {identity.risk_reasons.map((r, idx) => (
+            {identity.risk_reasons.slice(3).map((r, idx) => (
               <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
-                <span className="text-red-500 mt-0.5">
+                <span className="text-red-500 mt-0.5 flex-shrink-0">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
@@ -1384,10 +1640,9 @@ export default function OverviewTab({
               </li>
             ))}
           </ul>
-        ) : (
-          <div className="text-sm text-gray-500">No risk reasons recorded.</div>
-        )}
-      </div>
+        </div>
+      )}
+      </>)}
     </div>
   );
 }

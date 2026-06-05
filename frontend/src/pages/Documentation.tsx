@@ -152,6 +152,9 @@ export default function Documentation() {
             </nav>
 
             <div className="mt-8 border-t border-gray-800 pt-4 space-y-2">
+              <Link to="/trust" className="block text-xs text-gray-500 hover:text-gray-300 transition">
+                Trust Center
+              </Link>
               <Link to="/privacy" className="block text-xs text-gray-500 hover:text-gray-300 transition">
                 Privacy Policy
               </Link>

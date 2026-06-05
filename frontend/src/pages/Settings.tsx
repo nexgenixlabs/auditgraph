@@ -330,7 +330,10 @@ export default function Settings() {
   const location = useLocation();
   const navigate = useNavigate();
   const { tab: urlTab } = useParams<{ tab?: string }>();
-  const activeTab: SettingsTab = (SETTINGS_TABS.some(t => t.key === urlTab) ? urlTab : 'general') as SettingsTab;
+  // Block non-superadmin from landing on /settings/users via URL — they should
+  // use Team Members (/organization/users) instead.
+  const _requested = (SETTINGS_TABS.some(t => t.key === urlTab) ? urlTab : 'general') as SettingsTab;
+  const activeTab: SettingsTab = (_requested === 'users' && !isSuperAdmin) ? 'general' : _requested;
   const ticketingRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -542,7 +545,7 @@ export default function Settings() {
     }
   }
 
-  async function handleRunScan(connId: number) {
+  async function handleRunScan(connId: number): Promise<boolean> {
     setScanningConnId(connId);
     try {
       const res = await fetch('/api/runs/trigger', {
@@ -554,13 +557,20 @@ export default function Settings() {
         setSuccess('Snapshot capture started for this connection.');
         // Seed activeJobs so polling starts immediately
         setActiveJobs(prev => ({ ...prev, [connId]: { status: 'queued', stage: null, progress: 0 } }));
+        return true;
       } else if (res.status === 409) {
         setError('A scan is already in progress for this connection.');
+        // Treat as success for modal purposes — there IS an active job to watch
+        return true;
       } else {
-        setError('Failed to trigger snapshot');
+        let detail = '';
+        try { const data = await res.json(); detail = data?.error ? ` (${data.error})` : ''; } catch { /* ignore */ }
+        setError(`Failed to trigger snapshot${detail}`);
+        return false;
       }
     } catch {
       setError('Failed to trigger snapshot');
+      return false;
     } finally {
       setScanningConnId(null);
     }
@@ -1829,10 +1839,13 @@ export default function Settings() {
         </p>
       </div>
 
-      {/* Tab Bar */}
+      {/* Tab Bar — "Users" is hidden from non-superadmin. Team Members
+          (/organization/users, invite-based) is the canonical surface for
+          org-admin user management. The Settings>Users tab is retained
+          for superadmin break-glass create-with-password only. */}
       <div className="border-b border-gray-200 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8">
         <nav className="flex gap-0 overflow-x-auto" aria-label="Settings tabs">
-          {SETTINGS_TABS.map(t => (
+          {SETTINGS_TABS.filter(t => t.key !== 'users' || isSuperAdmin).map(t => (
             <button
               key={t.key}
               onClick={() => navigate(`/settings/${t.key}`, { replace: true })}

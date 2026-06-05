@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
+import EmptyState from '../components/ui/EmptyState';
 import { useFeatureFlag } from '../contexts/FeatureFlagContext';
 import QueryBuilder from '../components/QueryBuilder';
 import type { AdvancedQuery, QueryFieldDefinition } from '../types';
@@ -64,7 +65,10 @@ interface IdentityRow {
 
   // Risk fields
   risk_level?: RiskLevel;
+  /** Proprietary internal score — never displayed (2026-05-31 directive). */
   risk_score?: number;
+  /** CVSS-aligned 0-10 (industry standard) — render this in UI. */
+  risk_score_cvss?: number;
 
   // Canonical SSOT activity fields
   last_activity_date?: string | null;
@@ -170,6 +174,9 @@ interface IdentityRow {
   secret_expiry_status?: string | null;
   federated_cred_count?: number;
   owner_resolved?: string | null;
+  // AG-86: Shadow App detection
+  is_shadow_app?: boolean;
+  shadow_reasons?: string[];
   // Humans enrichment (AG-160)
   mfa_status?: string | null;
   mfa_methods?: string[];
@@ -177,6 +184,13 @@ interface IdentityRow {
   manager_id?: string | null;
   job_title?: string | null;
   upn?: string | null;
+  // Access path classification (P0-A 2026-05-30) — lets CISO views show
+  // "174 direct · 949 via group" instead of conflating both into 977.
+  has_direct_rbac_path?: boolean;
+  has_direct_entra_path?: boolean;
+  has_pim_eligible_path?: boolean;
+  has_group_inherited_path?: boolean;
+  access_depth?: 'direct' | 'group_inherited' | 'none';
   // Dependency impact
   dependency_impact?: string | null;
   // Observed usage tracking
@@ -368,14 +382,19 @@ function StatusBadge({ status }: { status?: IdentityStatus }) {
   return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${display.badge_class}`}>{display.label}</span>;
 }
 
+// CVSS-aligned 0-10 only. Proprietary score never shown to users (2026-05-31 directive).
 function RiskBadge({ level, score }: { level?: RiskLevel; score?: number }) {
   const risk = safeLower(level);
+  // `score` here is the CVSS-aligned 0-10 (callers pass risk_score_cvss);
+  // it's already in the industry-standard scale, no further normalization.
+  const showCvss = typeof score === 'number' && score > 0;
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1"
+         title={showCvss ? `CVSS-aligned ${score.toFixed(1)} (industry standard, FIRST.org CVSS 3.1)` : 'CVSS 3.1 severity band'}>
       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${RISK_BADGE[risk] || 'bg-gray-100 text-gray-600'}`}>
         {risk || '?'}
       </span>
-      {score !== undefined && score > 0 && <span className="text-[10px] text-gray-400 font-mono">{score}</span>}
+      {showCvss && <span className="text-[10px] text-gray-400 font-mono tabular-nums">{score.toFixed(1)}</span>}
     </div>
   );
 }
@@ -433,14 +452,48 @@ function PrivilegedBadge({ level }: { level?: PrivilegedLevel }) {
 }
 
 function LifecycleLabel({ state }: { state?: string | null }) {
-  const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Provisioned') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Provisioned;
-  const isDisabled = state === 'Disabled';
+  const cfg = LIFECYCLE_STATE_DISPLAY[(state || 'Unknown') as LifecycleState] || LIFECYCLE_STATE_DISPLAY.Unknown;
+  const s = state || 'Unknown';
+  // Disabled is a security signal (revoked, dormant after offboarding, etc.) — give it
+  // a chip that pops on the dark theme. Other states stay subtle so the eye
+  // tracks to outliers (Disabled / Stale).
+  const styleByState: Record<string, React.CSSProperties> = {
+    Disabled: { background: 'rgba(220,38,38,0.16)', color: '#fca5a5', border: '1px solid rgba(220,38,38,0.45)' },
+    Dormant:  { background: 'rgba(245,158,11,0.15)', color: '#fcd34d', border: '1px solid rgba(245,158,11,0.40)' },
+    Stale:    { background: 'rgba(245,158,11,0.10)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.30)' },
+  };
+  const chipStyle = styleByState[s];
+  if (chipStyle) {
+    return (
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '2px 7px',
+          borderRadius: 6,
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: 0.2,
+          ...chipStyle,
+        }}
+        title={cfg.tooltip}
+      >
+        <span style={{
+          width: 5, height: 5, borderRadius: '50%',
+          background: s === 'Disabled' ? '#ef4444' : '#f59e0b',
+          flexShrink: 0,
+        }} />
+        {cfg.label}
+      </span>
+    );
+  }
   return (
     <span style={{
       fontSize: '11px',
-      color: isDisabled ? 'var(--text-tertiary, #6b7280)' : 'var(--text-secondary, #9ca3af)',
-      fontWeight: isDisabled ? 500 : 400,
-      opacity: isDisabled ? 0.7 : 0.85,
+      color: 'var(--text-secondary, #9ca3af)',
+      fontWeight: 400,
+      opacity: 0.85,
     }} title={cfg.tooltip}>
       {cfg.label}
     </span>
@@ -554,7 +607,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | 'direct_access' | 'group_inherited' | 'direct_rbac' | 'direct_entra' | 'pim_eligible' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
     orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
@@ -834,6 +887,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
             enabled: raw.enabled,
             risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
             risk_score: raw.risk_score ?? 0,
+            risk_score_cvss: raw.risk_score_cvss ?? 0,
             activity_status: raw.activity_status || 'unknown',
             privilege_tier: raw.privilege_tier ?? undefined,
             pim_eligible_count: raw.pim_eligible_count ?? 0,
@@ -853,6 +907,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
             federated_workload_type: raw.federated_workload_type || null,
             federated_workload_name: raw.federated_workload_name || null,
             has_federated_credentials: raw.has_federated_credentials ?? false,
+            has_direct_rbac_path: raw.has_direct_rbac_path ?? false,
+            has_direct_entra_path: raw.has_direct_entra_path ?? false,
+            has_pim_eligible_path: raw.has_pim_eligible_path ?? false,
+            has_group_inherited_path: raw.has_group_inherited_path ?? false,
+            access_depth: (raw.access_depth as 'direct' | 'group_inherited' | 'none') || 'none',
             federated_issuer_types: raw.federated_issuer_types || [],
             secret_expiry_earliest: raw.secret_expiry_earliest || null,
             secret_expiry_status: raw.secret_expiry_status || null,
@@ -943,6 +1002,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           enabled: raw.enabled,
           risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
           risk_score: raw.risk_score ?? 0,
+            risk_score_cvss: raw.risk_score_cvss ?? 0,
           activity_status: raw.activity_status || 'unknown',
           privilege_tier: raw.privilege_tier ?? undefined,
           pim_eligible_count: raw.pim_eligible_count ?? 0,
@@ -988,6 +1048,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
           has_federated_credentials: raw.has_federated_credentials ?? false,
+          has_direct_rbac_path: raw.has_direct_rbac_path ?? false,
+          has_direct_entra_path: raw.has_direct_entra_path ?? false,
+          has_pim_eligible_path: raw.has_pim_eligible_path ?? false,
+          has_group_inherited_path: raw.has_group_inherited_path ?? false,
+          access_depth: (raw.access_depth as 'direct' | 'group_inherited' | 'none') || 'none',
           federated_issuer_types: raw.federated_issuer_types || [],
           // NHI enrichment (AG-159)
           secret_expiry_earliest: raw.secret_expiry_earliest || null,
@@ -1216,6 +1281,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           enabled: raw.enabled,
           risk_level: safeLower(raw.risk_level || 'unknown') as RiskLevel,
           risk_score: raw.risk_score ?? 0,
+            risk_score_cvss: raw.risk_score_cvss ?? 0,
           activity_status: raw.activity_status || 'unknown',
           privilege_tier: raw.privilege_tier ?? undefined,
           pim_eligible_count: raw.pim_eligible_count ?? 0,
@@ -1252,6 +1318,11 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           federated_workload_type: raw.federated_workload_type || null,
           federated_workload_name: raw.federated_workload_name || null,
           has_federated_credentials: raw.has_federated_credentials ?? false,
+          has_direct_rbac_path: raw.has_direct_rbac_path ?? false,
+          has_direct_entra_path: raw.has_direct_entra_path ?? false,
+          has_pim_eligible_path: raw.has_pim_eligible_path ?? false,
+          has_group_inherited_path: raw.has_group_inherited_path ?? false,
+          access_depth: (raw.access_depth as 'direct' | 'group_inherited' | 'none') || 'none',
           federated_issuer_types: raw.federated_issuer_types || [],
           secret_expiry_earliest: raw.secret_expiry_earliest || null,
           secret_expiry_status: raw.secret_expiry_status || null,
@@ -1693,6 +1764,20 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     if (signalChip === 'secrets') result = result.filter(i => i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000));
     if (signalChip === 'no_owner') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (signalChip === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
+    // P0-A (2026-05-30): access-path filters — Direct narrows to actual
+    // Azure-access holders; Group filters to passive members of role-bearing
+    // groups (the inflation source CISOs were misled by).
+    if (signalChip === 'direct_access') result = result.filter(i =>
+      i.has_direct_rbac_path || i.has_direct_entra_path || i.has_pim_eligible_path
+    );
+    if (signalChip === 'group_inherited') result = result.filter(i =>
+      !i.has_direct_rbac_path && !i.has_direct_entra_path && !i.has_pim_eligible_path
+      && i.has_group_inherited_path
+    );
+    // AG-B: sub-chips inside the direct breakdown — each is independently filterable
+    if (signalChip === 'direct_rbac') result = result.filter(i => i.has_direct_rbac_path);
+    if (signalChip === 'direct_entra') result = result.filter(i => i.has_direct_entra_path);
+    if (signalChip === 'pim_eligible') result = result.filter(i => i.has_pim_eligible_path);
 
     // AG-162: Column-level filters
     for (const [field, vals] of Object.entries(columnFilters)) {
@@ -2135,18 +2220,19 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
         </div>
       </div>
 
-      {/* Tenant Scope Bar */}
+      {/* Tenant Scope Pill — compact scope indicator. Was a 23-word prose banner;
+          collapsed to an at-a-glance "N of M · activate K more →" pattern. */}
       {scopeSummary && scopeSummary.discovered > 0 && (
-        <div className="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-800">
-          <svg className="w-4 h-4 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 mb-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-800">
+          <svg className="w-3.5 h-3.5 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <span>
-            Tenant-scoped view: Showing identities from <strong>{scopeSummary.activated}</strong> activated subscriptions only.{' '}
+            Scope: <strong>{scopeSummary.activated}</strong> of <strong>{scopeSummary.activated + scopeSummary.discovered}</strong> subscription{(scopeSummary.activated + scopeSummary.discovered) !== 1 ? 's' : ''}
+            <span className="mx-1.5 text-blue-300" aria-hidden="true">·</span>
             <Link to="/subscriptions" className="font-semibold hover:opacity-80">
-              {scopeSummary.discovered} discovered subscription{scopeSummary.discovered !== 1 ? 's' : ''}
-            </Link>{' '}
-            {scopeSummary.discovered === 1 ? 'is' : 'are'} excluded until activated.
+              Activate {scopeSummary.discovered} more →
+            </Link>
           </span>
         </div>
       )}
@@ -2617,28 +2703,41 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
 
       {/* Tab-scoped sub-pills */}
       {!loading && identities.length > 0 && (() => {
+        // P0-B (2026-05-30): show counts on each sub-pill so CISOs see the
+        // composition of their identity inventory at a glance ("we have 466
+        // App SPNs, 494 System MIs, 107 User MIs") instead of one opaque
+        // "1067 NHI" total. Count from the tab-scoped slice of identities,
+        // not the fully-filtered `filtered` array, so pill counts don't
+        // change when other filters (subscription, signal chip, etc.) are
+        // active — pills should always show the universe they'd filter to.
+        const scopeCats = TAB_SCOPE_CATEGORIES[tabScope];
+        const scopedIdentities = scopeCats
+          ? identities.filter(i => scopeCats.includes(i.identity_category as IdentityCategory))
+          : identities;
+        const countWhere = (pred: (i: IdentityRow) => boolean) => scopedIdentities.filter(pred).length;
+
         // Define sub-pills per tab scope
-        const subPills: { key: string; label: string }[] =
+        const subPills: { key: string; label: string; count?: number }[] =
           tabScope === 'humans' ? [
-            { key: 'all', label: 'All Humans' },
-            { key: 'members', label: 'Members' },
-            { key: 'guests', label: 'Guests' },
-            { key: 'stale', label: 'Stale > 90d' },
-            { key: 'no_mfa', label: 'No MFA' },
+            { key: 'all', label: 'All Humans', count: scopedIdentities.length },
+            { key: 'members', label: 'Members', count: countWhere(i => i.identity_category === 'human_user') },
+            { key: 'guests', label: 'Guests', count: countWhere(i => i.identity_category === 'guest') },
+            { key: 'stale', label: 'Stale > 90d', count: countWhere(i => { const a = safeLower(i.activity_status); return a === 'stale' || a === 'never_used'; }) },
+            { key: 'no_mfa', label: 'No MFA', count: countWhere(i => i.mfa_status === 'not_enrolled') },
           ] : tabScope === 'nhi' ? [
-            { key: 'all', label: 'All NHI' },
-            { key: 'app_spn', label: 'App SPNs' },
-            { key: 'sys_msi', label: 'System MSI' },
-            { key: 'usr_msi', label: 'User MSI' },
-            { key: 'federated', label: 'Federated' },
-            { key: 'orphaned', label: 'Orphaned' },
+            { key: 'all', label: 'All NHI', count: scopedIdentities.length },
+            { key: 'app_spn', label: 'App SPNs', count: countWhere(i => i.identity_category === 'service_principal') },
+            { key: 'sys_msi', label: 'System MSI', count: countWhere(i => i.identity_category === 'managed_identity_system') },
+            { key: 'usr_msi', label: 'User MSI', count: countWhere(i => i.identity_category === 'managed_identity_user') },
+            { key: 'federated', label: 'Federated', count: countWhere(i => ((i as any).federated_cred_count ?? 0) > 0 || (i as any).is_federated) },
+            { key: 'orphaned', label: 'Orphaned', count: countWhere(i => i.governance_state === 'Orphaned') },
           ] : [
             // "All Identities" tab — original category pills
-            { key: 'all', label: 'All Identities' },
-            { key: 'human_user', label: 'Human Users' },
-            { key: 'service_principal', label: 'Service Principals' },
-            { key: 'managed_ids', label: 'Managed IDs' },
-            { key: 'guest', label: 'Guest' },
+            { key: 'all', label: 'All Identities', count: scopedIdentities.length },
+            { key: 'human_user', label: 'Human Users', count: countWhere(i => i.identity_category === 'human_user') },
+            { key: 'service_principal', label: 'Service Principals', count: countWhere(i => i.identity_category === 'service_principal') },
+            { key: 'managed_ids', label: 'Managed IDs', count: countWhere(i => i.identity_category === 'managed_identity_system' || i.identity_category === 'managed_identity_user') },
+            { key: 'guest', label: 'Guest', count: countWhere(i => i.identity_category === 'guest') },
           ];
 
         return (
@@ -2670,13 +2769,20 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                       setTabSubPill(tabSubPill === pill.key ? 'all' : pill.key);
                     }
                   }}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
                     isActive
                       ? 'bg-violet-600 text-white shadow-sm'
                       : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
                   {pill.label}
+                  {typeof pill.count === 'number' && (
+                    <span className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded ${
+                      isActive ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-600'
+                    }`}>
+                      {pill.count.toLocaleString()}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -2768,6 +2874,78 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
 
         return (
           <div className="mb-3 space-y-2">
+            {/* P0-A (2026-05-30): Access-path breakdown for the Humans tab.
+                CISOs were misled by the conflated 977 count; the real "direct
+                Azure access" count is dramatically smaller. Showing both
+                turns the misleading single number into truthful triage info. */}
+            {tabScope === 'humans' && (() => {
+              const directHumans = filtered.filter(i =>
+                i.has_direct_rbac_path || i.has_direct_entra_path || i.has_pim_eligible_path
+              );
+              const groupOnlyHumans = filtered.filter(i =>
+                !i.has_direct_rbac_path && !i.has_direct_entra_path && !i.has_pim_eligible_path
+                && i.has_group_inherited_path
+              );
+              if (groupOnlyHumans.length === 0) return null;
+              const directRbacCount  = filtered.filter(i => i.has_direct_rbac_path).length;
+              const directEntraCount = filtered.filter(i => i.has_direct_entra_path).length;
+              const pimCount         = filtered.filter(i => i.has_pim_eligible_path).length;
+              return (
+                <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400 px-1">
+                  <span className="font-semibold uppercase tracking-wider text-slate-500">Access depth:</span>
+                  <button
+                    onClick={() => setSignalChip(s => s === 'direct_access' ? null : 'direct_access' as any)}
+                    className={`px-2 py-0.5 rounded-md transition-colors ${signalChip === 'direct_access' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-300'}`}
+                    title="Identities with direct RBAC, Entra role, or PIM eligibility — the real Azure-access count"
+                  >
+                    {directHumans.length} direct
+                  </button>
+                  <span className="text-slate-600">(</span>
+                  <button
+                    onClick={() => setSignalChip(s => s === 'direct_rbac' ? null : 'direct_rbac' as any)}
+                    className={`px-1.5 py-0.5 rounded-md transition-colors ${signalChip === 'direct_rbac' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-400'}`}
+                    title="Filter to identities with a direct Azure RBAC role assignment"
+                  >
+                    {directRbacCount} RBAC
+                  </button>
+                  {directEntraCount > 0 && (
+                    <>
+                      <span className="text-slate-700">·</span>
+                      <button
+                        onClick={() => setSignalChip(s => s === 'direct_entra' ? null : 'direct_entra' as any)}
+                        className={`px-1.5 py-0.5 rounded-md transition-colors ${signalChip === 'direct_entra' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-400'}`}
+                        title="Filter to identities with a direct Entra directory role (Global Admin, etc.)"
+                      >
+                        {directEntraCount} Entra
+                      </button>
+                    </>
+                  )}
+                  {pimCount > 0 && (
+                    <>
+                      <span className="text-slate-700">·</span>
+                      <button
+                        onClick={() => setSignalChip(s => s === 'pim_eligible' ? null : 'pim_eligible' as any)}
+                        className={`px-1.5 py-0.5 rounded-md transition-colors ${signalChip === 'pim_eligible' ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'hover:bg-slate-800/60 text-slate-400'}`}
+                        title="Filter to identities with PIM-eligible role assignments (just-in-time access)"
+                      >
+                        {pimCount} PIM
+                      </button>
+                    </>
+                  )}
+                  <span className="text-slate-600">)</span>
+                  <span className="text-slate-700">·</span>
+                  <button
+                    onClick={() => setSignalChip(s => s === 'group_inherited' ? null : 'group_inherited' as any)}
+                    className={`px-2 py-0.5 rounded-md transition-colors ${signalChip === 'group_inherited' ? 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/40' : 'hover:bg-slate-800/60 text-slate-300'}`}
+                    title="Passive members of role-bearing groups — included for coverage but typically lower-signal"
+                  >
+                    {groupOnlyHumans.length} via group
+                  </button>
+                  <span className="text-slate-600">·</span>
+                  <span className="text-slate-500">{filtered.length} total</span>
+                </div>
+              );
+            })()}
             <div className={`grid gap-2 ${tiles.length <= 5 ? 'grid-cols-5' : 'grid-cols-6'}`}>
               {tiles.map(tile => (
                 <button key={tile.key}
@@ -2905,7 +3083,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
               ) : error ? (
                 <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">No identities match filters.</td></tr>
+                <tr><td colSpan={colSpan}><EmptyState compact title="No identities match filters." /></td></tr>
               ) : filtered.map(i => {
                 const isComboRisk = (i.governance_state === 'Ungoverned' || i.governance_state === 'Orphaned' || i.governance_state === 'Policy Violation')
                   && (i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged');
@@ -2932,6 +3110,18 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                             )}
                             {!!i.is_discovery_connector && (
                               <span className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0" title="This SPN is the AuditGraph discovery connector">Discovery Connector</span>
+                            )}
+                            {!!i.is_shadow_app && (
+                              <span
+                                className="inline-flex items-center px-1 py-0 rounded text-[9px] font-bold bg-red-100 text-red-700 border border-red-300 flex-shrink-0"
+                                title={
+                                  (i.shadow_reasons && i.shadow_reasons.length > 0)
+                                    ? `Shadow App — ${i.shadow_reasons.join('; ')}`
+                                    : 'Shadow App — not in approved registry'
+                                }
+                              >
+                                Shadow
+                              </span>
                             )}
                           </div>
                           <div className="text-[10px] text-gray-400 font-mono truncate">{i.identity_id.substring(0, 12)}…</div>

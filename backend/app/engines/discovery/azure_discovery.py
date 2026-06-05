@@ -52,7 +52,7 @@ Dependencies:
 import os
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -496,6 +496,130 @@ class AzureDiscoveryEngine:
         except Exception:
             pass
 
+    # ── AG-PS (2026-06-01) Progressive Scan hooks ──────────────────────────
+    # Surface real findings mid-scan so the modal turns from a spinner into
+    # a live ticker. Columns added idempotently on first call so we don't
+    # need a migration ahead of cloud deploy.
+
+    _progressive_scan_columns_ensured = False
+
+    def _ensure_progressive_scan_columns(self):
+        if self.__class__._progressive_scan_columns_ensured:
+            return
+        try:
+            cur = self.db.conn.cursor()
+            for stmt in [
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS critical_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS high_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS medium_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS low_count INTEGER DEFAULT 0",
+                "ALTER TABLE snapshot_jobs ADD COLUMN IF NOT EXISTS live_findings JSONB",
+            ]:
+                cur.execute("SAVEPOINT ps_col")
+                try:
+                    cur.execute(stmt)
+                    cur.execute("RELEASE SAVEPOINT ps_col")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT ps_col")
+            self.db._commit()
+            cur.close()
+            self.__class__._progressive_scan_columns_ensured = True
+        except Exception as e:
+            logger.debug("Could not ensure progressive scan columns: %s", e)
+            try: self.db._rollback()
+            except Exception: pass
+
+    def _update_job_risk_counts(self, identities):
+        """Update critical/high/medium/low identity counts on the snapshot job
+        so the progress modal can show a live risk breakdown as identities are
+        classified. Called from _save_identities after risk scoring."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id or not identities:
+            return
+        self._ensure_progressive_scan_columns()
+        counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        for ident in identities:
+            rl = (ident.get('risk_level') or '').lower()
+            if rl in counts:
+                counts[rl] += 1
+        try:
+            cur = self.db.conn.cursor()
+            cur.execute("""
+                UPDATE snapshot_jobs
+                   SET critical_count = %s,
+                       high_count = %s,
+                       medium_count = %s,
+                       low_count = %s
+                 WHERE id = %s
+            """, (counts['critical'], counts['high'], counts['medium'],
+                  counts['low'], job_id))
+            self.db._commit()
+            cur.close()
+        except Exception as e:
+            logger.debug("Job risk-count update failed: %s", e)
+            try: self.db._rollback()
+            except Exception: pass
+
+    def _stream_live_findings(self, identities, top_n: int = 8):
+        """Pick the top N highest-risk identities and stream them as live
+        findings into snapshot_jobs.live_findings. The frontend modal renders
+        these as the cinematic ticker — actual scan data, no fakes."""
+        job_id = getattr(self, 'snapshot_job_id', None)
+        if not job_id or not identities:
+            return
+        self._ensure_progressive_scan_columns()
+        # Sort: critical first, then by risk_score desc — surface the most
+        # demo-worthy findings (Owner-on-sub, no-owner SPN, etc.).
+        rank = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1}
+        ordered = sorted(
+            identities,
+            key=lambda i: (
+                rank.get((i.get('risk_level') or '').lower(), 0),
+                int(i.get('risk_score') or 0),
+            ),
+            reverse=True,
+        )[:top_n]
+        findings = []
+        for ident in ordered:
+            # Primary risk factor → demo-worthy headline (e.g. "Owner on
+            # Subscription"). Falls back to risk reasons / identity type.
+            factors = ident.get('risk_factors') or []
+            headline = None
+            if factors:
+                f0 = factors[0]
+                if isinstance(f0, dict):
+                    headline = f0.get('description') or f0.get('code')
+            if not headline:
+                rr = ident.get('risk_reasons')
+                if isinstance(rr, list) and rr:
+                    headline = rr[0]
+                elif isinstance(rr, str) and rr:
+                    headline = rr
+            findings.append({
+                'identity_id': ident.get('identity_id'),
+                'display_name': ident.get('display_name'),
+                'identity_type': ident.get('identity_type'),
+                'risk_level': ident.get('risk_level'),
+                'risk_score_cvss': ident.get('risk_score_cvss'),
+                'headline': headline or 'High-risk identity detected',
+                'discovered_at_offset_s': int(
+                    (datetime.now(timezone.utc) - self._scan_started_at).total_seconds()
+                ) if getattr(self, '_scan_started_at', None) else 0,
+            })
+        try:
+            import json as _json
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "UPDATE snapshot_jobs SET live_findings = %s::jsonb WHERE id = %s",
+                (_json.dumps(findings, default=str), job_id),
+            )
+            self.db._commit()
+            cur.close()
+        except Exception as e:
+            logger.debug("Live findings update failed: %s", e)
+            try: self.db._rollback()
+            except Exception: pass
+
     def _get_monitored_subscription_ids(self) -> Optional[Set[str]]:
         """Query cloud_subscriptions for activated (monitored=true) subscription IDs.
 
@@ -572,6 +696,9 @@ class AzureDiscoveryEngine:
         Returns:
             DiscoveryResult or None on completion
         """
+        # AG-PS: stamp scan-start timestamp so live findings can compute
+        # offset-from-start ("Found at 12s into the scan…").
+        self._scan_started_at = datetime.now(timezone.utc)
         try:
             loop = asyncio.get_event_loop()
             if loop.is_closed():
@@ -1134,7 +1261,44 @@ class AzureDiscoveryEngine:
             else:
                 # AG-161: Fallback — per-user /authentication/methods (no Reports.Read.All needed)
                 logger.info("[MFA] Bulk endpoint empty — falling back to per-user auth methods. org=%s", self.db_org_id)
-                human_ids = [i for i in all_identities if i.get('identity_category') in ('human_user', 'guest')]
+
+                # Warm-cache pass first: reuse mfa_status from the most recent
+                # completed discovery run for this connection. MFA enrollment
+                # changes rarely, so re-fetching every scan was burning 8-10 min
+                # of Graph API time per cold scan. With the cache, scan-2+ only
+                # hits the API for NEW users (not in prior run) and users whose
+                # prior status was 'unknown' (retry). Drops 1000-user scans
+                # from ~10 min in the MFA phase to <30s typically.
+                prev_mfa = self._load_prev_mfa_cache()
+                if prev_mfa:
+                    cache_hits = 0
+                    for identity in all_identities:
+                        if identity.get('identity_category') not in ('human_user', 'guest'):
+                            continue
+                        oid = identity.get('object_id')
+                        if oid and oid in prev_mfa and not identity.get('mfa_status'):
+                            cached = prev_mfa[oid]
+                            identity['mfa_status'] = cached['mfa_status']
+                            identity['ca_mfa_enforced'] = cached['mfa_status'] == 'enrolled'
+                            identity['mfa_methods'] = cached.get('mfa_methods', [])
+                            cache_hits += 1
+                    logger.info(
+                        "[MFA-cache] Reused %s cached MFA values from prior run. org=%s",
+                        cache_hits, self.db_org_id,
+                    )
+
+                # Only fetch for humans still missing mfa_status after cache pass.
+                # This is the fresh-fetch set: new users + previously-unknown users
+                # (whose status was filtered out of the cache).
+                human_ids = [
+                    i for i in all_identities
+                    if i.get('identity_category') in ('human_user', 'guest')
+                    and not i.get('mfa_status')
+                ]
+                logger.info(
+                    "[MFA-methods] Fresh fetch needed for %s humans (cache miss / new / retry). org=%s",
+                    len(human_ids), self.db_org_id,
+                )
                 try:
                     per_user_map = await self._collect_mfa_auth_methods(human_ids)
                     if per_user_map:
@@ -1294,6 +1458,36 @@ class AzureDiscoveryEngine:
             self._collect_arm_activity(run_id, final_identities)
         except Exception as e:
             logger.warning("ARM activity collection error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # Step 9.8: Entra directory audit attribution (AG-E Phase 2, no P2 required).
+        # Microsoft offers no per-Entra-role exercise log. We infer last-used by
+        # bulk-pulling auditLogs/directoryAudits and attributing each event to
+        # whichever of the principal's standing Entra roles could have authorized
+        # it (category → roles map). Wiz-grade least-privilege evidence on the
+        # Entra side without depending on P2 telemetry.
+        try:
+            self._collect_entra_audit_activity(run_id)
+        except Exception as e:
+            logger.warning("Entra audit activity collection error: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+        # Step 9.9: OAuth Consent Grant discovery (AG-81, no P2 required).
+        # Bulk-pull /oauth2PermissionGrants (delegated) + per-SP iterate
+        # /servicePrincipals/{id}/appRoleAssignments (application). Each
+        # grant gets a CVSS-aligned risk score via compute_consent_risk().
+        # The Vercel-breach response narrative: "Who said yes, when, with
+        # what scopes, and is it still necessary?"
+        try:
+            self._discover_consent_grants(run_id)
+        except Exception as e:
+            logger.warning("OAuth consent grant discovery error: %s", e)
             try:
                 self.db._rollback()
             except Exception:
@@ -1893,7 +2087,7 @@ class AzureDiscoveryEngine:
             select_fields = ','.join([
                 'id', 'appId', 'displayName', 'accountEnabled', 'createdDateTime',
                 'servicePrincipalType', 'alternativeNames', 'appOwnerOrganizationId',
-                'publisherName', 'signInActivity',
+                'publisherName', 'verifiedPublisher', 'signInActivity',
                 'servicePrincipalNames', 'tags', 'passwordCredentials', 'keyCredentials',
             ])
             url = (
@@ -2020,6 +2214,9 @@ class AzureDiscoveryEngine:
                             'app_owner_organization_id': owner_org_str,
                             'app_owner_org_id': owner_org_str,
                             'publisher_name': sp.get('publisherName'),
+                            # AG-85: SP-level verifiedPublisher mirrors the
+                            # parent App Registration's verification status.
+                            'verified_publisher': bool((sp.get('verifiedPublisher') or {}).get('verifiedPublisherId')),
                             'service_principal_names': sp.get('servicePrincipalNames', []),
                             'tags': sp.get('tags', []),
                             'password_credentials': sp.get('passwordCredentials', []),
@@ -2100,18 +2297,32 @@ class AzureDiscoveryEngine:
                         len(identities), page, sign_in_available)
             if sign_in_available:
                 self._persist_permission('p2_signin_activity', 'granted')
-            # Persist P2 license availability on the cloud connection
+            # Persist P2 license availability on the cloud connection.
+            # AG-117: sign_in_available is the AuditLog.Read.All / signInActivity
+            # consent signal. true on this call = consent granted; false = the
+            # 403 retry path was taken. Mirror to p2_consent_granted so the
+            # Settings UI can show "needs consent" amber state without
+            # re-checking the discovery log.
             try:
                 cur = self.db.conn.cursor()
                 cur.execute(
-                    "UPDATE cloud_connections SET has_p2_license = %s WHERE id = %s",
-                    (sign_in_available, self.cloud_connection_id)
+                    """
+                    UPDATE cloud_connections
+                       SET has_p2_license = %s,
+                           p2_consent_granted = %s,
+                           p2_consent_checked_at = NOW()
+                     WHERE id = %s
+                    """,
+                    (sign_in_available, sign_in_available, self.cloud_connection_id)
                 )
                 self.db.conn.commit()
                 cur.close()
-                logger.info("Persisted has_p2_license=%s for connection %s", sign_in_available, self.cloud_connection_id)
+                logger.info(
+                    "Persisted has_p2_license=%s p2_consent_granted=%s for connection %s",
+                    sign_in_available, sign_in_available, self.cloud_connection_id,
+                )
             except Exception as e:
-                logger.warning("Failed to persist has_p2_license: %s", e)
+                logger.warning("Failed to persist P2 status: %s", e)
             return identities
         except Exception as e:
             logger.error("[_discover_service_principals] FAILED org=%s error=%s", self.db_org_id, e)
@@ -2174,7 +2385,7 @@ class AzureDiscoveryEngine:
             token = self.credential.get_token("https://graph.microsoft.com/.default")
             headers = {"Authorization": f"Bearer {token.token}"}
 
-            select_fields = 'id,appId,displayName,appOwnerOrganizationId,publisherDomain,signInAudience,identifierUris,notes,description,web,requiredResourceAccess'
+            select_fields = 'id,appId,displayName,appOwnerOrganizationId,publisherDomain,signInAudience,identifierUris,notes,description,web,requiredResourceAccess,verifiedPublisher'
             url: str | None = (
                 f"https://graph.microsoft.com/v1.0/applications"
                 f"?$select={select_fields}&$top=999"
@@ -2197,12 +2408,19 @@ class AzureDiscoveryEngine:
                     for app in data.get('value', []):
                         app_id = app.get('appId')
                         if app_id:
+                            # AG-85: verifiedPublisher is an object with
+                            # verifiedPublisherId, displayName, addedDateTime
+                            # when verified — empty object/null when not.
+                            vp = app.get('verifiedPublisher') or {}
+                            verified = bool(vp.get('verifiedPublisherId'))
                             lookup[app_id] = {
                                 'object_id': app.get('id'),
                                 'display_name': app.get('displayName'),
                                 'app_owner_organization_id': app.get('appOwnerOrganizationId'),
                                 'publisher_domain': app.get('publisherDomain'),
                                 'sign_in_audience': app.get('signInAudience'),
+                                'verified_publisher': verified,
+                                'verified_publisher_display_name': vp.get('displayName'),
                                 'owner_display_name': None,
                                 'owner_id': None,
                                 # Metadata fields for signal extraction
@@ -2277,6 +2495,12 @@ class AzureDiscoveryEngine:
                 sp['app_reg_sign_in_audience'] = app_reg.get('sign_in_audience')
                 sp['app_reg_owner_display_name'] = app_reg.get('owner_display_name')
                 sp['app_reg_owner_id'] = app_reg.get('owner_id')
+                # AG-85: prefer app-reg verified_publisher when SP-level
+                # was empty/None (the app registration is the source of truth
+                # for publisher verification; SP mirrors it).
+                if app_reg.get('verified_publisher') is not None:
+                    if not sp.get('verified_publisher'):
+                        sp['verified_publisher'] = app_reg['verified_publisher']
 
                 owner_org = app_reg.get('app_owner_organization_id')
                 is_ext = bool(owner_org and str(owner_org).lower() != self.azure_directory_id.lower())
@@ -5162,7 +5386,12 @@ class AzureDiscoveryEngine:
         Returns:
             Dictionary mapping identity_id to list of permissions
         """
-        # AG-74 Phase 1: Skip Microsoft system SPNs — permissions are Microsoft-managed
+        # AG-74 Phase 1: Skip Microsoft system SPNs — permissions are Microsoft-managed.
+        # AG-PERMFIX: keep a reference to the FULL list before filtering so the bulk
+        # appRoleAssignedTo pre-fetch can still find resource SPs like Microsoft Graph
+        # (which IS flagged is_microsoft_system but is exactly the resource we need
+        # to query for everyone's Application permissions).
+        all_service_principals = service_principals
         customer_sps = [sp for sp in service_principals if not sp.get('is_microsoft_system')]
         logger.info("[_discover_permissions] processing %s/%s customer SPNs (skipping %s MS system)",
                     len(customer_sps), len(service_principals),
@@ -5175,6 +5404,117 @@ class AzureDiscoveryEngine:
         error_count = 0
 
         logger.info("Discovering API Permissions...")
+
+        # ── AG-PERMFIX (2026-06-01): bulk-fetch Application permissions via
+        # appRoleAssignedTo on well-known resource SPs. The per-SP
+        # `appRoleAssignments` call below returns 0 for some SPNs even when
+        # the portal shows granted permissions (observed on the discovery
+        # connector itself in the Lantern tenant — the call succeeds with
+        # HTTP 200 but `value` is empty). Pulling from the resource side
+        # is the canonical source and catches everything in O(R) bulk
+        # calls where R = number of well-known resource SPs (≤6) instead
+        # of O(N) per-SP calls.
+        bulk_by_principal: Dict[str, List[Dict[str, str]]] = {}
+        try:
+            # Build a map of well-known resource SP object_ids by appId from
+            # already-discovered identities.
+            well_known_app_ids = {
+                '00000003-0000-0000-c000-000000000000': 'Microsoft Graph',
+                '00000002-0000-0000-c000-000000000000': 'Azure AD Graph',
+                '00000003-0000-0ff1-ce00-000000000000': 'Office 365 SharePoint Online',
+                '00000002-0000-0ff1-ce00-000000000000': 'Office 365 Exchange Online',
+                'fc780465-2017-40d4-a0c5-307022471b92': 'Windows Azure Active Directory',
+                '797f4846-ba00-4fd7-ba43-dac1f8f63013': 'Windows Azure Service Management API',
+            }
+            resource_sps: List[Dict[str, str]] = []
+            for sp_iter in all_service_principals:
+                app_id_lo = (sp_iter.get('app_id') or '').lower()
+                if app_id_lo in well_known_app_ids and sp_iter.get('object_id'):
+                    resource_sps.append({
+                        'object_id': sp_iter['object_id'],
+                        'app_id': sp_iter['app_id'],
+                        'display_name': well_known_app_ids[app_id_lo],
+                    })
+            logger.info("[_discover_permissions] bulk-fetching appRoleAssignedTo from %d resource SPs",
+                        len(resource_sps))
+            # Raw HTTP with proper pagination — Microsoft Graph's
+            # appRoleAssignedTo collection routinely exceeds the 100-row
+            # default page size, and the Kiota SDK doesn't expose a clean
+            # "follow nextLink" API uniformly across versions. requests +
+            # @odata.nextLink loop is simpler and reliable.
+            import requests as _requests
+            try:
+                _bulk_token = self.credential.get_token("https://graph.microsoft.com/.default")
+                _bulk_headers = {"Authorization": f"Bearer {_bulk_token.token}"}
+            except Exception as tok_err:
+                logger.warning("[_discover_permissions] bulk token fetch failed: %s", tok_err)
+                _bulk_headers = None
+
+            if _bulk_headers:
+                from urllib.parse import quote
+                MAX_PAGES_PER_RSP = 50  # 50 * 999 = ~50k rows; safety cap
+                for rsp in resource_sps:
+                    rsp_obj_id = rsp['object_id']
+                    n_paged = 0
+                    page_num = 0
+                    url = (f"https://graph.microsoft.com/v1.0/servicePrincipals/{quote(rsp_obj_id)}"
+                           f"/appRoleAssignedTo?$top=999"
+                           f"&$select=id,principalId,principalType,appRoleId,resourceId")
+                    while url and page_num < MAX_PAGES_PER_RSP:
+                        page_num += 1
+                        try:
+                            resp = _requests.get(url, headers=_bulk_headers, timeout=20)
+                        except _requests.RequestException as req_err:
+                            logger.warning("[_discover_permissions] bulk %s page=%d request err: %s",
+                                           rsp['display_name'], page_num, req_err)
+                            break
+                        if resp.status_code == 429:
+                            retry = int(resp.headers.get('Retry-After', '5'))
+                            await asyncio.sleep(min(retry, 30))
+                            continue
+                        if resp.status_code != 200:
+                            logger.warning("[_discover_permissions] bulk %s page=%d HTTP %s",
+                                           rsp['display_name'], page_num, resp.status_code)
+                            break
+                        body = resp.json()
+                        for ar in body.get('value', []):
+                            principal_id = (ar.get('principalId') or '').strip()
+                            if not principal_id:
+                                continue
+                            principal_type = (ar.get('principalType') or '').strip()
+                            # Application permissions are SP→SP assignments;
+                            # User/Group assignments aren't Application perms.
+                            if principal_type and principal_type != 'ServicePrincipal':
+                                continue
+                            bulk_by_principal.setdefault(principal_id, []).append({
+                                'resource_id': rsp_obj_id,
+                                'resource_name': rsp['display_name'],
+                                'app_role_id': (ar.get('appRoleId') or '').strip(),
+                            })
+                            n_paged += 1
+                        url = body.get('@odata.nextLink')
+                    logger.info("[_discover_permissions] bulk %s: %d assignments collected (pages=%d)",
+                                rsp['display_name'], n_paged, page_num)
+        except Exception as outer:
+            logger.warning("[_discover_permissions] bulk pre-fetch outer error: %s", outer)
+        # ── end bulk pre-fetch ──
+
+        # AG-PERMFIX debug: surface the connector's bulk-lookup count so we can
+        # tell whether the issue is bulk-fetch coverage vs the per-SP merge step.
+        try:
+            _conn_sp = next((sp for sp in all_service_principals
+                             if sp.get('is_discovery_connector')), None)
+            if _conn_sp and _conn_sp.get('object_id'):
+                _conn_obj = _conn_sp['object_id']
+                _conn_hits = len(bulk_by_principal.get(_conn_obj, []))
+                _conn_hits_lower = len(bulk_by_principal.get(_conn_obj.lower(), []))
+                _all_keys = list(bulk_by_principal.keys())[:5]
+                logger.info("[_discover_permissions] CONNECTOR BULK CHECK obj_id=%s "
+                            "exact_hits=%d lower_hits=%d total_principals=%d sample_keys=%s",
+                            _conn_obj, _conn_hits, _conn_hits_lower,
+                            len(bulk_by_principal), _all_keys)
+        except Exception as _dbg_err:
+            logger.debug("[_discover_permissions] connector debug log failed: %s", _dbg_err)
 
         for sp in service_principals:
             sp_object_id = sp.get('object_id')
@@ -5210,6 +5550,51 @@ class AzureDiscoveryEngine:
                 logger.warning("appRoleAssignments failed for %s (%s): %s",
                                sp.get('display_name', '?'), sp_object_id, e)
                 error_count += 1
+
+            # ── AG-PERMFIX: merge bulk-fetched Application permissions for this
+            # SP (covers SPs whose per-SP appRoleAssignments call returns empty —
+            # observed on the discovery connector itself). Dedup by (resource_id,
+            # app_role_id) so we don't double-count if both paths returned the
+            # same assignment.
+            bulk_entries = bulk_by_principal.get(sp_object_id, [])
+            if bulk_entries:
+                already = {(p.get('permission_id'), p.get('resource_name')) for p in permissions}
+                _bulk_added = 0
+                _bulk_resolved_empty = 0
+                _bulk_dedup_skipped = 0
+                for be in bulk_entries:
+                    rid = be['resource_id']
+                    arid = be['app_role_id']
+                    if (arid, be['resource_name']) in already:
+                        _bulk_dedup_skipped += 1
+                        continue
+                    perm_name, resource_name = await self._resolve_app_role_name(rid, arid)
+                    if perm_name:
+                        permissions.append({
+                            'name': perm_name,
+                            'description': f"{resource_name}: {perm_name}",
+                            'resource_name': resource_name,
+                            'permission_type': 'Application',
+                            'permission_id': arid,
+                            'consent_type': 'Admin',
+                        })
+                        app_perm_total += 1
+                        already.add((arid, resource_name))
+                        _bulk_added += 1
+                    else:
+                        _bulk_resolved_empty += 1
+                # Debug log only for the connector SPN so we see exactly what
+                # happens to its 10 bulk-fetched entries.
+                if sp.get('is_discovery_connector'):
+                    logger.info(
+                        "[_discover_permissions] CONNECTOR BULK MERGE "
+                        "sp_obj=%s bulk_entries=%d added=%d dedup_skipped=%d resolved_empty=%d "
+                        "sample_resource=%s sample_app_role=%s",
+                        sp_object_id, len(bulk_entries), _bulk_added,
+                        _bulk_dedup_skipped, _bulk_resolved_empty,
+                        bulk_entries[0].get('resource_id') if bulk_entries else None,
+                        bulk_entries[0].get('app_role_id') if bulk_entries else None,
+                    )
 
             # ── Delegated permissions (oauth2PermissionGrants) ──
             try:
@@ -5707,6 +6092,56 @@ class AzureDiscoveryEngine:
         'emailAuthenticationMethod',
     }
 
+    def _load_prev_mfa_cache(self) -> dict:
+        """Load mfa_status + mfa_methods from the most recent completed
+        discovery run for this cloud_connection_id.
+
+        MFA enrollment changes rarely for established users. Reusing prior
+        values turns the per-user Graph API loop (which can take 8-10 min for
+        a 1000-user tenant due to rate limiting) into a thin "fetch only new
+        / previously-unknown users" pass. Drops scan-2+ duration significantly
+        and lets us hit the "10 min to blast radius" promise on warm scans.
+
+        Returns {} on first run, on error, or when no prior MFA data exists
+        (fail-open — caller still does the full fetch in that case).
+        """
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                """
+                SELECT i.object_id, i.mfa_status, i.mfa_methods
+                FROM identities i
+                JOIN discovery_runs dr ON dr.id = i.discovery_run_id
+                WHERE dr.cloud_connection_id = %s
+                  AND dr.status = 'completed'
+                  AND i.identity_category IN ('human_user', 'guest')
+                  AND i.mfa_status IS NOT NULL
+                  AND i.mfa_status <> 'unknown'
+                  AND i.object_id IS NOT NULL
+                  AND dr.id = (
+                      SELECT MAX(id) FROM discovery_runs
+                      WHERE cloud_connection_id = %s
+                        AND status = 'completed'
+                  )
+                """,
+                (self.cloud_connection_id, self.cloud_connection_id),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            cache: dict = {}
+            for r in rows:
+                oid = r[0]
+                if not oid:
+                    continue
+                cache[oid] = {
+                    'mfa_status': r[1],
+                    'mfa_methods': r[2] or [],
+                }
+            return cache
+        except Exception as e:
+            logger.warning("[MFA-cache] Failed to load prior MFA cache: %s", e)
+            return {}
+
     async def _collect_mfa_auth_methods(self, human_identities: list) -> dict:
         """Collect per-user MFA enrollment via /users/{id}/authentication/methods.
 
@@ -5714,14 +6149,14 @@ class AzureDiscoveryEngine:
         No P2 dependency. Falls back from the bulk credentialUserRegistrationDetails
         endpoint which requires Reports.Read.All.
 
-        Uses concurrent requests (bounded by _graph_semaphore) to cover
-        large tenants within the time budget.
+        Uses concurrent requests (bounded by a DEDICATED MFA semaphore that
+        doesn't compete with other Graph calls) to cover large tenants
+        within the time budget.
 
         Returns: dict mapping object_id -> {mfa_status, mfa_methods}
         """
         import time as _time
         phase_start = _time.monotonic()
-        TIME_BUDGET = 600  # seconds — enough for ~1000+ users with concurrency
 
         mfa_result: dict[str, dict] = {}
         if not human_identities:
@@ -5733,9 +6168,21 @@ class AzureDiscoveryEngine:
         if not targets:
             return mfa_result
 
+        # P2-C (2026-05-30) scan-time optimizations:
+        # 1. Adaptive time budget — when the MFA cache covered most users
+        #    (warm scan, residual <200 fetches), 90s is plenty. The original
+        #    600s budget was for cold scans of 1000+ users. A warm scan with
+        #    50 cache misses doesn't need a 10-minute ceiling.
+        # 2. Dedicated MFA semaphore at 50 concurrency — Graph's
+        #    /authentication/methods endpoint has a per-app rate limit
+        #    around 1000 req/min, comfortably above 50 concurrent. Sharing
+        #    _graph_semaphore (cap 20) was the bottleneck.
+        TIME_BUDGET = 90 if len(targets) < 200 else 600
+        mfa_semaphore = asyncio.Semaphore(50)
+
         logger.info(
-            "[MFA-methods] Collecting authentication methods for %s humans (concurrent). org=%s",
-            len(targets), self.db_org_id,
+            "[MFA-methods] Collecting auth methods for %s humans · concurrency=50 · budget=%ss · org=%s",
+            len(targets), TIME_BUDGET, self.db_org_id,
         )
 
         # Shared mutable state for the permission-check sentinel
@@ -5759,7 +6206,10 @@ class AzureDiscoveryEngine:
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
-                        async with self._graph_semaphore:
+                        # P2-C: use dedicated MFA semaphore (50), not the shared
+                        # _graph_semaphore (20) — MFA fetch was bottlenecked by
+                        # other concurrent Graph calls in the same scan phase.
+                        async with mfa_semaphore:
                             if not _permission_ok:
                                 return None
                             async with session.get(url, headers=headers) as resp:
@@ -6073,6 +6523,11 @@ class AzureDiscoveryEngine:
                 })
 
         # 3. PIM-eligible principals
+        # AG-PIM-FALLBACK enrichment (2026-05-30): also store assignment_type,
+        # member_type, and end_datetime so the PIM tab fallback can render
+        # real Time-Bound/Permanent + Direct/Group distinctions. Previously
+        # only role+scope were captured, which forced the fallback to show
+        # "Time-Bound · Direct · No expiry" placeholders regardless of truth.
         for pid, pim_data in pim_map.items():
             eligible = pim_data.get('eligible', [])
             if eligible:
@@ -6081,6 +6536,10 @@ class AzureDiscoveryEngine:
                     access_paths[pid]['pim_eligible'].append({
                         'role': e.get('role_name', ''),
                         'scope': e.get('directory_scope', '/'),
+                        'assignment_type': e.get('assignment_type'),
+                        'member_type': e.get('member_type'),
+                        'end_datetime': e.get('end_datetime'),
+                        'role_definition_id': e.get('role_definition_id'),
                     })
 
         # 4. Group members from role-bearing groups
@@ -6156,16 +6615,34 @@ class AzureDiscoveryEngine:
                     ca_count += 1
 
         self._principal_access_paths = access_paths
-        result_set = set(access_paths.keys())
+
+        # Founder principle (2026-05-30): only discover humans who have ACTUAL
+        # Azure access — direct RBAC, direct Entra role, PIM eligibility, or
+        # membership in a role-bearing group. SPN ownership and CA-policy
+        # targeting are administrative associations, not access; they should
+        # not earn a principal a slot in the human inventory.
+        #
+        # We keep the spn_ownership / ca_targeted entries populated on the
+        # access_paths dict (they're useful context when the principal is
+        # ALSO included for a real access path), but they don't qualify a
+        # principal for inclusion on their own.
+        _ACCESS_PATHS = ('direct_rbac', 'direct_entra', 'pim_eligible', 'group_membership')
+        result_set = {
+            pid for pid, paths in access_paths.items()
+            if any(paths.get(k) for k in _ACCESS_PATHS)
+        }
+        excluded_count = len(access_paths) - len(result_set)
 
         logger.info(
-            "[_collect_relevant_principal_ids] %d unique principals "
-            "(RBAC=%d Entra=%d PIM=%d group_expanded=%d SPN_owners=%d CA=%d)",
+            "[_collect_relevant_principal_ids] %d included principals "
+            "(RBAC=%d Entra=%d PIM=%d group_expanded=%d) | "
+            "excluded %d (SPN_owners=%d / CA_targets=%d only, no access)",
             len(result_set),
             len({ra['principal_id'] for ra in role_assignments if ra.get('principal_id')}),
             len({er['principal_id'] for er in entra_roles if er.get('principal_id')}),
             len({pid for pid, d in pim_map.items() if d.get('eligible')}),
             expanded_from_groups,
+            excluded_count,
             owner_count,
             ca_count,
         )
@@ -7763,6 +8240,236 @@ class AzureDiscoveryEngine:
             return entra_roles  # return whatever we got so far
 
 
+    def discover_cognitive_services_and_deployments(self, run_id: int) -> dict:
+        """Phase 2.1: discover Cognitive Services / Azure OpenAI accounts and
+        their model deployments (gpt-4, gpt-4o, embeddings, etc.).
+
+        Architecture-only — reads the management plane, no logs/telemetry
+        required. Answers "which model is this AI agent using?" by linking an
+        agent's RBAC scope to the deployments hosted on the account.
+
+        Persists to azure_cognitive_services_accounts + azure_ai_model_deployments.
+        Returns {accounts, deployments} counts.
+        """
+        try:
+            from azure.mgmt.cognitiveservices import CognitiveServicesManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-cognitiveservices not installed — skipping AI model discovery")
+            return {'accounts': 0, 'deployments': 0}
+
+        accounts_persisted = 0
+        deployments_persisted = 0
+        conn = self.db.conn
+        cur = conn.cursor()
+
+        for sub in getattr(self, 'subscriptions', []) or []:
+            sub_id = sub.get('subscription_id') or sub.get('id')
+            sub_name = sub.get('display_name') or sub.get('name') or ''
+            if not sub_id:
+                continue
+            try:
+                cs_client = CognitiveServicesManagementClient(self.credential, sub_id, **ARM_TIMEOUT_KWARGS)
+            except Exception as e:
+                logger.warning("CognitiveServices client error for sub %s: %s", str(sub_id)[:8], e)
+                continue
+
+            try:
+                accounts = list(cs_client.accounts.list())
+            except Exception as e:
+                logger.warning("Could not list Cognitive Services accounts in sub %s: %s", str(sub_id)[:8], e)
+                continue
+
+            for acct in accounts:
+                try:
+                    rid = acct.id or ''
+                    rid_parts = rid.split('/')
+                    rg = ''
+                    try:
+                        rg = rid_parts[rid_parts.index('resourceGroups') + 1]
+                    except (ValueError, IndexError):
+                        pass
+                    props = getattr(acct, 'properties', None)
+                    network_acls = getattr(props, 'network_acls', None) if props else None
+                    pe = getattr(props, 'private_endpoint_connections', None) if props else None
+                    cur.execute("""
+                        INSERT INTO azure_cognitive_services_accounts
+                            (discovery_run_id, organization_id, resource_id, name, kind, sku,
+                             location, resource_group, subscription_id, subscription_name,
+                             public_network_access, network_acls_default_action,
+                             private_endpoint_count, custom_subdomain, endpoint_url)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (organization_id, resource_id, discovery_run_id) DO NOTHING
+                    """, (
+                        run_id, self.db_org_id, rid, acct.name,
+                        getattr(acct, 'kind', None),
+                        getattr(getattr(acct, 'sku', None), 'name', None),
+                        getattr(acct, 'location', None),
+                        rg, sub_id, sub_name,
+                        getattr(props, 'public_network_access', None) if props else None,
+                        getattr(network_acls, 'default_action', None) if network_acls else None,
+                        len(pe) if pe else 0,
+                        getattr(props, 'custom_sub_domain_name', None) if props else None,
+                        (getattr(props, 'endpoint', None) if props else None),
+                    ))
+                    accounts_persisted += 1
+
+                    # List deployments (the actual models)
+                    try:
+                        deployments = list(cs_client.deployments.list(rg, acct.name))
+                    except Exception as e:
+                        logger.debug("No deployments for %s: %s", acct.name, e)
+                        deployments = []
+                    for dep in deployments:
+                        dprops = getattr(dep, 'properties', None)
+                        model = getattr(dprops, 'model', None) if dprops else None
+                        dsku = getattr(dep, 'sku', None)
+                        cur.execute("""
+                            INSERT INTO azure_ai_model_deployments
+                                (discovery_run_id, organization_id, account_resource_id, account_name,
+                                 deployment_name, model_name, model_version, model_format,
+                                 sku_name, sku_capacity, provisioning_state, rai_policy_name)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (organization_id, account_resource_id, deployment_name, discovery_run_id) DO NOTHING
+                        """, (
+                            run_id, self.db_org_id, rid, acct.name,
+                            dep.name,
+                            getattr(model, 'name', None) if model else (dep.name or 'unknown'),
+                            getattr(model, 'version', None) if model else None,
+                            getattr(model, 'format', None) if model else None,
+                            getattr(dsku, 'name', None) if dsku else None,
+                            getattr(dsku, 'capacity', None) if dsku else None,
+                            getattr(dprops, 'provisioning_state', None) if dprops else None,
+                            getattr(dprops, 'rai_policy_name', None) if dprops else None,
+                        ))
+                        deployments_persisted += 1
+                except Exception as e:
+                    logger.warning("Error persisting CS account %s: %s", getattr(acct, 'name', '?'), e)
+                    continue
+
+        conn.commit()
+        cur.close()
+        logger.info("AI model discovery: %d accounts, %d deployments (run %s)",
+                    accounts_persisted, deployments_persisted, run_id)
+        return {'accounts': accounts_persisted, 'deployments': deployments_persisted}
+
+
+    def discover_ai_touched_resource_network(self, run_id: int) -> dict:
+        """Phase 2.2: fetch network posture (firewall / Private Endpoint / public
+        access) for the storage accounts and key vaults that AI agents actually
+        hold roles on, and persist to azure_storage_accounts / azure_key_vaults.
+
+        Targeted (only AI-touched resources) so it's fast — not a full tenant
+        sweep. Architecture-only: powers the egress verdict for storage/KV the
+        same way Cognitive accounts already work.
+
+        Returns {storage, key_vaults} persisted counts.
+        """
+        import re as _re
+        conn = self.db.conn
+        cur = conn.cursor()
+
+        # Resource ids AI agents touch (latest run per identity)
+        cur.execute("""
+            SELECT DISTINCT ra.scope
+            FROM role_assignments ra
+            JOIN identities i ON i.id = ra.identity_db_id
+            JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.organization_id = %s
+              AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+              AND (ra.scope ~ 'Microsoft\\.Storage/storageAccounts/[^/]+$'
+                   OR ra.scope ~ 'Microsoft\\.KeyVault/vaults/[^/]+$')
+        """, (self.db_org_id,))
+        storage_ids, kv_ids = set(), set()
+        for (scope,) in cur.fetchall():
+            if not scope:
+                continue
+            if _re.search(r'Microsoft\.Storage/storageAccounts/[^/]+$', scope):
+                storage_ids.add(scope)
+            elif _re.search(r'Microsoft\.KeyVault/vaults/[^/]+$', scope):
+                kv_ids.add(scope)
+
+        # Idempotency: clear this run's rows first
+        cur.execute("DELETE FROM azure_storage_accounts WHERE organization_id=%s AND discovery_run_id=%s",
+                    (self.db_org_id, run_id))
+        cur.execute("DELETE FROM azure_key_vaults WHERE organization_id=%s AND discovery_run_id=%s",
+                    (self.db_org_id, run_id))
+
+        def _parse(rid):
+            parts = rid.split('/')
+            sub = parts[parts.index('subscriptions') + 1] if 'subscriptions' in parts else ''
+            rg = parts[parts.index('resourceGroups') + 1] if 'resourceGroups' in parts else ''
+            return sub, rg, parts[-1]
+
+        storage_n = 0
+        try:
+            from azure.mgmt.storage import StorageManagementClient
+            sm_clients = {}
+            for rid in storage_ids:
+                sub, rg, name = _parse(rid)
+                if not (sub and rg and name):
+                    continue
+                cli = sm_clients.get(sub) or StorageManagementClient(self.credential, sub, **ARM_TIMEOUT_KWARGS)
+                sm_clients[sub] = cli
+                try:
+                    acct = cli.storage_accounts.get_properties(rg, name)
+                    nrs = getattr(acct, 'network_rule_set', None)
+                    default_action = getattr(nrs, 'default_action', None) if nrs else None
+                    ip_rules = len(getattr(nrs, 'ip_rules', []) or []) if nrs else 0
+                    vnet_rules = len(getattr(nrs, 'virtual_network_rules', []) or []) if nrs else 0
+                    pe = len(getattr(acct, 'private_endpoint_connections', []) or [])
+                    public_blob = getattr(acct, 'allow_blob_public_access', None)
+                    cur.execute("""
+                        INSERT INTO azure_storage_accounts
+                          (discovery_run_id, organization_id, resource_id, name, location,
+                           resource_group, subscription_id, default_network_action,
+                           ip_rules_count, vnet_rules_count, private_endpoint_count, public_blob_access)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (run_id, self.db_org_id, rid, name, getattr(acct, 'location', None),
+                          rg, sub, str(default_action) if default_action else None,
+                          ip_rules, vnet_rules, pe, public_blob))
+                    storage_n += 1
+                except Exception as e:
+                    logger.debug("storage net fetch failed for %s: %s", name, e)
+        except ImportError:
+            logger.warning("azure-mgmt-storage not installed — skipping storage network posture")
+
+        kv_n = 0
+        try:
+            from azure.mgmt.keyvault import KeyVaultManagementClient
+            kv_clients = {}
+            for rid in kv_ids:
+                sub, rg, name = _parse(rid)
+                if not (sub and rg and name):
+                    continue
+                cli = kv_clients.get(sub) or KeyVaultManagementClient(self.credential, sub, **ARM_TIMEOUT_KWARGS)
+                kv_clients[sub] = cli
+                try:
+                    vault = cli.vaults.get(rg, name)
+                    props = getattr(vault, 'properties', None)
+                    acls = getattr(props, 'network_acls', None) if props else None
+                    default_action = getattr(acls, 'default_action', None) if acls else None
+                    pe = len(getattr(props, 'private_endpoint_connections', []) or []) if props else 0
+                    pna = getattr(props, 'public_network_access', None) if props else None
+                    cur.execute("""
+                        INSERT INTO azure_key_vaults
+                          (discovery_run_id, organization_id, resource_id, name,
+                           public_network_access, default_network_action, private_endpoint_count)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """, (run_id, self.db_org_id, rid, name,
+                          pna, str(default_action) if default_action else None, pe))
+                    kv_n += 1
+                except Exception as e:
+                    logger.debug("kv net fetch failed for %s: %s", name, e)
+        except ImportError:
+            logger.warning("azure-mgmt-keyvault not installed — skipping KV network posture")
+
+        conn.commit()
+        cur.close()
+        logger.info("AI-touched resource network: %d storage, %d key vaults (run %s)",
+                    storage_n, kv_n, run_id)
+        return {'storage': storage_n, 'key_vaults': kv_n}
+
+
     def _is_microsoft_system_app(self, identity: Dict) -> bool:
         """
         Determine if a service principal is a Microsoft first-party app.
@@ -8170,6 +8877,22 @@ class AzureDiscoveryEngine:
             # Initialize V2 scoring
             risk_factors = []
 
+            # AG-E Phase 2 (2026-06-01): track which Entra roles have observed
+            # usage in the last 90 days so we can emit the "unused" finding.
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            _PRIVILEGED_ENTRA_NAMES = {
+                'global administrator', 'privileged role administrator',
+                'application administrator', 'cloud application administrator',
+                'user administrator', 'security administrator',
+                'authentication administrator', 'privileged authentication administrator',
+                'conditional access administrator', 'hybrid identity administrator',
+                'helpdesk administrator', 'exchange administrator',
+                'sharepoint administrator', 'teams administrator',
+                'intune administrator', 'compliance administrator',
+            }
+            _ninety_days_ago = _dt.now(_tz.utc) - _td(days=90)
+            _unused_priv_entra = []  # collected for the post-loop finding emit
+
             # ============================================================
             # 1. Entra ID Directory Roles (highest privilege)
             # ============================================================
@@ -8189,6 +8912,25 @@ class AzureDiscoveryEngine:
                     risk_factors.append(make_factor("EXCHANGE_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
                 elif 'sharepoint administrator' in role_name_lower:
                     risk_factors.append(make_factor("SHAREPOINT_ADMIN_ROLE", f"entra_role:{entra_role['role_name']}"))
+
+                # AG-E Phase 2: collect privileged-but-unused candidates for
+                # the post-loop STANDING_ENTRA_ROLE_UNUSED_90D emit. We check
+                # against last_used_at populated by _collect_entra_audit_activity
+                # (or NULL if directoryAudits never observed the role being used).
+                if role_name_lower in _PRIVILEGED_ENTRA_NAMES:
+                    _lu = entra_role.get('last_used_at')
+                    if _lu is None or (
+                        hasattr(_lu, 'tzinfo') and _lu < _ninety_days_ago
+                    ):
+                        _unused_priv_entra.append(entra_role['role_name'])
+
+            # Emit a single STANDING_ENTRA_ROLE_UNUSED_90D finding per identity
+            # with the list of unused privileged Entra roles as evidence.
+            if _unused_priv_entra:
+                evidence = "unused 90d: " + ", ".join(_unused_priv_entra[:5])
+                if len(_unused_priv_entra) > 5:
+                    evidence += f" (+{len(_unused_priv_entra) - 5} more)"
+                risk_factors.append(make_factor("STANDING_ENTRA_ROLE_UNUSED_90D", evidence))
 
             # ============================================================
             # 2. Azure RBAC Roles
@@ -8352,6 +9094,50 @@ class AzureDiscoveryEngine:
                         risk_level = score_to_level_v2(risk_score)
             except Exception as e:
                 logger.warning("Custom risk rules error: %s", e)
+
+            # ============================================================
+            # NHI default = CRITICAL until proven safe
+            # (Founder principle, 2026-05-30: "for NHIs - everyone is critical")
+            # Service principals and managed identities start at CRITICAL and
+            # must EARN a downgrade by passing all 5 safety checks below.
+            # Microsoft-managed identities are excluded — they're already
+            # filtered out of the inventory.
+            # ============================================================
+            _nhi_types = ('service_principal', 'managed_identity_system', 'managed_identity_user')
+            if (identity.get('identity_type') in _nhi_types
+                    and not identity.get('is_microsoft_system')):
+                _all_roles = identity_roles + identity_entra_roles
+                _priv_kw = ('owner', 'contributor', 'user access administrator',
+                            'global administrator', 'privileged role administrator')
+                _has_priv_role = any(
+                    any(kw in (r.get('role_name') or '').lower() for kw in _priv_kw)
+                    for r in _all_roles
+                )
+                _days_inactive = identity.get('days_inactive')
+                _recent_activity = _days_inactive is not None and _days_inactive < 30
+                _has_owner = (identity.get('owner_count') or 0) > 0
+                _auth_gated = (
+                    bool(identity.get('has_federated_credentials'))
+                    or (identity.get('identity_type') or '').startswith('managed_identity')
+                    or active_cred_count == 0
+                )
+                _no_bad_creds = not has_expired and not has_expiring_soon
+
+                _failed_checks = []
+                if _has_priv_role:      _failed_checks.append('privileged role')
+                if not _recent_activity: _failed_checks.append('no recent activity')
+                if not _has_owner:      _failed_checks.append('no owner')
+                if not _auth_gated:     _failed_checks.append('ungated auth (long-lived secrets)')
+                if not _no_bad_creds:   _failed_checks.append('expired/expiring credentials')
+
+                # Floor the risk_level at CRITICAL when any safety check fails.
+                # Never downgrade a higher-than-critical result (none exists yet,
+                # but futureproof). Skip when already critical.
+                if _failed_checks and risk_level not in ('critical',):
+                    risk_level = 'critical'
+                    risk_reasons.append(
+                        'NHI default = CRITICAL (failed: ' + ', '.join(_failed_checks) + ')'
+                    )
 
             # Calculate role usage status (inference-based)
             identity_roles, identity_entra_roles = self._calculate_role_usage_status(
@@ -9322,6 +10108,429 @@ class AzureDiscoveryEngine:
         logger.info("[arm_activity] COMPLETE: %d events, %d role updates, %.1fs",
                     len(all_events), len(role_updates), elapsed)
 
+    def _collect_entra_audit_activity(self, run_id: int) -> None:
+        """AG-E Phase 2: per-Entra-role last-used inference from
+        /auditLogs/directoryAudits.
+
+        Microsoft provides no per-Entra-role exercise log. We bulk-pull
+        directory audit events for the last 90 days, group by initiator,
+        and attribute each event's category to whichever of the principal's
+        Entra roles could have authorized it (see entra_role_matches_audit_category).
+
+        Time-bounded: 90s soft budget — directoryAudits supports $top=999
+        which is usually enough for tenants <10k events/day; large tenants
+        will see partial coverage which still beats today's 0%.
+
+        Tenant requirements: AuditLog.Read.All Graph permission (already
+        granted for IP enrichment). 403 → graceful skip with a log line.
+        """
+        import os
+        import time as _time
+        from urllib.parse import quote
+        import requests
+
+        if os.environ.get('DISABLE_ENTRA_AUDIT_ACTIVITY', 'false').lower() == 'true':
+            logger.info("[entra_activity] SKIPPED via env flag")
+            return
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('ENTRA_ACTIVITY_MAX_SECONDS', '90'))
+        lookback_days = int(os.environ.get('ENTRA_AUDIT_LOOKBACK_DAYS', '90'))
+        cutoff_iso = (datetime.utcnow() - timedelta(days=lookback_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # Get Graph token
+        try:
+            graph_token = self.credential.get_token("https://graph.microsoft.com/.default")
+        except Exception as e:
+            logger.warning("[entra_activity] Graph token acquisition failed: %s", e)
+            return
+        headers = {"Authorization": f"Bearer {graph_token.token}"}
+
+        # Bulk-fetch with $top=999 + nextLink pagination
+        filter_str = f"activityDateTime ge {cutoff_iso}"
+        url = (
+            f"https://graph.microsoft.com/v1.0/auditLogs/directoryAudits"
+            f"?$filter={quote(filter_str)}"
+            f"&$top=999"
+            f"&$select=activityDateTime,category,activityDisplayName,initiatedBy,result"
+        )
+
+        events_seen = 0
+        updates: list[dict] = []
+        # De-duplicate per (user_id, category) — keep only the most recent.
+        # We have N×M attributions to do (events × candidate roles); shrinking
+        # at this stage keeps the DB update loop tractable.
+        per_user_category: dict[tuple[str, str], dict] = {}
+
+        page = 0
+        try:
+            while url:
+                page += 1
+                if _time.monotonic() - phase_start > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[entra_activity] TIME BUDGET %ds exceeded at page=%d events=%d — stopping",
+                        MAX_PHASE_SECONDS, page, events_seen,
+                    )
+                    break
+                try:
+                    resp = requests.get(url, headers=headers, timeout=20)
+                except requests.RequestException as e:
+                    logger.warning("[entra_activity] page=%d request error: %s", page, e)
+                    break
+                if resp.status_code == 403:
+                    logger.warning("[entra_activity] PERMISSION DENIED — AuditLog.Read.All required, skipping")
+                    return
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get('Retry-After', '5'))
+                    logger.info("[entra_activity] 429 throttled, sleeping %ds", min(retry_after, 30))
+                    _time.sleep(min(retry_after, 30))
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("[entra_activity] page=%d HTTP %s — %s",
+                                   page, resp.status_code, resp.text[:200])
+                    break
+
+                data = resp.json()
+                for evt in data.get('value', []):
+                    events_seen += 1
+                    initiated_by = evt.get('initiatedBy') or {}
+                    user_block = initiated_by.get('user') or {}
+                    user_id = (user_block.get('id') or '').strip()
+                    if not user_id:
+                        # initiatedBy.app — not a user; skip for Entra role attribution.
+                        # App-attributed events are SPN actions which are tracked via
+                        # ARM Activity Log + sign-in events, not directory roles.
+                        continue
+                    activity_at_str = evt.get('activityDateTime')
+                    if not activity_at_str:
+                        continue
+                    try:
+                        activity_at = datetime.fromisoformat(
+                            activity_at_str.replace('Z', '+00:00')
+                        )
+                    except Exception:
+                        continue
+                    category = evt.get('category') or ''
+                    op_name = evt.get('activityDisplayName') or ''
+                    key = (user_id.lower(), category)
+                    prior = per_user_category.get(key)
+                    if prior is None or activity_at > prior['activity_at']:
+                        per_user_category[key] = {
+                            'principal_user_id': user_id,
+                            'activity_at': activity_at,
+                            'category': category,
+                            'activity_display_name': op_name,
+                        }
+
+                url = data.get('@odata.nextLink')
+        except Exception as e:
+            logger.warning("[entra_activity] Bulk fetch error after %d events: %s",
+                           events_seen, e)
+
+        updates = list(per_user_category.values())
+        if not updates:
+            elapsed = _time.monotonic() - phase_start
+            logger.info("[entra_activity] No events (or 0 user-initiated) after %.1fs", elapsed)
+            return
+
+        try:
+            updated = self.db.update_role_last_used_from_entra_audits(
+                self.db_org_id, updates,
+            )
+            elapsed = _time.monotonic() - phase_start
+            logger.info(
+                "[entra_activity] COMPLETE: %d events, %d (user,category) keys, %d entra roles updated, %.1fs",
+                events_seen, len(updates), updated, elapsed,
+            )
+        except Exception as e:
+            logger.warning("[entra_activity] DB update failed: %s", e)
+            try:
+                self.db._rollback()
+            except Exception:
+                pass
+
+    def _discover_consent_grants(self, run_id: int) -> None:
+        """AG-81: discover OAuth consent grants for the tenant.
+
+        Two Graph endpoints:
+          - /oauth2PermissionGrants — delegated consents (user OR admin
+            consented). Bulk fetch with $top pagination.
+          - /servicePrincipals/{id}/appRoleAssignments — application
+            permissions (always admin-consented). Per-SP iteration; we
+            only query SPs we already discovered to keep API budget tight.
+
+        Each grant gets CVSS-aligned risk via compute_consent_risk() then
+        UPSERTed via db.upsert_consent_grant(). Graceful 403 if scopes
+        not yet consented; entire path no-ops with a warning so the scan
+        completes.
+
+        Time-bounded (default 90s soft budget). Required Graph scopes
+        (already requested at connector setup): Directory.Read.All,
+        Application.Read.All.
+        """
+        import os
+        import time as _time
+        from urllib.parse import quote
+        import requests
+
+        if os.environ.get('DISABLE_CONSENT_GRANT_DISCOVERY', 'false').lower() == 'true':
+            logger.info("[consent_grants] SKIPPED via env flag")
+            return
+
+        phase_start = _time.monotonic()
+        MAX_PHASE_SECONDS = int(os.environ.get('CONSENT_GRANTS_MAX_SECONDS', '90'))
+
+        # Late-import — risk scorer lives in constants/
+        from app.constants.consent_risk import compute_consent_risk
+
+        try:
+            graph_token = self.credential.get_token("https://graph.microsoft.com/.default")
+        except Exception as e:
+            logger.warning("[consent_grants] Graph token acquisition failed: %s", e)
+            return
+        headers = {"Authorization": f"Bearer {graph_token.token}"}
+
+        # ── Build SPN object_id → display_name map from THIS run's identities ──
+        # Resource SP lookup needs display names for the "resource_display_name"
+        # column. Saves an N+1 Graph call.
+        # AG-85: same SELECT also pulls publisher_name + verified_publisher
+        # + app_reg_publisher_domain so each consent grant gets enriched
+        # with publisher trust at discovery time.
+        sp_name_by_object_id: dict[str, str] = {}
+        sp_name_by_app_id: dict[str, str] = {}
+        sp_publisher_by_object_id: dict[str, dict] = {}  # AG-85
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                SELECT object_id, app_id, display_name,
+                       publisher_name, verified_publisher, app_reg_publisher_domain
+                  FROM identities
+                 WHERE discovery_run_id = %s
+                   AND identity_type IN ('service_principal', 'managed_identity_user',
+                                          'managed_identity_system', 'app_registration')
+            """, (run_id,))
+            for obj_id, app_id, display_name, pub_name, verified, pub_dom in cursor.fetchall():
+                if obj_id and display_name:
+                    sp_name_by_object_id[str(obj_id).lower()] = display_name
+                if app_id and display_name:
+                    sp_name_by_app_id[str(app_id).lower()] = display_name
+                if obj_id and (pub_name or verified is not None or pub_dom):
+                    sp_publisher_by_object_id[str(obj_id).lower()] = {
+                        'publisher_name': pub_name,
+                        'verified_publisher': verified,
+                        'publisher_domain': pub_dom,
+                    }
+            cursor.close()
+        except Exception:
+            pass
+
+        def _name_for_resource(resource_id: str, resource_app_id: str = None) -> str | None:
+            """Look up the resource API's display name by either ID."""
+            if resource_id and resource_id.lower() in sp_name_by_object_id:
+                return sp_name_by_object_id[resource_id.lower()]
+            if resource_app_id and resource_app_id.lower() in sp_name_by_app_id:
+                return sp_name_by_app_id[resource_app_id.lower()]
+            # Known fallbacks for Microsoft first-party resources
+            mapping = {
+                '00000003-0000-0000-c000-000000000000': 'Microsoft Graph',
+                '00000002-0000-0000-c000-000000000000': 'Azure AD Graph',
+                '00000003-0000-0ff1-ce00-000000000000': 'Office 365 SharePoint Online',
+                '00000002-0000-0ff1-ce00-000000000000': 'Office 365 Exchange Online',
+                'fc780465-2017-40d4-a0c5-307022471b92': 'Windows Azure Active Directory',
+            }
+            return mapping.get((resource_app_id or resource_id or '').lower())
+
+        upserted = 0
+        events_seen = 0
+
+        # ── (1) Delegated grants — bulk fetch ──
+        url = ("https://graph.microsoft.com/v1.0/oauth2PermissionGrants"
+               "?$top=999"
+               "&$select=id,clientId,consentType,principalId,resourceId,scope,startTime,expiryTime")
+        page = 0
+        try:
+            while url:
+                page += 1
+                if _time.monotonic() - phase_start > MAX_PHASE_SECONDS:
+                    logger.warning(
+                        "[consent_grants] TIME BUDGET %ds exceeded at delegated page=%d events=%d",
+                        MAX_PHASE_SECONDS, page, events_seen,
+                    )
+                    break
+                try:
+                    resp = requests.get(url, headers=headers, timeout=20)
+                except requests.RequestException as e:
+                    logger.warning("[consent_grants] delegated page=%d request err: %s", page, e)
+                    break
+                if resp.status_code == 403:
+                    logger.warning("[consent_grants] PERMISSION DENIED on oauth2PermissionGrants — Directory.Read.All required")
+                    return
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get('Retry-After', '5'))
+                    _time.sleep(min(retry_after, 30))
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("[consent_grants] delegated page=%d HTTP %s — %s",
+                                   page, resp.status_code, resp.text[:200])
+                    break
+
+                data = resp.json()
+                for evt in data.get('value', []):
+                    events_seen += 1
+                    client_object_id = (evt.get('clientId') or '').strip()
+                    resource_object_id = (evt.get('resourceId') or '').strip()
+                    scopes_str = (evt.get('scope') or '').strip()
+                    scopes = [s for s in scopes_str.split(' ') if s] if scopes_str else []
+                    if not client_object_id or not scopes:
+                        continue
+                    # Created datetime — startTime is the consent time
+                    created_at = None
+                    try:
+                        st = evt.get('startTime')
+                        if st:
+                            from datetime import datetime as _dt
+                            created_at = _dt.fromisoformat(st.replace('Z', '+00:00'))
+                    except Exception:
+                        pass
+                    consent_type = evt.get('consentType') or 'Principal'
+                    # AG-85: enrich risk + grant with publisher trust
+                    pub = sp_publisher_by_object_id.get(client_object_id.lower(), {})
+                    risk = compute_consent_risk(
+                        scopes=scopes,
+                        consent_type=consent_type,
+                        grant_type='delegated',
+                        created_datetime=created_at,
+                        verified_publisher=pub.get('verified_publisher'),
+                        publisher_name=pub.get('publisher_name'),
+                    )
+                    client_name = sp_name_by_object_id.get(client_object_id.lower())
+                    grant = {
+                        'grant_type': 'delegated',
+                        'client_app_id': client_object_id,  # delegated grants don't carry the appId; use obj id
+                        'client_object_id': client_object_id,
+                        'client_display_name': client_name,
+                        'resource_app_id': resource_object_id,
+                        'resource_object_id': resource_object_id,
+                        'resource_display_name': _name_for_resource(resource_object_id),
+                        'scopes': scopes,
+                        'consent_type': consent_type,
+                        'principal_id': evt.get('principalId'),
+                        'principal_display_name': None,
+                        'created_datetime': created_at,
+                        'expires_at': None,
+                        'last_activity_at': None,
+                        'risk_score': risk['risk_score'],
+                        'risk_level': risk['risk_level'],
+                        'high_risk_scopes': risk['high_risk_scopes'],
+                        'age_days': risk['age_days'],
+                        'evidence_source': 'graph_oauth2_grants',
+                        'publisher_name': pub.get('publisher_name'),
+                        'verified_publisher': pub.get('verified_publisher'),
+                        'publisher_domain': pub.get('publisher_domain'),
+                        'publisher_enriched_at': datetime.utcnow() if pub else None,
+                    }
+                    try:
+                        self.db.upsert_consent_grant(self.db_org_id, run_id, grant)
+                        upserted += 1
+                    except Exception as e:
+                        logger.debug("[consent_grants] delegated upsert err: %s", e)
+                        try: self.db._rollback()
+                        except Exception: pass
+
+                url = data.get('@odata.nextLink')
+        except Exception as e:
+            logger.warning("[consent_grants] delegated fetch error after %d events: %s", events_seen, e)
+
+        # ── (2) Application grants — per-SP iterate ──
+        # We only query the SPs we already discovered (sp_name_by_object_id),
+        # not the full tenant SP list — keeps the API budget tight on large
+        # tenants where many SPs have zero grants.
+        app_grants_seen = 0
+        for sp_object_id in list(sp_name_by_object_id.keys()):
+            if _time.monotonic() - phase_start > MAX_PHASE_SECONDS:
+                logger.warning("[consent_grants] TIME BUDGET hit during appRoleAssignments iteration")
+                break
+            url = (f"https://graph.microsoft.com/v1.0/servicePrincipals/{quote(sp_object_id)}"
+                   f"/appRoleAssignments?$top=999")
+            try:
+                resp = requests.get(url, headers=headers, timeout=15)
+            except requests.RequestException:
+                continue
+            if resp.status_code == 403:
+                logger.warning("[consent_grants] 403 on appRoleAssignments — Application.Read.All required")
+                break
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            for evt in data.get('value', []):
+                app_grants_seen += 1
+                resource_id = (evt.get('resourceId') or '').strip()
+                resource_app_id = resource_id  # for application grants resourceId IS the SP object_id
+                # appRoleId is a UUID — we don't enumerate AppRole names here
+                # (would require a separate /servicePrincipals/{rid}?$select=appRoles
+                # call per resource). Surface the role UUID as a placeholder scope
+                # so the row is still useful; future enrichment can resolve names.
+                app_role_id = evt.get('appRoleId')
+                scopes = [f"appRole:{app_role_id}"] if app_role_id else ['appRole:unknown']
+                created_at = None
+                try:
+                    from datetime import datetime as _dt
+                    st = evt.get('createdDateTime')
+                    if st:
+                        created_at = _dt.fromisoformat(st.replace('Z', '+00:00'))
+                except Exception:
+                    pass
+                # Risk scoring with empty/placeholder scopes: still surfaces
+                # admin-consent + dormant signals even if scope tier is unknown
+                # AG-85: enrich risk + grant with publisher trust
+                pub = sp_publisher_by_object_id.get(sp_object_id.lower(), {})
+                risk = compute_consent_risk(
+                    scopes=scopes,
+                    consent_type='AllPrincipals',
+                    grant_type='application',
+                    created_datetime=created_at,
+                    verified_publisher=pub.get('verified_publisher'),
+                    publisher_name=pub.get('publisher_name'),
+                )
+                grant = {
+                    'grant_type': 'application',
+                    'client_app_id': sp_object_id,
+                    'client_object_id': sp_object_id,
+                    'client_display_name': sp_name_by_object_id.get(sp_object_id),
+                    'resource_app_id': resource_app_id,
+                    'resource_object_id': resource_id,
+                    'resource_display_name': _name_for_resource(resource_id),
+                    'scopes': scopes,
+                    'consent_type': 'AllPrincipals',
+                    'principal_id': None,
+                    'principal_display_name': None,
+                    'created_datetime': created_at,
+                    'expires_at': None,
+                    'last_activity_at': None,
+                    'risk_score': risk['risk_score'],
+                    'risk_level': risk['risk_level'],
+                    'high_risk_scopes': risk['high_risk_scopes'],
+                    'age_days': risk['age_days'],
+                    'evidence_source': 'graph_app_role_assignments',
+                    'publisher_name': pub.get('publisher_name'),
+                    'verified_publisher': pub.get('verified_publisher'),
+                    'publisher_domain': pub.get('publisher_domain'),
+                    'publisher_enriched_at': datetime.utcnow() if pub else None,
+                }
+                try:
+                    self.db.upsert_consent_grant(self.db_org_id, run_id, grant)
+                    upserted += 1
+                except Exception as e:
+                    logger.debug("[consent_grants] app upsert err: %s", e)
+                    try: self.db._rollback()
+                    except Exception: pass
+
+        elapsed = _time.monotonic() - phase_start
+        logger.info(
+            "[consent_grants] COMPLETE: delegated=%d appRole=%d upserted=%d %.1fs",
+            events_seen, app_grants_seen, upserted, elapsed,
+        )
+
     async def _fetch_last_observed_ips(self, identities: List[Dict]) -> None:
         """Fetch last observed IP from ARM Activity Log for all identities.
 
@@ -10102,6 +11311,15 @@ class AzureDiscoveryEngine:
                                     self.db_org_id, plan, len(identities), max_ids or 'unlimited')
             except Exception as e:
                 logger.error("Entitlement check failed, proceeding without limit: %s", e)
+
+        # AG-PS: surface risk-level breakdown + top findings mid-scan so the
+        # Discovery modal renders the cinematic ticker. Real data only —
+        # everything sourced from identities[].risk_level + risk_factors.
+        try:
+            self._update_job_risk_counts(identities)
+            self._stream_live_findings(identities, top_n=8)
+        except Exception as e:
+            logger.debug("Progressive scan hooks soft-failed: %s", e)
 
         # Ensure clean transaction state before identity save loop.
         # Prior operations (job progress/metrics) may have left a poisoned

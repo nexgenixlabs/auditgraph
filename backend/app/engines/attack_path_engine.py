@@ -132,6 +132,7 @@ class AttackPathEngine:
             ('lateral_movement', self._detect_lateral_movement),
             ('sensitive_data_exposure', self._detect_sensitive_data_exposure),
             ('external_identity_risk', self._detect_external_identity_risk),
+            ('ai_agent_exfiltration', self._detect_ai_agent_exfiltration),
         ]
 
         for name, detector in detectors:
@@ -692,6 +693,552 @@ class AttackPathEngine:
                 ))
         except Exception:
             self.db._rollback()
+
+        cursor.close()
+        return paths
+
+    # ------------------------------------------------------------------
+    # AG-178 — AI Agent Exfiltration chain detector
+    # ------------------------------------------------------------------
+
+    def _detect_ai_agent_exfiltration(self, run_id: int) -> List[Dict]:
+        """AG-178: AI-agent → MI → KV secret → Storage → classified data → egress.
+
+        Detects the canonical AI-agent exfiltration kill-chain:
+          0. ai_agent (identity from agent_classifications)
+          1. managed_identity (T1078.004)
+          2. rbac_role (role linking MI to KV / storage)
+          3. key_vault (with secrets_total + public_network_access)
+          4. kv_secret (T1552.001) — synthesized aggregate
+          5. storage_account (T1530, only if classified PHI/PCI/PII/HR/SOURCE)
+          6. network_egress (T1041, T1567) — only if public_blob_access=True
+             OR default_network_action='Allow'
+
+        MITRE techniques are sourced via enrich_path_node_with_mitre.
+        Data classification chip comes from constants.data_classification.
+        Scope matching uses services.access_resolution.resolve_agent_resource_access.
+        """
+        from app.constants.data_classification import classify_resource
+        from app.constants.mitre import enrich_path_node_with_mitre
+        from app.services.access_resolution import resolve_agent_resource_access
+
+        # AG-178 exfil target classifications: only chains terminating in one of
+        # these classes are emitted (others are out-of-scope for this detector).
+        _EXFIL_CLASSES = {"PHI", "PCI", "PII", "HR", "SOURCE"}
+
+        org_id = getattr(self.db, '_organization_id', None)
+        paths: List[Dict] = []
+        cursor = self.db.conn.cursor()
+
+        # If no org context on the Database (admin / dry-run usage),
+        # derive it from the discovery_run itself so the org-scoped
+        # latest-per-resource queries still fire.
+        if org_id is None:
+            try:
+                cursor.execute("SAVEPOINT ag178_derive_org")
+                cursor.execute(
+                    "SELECT organization_id FROM discovery_runs WHERE id = %s",
+                    (run_id,),
+                )
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    org_id = row[0]
+                cursor.execute("RELEASE SAVEPOINT ag178_derive_org")
+            except Exception:
+                try: cursor.execute("ROLLBACK TO SAVEPOINT ag178_derive_org")
+                except Exception: pass
+
+        # ── 1. Find AI agents in this run ───────────────────────────────
+        # AI agents are identities flagged by agent_classifications with type
+        # 'ai_agent' or 'possible_ai_agent'. We need identity_db_id (FK for
+        # role_assignments) and identity_id (external UUID for source_entity_id).
+        try:
+            cursor.execute("SAVEPOINT ag178_load_agents")
+            cursor.execute("""
+                SELECT i.id, i.identity_id, i.display_name, i.identity_category,
+                       ac.agent_identity_type, ac.detected_platform,
+                       ac.classification_confidence
+                FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE i.discovery_run_id = %s
+                  AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                  AND i.is_microsoft_system = FALSE
+            """, (run_id,))
+            agents = cursor.fetchall()
+            cursor.execute("RELEASE SAVEPOINT ag178_load_agents")
+        except Exception as e:
+            logger.debug(f"AG-178: agent_classifications query failed: {e}")
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT ag178_load_agents")
+            except Exception:
+                self.db._rollback()
+            cursor.close()
+            return []
+
+        if not agents:
+            cursor.close()
+            return []
+
+        # ── 2. Load Key Vaults for this org. Resource enumeration may run
+        # less often than identity discovery (customers sometimes only run
+        # ARM enum every Nth scan), so we use latest-per-resource_id
+        # across the org rather than strict run-id match. Falls back to
+        # the run-id strict query if the org-scoped one isn't possible.
+        key_vaults: List[dict] = []
+        try:
+            cursor.execute("SAVEPOINT ag178_load_kv")
+            if org_id is not None:
+                cursor.execute("""
+                    SELECT DISTINCT ON (resource_id)
+                           resource_id, name, subscription_id, resource_group,
+                           secrets_total, public_network_access,
+                           default_network_action, private_endpoint_count
+                    FROM azure_key_vaults
+                    WHERE organization_id = %s
+                    ORDER BY resource_id, discovery_run_id DESC
+                """, (org_id,))
+            else:
+                cursor.execute("""
+                    SELECT resource_id, name, subscription_id, resource_group,
+                           secrets_total, public_network_access,
+                           default_network_action, private_endpoint_count
+                    FROM azure_key_vaults
+                    WHERE discovery_run_id = %s
+                """, (run_id,))
+            for row in cursor.fetchall():
+                key_vaults.append({
+                    'resource_id': row[0],
+                    'name': row[1],
+                    'subscription_id': row[2],
+                    'resource_group': row[3],
+                    'secrets_total': row[4] or 0,
+                    'public_network_access': row[5],
+                    'default_network_action': row[6],
+                    'private_endpoint_count': row[7] or 0,
+                })
+            cursor.execute("RELEASE SAVEPOINT ag178_load_kv")
+        except Exception as e:
+            logger.debug(f"AG-178: key_vaults query failed: {e}")
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT ag178_load_kv")
+            except Exception:
+                self.db._rollback()
+
+        # ── 3. Load this run's Storage Accounts with non-null classifications.
+        # AG-178: storage accounts on the chain. We classify on the fly via
+        # the SSOT taxonomy (name + tag) so that real-world customer storage
+        # that has NEVER been classified still produces chains — un-classified
+        # rows become "Suspected (heuristic)" instead of being filtered out.
+        # If even the heuristic finds nothing, we keep the row with
+        # classification=None so the chain emits at a lower severity rather
+        # than disappear entirely (admin role on storage IS the risk signal,
+        # tag is just enrichment).
+        storage_accounts: List[dict] = []
+        try:
+            cursor.execute("SAVEPOINT ag178_load_storage")
+            if org_id is not None:
+                # latest-per-resource_id across the org (resource enumeration
+                # may have run on an earlier discovery_run_id than identities)
+                cursor.execute("""
+                    SELECT DISTINCT ON (resource_id)
+                           resource_id, name, subscription_id, resource_group,
+                           public_blob_access, default_network_action,
+                           private_endpoint_count, data_classification,
+                           classification_confidence, classification_source,
+                           tags
+                    FROM azure_storage_accounts
+                    WHERE organization_id = %s
+                    ORDER BY resource_id, discovery_run_id DESC
+                """, (org_id,))
+            else:
+                cursor.execute("""
+                    SELECT resource_id, name, subscription_id, resource_group,
+                           public_blob_access, default_network_action,
+                           private_endpoint_count, data_classification,
+                           classification_confidence, classification_source,
+                           tags
+                    FROM azure_storage_accounts
+                    WHERE discovery_run_id = %s
+                """, (run_id,))
+            for row in cursor.fetchall():
+                stored_cls = (row[7] or '').upper()
+                tags = row[10] if isinstance(row[10], dict) else None
+                # Live SSOT classify — derives PHI/PCI/etc. from name + tag.
+                cls_result = classify_resource(row[1], tags, None)
+
+                if stored_cls and stored_cls in _EXFIL_CLASSES:
+                    classification = stored_cls
+                    cls_confidence = row[8] or 'medium'
+                    cls_source = row[9] or 'stored'
+                elif cls_result and cls_result['classification'] in _EXFIL_CLASSES:
+                    classification = cls_result['classification']
+                    cls_confidence = cls_result['confidence']
+                    cls_source = cls_result['source']
+                elif stored_cls:
+                    # Stored classification is outside AG-178 scope
+                    # (e.g. FINANCIAL / CONFIDENTIAL) — chain still risky,
+                    # just labeled honestly.
+                    classification = stored_cls
+                    cls_confidence = row[8] or 'low'
+                    cls_source = row[9] or 'stored'
+                else:
+                    # Truly unclassified — chain still emits at lower severity
+                    # so admin-role-on-storage doesn't vanish from the demo.
+                    classification = None
+                    cls_confidence = None
+                    cls_source = None
+
+                storage_accounts.append({
+                    'resource_id': row[0],
+                    'name': row[1],
+                    'subscription_id': row[2],
+                    'resource_group': row[3],
+                    'public_blob_access': bool(row[4]) if row[4] is not None else False,
+                    'default_network_action': row[5],
+                    'private_endpoint_count': row[6] or 0,
+                    'classification': classification,
+                    'classification_confidence': cls_confidence,
+                    'classification_source': cls_source,
+                })
+            cursor.execute("RELEASE SAVEPOINT ag178_load_storage")
+        except Exception as e:
+            logger.debug(f"AG-178: storage_accounts query failed: {e}")
+            try:
+                cursor.execute("ROLLBACK TO SAVEPOINT ag178_load_storage")
+            except Exception:
+                self.db._rollback()
+
+        # AG-178: relaxed gating. Secrets enumeration (kv.secrets_total > 0)
+        # is enrichment — KV-Administrator on the vault IS the access risk
+        # whether or not we've successfully listed secrets via Graph. Same
+        # philosophy as the storage classification: emit chain at lower
+        # severity if enrichment is missing, instead of dropping it.
+        kv_pool = key_vaults if key_vaults else []
+        if not kv_pool and not storage_accounts:
+            logger.debug(
+                "[AG-178] org=%s run=%s: 0 kvs / 0 storage → early return",
+                org_id, run_id,
+            )
+            cursor.close()
+            return []
+
+        # ── 4. For each AI agent, build chains via access_resolution ─────
+        for (id_db_id, identity_id, display_name, category,
+             agent_type, platform, agent_conf) in agents:
+
+            # 4a. Determine which KV(s) and storage(s) this agent can reach.
+            # We use the canonical resolver — single source of truth for
+            # "does identity X reach scope Y."
+            reachable_kvs: list[tuple[dict, dict]] = []
+            for kv in kv_pool:
+                access = resolve_agent_resource_access(
+                    cursor, id_db_id, kv['resource_id']
+                )
+                if access is not None:
+                    reachable_kvs.append((kv, access))
+
+            reachable_storage: list[tuple[dict, dict]] = []
+            for sa in storage_accounts:
+                access = resolve_agent_resource_access(
+                    cursor, id_db_id, sa['resource_id']
+                )
+                if access is not None:
+                    reachable_storage.append((sa, access))
+
+            # AG-178 requires BOTH a KV-secret stage AND a storage stage.
+            # If either is missing for this agent, no chain.
+            if not reachable_kvs or not reachable_storage:
+                continue
+            logger.debug(
+                "[AG-178] agent=%s kvs=%d storage=%d",
+                identity_id, len(reachable_kvs), len(reachable_storage),
+            )
+
+            # 4b. Emit one chain per (kv, storage) pair the agent can reach.
+            for kv, kv_access in reachable_kvs:
+                for sa, sa_access in reachable_storage:
+
+                    # Egress node only fires if storage has open egress.
+                    egress_open = (
+                        sa['public_blob_access']
+                        or (sa['default_network_action'] or '').lower() == 'allow'
+                    )
+
+                    # ── Node 0: ai_agent ─────────────────────────────
+                    node0 = {
+                        'node_type': 'ai_agent',
+                        'type': 'ai_agent',
+                        'id': identity_id,
+                        'label': display_name or identity_id,
+                        'description': (
+                            f"{agent_type or 'AI agent'} "
+                            + (f"({platform})" if platform else "")
+                        ).strip(),
+                        'mitre_techniques': [],
+                        'evidence_id': f'agent_cls:{identity_id}',
+                        'severity': 'high',
+                        'risk_contribution': 15,
+                        'detail': {
+                            'agent_identity_type': agent_type,
+                            'detected_platform': platform,
+                            'classification_confidence': agent_conf,
+                            'identity_category': category,
+                        },
+                    }
+
+                    # ── Node 1: managed_identity (T1078.004) ─────────
+                    mi_mitre = enrich_path_node_with_mitre('managed_identity')
+                    node1 = {
+                        'node_type': 'managed_identity',
+                        'type': 'managed_identity',
+                        'id': identity_id,
+                        'label': display_name or identity_id,
+                        'description': (
+                            f"Workload identity ({category}) used by the AI agent "
+                            f"to authenticate to Azure."
+                        ),
+                        'mitre_techniques': mi_mitre,
+                        'evidence_id': f'identity:{identity_id}',
+                        'severity': 'high',
+                        'risk_contribution': 10,
+                    }
+
+                    # ── Node 2: rbac_role linking MI → KV ─────────────
+                    # We tag the role node with techniques driven by the KV
+                    # role name (e.g. "Key Vault Administrator" yields
+                    # T1552.001 + T1555.006 via ROLE_TO_TECHNIQUES).
+                    kv_role_name = kv_access['role_name']
+                    role_kv_mitre = enrich_path_node_with_mitre(
+                        'role_assignment', role_name=kv_role_name,
+                    )
+                    node2 = {
+                        'node_type': 'rbac_role',
+                        'type': 'rbac_role',
+                        'id': f'{kv_role_name}@{kv_access["scope"]}',
+                        'label': kv_role_name,
+                        'description': (
+                            f"{kv_role_name} ({kv_access['access_level']}) "
+                            f"derived via {kv_access['derivation_path']} "
+                            f"on {kv['name']}."
+                        ),
+                        'mitre_techniques': role_kv_mitre,
+                        'evidence_id': f'rbac:{id_db_id}:{kv["resource_id"]}',
+                        'severity': 'high' if kv_access['access_level'] == 'owner' else 'medium',
+                        'risk_contribution': (
+                            20 if kv_access['access_level'] == 'owner' else 12
+                        ),
+                    }
+
+                    # ── Node 3: key_vault ─────────────────────────────
+                    kv_pna = (kv['public_network_access'] or '').lower()
+                    kv_public_exposed = (
+                        kv_pna == 'enabled'
+                        and kv['private_endpoint_count'] == 0
+                    )
+                    node3 = {
+                        'node_type': 'key_vault',
+                        'type': 'key_vault',
+                        'id': kv['resource_id'],
+                        'label': kv['name'],
+                        'description': (
+                            f"Vault holds {kv['secrets_total']} secret(s); "
+                            f"public_network_access={kv['public_network_access']}, "
+                            f"default_network_action={kv['default_network_action']}."
+                        ),
+                        'mitre_techniques': [],
+                        'evidence_id': f'kv:{kv["resource_id"]}',
+                        'severity': 'high' if kv_public_exposed else 'medium',
+                        'risk_contribution': 10 if kv_public_exposed else 5,
+                        'detail': {
+                            'secrets_total': kv['secrets_total'],
+                            'public_network_access': kv['public_network_access'],
+                            'default_network_action': kv['default_network_action'],
+                            'private_endpoint_count': kv['private_endpoint_count'],
+                        },
+                    }
+
+                    # ── Node 4: kv_secret (synthesized aggregate, T1552.001) ─
+                    secret_mitre = enrich_path_node_with_mitre('kv_secret')
+                    kv_secrets_known = kv['secrets_total'] > 0
+                    if kv_secrets_known:
+                        node4_label = f'{kv["secrets_total"]} secret(s) in {kv["name"]}'
+                        node4_desc = (
+                            "Aggregate of all readable secrets in the vault — "
+                            "compromising the agent yields every secret's "
+                            "credentials for lateral pivot."
+                        )
+                        node4_severity = 'critical'
+                        node4_risk = 15
+                    else:
+                        node4_label = f'Secrets in {kv["name"]} (not enumerated)'
+                        node4_desc = (
+                            "Vault contents not enumerated (Graph permission gap "
+                            "OR discovery has not run secret list). "
+                            "KV-Administrator role still implies access to any "
+                            "secrets present — chain emits at reduced severity "
+                            "until enumeration confirms count."
+                        )
+                        node4_severity = 'high'
+                        node4_risk = 8
+                    node4 = {
+                        'node_type': 'kv_secret',
+                        'type': 'kv_secret',
+                        'id': f'{kv["resource_id"]}#secrets',
+                        'label': node4_label,
+                        'description': node4_desc,
+                        'mitre_techniques': secret_mitre,
+                        'evidence_id': f'kv_secrets:{kv["resource_id"]}',
+                        'severity': node4_severity,
+                        'risk_contribution': node4_risk,
+                    }
+
+                    # ── Node 5: storage_account (T1530 when classified) ─
+                    has_classified = sa['classification'] is not None
+                    sa_mitre = enrich_path_node_with_mitre(
+                        'storage_account',
+                        has_sensitive_data=has_classified,
+                    )
+                    # Role techniques for the storage-side role too
+                    sa_role_name = sa_access['role_name']
+                    sa_role_mitre = enrich_path_node_with_mitre(
+                        'role_assignment', role_name=sa_role_name,
+                    )
+                    # Merge, deduping by technique id
+                    sa_all_mitre = sa_mitre + [
+                        m for m in sa_role_mitre
+                        if m['id'] not in {x['id'] for x in sa_mitre}
+                    ]
+                    if has_classified:
+                        sa_description = (
+                            f"Storage account classified {sa['classification']} "
+                            f"(confidence={sa['classification_confidence']}, "
+                            f"source={sa['classification_source']}); "
+                            f"reached via {sa_role_name} ({sa_access['access_level']})."
+                        )
+                        sa_severity = 'critical'
+                        sa_risk = 20
+                    else:
+                        # Honest unclassified case — chain still emits but at
+                        # lower severity, with a copy that explains the gap.
+                        sa_description = (
+                            f"Storage account (no data-classification tag — apply "
+                            f"the 'data-classification' Azure tag or run "
+                            f"auto-classifier to confirm sensitivity); "
+                            f"reached via {sa_role_name} ({sa_access['access_level']})."
+                        )
+                        sa_severity = 'high'
+                        sa_risk = 12
+                    node5 = {
+                        'node_type': 'storage_account',
+                        'type': 'storage_account',
+                        'id': sa['resource_id'],
+                        'label': sa['name'],
+                        'description': sa_description,
+                        'mitre_techniques': sa_all_mitre,
+                        'evidence_id': f'storage:{sa["resource_id"]}',
+                        'severity': sa_severity,
+                        'risk_contribution': sa_risk,
+                        'detail': {
+                            'classification': sa['classification'],
+                            'classification_confidence': sa['classification_confidence'],
+                            'classification_source': sa['classification_source'],
+                            'public_blob_access': sa['public_blob_access'],
+                            'default_network_action': sa['default_network_action'],
+                            'private_endpoint_count': sa['private_endpoint_count'],
+                            'sa_role_name': sa_role_name,
+                            'sa_access_level': sa_access['access_level'],
+                            # records_estimate column not yet present (T2A
+                            # migration adds record_count_estimate) → NULL.
+                            'records_estimate': None,
+                        },
+                    }
+
+                    chain_nodes = [node0, node1, node2, node3, node4, node5]
+
+                    # ── Node 6: network_egress (T1041, T1567) — optional ─
+                    if egress_open:
+                        egress_mitre = enrich_path_node_with_mitre(
+                            'network_egress', egress_open=True,
+                        )
+                        node6 = {
+                            'node_type': 'network_egress',
+                            'type': 'network_egress',
+                            'id': f'{sa["resource_id"]}#egress',
+                            'label': 'Open egress',
+                            'description': (
+                                "Storage permits outbound exfil: "
+                                + ("public blob access enabled. "
+                                   if sa['public_blob_access'] else "")
+                                + (f"default network action = "
+                                   f"{sa['default_network_action']}."
+                                   if (sa['default_network_action'] or '').lower() == 'allow'
+                                   else "")
+                            ).strip(),
+                            'mitre_techniques': egress_mitre,
+                            'evidence_id': f'egress:{sa["resource_id"]}',
+                            'severity': 'critical',
+                            'risk_contribution': 15,
+                        }
+                        chain_nodes.append(node6)
+
+                    # ── 5. Score, severity, dedup-fingerprint ─────────
+                    risk_score = sum(
+                        int(n.get('risk_contribution', 0)) for n in chain_nodes
+                    )
+                    risk_score = min(risk_score, 100)
+
+                    # records_estimate stays None until T2A migration adds
+                    # record_count_estimate to azure_storage_accounts. Until
+                    # then we cannot legitimately compute it, so severity
+                    # uses egress-openness + classification as the proxy.
+                    records_estimate = None
+                    classification_label = sa['classification'] or 'unclassified'
+                    if records_estimate is not None and records_estimate > 10000:
+                        severity = 'critical'
+                    elif egress_open or sa['classification'] in ('PHI', 'PCI'):
+                        severity = 'critical'
+                    elif sa['classification'] is None:
+                        # Unclassified storage — chain still risky (admin role on
+                        # storage IS the signal), but we can't claim PHI/PCI.
+                        severity = 'medium' if not egress_open else 'high'
+                    else:
+                        severity = 'high'
+
+                    fingerprint = compute_path_fingerprint(
+                        identity_id, 'ai_agent_exfiltration', chain_nodes,
+                    )
+
+                    description = (
+                        f'AI agent {display_name or identity_id} → '
+                        f'{kv["name"]} secret → {sa["name"]} '
+                        f'({classification_label})'
+                        + (' → open egress' if egress_open else '')
+                    )
+
+                    paths.append({
+                        'path_type': 'ai_agent_exfiltration',
+                        'source_entity_id': identity_id,
+                        'source_entity_name': display_name or identity_id,
+                        'source_entity_type': 'ai_agent',
+                        'target_resource_id': sa['resource_id'],
+                        'target_resource_type': 'storage_account',
+                        'severity': severity,
+                        'risk_score': risk_score,
+                        'path_nodes': chain_nodes,
+                        'path_length': len(chain_nodes),
+                        'path_fingerprint': fingerprint,
+                        'description': description,
+                        # Argus generates the narrative lazily on first detail view.
+                        'narrative': None,
+                        'impact': (
+                            f'Exfiltration of {classification_label} data via '
+                            f'{kv["name"]} secrets and '
+                            + ('open egress' if egress_open else 'reachable storage')
+                        ),
+                        'affected_resource_count': 2,  # 1 KV + 1 storage
+                        'organization_id': org_id,
+                        'discovery_run_id': run_id,
+                    })
 
         cursor.close()
         return paths

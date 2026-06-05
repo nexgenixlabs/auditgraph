@@ -1,8 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { DiscoveryProgressModal } from '../components/settings/DiscoveryProgressModal';
 
-const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch'];
+// AG-Onboarding-FirstFinding (2026-06-01): Step 6 "Scanning" is the
+// magical-moment step. Wizard kicks the first scan, mounts the live
+// findings modal inline, and on completion deep-links to the single
+// highest-risk identity from the just-completed run. Turns the wizard
+// from "settings form → orphan landing" into Wiz-style "connect →
+// first finding in <2min".
+const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch', 'Scanning'];
 
 interface TestResult {
   status: string;
@@ -60,6 +67,12 @@ export default function OnboardingWizard() {
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
   const [showChecklist, setShowChecklist] = useState(false);
   const [orgNamePreFilled, setOrgNamePreFilled] = useState(false);
+  // First-finding launch state — after settings save, we trigger the
+  // initial scan and mount the live-findings modal inline on step 6.
+  const [showScanModal, setShowScanModal] = useState(false);
+  const [scanConnectionId, setScanConnectionId] = useState<number | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [navigatingToFinding, setNavigatingToFinding] = useState(false);
 
   // Persist step to sessionStorage whenever it changes
   useEffect(() => {
@@ -144,7 +157,9 @@ export default function OnboardingWizard() {
   async function handleComplete() {
     setSaving(true);
     setError(null);
+    setScanError(null);
     try {
+      // 1. Save settings (creates / updates the cloud connection)
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -163,18 +178,68 @@ export default function OnboardingWizard() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to save settings');
       }
-      // Mark wizard as explicitly completed + clear step persistence
       if (orgId) {
         sessionStorage.setItem(completeKey(orgId), 'true');
         sessionStorage.removeItem(stepKey(orgId));
       }
-      // Redirect to subscriptions so user can activate discovered subs
-      window.location.href = '/subscriptions';
+
+      // 2. Trigger the initial scan immediately so the wizard hands off
+      //    to a live scan progress experience instead of an empty
+      //    /subscriptions page.
+      let triggeredConnectionId: number | null = null;
+      try {
+        const triggerRes = await fetch('/api/runs/trigger', { method: 'POST' });
+        if (triggerRes.ok) {
+          const triggerData = await triggerRes.json().catch(() => ({}));
+          triggeredConnectionId =
+            triggerData.cloud_connection_id ?? triggerData.connection_id ?? null;
+        } else {
+          // Scan-trigger failure is not fatal — fall back to the legacy
+          // /subscriptions destination so the user isn't stuck.
+          setScanError('Could not start the first scan automatically. You can run it manually from Settings → Connections.');
+        }
+      } catch (triggerErr) {
+        setScanError('Could not start the first scan automatically.');
+      }
+
+      // 3. Advance to the Scanning step + mount the live findings modal.
+      //    If trigger failed, the modal will still open and poll —
+      //    /api/discovery/status will return any in-flight job (or the
+      //    most-recent completed job) and the user sees what's there.
+      setScanConnectionId(triggeredConnectionId);
+      setShowScanModal(true);
+      setStep(6);
     } catch (e: any) {
       setError(e?.message || 'Setup failed');
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleScanComplete() {
+    // Modal called onComplete — fetch the top critical/high identity
+    // from the just-finished run and deep-link there. If nothing
+    // critical was found, fall through to the dashboard.
+    setNavigatingToFinding(true);
+    try {
+      const r = await fetch('/api/onboarding/first-finding');
+      const d = await r.json().catch(() => ({}));
+      if (d && d.identity_id) {
+        window.location.href = `/identities/${encodeURIComponent(d.identity_id)}`;
+        return;
+      }
+    } catch (_e) {
+      // fall through
+    }
+    // No critical/high → land on the dashboard
+    window.location.href = '/';
+  }
+
+  function handleScanModalClose() {
+    // User closed the modal without waiting for scan completion.
+    // Don't auto-navigate to a finding — they're choosing to exit.
+    setShowScanModal(false);
+    window.location.href = '/';
   }
 
   // If onboarding is completed, show the checklist dashboard
@@ -550,6 +615,39 @@ export default function OnboardingWizard() {
           </div>
         )}
 
+        {/* Step 6: Scanning — first-finding handoff. Renders behind the
+            modal; serves as the page content if the user closes the modal
+            without navigating. */}
+        {step === 6 && (
+          <div className="space-y-5">
+            <div>
+              <h2 className="text-xl font-bold text-white">First scan running…</h2>
+              <p className="text-sm text-gray-400 mt-2">
+                We're discovering your identities and analyzing risk. The
+                modal will close automatically when we find your first
+                critical finding.
+              </p>
+            </div>
+            {scanError && (
+              <div className="bg-amber-900/20 border border-amber-800 text-amber-300 text-sm rounded-lg p-3">
+                {scanError}
+              </div>
+            )}
+            {navigatingToFinding && (
+              <div className="flex items-center gap-2 text-sm text-blue-300">
+                <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                Loading your first finding…
+              </div>
+            )}
+            <button
+              onClick={() => setShowScanModal(true)}
+              className="text-xs font-medium text-blue-400 hover:text-blue-300 transition underline"
+            >
+              Re-open scan progress
+            </button>
+          </div>
+        )}
+
         {/* Navigation */}
         {step < 6 && (
           <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-700">
@@ -581,6 +679,17 @@ export default function OnboardingWizard() {
       >
         Skip setup for now
       </button>
+
+      {/* AG-Onboarding-FirstFinding: live findings modal mounts inline
+          when the wizard kicks the first scan. onComplete handoff
+          deep-links to the top critical/high identity. */}
+      {showScanModal && (
+        <DiscoveryProgressModal
+          connectionId={scanConnectionId}
+          onClose={handleScanModalClose}
+          onComplete={handleScanComplete}
+        />
+      )}
     </div>
   );
 }

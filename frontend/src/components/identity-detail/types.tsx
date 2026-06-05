@@ -125,6 +125,22 @@ export interface IdentityDetailsResponse {
       jit_enabled?: boolean | null;
       env_secret_count?: number;
     } | null;
+    // Feature D (humans variant) — surfaces directory_audit_log IP enrichment
+    // even without P2 telemetry. The aggregate arrays are only populated when
+    // P2 sign-in telemetry is enabled.
+    signin_intelligence?: {
+      last_observed_ip?: string | null;
+      last_observed_ip_source?: string | null;
+      last_observed_ip_date?: string | null;
+      last_observed_operation?: string | null;
+      ips?: Array<{ ip: string; classification?: string; count?: number }>;
+      locations?: Array<{ city?: string; country?: string; count?: number }>;
+      resources_accessed?: Array<{ name?: string; count?: number }>;
+      client_apps?: Array<{ name?: string; count?: number }>;
+      failure_count_30d?: number | null;
+      success_count_30d?: number | null;
+      total_events_30d?: number | null;
+    };
   };
   roles: any[];
   graph_permissions: any[];
@@ -281,6 +297,21 @@ export interface PimActivation {
   created_datetime?: string | null;
 }
 
+export interface PimShouldBePimFinding {
+  role_name: string;
+  scope: string;
+  scope_type: string;
+  kind: 'entra' | 'azure';
+  has_pim_alt: boolean;
+  severity: string;
+  recommendation: string;
+  frameworks?: {
+    cis?: string[];
+    nist?: string[];
+    mitre?: string[];
+  };
+}
+
 export interface PimData {
   eligible_assignments: PimEligible[];
   activations: PimActivation[];
@@ -289,6 +320,11 @@ export interface PimData {
     always_active_pattern: boolean;
     total_active_hours_30d: number;
   };
+  // Standing privileged assignments that Microsoft best practice says
+  // should be PIM-eligible (just-in-time, time-bound). Computed at
+  // API time from identity_subscription_access + entra_role_assignments
+  // joined against access_paths.pim_eligible.
+  should_be_pim?: PimShouldBePimFinding[];
 }
 
 // ─── Utility Functions ──────────────────────────────────────────────

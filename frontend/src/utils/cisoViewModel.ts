@@ -29,6 +29,13 @@ export function fmtPct(value: number): string {
 
 // ── Posture v3.1 Response Types ──────────────────────────────
 
+// AG-T1.5: breach exposure dollar band (server-computed)
+export interface BreachExposureBand {
+  low: number; mid: number; high: number;
+  low_display: string; mid_display: string; high_display: string;
+  total_records: number;
+}
+
 export interface PostureV31BlastRadius {
   identity_id: number;
   identity_name: string;
@@ -141,9 +148,25 @@ export interface PostureV31Response {
     identity_id: number | string | null;
     created_at: string | null;
   }>;
+  anomalies_unresolved_count?: number;
   business_impact?: {
     inactive_admin_count: number;
     disabled_live_rbac_count: number;
+    // AG-T1.1: dollar exposure band (server-computed, breach_cost_factors)
+    estimated_exposure?: {
+      low: number; mid: number; high: number;
+      low_display: string; mid_display: string; high_display: string;
+      classified_resource_count: number;
+      total_records: number;
+      scope?: string;
+      scope_label?: string;
+    };
+    // AG-T1.5: three-scope breakdown so the board knows WHO can reach the data
+    exposure_by_scope?: {
+      total?:         BreachExposureBand | null;
+      ai_reachable?:  BreachExposureBand | null;
+      nhi_reachable?: BreachExposureBand | null;
+    };
   };
   drift?: {
     has_drift: boolean;

@@ -275,13 +275,22 @@ export const PRIVILEGED_LEVELS: Record<PrivilegedLevel, { label: string; color: 
 
 // ── Three-Dimension Identity Classification ─────────────────────────
 
-export type LifecycleState = 'Provisioned' | 'Active' | 'Dormant' | 'Disabled';
+export type LifecycleState =
+  | 'Provisioned' | 'Active' | 'Dormant' | 'Disabled'
+  // AuditGraph-inferred states (lowercase, computed when no telemetry signal
+  // is available). Without these in the display map, every row defaulted to
+  // "Provisioned" and the column looked useless.
+  | 'blind' | 'likely_dormant' | 'possibly_active' | 'Unknown';
 
 export const LIFECYCLE_STATE_DISPLAY: Record<LifecycleState, { label: string; color: string; tooltip: string }> = {
-  Provisioned: { label: 'Provisioned', color: 'text-blue-500',  tooltip: 'Identity has been provisioned and granted access but has no observed authentication or activity since creation' },
-  Active:      { label: 'Active',      color: 'text-green-500', tooltip: 'Identity has recent sign-in or usage activity' },
-  Dormant:     { label: 'Dormant',     color: 'text-amber-500', tooltip: 'No observed authentication or activity in the past 90 days (default \u2014 configurable) while retaining active access' },
-  Disabled:    { label: 'Disabled',    color: 'text-gray-400',  tooltip: 'Identity is disabled or deprovisioned in the identity provider \u2014 classified as Ghost if access remains' },
+  Provisioned:     { label: 'Provisioned',      color: 'text-blue-500',  tooltip: 'Identity has been provisioned and granted access but has no observed authentication or activity since creation' },
+  Active:          { label: 'Active',           color: 'text-green-500', tooltip: 'Identity has recent sign-in or usage activity' },
+  Dormant:         { label: 'Dormant',          color: 'text-amber-500', tooltip: 'No observed authentication or activity in the past 90 days (default \u2014 configurable) while retaining active access' },
+  Disabled:        { label: 'Disabled',         color: 'text-gray-400',  tooltip: 'Identity is disabled or deprovisioned in the identity provider \u2014 classified as Ghost if access remains' },
+  blind:           { label: 'No telemetry',     color: 'text-gray-500',  tooltip: 'No sign-in logs available (log-independent mode). Lifecycle inferred from architecture only.' },
+  likely_dormant:  { label: 'Likely dormant',   color: 'text-amber-500', tooltip: 'Inferred dormant from architecture signals (stale credentials, no recent role changes) when sign-in logs are unavailable' },
+  possibly_active: { label: 'Possibly active',  color: 'text-green-500', tooltip: 'Inferred recently-active from architecture signals (fresh credential, recent role grant) when sign-in logs are unavailable' },
+  Unknown:         { label: 'Unknown',          color: 'text-gray-400',  tooltip: 'Lifecycle could not be determined' },
 };
 
 export type GovernanceState = 'Governed' | 'Ungoverned' | 'Orphaned' | 'Policy Violation';

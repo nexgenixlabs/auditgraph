@@ -7,6 +7,7 @@ import {
   IDENTITY_CSV_COLUMNS, COMPLIANCE_CSV_COLUMNS, DRIFT_CSV_COLUMNS,
   EXPORT_SCHEMA_VERSION, buildExportMeta,
 } from '../utils/exportUtils';
+import ReportsExportsTabs from '../components/ui/ReportsExportsTabs';
 
 interface ExportCard {
   key: string;
@@ -228,11 +229,14 @@ export default function Exports() {
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
       {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Export Center</h2>
-        <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
-          Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
-        </p>
+      <div className="space-y-3">
+        <ReportsExportsTabs />
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Data Exports</h2>
+          <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
+            Download identity, compliance, drift, and risk data for auditing, SIEM integration, or offline analysis.
+          </p>
+        </div>
       </div>
 
       {hasRuns === false && (

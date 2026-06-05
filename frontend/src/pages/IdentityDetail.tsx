@@ -125,7 +125,7 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups' | 'attack_paths';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups' | 'attack_paths' | 'consents';
 
 interface EffectiveAccessEntry {
   role_name: string;
@@ -363,17 +363,19 @@ function parseEffectiveAccessScope(roles: any[]): { subscriptions: string[]; res
 }
 
 // Tab component
-function TabBar({ activeTab, onTabChange, counts, labelOverrides }: {
+function TabBar({ activeTab, onTabChange, counts, labelOverrides, hideTabs }: {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
   counts: Record<TabId, number>;
   labelOverrides?: Partial<Record<TabId, string>>;
+  hideTabs?: TabId[];
 }) {
   const tabs: { id: TabId; label: string; icon: string }[] = [
     { id: 'overview', label: 'Overview', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
     { id: 'roles', label: 'Roles', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
     { id: 'permissions', label: 'Permissions', icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z' },
     { id: 'credentials', label: 'Credentials', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
+    { id: 'consents' as TabId, label: 'OAuth Consents', icon: 'M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z' },
     { id: 'ownership', label: 'Ownership', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
     { id: 'entra_groups' as TabId, label: 'Groups', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
     { id: 'effective_access' as TabId, label: 'Effective Access', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
@@ -389,10 +391,14 @@ function TabBar({ activeTab, onTabChange, counts, labelOverrides }: {
     { id: 'timeline' as TabId, label: 'Timeline', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
 
+  const visibleTabs = hideTabs && hideTabs.length > 0
+    ? tabs.filter(t => !hideTabs.includes(t.id))
+    : tabs;
+
   return (
     <div className="border-b bg-white rounded-t-xl">
       <nav className="flex -mb-px overflow-x-auto">
-        {tabs.map(tab => {
+        {visibleTabs.map(tab => {
           const isActive = activeTab === tab.id;
           const count = counts[tab.id];
           return (
@@ -562,9 +568,17 @@ export default function IdentityDetail() {
     return () => { cancelled = true; };
   }, [id]);
 
-  // Lazy-load PIM data when tab is selected
+  // Lazy-load PIM data when tab is selected.
+  // BUGFIX (2026-05-30): removed `pimLoading` from deps. Including it caused
+  // a self-cancellation race: setPimLoading(true) ↑ retriggers effect ↑
+  // cleanup sets cancelled=true ↑ in-flight fetch's .finally is skipped ↑
+  // pimLoading stuck true → skeleton renders forever even though the API
+  // returned a successful response. The pimData truthy check is enough to
+  // prevent duplicate fetches.
   useEffect(() => {
-    if (activeTab !== 'pim' || pimData || pimLoading || !id) return;
+    // AG-118: also fetch on Roles tab so per-role PIM badges render
+    // without forcing the user to visit Pim tab first.
+    if (!['pim', 'roles'].includes(activeTab) || pimData || !id) return;
     let cancelled = false;
     setPimLoading(true);
     fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/pim`))
@@ -573,7 +587,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setPimData({ eligible_assignments: [], activations: [], overuse_metrics: { activation_frequency_30d: 0, always_active_pattern: false, total_active_hours_30d: 0 } }); })
       .finally(() => { if (!cancelled) setPimLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, pimData, pimLoading]);
+  }, [activeTab, id, pimData]);
 
   // Lazy-load Remediation data + action statuses when tab is selected
   useEffect(() => {
@@ -598,7 +612,7 @@ export default function IdentityDetail() {
       .finally(() => { if (!cancelled) setRemediationLoading(false); });
 
     return () => { cancelled = true; };
-  }, [activeTab, id, remediationData, remediationLoading]);
+  }, [activeTab, id, remediationData]); // BUGFIX (2026-05-30): remediationLoading intentionally excluded — including it causes self-cancellation race, see effective_access effect comment
 
   // Lazy-load Lifecycle data when tab is selected
   useEffect(() => {
@@ -611,7 +625,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setLifecycleData({ events: [], summary: { total_runs_observed: 0, first_seen: null, last_seen: null, risk_changes: 0, credential_events: 0, access_changes: 0, status_changes: 0 }, total_events: 0 }); })
       .finally(() => { if (!cancelled) setLifecycleLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, lifecycleData, lifecycleLoading]);
+  }, [activeTab, id, lifecycleData]); // BUGFIX (2026-05-30): lifecycleLoading intentionally excluded — self-cancellation race, see effective_access effect
 
   // Lazy-load Anomaly data when tab is selected
   useEffect(() => {
@@ -624,7 +638,7 @@ export default function IdentityDetail() {
       .catch(() => { if (!cancelled) setAnomalyData({ anomalies: [], count: 0 }); })
       .finally(() => { if (!cancelled) setAnomalyLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, id, anomalyData, anomalyLoading]);
+  }, [activeTab, id, anomalyData]); // BUGFIX (2026-05-30): anomalyLoading intentionally excluded — self-cancellation race, see effective_access effect
 
   // Lazy-load Effective Access data when tab is selected
   useEffect(() => {
@@ -781,6 +795,7 @@ export default function IdentityDetail() {
     roles: (data?.roles || []).length,
     permissions: (data?.graph_permissions || []).length + (data?.app_roles || []).length,
     credentials: identity?.credential_count ?? 0,
+    consents: 0,  // Populated by ConsentGrantsPanel on tab open; tab badge stays unset
     ownership: (data?.owners || []).length,
     effective_access: effectiveAccessData?.summary?.total_roles ?? (data?.roles || []).length,
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
@@ -817,7 +832,7 @@ export default function IdentityDetail() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
             </svg>
-            Investigate with Copilot
+            Investigate with Argus
           </button>
         )}
       </div>
@@ -1141,11 +1156,30 @@ export default function IdentityDetail() {
 
           {/* Tabs */}
           <div className="bg-white border rounded-2xl overflow-hidden">
-            <TabBar activeTab={activeTab} onTabChange={setActiveTab} counts={tabCounts} labelOverrides={{
-              entra_groups: entraGroupMeta.total > 0
-                ? `Groups (${entraGroupMeta.total})${entraGroupMeta.withAccess > 0 ? ` \u00b7 ${entraGroupMeta.withAccess} with Azure access` : ''}`
-                : undefined,
-            }} />
+            <TabBar
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              counts={tabCounts}
+              labelOverrides={{
+                entra_groups: entraGroupMeta.total > 0
+                  ? `Groups (${entraGroupMeta.total})${entraGroupMeta.withAccess > 0 ? ` \u00b7 ${entraGroupMeta.withAccess} with Azure access` : ''}`
+                  : undefined,
+              }}
+              /* Humans authenticate via Entra ID, not app secrets/certificates,
+                 so the Credentials tab is always N/A for them \u2014 hide it. They
+                 also don't have "owners" in the SPN sense (the existing
+                 Ownership tab is built around appOwners); hide it for humans
+                 until a reversed "Owns N service principals" view is built. */
+              hideTabs={
+                identity && (identity.identity_category === 'human_user' || identity.identity_category === 'guest')
+                  // OAuth Consents tab makes sense only for client SPN identities
+                  // (App Reg / Service Principal / Managed Identity acting as a
+                  // client). Humans don't hold OAuth consent grants as the client
+                  // side — they're principals on delegated grants instead.
+                  ? ['credentials', 'ownership', 'consents']
+                  : undefined
+              }
+            />
 
             <div className="p-6">
               {/* ═══ OVERVIEW TAB ═══ */}
@@ -1176,6 +1210,7 @@ export default function IdentityDetail() {
                   groupedRoles={groupedRoles}
                   intelByRole={intelByRole}
                   setActiveTab={setActiveTab}
+                  pimData={pimData}
                 />
               )}
 
@@ -1187,6 +1222,17 @@ export default function IdentityDetail() {
               {/* ═══ CREDENTIALS TAB ═══ */}
               {activeTab === 'credentials' && (
                 <CredentialsTab identity={identity} data={data!} />
+              )}
+
+              {/* ═══ OAUTH CONSENTS TAB (AG-81) ═══ */}
+              {activeTab === 'consents' && identity && (
+                <ConsentGrantsPanel
+                  clientLookupIds={[
+                    (identity as any).app_id,
+                    (identity as any).object_id,
+                    identity.identity_id,
+                  ].filter(Boolean) as string[]}
+                />
               )}
 
               {/* ═══ OWNERSHIP TAB ═══ */}
@@ -1339,6 +1385,208 @@ const SENS_CLASS_COLORS: Record<string, { bg: string; fg: string }> = {
   PCI: { bg: 'rgba(251,191,36,0.12)', fg: '#FBBF24' },
   PII: { bg: 'rgba(96,165,250,0.12)', fg: '#60A5FA' },
 };
+
+// AG-81: OAuth Consents tab — lists every consent grant where THIS identity
+// is the client. Tries app_id first (the canonical OAuth client id for SPNs),
+// falls back to object_id then identity_id. The /api/consent-grants endpoint
+// filters server-side on whichever the consent_grants.client_app_id row
+// happens to be populated with (Graph discovery uses object_id for delegated,
+// app_id for application; demo seeder uses app_id-or-identity_id).
+function ConsentGrantsPanel({ clientLookupIds }: { clientLookupIds: string[] }) {
+  const [grants, setGrants] = useState<any[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!clientLookupIds.length) {
+      setGrants([]);
+      return;
+    }
+    let cancelled = false;
+    // Try each lookup id in order — first non-empty result wins. This handles
+    // the SPN-with-multiple-ids case without N round-trips when the first hits.
+    const tryNext = async (idx: number) => {
+      if (idx >= clientLookupIds.length) {
+        if (!cancelled) setGrants([]);
+        return;
+      }
+      try {
+        const r = await fetch(`/api/consent-grants?client_app_id=${encodeURIComponent(clientLookupIds[idx])}&limit=100`);
+        if (!r.ok) throw new Error('fetch_failed');
+        const d = await r.json();
+        if (cancelled) return;
+        if ((d.grants || []).length > 0) {
+          setGrants(d.grants);
+        } else {
+          await tryNext(idx + 1);
+        }
+      } catch {
+        if (!cancelled) setError('Could not load consent grants.');
+      }
+    };
+    tryNext(0);
+    return () => { cancelled = true; };
+  }, [clientLookupIds.join('|')]);
+
+  if (error) {
+    return <p className="text-xs text-red-600">{error}</p>;
+  }
+  if (grants === null) {
+    return (
+      <div className="space-y-2 p-4">
+        <div className="h-4 w-1/2 bg-gray-100 dark:bg-slate-800 rounded animate-pulse" />
+        <div className="h-4 w-3/4 bg-gray-100 dark:bg-slate-800 rounded animate-pulse" />
+      </div>
+    );
+  }
+  if (grants.length === 0) {
+    return (
+      <div className="p-6 text-center">
+        <div className="text-sm text-gray-500 dark:text-slate-400 mb-2">
+          No OAuth consent grants discovered for this identity.
+        </div>
+        <div className="text-xs text-gray-400 dark:text-slate-500">
+          Source: Microsoft Graph <span className="font-mono">/oauth2PermissionGrants</span> (delegated)
+          + <span className="font-mono">/servicePrincipals/{'{id}'}/appRoleAssignments</span> (application).
+        </div>
+        <div className="text-xs text-gray-400 dark:text-slate-500 mt-1">
+          Requires a discovery scan with <span className="font-mono">Directory.Read.All</span> +{' '}
+          <span className="font-mono">Application.Read.All</span>.
+        </div>
+      </div>
+    );
+  }
+
+  const sevRank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+  const sorted = grants.slice().sort((a, b) => {
+    const r = (sevRank[b.risk_level] || 0) - (sevRank[a.risk_level] || 0);
+    return r !== 0 ? r : (b.age_days || 0) - (a.age_days || 0);
+  });
+
+  const sevPill = (lvl: string) => {
+    const cls =
+      lvl === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+      lvl === 'high'     ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' :
+      lvl === 'medium'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
+                           'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+    return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${cls}`}>{lvl}</span>;
+  };
+
+  // AG-85: publisher trust banner — derive from the consent grants themselves
+  // (publisher_name / verified_publisher are denormalised onto each grant
+  // at discovery time so we don't need a separate API call).
+  const firstWithPub = sorted.find(g => g.publisher_name || g.verified_publisher !== null);
+  const publisherName: string | null = firstWithPub?.publisher_name || null;
+  const isMicrosoft = (publisherName || '').toLowerCase().startsWith('microsoft');
+  const verifiedRaw = firstWithPub?.verified_publisher;
+  const verified: boolean | null = isMicrosoft ? true : (verifiedRaw === true ? true : verifiedRaw === false ? false : null);
+  const trustBadge = isMicrosoft
+    ? { tone: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300', label: 'Microsoft', why: 'First-party Microsoft publisher.' }
+    : verified === true
+      ? { tone: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300', label: 'Verified publisher', why: 'Publisher attested via MS Verified Publisher.' }
+      : verified === false
+        ? { tone: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300', label: 'Unverified publisher', why: 'Publisher not verified by Microsoft — high-risk consent grants are consent-phishing indicators.' }
+        : { tone: 'bg-gray-100 text-gray-700 dark:bg-slate-800 dark:text-slate-300', label: 'Publisher unknown', why: 'Publisher trust not yet enriched. Re-run discovery to populate.' };
+
+  return (
+    <div className="space-y-3 p-4">
+      <div className="text-xs text-gray-500 dark:text-slate-400">
+        {sorted.length} grant{sorted.length !== 1 ? 's' : ''} —
+        {' '}{sorted.filter(g => g.grant_type === 'application').length} application,
+        {' '}{sorted.filter(g => g.grant_type === 'delegated').length} delegated
+      </div>
+
+      {/* AG-85 publisher trust banner */}
+      <div className="flex items-center gap-2 text-xs">
+        <span className={`px-2 py-0.5 rounded font-semibold uppercase tracking-wide ${trustBadge.tone}`}>
+          {trustBadge.label}
+        </span>
+        {publisherName && (
+          <span className="text-gray-600 dark:text-slate-300">
+            {publisherName}
+          </span>
+        )}
+        <span className="text-gray-500 dark:text-slate-500 truncate">{trustBadge.why}</span>
+      </div>
+
+      <div className="overflow-x-auto border border-gray-200 dark:border-slate-700 rounded-lg">
+        <table className="w-full text-xs">
+          <thead className="bg-gray-50 dark:bg-slate-800 text-gray-500 dark:text-slate-400">
+            <tr>
+              <th className="text-left px-3 py-2 font-medium">Risk</th>
+              <th className="text-left px-3 py-2 font-medium">Resource</th>
+              <th className="text-left px-3 py-2 font-medium">Scopes</th>
+              <th className="text-left px-3 py-2 font-medium">Consent</th>
+              <th className="text-left px-3 py-2 font-medium">Approver</th>
+              <th className="text-right px-3 py-2 font-medium">Age</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+            {sorted.map((g: any) => (
+              <tr key={g.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 align-top">
+                <td className="px-3 py-2">
+                  {sevPill(g.risk_level)}
+                  <div className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">
+                    score {g.risk_score}/100
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="text-gray-800 dark:text-slate-200 font-medium">
+                    {g.resource_display_name || g.resource_app_id || '—'}
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="flex flex-wrap gap-1 max-w-[420px]">
+                    {(g.scopes || []).map((s: string, i: number) => {
+                      const isHigh = (g.high_risk_scopes || []).includes(s);
+                      const cls = isHigh
+                        ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800'
+                        : 'bg-gray-50 dark:bg-slate-800 text-gray-600 dark:text-slate-300 border border-gray-200 dark:border-slate-700';
+                      return (
+                        <span key={i} className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${cls}`}>
+                          {s}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className={g.consent_type === 'AllPrincipals' ? 'text-orange-600 dark:text-orange-400 font-medium' : 'text-gray-600 dark:text-slate-300'}>
+                    {g.consent_type === 'AllPrincipals' ? 'Admin (tenant-wide)' :
+                     g.consent_type === 'Principal'     ? 'User' :
+                     g.consent_type || '—'}
+                  </div>
+                  <div className="text-[10px] text-gray-400 dark:text-slate-500">
+                    {g.grant_type}
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-gray-600 dark:text-slate-300">
+                  {g.principal_display_name || (g.consent_type === 'AllPrincipals' ? 'Tenant admin' : '—')}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {typeof g.age_days === 'number' ? (
+                    <span className={
+                      g.age_days > 365 ? 'text-red-600 dark:text-red-400 font-medium' :
+                      g.age_days > 180 ? 'text-amber-600 dark:text-amber-400' :
+                      'text-gray-600 dark:text-slate-300'
+                    }>
+                      {g.age_days}d
+                    </span>
+                  ) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="text-[10px] text-gray-400 dark:text-slate-500">
+        Source: Microsoft Graph <span className="font-mono">/oauth2PermissionGrants</span> +{' '}
+        <span className="font-mono">/servicePrincipals/{'{id}'}/appRoleAssignments</span> ·
+        Scope-breadth risk per CVSS-aligned scoring (high-risk scopes highlighted in red)
+      </div>
+    </div>
+  );
+}
 
 function SensitiveAccessTab({ identityId, roleBasedFallback, identityCategory }: { identityId: string; roleBasedFallback?: Array<{ role: string; scope: string; description: string; sensitivity: string }>; identityCategory?: string }) {
   const { withConnection } = useConnection();

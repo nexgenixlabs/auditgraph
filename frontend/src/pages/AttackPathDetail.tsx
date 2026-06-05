@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { riskDisplay } from '../utils/riskDisplay';
 import { useToast } from '../components/ToastProvider';
 
 interface RoleMeta {
@@ -381,7 +382,11 @@ export default function AttackPathDetailPage() {
               Risk Assessment
             </h3>
             <div className="flex items-baseline gap-3 mb-4">
-              <span className="text-3xl font-bold font-mono" style={{ color: sevStyle.text }}>{path.risk_score}</span>
+              {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+              <span className="text-3xl font-bold font-mono" style={{ color: sevStyle.text }} title="CVSS-aligned 0-10 severity (FIRST.org CVSS 3.1)">
+                {riskDisplay(path) ?? '—'}
+              </span>
+              <span className="text-xs font-mono text-gray-400 self-center">CVSS</span>
               <span className="text-xs font-semibold px-2 py-0.5 rounded"
                 style={{ backgroundColor: sevStyle.bg, color: sevStyle.text, border: `1px solid ${sevStyle.border}` }}>
                 {sev.toUpperCase()}

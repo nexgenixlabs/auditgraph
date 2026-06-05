@@ -89,9 +89,20 @@ export function BlastRadiusCardV31({ data }: { data: PostureV31Response }) {
     );
   }
 
+  // Compress the previous wall-of-roles into a counted bullet so the card reads
+  // at-a-glance. exploitation_text is the comma-joined role list when the
+  // backend has many roles to enumerate; the full text remains available on
+  // hover via the container's title attribute (below).
+  const exploitText = br.exploitation_text || '';
+  const roleItems = exploitText.split(/,\s*/).map(s => s.trim()).filter(Boolean);
+  const roleCount = roleItems.length;
+
+  const tierNum = (br.role_tier || '').replace('T', '');
+  const impactColor = tierNum <= '1' ? '#e8465a' : tierNum === '2' ? '#FF7216' : '#6b7280';
+
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition"
-         title={br.exploitation_text}>
+         title={exploitText}>
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-gray-400 uppercase tracking-wider font-medium"
               title="Worst-case impact if this identity is compromised"
@@ -108,19 +119,28 @@ export function BlastRadiusCardV31({ data }: { data: PostureV31Response }) {
         </div>
       </div>
       <span className="text-xs font-semibold text-gray-300 mb-1 mt-1">If compromised:</span>
-      <p className="text-xs text-gray-400 truncate">
-        <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
-      </p>
-      <p className="text-xs text-gray-400 truncate mt-0.5">
-        <span className="text-red-400/70 mr-1">•</span>Tier {br.role_tier} access
-      </p>
-      <p className="text-xs text-gray-500 mt-auto" style={{ overflow: 'visible', whiteSpace: 'normal' }}>{br.exploitation_text}</p>
+      <div className="space-y-0.5">
+        {br.scope_string && (
+          <p className="text-xs text-gray-400 truncate">
+            <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
+          </p>
+        )}
+        {br.role_tier && (
+          <p className="text-xs text-gray-400 truncate">
+            <span className="text-red-400/70 mr-1">•</span>Tier {br.role_tier} access
+          </p>
+        )}
+        {roleCount > 3 ? (
+          <p className="text-xs text-gray-400 truncate" title={exploitText}>
+            <span className="text-red-400/70 mr-1">•</span>
+            Grants <span className="font-mono text-gray-300">{roleCount}</span> privileged role{roleCount === 1 ? '' : 's'}
+          </p>
+        ) : exploitText ? (
+          <p className="text-xs text-gray-500 truncate" title={exploitText}>{exploitText}</p>
+        ) : null}
+      </div>
       {br.impact_label && (
-        <p className="text-[11px] font-medium mt-1.5" style={{
-          color: (br.role_tier || '').replace('T', '') <= '1' ? '#e8465a'
-               : (br.role_tier || '').replace('T', '') === '2' ? '#FF7216'
-               : '#6b7280'
-        }}>
+        <p className="text-[11px] font-medium mt-auto pt-1.5" style={{ color: impactColor }}>
           Impact: {br.impact_label}
         </p>
       )}

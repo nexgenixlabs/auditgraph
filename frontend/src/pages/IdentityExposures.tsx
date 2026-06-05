@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { riskDisplay } from '../utils/riskDisplay';
 import { useConnection } from '../contexts/ConnectionContext';
 import { RISK_BADGE, CLOUD_BADGE, safeLower } from '../constants/metrics';
 
@@ -273,7 +274,8 @@ export default function IdentityExposures() {
                         </td>
                         <td className="px-3 py-2">
                           <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase ${RISK_BADGE[safeLower(e.risk_level)] || 'bg-slate-700 text-slate-400'}`}>{e.risk_level}</span>
-                          {e.risk_score > 0 && <span className="text-[9px] text-slate-500 ml-1 font-mono">{e.risk_score}</span>}
+                          {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                          {riskDisplay(e) && <span className="text-[9px] text-slate-500 ml-1 font-mono tabular-nums" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">{riskDisplay(e)}</span>}
                         </td>
                         <td className="px-3 py-2">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${STATUS_BADGE[e.status] || ''}`}>{e.status}</span>

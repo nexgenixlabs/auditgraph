@@ -214,8 +214,12 @@ class _PoolManager:
                         cur.execute(
                             "SELECT set_config('app.current_organization_id', '0', FALSE)"
                         )
+                        cur.execute(
+                            "SELECT set_config('app.current_tenant_id', '0', FALSE)"
+                        )
                     else:
                         cur.execute("RESET app.current_organization_id")
+                        cur.execute("RESET app.current_tenant_id")
                     cur.execute("SET statement_timeout = '30s'")
                     cur.close()
                     conn.commit()  # Commit so the default takes effect
@@ -259,6 +263,9 @@ class _PoolManager:
                 cur.execute(
                     "SELECT set_config('app.current_organization_id', '0', FALSE)"
                 )
+                cur.execute(
+                    "SELECT set_config('app.current_tenant_id', '0', FALSE)"
+                )
                 cur.close()
                 conn.commit()
             except Exception:
@@ -279,6 +286,7 @@ class _PoolManager:
         try:
             cur = conn.cursor()
             cur.execute("RESET app.current_organization_id")
+            cur.execute("RESET app.current_tenant_id")
             cur.close()
             conn.commit()
         except Exception:
@@ -570,6 +578,14 @@ class Database:
                 "SELECT set_config('app.current_organization_id', %s, FALSE)",
                 (str(organization_id),)
             )
+            # Some RLS policies (ai_agent_lifecycle_events, agent_data_reachability,
+            # agent_activity_events, agent_behavior_anomalies, federated_credentials)
+            # read `app.current_tenant_id` instead of `app.current_organization_id`.
+            # Set both to the same value so every policy variant resolves correctly.
+            cursor.execute(
+                "SELECT set_config('app.current_tenant_id', %s, FALSE)",
+                (str(organization_id),)
+            )
             # Verify the context was actually set (fail closed)
             cursor.execute(
                 "SELECT current_setting('app.current_organization_id', true)"
@@ -641,6 +657,10 @@ class Database:
                 cur = self.conn.cursor()
                 cur.execute(
                     "SELECT set_config('app.current_organization_id', %s, FALSE)",
+                    (str(self._organization_id),),
+                )
+                cur.execute(
+                    "SELECT set_config('app.current_tenant_id', %s, FALSE)",
                     (str(self._organization_id),),
                 )
                 cur.close()
@@ -1841,6 +1861,7 @@ class Database:
     _telemetry_coverage_col_ensured = False
     _ms_first_party_col_ensured = False
     _lineage_verdicts_ensured = False
+    _nhi_human_cols_ensured = False
 
     def backfill_microsoft_flag(self):
         """Startup backfill of is_microsoft_system for ALL data.
@@ -1868,6 +1889,10 @@ class Database:
             customer_prefixes = [
                 'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
                 'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
+                # AG-T1.4: demo-* identities are explicitly synthetic AuditGraph
+                # demo agents (org=9 / org=3). They are customer-owned in the
+                # demo context, never Microsoft platform-owned.
+                'demo-',
             ]
             prefix_conditions = " OR ".join(
                 ["LOWER(display_name) LIKE %s"] * len(customer_prefixes)
@@ -2069,6 +2094,11 @@ class Database:
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_object_id VARCHAR(255)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_registration_name VARCHAR(500)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS is_external_app BOOLEAN DEFAULT FALSE")
+            # AG-85: MS Graph verifiedPublisher (post-MSA verified publisher
+            # program). True = publisher attested by Microsoft; False =
+            # unverified (matches consent-phishing signature for high-risk
+            # scopes); NULL = not yet enriched.
+            cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS verified_publisher BOOLEAN")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_publisher_domain VARCHAR(255)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_sign_in_audience VARCHAR(100)")
             cursor.execute("ALTER TABLE identities ADD COLUMN IF NOT EXISTS app_reg_owner_display_name VARCHAR(255)")
@@ -2275,6 +2305,44 @@ class Database:
         finally:
             cursor.close()
 
+    def ensure_nhi_human_columns(self):
+        """Startup migration: NHI (AG-159) + Humans (AG-160) enrichment columns.
+
+        These were originally added lazily inside save_identity (write path),
+        which meant a DB that hadn't re-run discovery on the new code lacked
+        them — and the identities read path (_identity_list_select) 500s on the
+        missing column. Adding them at startup makes the read path safe on any
+        tenant regardless of discovery state. Pure additive / idempotent.
+        """
+        if Database._nhi_human_cols_ensured:
+            return
+        _log = logging.getLogger(__name__)
+        cursor = self.conn.cursor()
+        try:
+            required_cols = [
+                # NHI enrichment (AG-159)
+                ("secret_expiry_earliest", "TIMESTAMPTZ"),
+                ("secret_expiry_status", "VARCHAR(20)"),
+                ("federated_cred_count", "INTEGER DEFAULT 0"),
+                ("owner_resolved", "TEXT"),
+                # Humans enrichment (AG-160)
+                ("mfa_status", "VARCHAR(20)"),
+                ("mfa_methods", "JSONB"),
+                ("department", "VARCHAR(255)"),
+                ("manager_id", "VARCHAR(255)"),
+                ("job_title", "VARCHAR(255)"),
+                ("upn", "VARCHAR(500)"),
+            ]
+            for col_name, col_type in required_cols:
+                cursor.execute(f"ALTER TABLE identities ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            self._commit()
+            Database._nhi_human_cols_ensured = True
+        except Exception as e:
+            self._rollback()
+            _log.warning("NHI/Humans columns migration error: %s", e)
+        finally:
+            cursor.close()
+
     def sweep_microsoft_flag(self, run_id: int):
         """Post-discovery sweep: mark remaining undetected Microsoft SPNs for a specific run.
 
@@ -2288,6 +2356,10 @@ class Database:
             customer_prefixes = [
                 'spn-', 'app-', 'svc-', 'sa-', 'func-', 'aks-', 'webapp-', 'mi-',
                 'aglab', 'auditgraph', 'nexgenix', 'ngh-', 'aglabs',
+                # AG-T1.4: demo-* identities are explicitly synthetic AuditGraph
+                # demo agents (org=9 / org=3). They are customer-owned in the
+                # demo context, never Microsoft platform-owned.
+                'demo-',
             ]
             prefix_conditions = " OR ".join(
                 ["LOWER(display_name) LIKE %s"] * len(customer_prefixes)
@@ -2636,6 +2708,7 @@ class Database:
                 app_registration_object_id,
                 app_registration_name,
                 is_external_app,
+                verified_publisher,
                 app_reg_publisher_domain,
                 app_reg_sign_in_audience,
                 app_reg_owner_display_name,
@@ -2762,7 +2835,7 @@ class Database:
                 %s,
                 %s, %s, %s, %s, %s, %s, %s,
                 %s,
-                %s, %s, %s,
+                %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
@@ -2851,6 +2924,7 @@ class Database:
                 app_registration_object_id = EXCLUDED.app_registration_object_id,
                 app_registration_name = EXCLUDED.app_registration_name,
                 is_external_app = EXCLUDED.is_external_app,
+                verified_publisher = COALESCE(EXCLUDED.verified_publisher, identities.verified_publisher),
                 app_reg_publisher_domain = EXCLUDED.app_reg_publisher_domain,
                 app_reg_sign_in_audience = EXCLUDED.app_reg_sign_in_audience,
                 app_reg_owner_display_name = EXCLUDED.app_reg_owner_display_name,
@@ -3023,6 +3097,7 @@ class Database:
                 identity_data.get("app_registration_object_id"),
                 identity_data.get("app_registration_name"),
                 identity_data.get("is_external_app", False),
+                identity_data.get("verified_publisher"),
                 identity_data.get("app_reg_publisher_domain"),
                 identity_data.get("app_reg_sign_in_audience"),
                 identity_data.get("app_reg_owner_display_name"),
@@ -3581,10 +3656,68 @@ class Database:
             return 'medium'
         return 'low'
 
+    # AG-DBFIX guard: migration 100_full_schema.sql defined
+    # graph_api_permissions + sp_app_roles WITHOUT primary keys, sequence
+    # defaults, or unique constraints — every store_graph_permissions()
+    # call was silently failing (NOT NULL on id + ON CONFLICT with no
+    # matching UNIQUE). Self-heal at first write so deploys don't lose
+    # SPN permissions for any identity.
+    _perm_tables_ensured = False
+
+    def _ensure_perm_tables_constraints(self):
+        """Restore PK + UNIQUE + id sequence on graph_api_permissions and
+        sp_app_roles if migration 100 lost them. Idempotent.
+        """
+        if Database._perm_tables_ensured:
+            return
+        if not self._can_ddl():
+            Database._perm_tables_ensured = True
+            return
+        cursor = self.conn.cursor()
+        for table, unique_cols, unique_name in [
+            ('graph_api_permissions', ['identity_db_id', 'permission_name'],
+             'graph_api_permissions_identity_perm_key'),
+            ('sp_app_roles', ['identity_db_id', 'app_role_id', 'resource_id'],
+             'sp_app_roles_identity_role_resource_key'),
+        ]:
+            seq = f"{table}_id_seq"
+            for stmt in [
+                f"CREATE SEQUENCE IF NOT EXISTS {seq} AS BIGINT OWNED BY {table}.id",
+                f"SELECT setval('{seq}', COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)",
+                f"ALTER TABLE {table} ALTER COLUMN id SET DEFAULT nextval('{seq}')",
+                # PK and UNIQUE need conditional DO blocks (ADD CONSTRAINT
+                # has no IF NOT EXISTS in PG <16).
+                f"""DO $$ BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                                  WHERE conrelid='{table}'::regclass AND contype='p') THEN
+                    ALTER TABLE {table} ADD CONSTRAINT {table}_pkey PRIMARY KEY (id);
+                  END IF;
+                END$$""",
+                f"""DO $$ BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                                  WHERE conrelid='{table}'::regclass
+                                    AND contype='u' AND conname='{unique_name}') THEN
+                    ALTER TABLE {table} ADD CONSTRAINT {unique_name} UNIQUE ({', '.join(unique_cols)});
+                  END IF;
+                END$$""",
+            ]:
+                cursor.execute("SAVEPOINT perm_fix")
+                try:
+                    cursor.execute(stmt)
+                    cursor.execute("RELEASE SAVEPOINT perm_fix")
+                except Exception:
+                    # Likely cause: duplicate rows blocking the UNIQUE add.
+                    # Keep going so other tables aren't held hostage.
+                    cursor.execute("ROLLBACK TO SAVEPOINT perm_fix")
+        self._commit()
+        cursor.close()
+        Database._perm_tables_ensured = True
+
     def store_graph_permissions(self, identity_db_id: int, permissions: list):
         """Store Graph API permissions for an identity"""
         if not permissions:
             return
+        self._ensure_perm_tables_constraints()
         cursor = self.conn.cursor()
 
         for perm in permissions:
@@ -3624,6 +3757,7 @@ class Database:
         if not app_roles:
             return
 
+        self._ensure_perm_tables_constraints()
         cursor = self.conn.cursor()
 
         for role in app_roles:
@@ -3871,16 +4005,104 @@ class Database:
     # PIM (Privileged Identity Management) Methods
     # ========================================================================
 
+    def _ensure_pim_constraints(self):
+        """Repair drift on pim_eligible_assignments / pim_activations.
+
+        The live schema is missing pieces that migrations were supposed
+        to apply:
+          - organization_id INT column (the trg_auto_organization_id
+            trigger references NEW.organization_id which crashed every
+            INSERT until this ran)
+          - unique index on (identity_db_id, role_definition_id,
+            directory_scope) — required for ON CONFLICT in
+            save_pim_eligible
+          - RLS policies (org_strict_sel/ins/upd/del)
+        All steps are idempotent so this is safe to run repeatedly and
+        on cloud envs that may have partial state."""
+        if Database._pim_constraints_ensured:
+            return
+        if not self._can_ddl():
+            # Tenant-scoped connection — DDL is admin-only. Mark done so
+            # we don't retry per-request; startup or an admin path will
+            # actually apply the migration.
+            Database._pim_constraints_ensured = True
+            return
+        try:
+            cursor = self.conn.cursor()
+            for stmt in [
+                # 1) Add organization_id column (the trigger references it).
+                "ALTER TABLE pim_eligible_assignments ADD COLUMN IF NOT EXISTS organization_id INTEGER",
+                "ALTER TABLE pim_activations          ADD COLUMN IF NOT EXISTS organization_id INTEGER",
+                # 2) Backfill from identities (FK chain to org).
+                """UPDATE pim_eligible_assignments p
+                      SET organization_id = i.organization_id
+                     FROM identities i
+                    WHERE p.identity_db_id = i.id
+                      AND p.organization_id IS NULL""",
+                """UPDATE pim_activations p
+                      SET organization_id = i.organization_id
+                     FROM identities i
+                    WHERE p.identity_db_id = i.id
+                      AND p.organization_id IS NULL""",
+                # 3) Unique index for the UPSERT.
+                """CREATE UNIQUE INDEX IF NOT EXISTS uq_pim_eligible_identity_role_scope
+                     ON pim_eligible_assignments
+                       (identity_db_id, role_definition_id, directory_scope)""",
+                # 4) RLS — match the org_strict_* pattern used elsewhere.
+                "ALTER TABLE pim_eligible_assignments ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE pim_eligible_assignments FORCE  ROW LEVEL SECURITY",
+                "ALTER TABLE pim_activations          ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE pim_activations          FORCE  ROW LEVEL SECURITY",
+            ]:
+                cursor.execute("SAVEPOINT pim_step")
+                try:
+                    cursor.execute(stmt)
+                    cursor.execute("RELEASE SAVEPOINT pim_step")
+                except Exception as e:
+                    cursor.execute("ROLLBACK TO SAVEPOINT pim_step")
+                    _db_logger.debug("pim ensure step skipped: %s", e)
+            # Policies — separate loop because CREATE POLICY isn't IF NOT EXISTS-able.
+            for tbl in ("pim_eligible_assignments", "pim_activations"):
+                for policy in [
+                    f"CREATE POLICY org_strict_sel ON {tbl} FOR SELECT USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_ins ON {tbl} FOR INSERT WITH CHECK (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_upd ON {tbl} FOR UPDATE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                    f"CREATE POLICY org_strict_del ON {tbl} FOR DELETE USING (organization_id = current_setting('app.current_organization_id', true)::integer)",
+                ]:
+                    cursor.execute("SAVEPOINT pim_policy")
+                    try:
+                        cursor.execute(policy)
+                        cursor.execute("RELEASE SAVEPOINT pim_policy")
+                    except Exception:
+                        cursor.execute("ROLLBACK TO SAVEPOINT pim_policy")
+            self._commit()
+            cursor.close()
+            Database._pim_constraints_ensured = True
+        except Exception as e:
+            _db_logger.warning("Could not ensure pim constraints: %s", e)
+            try: self._rollback()
+            except Exception: pass
+
     def save_pim_eligible(self, identity_db_id: int, data: Dict):
-        """UPSERT a PIM eligible role assignment"""
+        """UPSERT a PIM eligible role assignment.
+
+        Tenant scoping: pim_eligible_assignments has no organization_id
+        column in the live schema — tenant isolation is via the
+        identity_db_id FK (identities is RLS-scoped per org). Earlier
+        code attempted to bind organization_id and the INSERT failed
+        silently, leaving the table empty and forcing the UI to fall
+        back to access_paths.pim_eligible JSONB. TODO: follow-up
+        migration to add organization_id + RLS to PIM tables.
+        """
+        self._ensure_pim_constraints()
         cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT INTO pim_eligible_assignments (
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 assignment_type, start_datetime, end_datetime, member_type,
-                organization_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                discovered_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (identity_db_id, role_definition_id, directory_scope)
             DO UPDATE SET
                 role_name = EXCLUDED.role_name,
@@ -3899,14 +4121,14 @@ class Database:
                 data.get("start_datetime"),
                 data.get("end_datetime"),
                 data.get("member_type"),
-                self._organization_id,
             ),
         )
         self._commit()
         cursor.close()
 
     def save_pim_activation(self, identity_db_id: int, data: Dict):
-        """INSERT a PIM activation record"""
+        """INSERT a PIM activation record. Tenant scoping via identity_db_id
+        FK (see save_pim_eligible header note)."""
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -3914,9 +4136,8 @@ class Database:
                 identity_db_id, role_name, role_definition_id, directory_scope,
                 status, activation_start, activation_end,
                 justification, ticket_number, ticket_system,
-                is_approval_required, created_datetime,
-                organization_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                is_approval_required, created_datetime, discovered_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """,
             (
                 identity_db_id,
@@ -3931,7 +4152,6 @@ class Database:
                 data.get("ticket_system"),
                 data.get("is_approval_required", False),
                 data.get("created_datetime"),
-                self._organization_id,
             ),
         )
         self._commit()
@@ -12201,7 +12421,9 @@ class Database:
                        retry_count, duration_seconds,
                        identities_discovered, resources_discovered, subscriptions_discovered,
                        created_at, started_at, completed_at, last_heartbeat_at,
-                       stage_timings, estimated_remaining_seconds
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
                 FROM snapshot_jobs
                 WHERE cloud_connection_id = %s AND organization_id = %s
                   AND status IN ('queued', 'running')
@@ -12216,7 +12438,9 @@ class Database:
                        retry_count, duration_seconds,
                        identities_discovered, resources_discovered, subscriptions_discovered,
                        created_at, started_at, completed_at, last_heartbeat_at,
-                       stage_timings, estimated_remaining_seconds
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
                 FROM snapshot_jobs
                 WHERE cloud_connection_id = %s AND status IN ('queued', 'running')
                   AND created_at > NOW() - INTERVAL '90 minutes'
@@ -12227,6 +12451,55 @@ class Database:
         if row:
             result = dict(row)
             # Serialize UUID and timestamps
+            result['id'] = str(result['id'])
+            for ts_key in ('created_at', 'started_at', 'completed_at', 'last_heartbeat_at'):
+                if result.get(ts_key):
+                    result[ts_key] = result[ts_key].isoformat()
+            return result
+        return None
+
+    def get_latest_snapshot_job(self, cloud_connection_id, *, org_id: int = None):
+        """Get the most recent snapshot job for a connection regardless of status.
+
+        Used by the progress modal: active_job goes null the instant a job
+        completes, but the finalized identities_discovered count is only written
+        at completion — so the modal must read the completed row to show the
+        real total instead of the last in-flight (0) value.
+        """
+        effective_org_id = org_id or self._organization_id
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        if effective_org_id:
+            cursor.execute("""
+                SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                       scan_mode, status, stage, progress, error_message,
+                       retry_count, duration_seconds,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       created_at, started_at, completed_at, last_heartbeat_at,
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
+                FROM snapshot_jobs
+                WHERE cloud_connection_id = %s AND organization_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (cloud_connection_id, effective_org_id))
+        else:
+            cursor.execute("""
+                SELECT id, organization_id, cloud_connection_id, discovery_run_id,
+                       scan_mode, status, stage, progress, error_message,
+                       retry_count, duration_seconds,
+                       identities_discovered, resources_discovered, subscriptions_discovered,
+                       created_at, started_at, completed_at, last_heartbeat_at,
+                       stage_timings, estimated_remaining_seconds,
+                       critical_count, high_count, medium_count, low_count,
+                       live_findings
+                FROM snapshot_jobs
+                WHERE cloud_connection_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (cloud_connection_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            result = dict(row)
             result['id'] = str(result['id'])
             for ts_key in ('created_at', 'started_at', 'completed_at', 'last_heartbeat_at'):
                 if result.get(ts_key):
@@ -17500,6 +17773,20 @@ class Database:
             result['discount_pct'] = float(result['discount_pct'])
         return result
 
+    def get_organization_settings(self, organization_id) -> dict:
+        """Return the organizations.settings JSONB blob (always a dict).
+
+        Used by handlers that need to read org-level configuration such as
+        allowed_email_domains (invitation whitelist), default views, etc.
+        Returns {} when the org doesn't exist or settings is null — callers
+        should treat both as "no preference set."
+        """
+        org = self.get_organization_by_id(organization_id)
+        if not org:
+            return {}
+        s = org.get('settings')
+        return s if isinstance(s, dict) else {}
+
     def get_organization_config(self, organization_id):
         """Get cloud provider and add-on configuration for an organization."""
         org = self.get_organization_by_id(organization_id)
@@ -18406,6 +18693,551 @@ class Database:
         cursor.close()
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # AI Agent Governance — Exception Workflow
+    # ------------------------------------------------------------------
+
+    _ai_governance_exceptions_ensured = False
+
+    def _ensure_ai_governance_exceptions_table(self):
+        """Create ai_governance_exceptions table if it doesn't exist.
+
+        Tracks risk-accepted exceptions to AI agent governance policies.
+        Each row is one (agent identity, policy) approval with expiry.
+        organization_id scopes the row to a tenant — every query MUST filter
+        by org_id (no RLS policy installed here; isolation is via WHERE clause).
+        """
+        if Database._ai_governance_exceptions_ensured:
+            return
+        if not self._can_ddl():
+            Database._ai_governance_exceptions_ensured = True
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_governance_exceptions (
+                id SERIAL PRIMARY KEY,
+                exception_uuid UUID DEFAULT gen_random_uuid() UNIQUE,
+                organization_id INTEGER NOT NULL,
+                identity_db_id INTEGER NOT NULL REFERENCES identities(id),
+                identity_id TEXT NOT NULL,
+                policy_id VARCHAR(64) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                justification TEXT NOT NULL,
+                business_owner TEXT,
+                requested_by INTEGER REFERENCES users(id),
+                requested_at TIMESTAMPTZ DEFAULT NOW(),
+                approved_by INTEGER REFERENCES users(id),
+                approved_at TIMESTAMPTZ,
+                rejected_by INTEGER REFERENCES users(id),
+                rejected_at TIMESTAMPTZ,
+                rejection_reason TEXT,
+                expires_at TIMESTAMPTZ NOT NULL,
+                revoked_by INTEGER REFERENCES users(id),
+                revoked_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        for idx_stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_ai_excp_org_status ON ai_governance_exceptions (organization_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_excp_identity_policy ON ai_governance_exceptions (identity_id, policy_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_excp_expires ON ai_governance_exceptions (expires_at)",
+        ]:
+            cursor.execute("SAVEPOINT ai_excp_idx")
+            try:
+                cursor.execute(idx_stmt)
+                cursor.execute("RELEASE SAVEPOINT ai_excp_idx")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT ai_excp_idx")
+        self._commit()
+        cursor.close()
+        Database._ai_governance_exceptions_ensured = True
+
+    @staticmethod
+    def _ai_excp_serialize(row: dict) -> dict:
+        """Convert TIMESTAMPTZ/UUID values into JSON-friendly strings."""
+        if not row:
+            return row
+        out = dict(row)
+        for ts in (
+            'requested_at', 'approved_at', 'rejected_at',
+            'revoked_at', 'expires_at', 'created_at',
+        ):
+            v = out.get(ts)
+            if v is not None and hasattr(v, 'isoformat'):
+                out[ts] = v.isoformat()
+        if out.get('exception_uuid') is not None and not isinstance(out['exception_uuid'], str):
+            out['exception_uuid'] = str(out['exception_uuid'])
+        return out
+
+    def list_ai_governance_exceptions(self, org_id, status=None,
+                                      identity_id=None, policy_id=None):
+        """Return all exceptions for an org with optional filters.
+
+        Joins users for requested_by / approved_by / rejected_by / revoked_by
+        display names so the UI can render attribution without extra round-trips.
+        Most-recent-first ordering by created_at.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        sql = """
+            SELECT e.*,
+                   u_req.display_name AS requested_by_name,
+                   u_app.display_name AS approved_by_name,
+                   u_rej.display_name AS rejected_by_name,
+                   u_rev.display_name AS revoked_by_name,
+                   i.display_name     AS identity_display_name
+              FROM ai_governance_exceptions e
+              LEFT JOIN users u_req ON u_req.id = e.requested_by
+              LEFT JOIN users u_app ON u_app.id = e.approved_by
+              LEFT JOIN users u_rej ON u_rej.id = e.rejected_by
+              LEFT JOIN users u_rev ON u_rev.id = e.revoked_by
+              LEFT JOIN identities i ON i.id = e.identity_db_id
+             WHERE e.organization_id = %s
+        """
+        params = [org_id]
+        if status:
+            sql += " AND e.status = %s"
+            params.append(status)
+        if identity_id:
+            sql += " AND e.identity_id = %s"
+            params.append(identity_id)
+        if policy_id:
+            sql += " AND e.policy_id = %s"
+            params.append(policy_id)
+        sql += " ORDER BY e.created_at DESC"
+        cursor.execute(sql, params)
+        rows = [self._ai_excp_serialize(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_ai_governance_exception(self, exc_id, org_id):
+        """Return one exception (with attribution joins) or None.
+
+        Always tenant-scoped — never look up by id alone.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT e.*,
+                   u_req.display_name AS requested_by_name,
+                   u_app.display_name AS approved_by_name,
+                   u_rej.display_name AS rejected_by_name,
+                   u_rev.display_name AS revoked_by_name,
+                   i.display_name     AS identity_display_name
+              FROM ai_governance_exceptions e
+              LEFT JOIN users u_req ON u_req.id = e.requested_by
+              LEFT JOIN users u_app ON u_app.id = e.approved_by
+              LEFT JOIN users u_rej ON u_rej.id = e.rejected_by
+              LEFT JOIN users u_rev ON u_rev.id = e.revoked_by
+              LEFT JOIN identities i ON i.id = e.identity_db_id
+             WHERE e.id = %s AND e.organization_id = %s
+        """, (exc_id, org_id))
+        row = cursor.fetchone()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def create_ai_governance_exception(self, org_id, *, identity_db_id,
+                                       identity_id, policy_id, justification,
+                                       business_owner, requested_by, expires_at):
+        """Insert a new pending exception. Returns the created row."""
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO ai_governance_exceptions
+                (organization_id, identity_db_id, identity_id, policy_id,
+                 status, justification, business_owner, requested_by,
+                 requested_at, expires_at)
+            VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, NOW(), %s)
+            RETURNING *
+        """, (org_id, identity_db_id, identity_id, policy_id,
+              justification, business_owner, requested_by, expires_at))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def approve_ai_governance_exception(self, exc_id, org_id, *, approved_by):
+        """Approve a pending exception. Returns the updated row or None.
+
+        Only transitions rows currently in 'pending' state — protects against
+        double-approval and approve-after-rejected race conditions.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE ai_governance_exceptions
+               SET status      = 'approved',
+                   approved_by = %s,
+                   approved_at = NOW()
+             WHERE id = %s
+               AND organization_id = %s
+               AND status = 'pending'
+             RETURNING *
+        """, (approved_by, exc_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def reject_ai_governance_exception(self, exc_id, org_id, *, rejected_by, reason):
+        """Reject a pending exception. Returns the updated row or None."""
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE ai_governance_exceptions
+               SET status           = 'rejected',
+                   rejected_by      = %s,
+                   rejected_at      = NOW(),
+                   rejection_reason = %s
+             WHERE id = %s
+               AND organization_id = %s
+               AND status = 'pending'
+             RETURNING *
+        """, (rejected_by, reason, exc_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def revoke_ai_governance_exception(self, exc_id, org_id, *, revoked_by):
+        """Revoke an approved exception. Returns the updated row or None.
+
+        Only transitions rows currently in 'approved' state.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            UPDATE ai_governance_exceptions
+               SET status     = 'revoked',
+                   revoked_by = %s,
+                   revoked_at = NOW()
+             WHERE id = %s
+               AND organization_id = %s
+               AND status = 'approved'
+             RETURNING *
+        """, (revoked_by, exc_id, org_id))
+        row = cursor.fetchone()
+        self._commit()
+        cursor.close()
+        return self._ai_excp_serialize(dict(row)) if row else None
+
+    def list_active_ai_governance_exceptions(self, org_id):
+        """Return exceptions that are currently in effect for an org.
+
+        Active = status='approved' AND expires_at > NOW(). Used by the
+        governance + anomaly evaluators to suppress violations for agents
+        with an approved exception in force.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT e.id, e.identity_id, e.policy_id, e.expires_at,
+                   u_app.display_name AS approved_by_name
+              FROM ai_governance_exceptions e
+              LEFT JOIN users u_app ON u_app.id = e.approved_by
+             WHERE e.organization_id = %s
+               AND e.status = 'approved'
+               AND e.expires_at > NOW()
+        """, (org_id,))
+        rows = [self._ai_excp_serialize(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def expire_overdue_ai_governance_exceptions(self, org_id=None):
+        """Bulk-transition approved exceptions whose expires_at has passed.
+
+        If org_id is provided, scope the update to that tenant; otherwise sweep
+        ALL orgs (only safe under the admin connection). Returns the number of
+        rows transitioned.
+        """
+        self._ensure_ai_governance_exceptions_table()
+        cursor = self.conn.cursor()
+        if org_id is not None:
+            cursor.execute("""
+                UPDATE ai_governance_exceptions
+                   SET status = 'expired'
+                 WHERE organization_id = %s
+                   AND status = 'approved'
+                   AND expires_at <= NOW()
+            """, (org_id,))
+        else:
+            cursor.execute("""
+                UPDATE ai_governance_exceptions
+                   SET status = 'expired'
+                 WHERE status = 'approved'
+                   AND expires_at <= NOW()
+            """)
+        count = cursor.rowcount
+        self._commit()
+        cursor.close()
+        return count or 0
+
+    # ──────────────────────────────────────────────────────────────────
+    # AG-81: OAuth Consent Grant Inventory & Risk Scoring
+    # ──────────────────────────────────────────────────────────────────
+    # Closes the Vercel-breach response narrative. Surfaces who consented
+    # to what, when, with what scopes. Two data sources from MS Graph:
+    #   - /oauth2PermissionGrants — delegated consents (user OR admin)
+    #   - /servicePrincipals/<id>/appRoleAssignments — application
+    #     permissions (always admin-consented at app level)
+    # Risk score = scope breadth × consent type (admin > user) × age.
+
+    _consent_grants_ensured = False
+
+    def _ensure_consent_grants_table(self):
+        """Create consent_grants table if it doesn't exist (idempotent)."""
+        if Database._consent_grants_ensured:
+            return
+        if not self._can_ddl():
+            Database._consent_grants_ensured = True
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS consent_grants (
+                id SERIAL PRIMARY KEY,
+                organization_id INTEGER NOT NULL,
+                discovery_run_id INTEGER,
+                grant_type VARCHAR(20) NOT NULL,
+                client_app_id TEXT NOT NULL,
+                client_object_id TEXT,
+                client_display_name TEXT,
+                resource_app_id TEXT,
+                resource_object_id TEXT,
+                resource_display_name TEXT,
+                scopes TEXT[],
+                consent_type VARCHAR(20),
+                principal_id TEXT,
+                principal_display_name TEXT,
+                created_datetime TIMESTAMPTZ,
+                expires_at TIMESTAMPTZ,
+                last_activity_at TIMESTAMPTZ,
+                risk_score INTEGER DEFAULT 0,
+                risk_level VARCHAR(20),
+                high_risk_scopes TEXT[],
+                age_days INTEGER,
+                evidence_source VARCHAR(40),
+                discovered_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        for idx_stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_org ON consent_grants (organization_id)",
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_client ON consent_grants (organization_id, client_app_id)",
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_risk ON consent_grants (organization_id, risk_level)",
+            "CREATE INDEX IF NOT EXISTS idx_consent_grants_run ON consent_grants (discovery_run_id)",
+            # Dedup key — one row per (org, client, resource, principal, type) per scan
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_consent_grants_unique ON consent_grants (organization_id, client_app_id, resource_app_id, COALESCE(principal_id, ''), grant_type)",
+        ]:
+            cursor.execute("SAVEPOINT cg_idx")
+            try:
+                cursor.execute(idx_stmt)
+                cursor.execute("RELEASE SAVEPOINT cg_idx")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT cg_idx")
+        # AG-85 publisher trust columns — additive ALTERs so existing rows
+        # survive. NULL means "not yet enriched"; risk scoring treats
+        # unknown publisher as untrusted.
+        for alter_stmt in [
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS publisher_name TEXT",
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS publisher_domain TEXT",
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS verified_publisher BOOLEAN",
+            "ALTER TABLE consent_grants ADD COLUMN IF NOT EXISTS publisher_enriched_at TIMESTAMPTZ",
+        ]:
+            cursor.execute("SAVEPOINT cg_alt")
+            try:
+                cursor.execute(alter_stmt)
+                cursor.execute("RELEASE SAVEPOINT cg_alt")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT cg_alt")
+        self._commit()
+        cursor.close()
+        Database._consent_grants_ensured = True
+
+    @staticmethod
+    def _consent_grant_serialize(row: dict) -> dict:
+        if not row:
+            return row
+        out = dict(row)
+        for ts in ('created_datetime', 'expires_at', 'last_activity_at', 'discovered_at', 'publisher_enriched_at'):
+            v = out.get(ts)
+            if v is not None and hasattr(v, 'isoformat'):
+                out[ts] = v.isoformat()
+        return out
+
+    def upsert_consent_grant(self, org_id: int, run_id: int, grant: dict) -> int:
+        """UPSERT a consent grant for the current scan. Returns id."""
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO consent_grants
+              (organization_id, discovery_run_id, grant_type, client_app_id,
+               client_object_id, client_display_name, resource_app_id,
+               resource_object_id, resource_display_name, scopes,
+               consent_type, principal_id, principal_display_name,
+               created_datetime, expires_at, last_activity_at,
+               risk_score, risk_level, high_risk_scopes, age_days,
+               evidence_source, discovered_at,
+               publisher_name, publisher_domain, verified_publisher,
+               publisher_enriched_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, NOW(),
+                    %s, %s, %s, %s)
+            ON CONFLICT (organization_id, client_app_id, resource_app_id,
+                         COALESCE(principal_id, ''), grant_type)
+            DO UPDATE SET
+                discovery_run_id = EXCLUDED.discovery_run_id,
+                client_object_id = EXCLUDED.client_object_id,
+                client_display_name = EXCLUDED.client_display_name,
+                resource_object_id = EXCLUDED.resource_object_id,
+                resource_display_name = EXCLUDED.resource_display_name,
+                scopes = EXCLUDED.scopes,
+                consent_type = EXCLUDED.consent_type,
+                principal_display_name = EXCLUDED.principal_display_name,
+                created_datetime = COALESCE(consent_grants.created_datetime, EXCLUDED.created_datetime),
+                expires_at = EXCLUDED.expires_at,
+                last_activity_at = EXCLUDED.last_activity_at,
+                risk_score = EXCLUDED.risk_score,
+                risk_level = EXCLUDED.risk_level,
+                high_risk_scopes = EXCLUDED.high_risk_scopes,
+                age_days = EXCLUDED.age_days,
+                discovered_at = NOW(),
+                publisher_name = COALESCE(EXCLUDED.publisher_name, consent_grants.publisher_name),
+                publisher_domain = COALESCE(EXCLUDED.publisher_domain, consent_grants.publisher_domain),
+                verified_publisher = COALESCE(EXCLUDED.verified_publisher, consent_grants.verified_publisher),
+                publisher_enriched_at = COALESCE(EXCLUDED.publisher_enriched_at, consent_grants.publisher_enriched_at)
+            RETURNING id
+        """, (
+            org_id, run_id, grant['grant_type'], grant['client_app_id'],
+            grant.get('client_object_id'), grant.get('client_display_name'),
+            grant.get('resource_app_id'), grant.get('resource_object_id'),
+            grant.get('resource_display_name'), grant.get('scopes', []),
+            grant.get('consent_type'), grant.get('principal_id'),
+            grant.get('principal_display_name'),
+            grant.get('created_datetime'), grant.get('expires_at'),
+            grant.get('last_activity_at'),
+            grant.get('risk_score', 0), grant.get('risk_level'),
+            grant.get('high_risk_scopes', []), grant.get('age_days'),
+            grant.get('evidence_source'),
+            grant.get('publisher_name'), grant.get('publisher_domain'),
+            grant.get('verified_publisher'), grant.get('publisher_enriched_at'),
+        ))
+        new_id = cursor.fetchone()[0]
+        self._commit()
+        cursor.close()
+        return new_id
+
+    def list_consent_grants(self, org_id: int, *, risk_level=None,
+                            grant_type=None, client_app_id=None,
+                            limit: int = 100, offset: int = 0) -> list:
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        clauses = ["organization_id = %s"]
+        params = [org_id]
+        if risk_level:
+            clauses.append("risk_level = %s")
+            params.append(risk_level)
+        if grant_type:
+            clauses.append("grant_type = %s")
+            params.append(grant_type)
+        if client_app_id:
+            clauses.append("client_app_id = %s")
+            params.append(client_app_id)
+        where = " AND ".join(clauses)
+        params.extend([int(limit), int(offset)])
+        cursor.execute(
+            f"""
+            SELECT * FROM consent_grants
+             WHERE {where}
+             ORDER BY risk_score DESC NULLS LAST, created_datetime DESC NULLS LAST
+             LIMIT %s OFFSET %s
+            """,
+            params,
+        )
+        rows = [self._consent_grant_serialize(dict(r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_connected_app_risk_summary(self, org_id: int) -> dict:
+        """Aggregate stats for the CISO dashboard 'Connected App Risk' tile."""
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE risk_level = 'critical')                  AS critical,
+              COUNT(*) FILTER (WHERE risk_level = 'high')                      AS high,
+              COUNT(*) FILTER (WHERE risk_level = 'medium')                    AS medium,
+              COUNT(*) FILTER (WHERE risk_level = 'low')                       AS low,
+              COUNT(*) FILTER (WHERE consent_type = 'Principal')               AS user_consents,
+              COUNT(*) FILTER (WHERE consent_type = 'AllPrincipals')           AS admin_consents,
+              COUNT(*) FILTER (WHERE grant_type = 'application')               AS app_perm_grants,
+              COUNT(*) FILTER (WHERE grant_type = 'delegated')                 AS delegated_grants,
+              COALESCE(ROUND(AVG(NULLIF(age_days, 0))), 0)                     AS avg_age_days,
+              COUNT(*) FILTER (WHERE age_days IS NOT NULL AND age_days > 180)  AS over_180d,
+              COUNT(DISTINCT client_app_id)                                    AS unique_apps,
+              COUNT(*)                                                         AS total,
+              -- AG-85: publisher trust breakdown
+              COUNT(*) FILTER (WHERE verified_publisher IS TRUE)               AS verified_pub_grants,
+              COUNT(*) FILTER (WHERE verified_publisher IS FALSE)              AS unverified_pub_grants,
+              COUNT(*) FILTER (WHERE verified_publisher IS FALSE
+                                 AND risk_level IN ('critical', 'high'))       AS unverified_high_risk,
+              COUNT(*) FILTER (WHERE verified_publisher IS NULL
+                                 AND publisher_name IS NULL)                   AS publisher_unknown
+            FROM consent_grants
+            WHERE organization_id = %s
+        """, (org_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        return {
+            'critical': int(row[0] or 0),
+            'high': int(row[1] or 0),
+            'medium': int(row[2] or 0),
+            'low': int(row[3] or 0),
+            'user_consents': int(row[4] or 0),
+            'admin_consents': int(row[5] or 0),
+            'application_grants': int(row[6] or 0),
+            'delegated_grants': int(row[7] or 0),
+            'avg_age_days': int(row[8] or 0),
+            'over_180_days': int(row[9] or 0),
+            'unique_apps': int(row[10] or 0),
+            'total': int(row[11] or 0),
+            'verified_publisher_grants': int(row[12] or 0),
+            'unverified_publisher_grants': int(row[13] or 0),
+            'unverified_high_risk_grants': int(row[14] or 0),
+            'publisher_unknown_grants': int(row[15] or 0),
+        }
+
+    def list_top_risky_connected_apps(self, org_id: int, limit: int = 5) -> list:
+        """Return top N apps ranked by max risk score across their grants."""
+        self._ensure_consent_grants_table()
+        cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+              client_app_id,
+              MAX(client_display_name) FILTER (WHERE client_display_name IS NOT NULL) AS display_name,
+              MAX(risk_score) AS max_risk_score,
+              MAX(risk_level) FILTER (WHERE risk_level = 'critical') AS has_critical,
+              MAX(risk_level) FILTER (WHERE risk_level = 'high')     AS has_high,
+              COUNT(*) AS grant_count,
+              ARRAY(SELECT DISTINCT unnest(high_risk_scopes) FROM consent_grants cg2
+                     WHERE cg2.organization_id = cg.organization_id
+                       AND cg2.client_app_id = cg.client_app_id) AS top_risky_scopes,
+              MIN(created_datetime) AS oldest_grant_at,
+              -- AG-85: publisher trust per-app (mode aggregation)
+              MAX(publisher_name) FILTER (WHERE publisher_name IS NOT NULL) AS publisher_name,
+              BOOL_AND(verified_publisher) FILTER (WHERE verified_publisher IS NOT NULL) AS verified_publisher,
+              MAX(publisher_domain) FILTER (WHERE publisher_domain IS NOT NULL) AS publisher_domain
+            FROM consent_grants cg
+            WHERE organization_id = %s
+            GROUP BY organization_id, client_app_id
+            ORDER BY MAX(risk_score) DESC NULLS LAST
+            LIMIT %s
+        """, (org_id, int(limit)))
+        rows = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        for r in rows:
+            if r.get('oldest_grant_at') and hasattr(r['oldest_grant_at'], 'isoformat'):
+                r['oldest_grant_at'] = r['oldest_grant_at'].isoformat()
+        return rows
+
     # ── Identity Governance V2: Decisions Table ──────────────────────
 
     _governance_decisions_ensured = False
@@ -18807,9 +19639,13 @@ class Database:
     _copilot_ensured = False
     _ai_audit_log_ensured = False
     _agent_classifications_ensured = False
+    _pim_constraints_ensured = False
 
     def _ensure_copilot_tables(self):
         if Database._copilot_ensured:
+            return
+        if not self._can_ddl():
+            Database._copilot_ensured = True
             return
         cursor = self.conn.cursor()
         cursor.execute("""
@@ -18971,6 +19807,21 @@ class Database:
             cursor.execute("RELEASE SAVEPOINT add_p2_col")
         except Exception:
             cursor.execute("ROLLBACK TO SAVEPOINT add_p2_col")
+        # AG-117: track whether the AuditLog.Read.All admin consent has
+        # been granted yet. null = never tested; true = last sign-in API
+        # call succeeded; false = last call returned 403. The Settings
+        # UI splits has_p2_license + p2_consent_granted into the three
+        # demoable states (green / amber-needs-consent / gray-no-license).
+        for alter in [
+            "ALTER TABLE cloud_connections ADD COLUMN IF NOT EXISTS p2_consent_granted BOOLEAN",
+            "ALTER TABLE cloud_connections ADD COLUMN IF NOT EXISTS p2_consent_checked_at TIMESTAMPTZ",
+        ]:
+            cursor.execute("SAVEPOINT add_p2_consent_col")
+            try:
+                cursor.execute(alter)
+                cursor.execute("RELEASE SAVEPOINT add_p2_consent_col")
+            except Exception:
+                cursor.execute("ROLLBACK TO SAVEPOINT add_p2_consent_col")
         # RLS policies for organization isolation (idempotent)
         cursor.execute("ALTER TABLE cloud_connections ENABLE ROW LEVEL SECURITY")
         cursor.execute("ALTER TABLE cloud_connections FORCE ROW LEVEL SECURITY")
@@ -19809,6 +20660,10 @@ class Database:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Pre-existing tables may lack the PK on `key` (older schema) — ensure a
+        # unique index so the ON CONFLICT (key) upsert below has a match target.
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_settings_key ON platform_settings (key)")
         # Seed defaults
         for k, v in [
             ('company_name', 'AuditGraph Inc.'),
@@ -20215,11 +21070,12 @@ class Database:
         return bool(result[0]) if result else False
 
     def update_role_last_used_from_arm(self, org_id: int, updates: list):
-        """Scope-aware batch-update of role_assignments.last_used_at from ARM events.
+        """Scope+role-aware batch-update of role_assignments.last_used_at from ARM events.
 
         An ARM event at resource_id proves usage of roles whose scope is an
         ancestor of that resource_id (exact, parent RG, parent subscription,
-        or tenant/root). Sibling/unrelated scopes are NOT updated.
+        or tenant/root) AND whose role definition plausibly grants the
+        operation that fired the event.
 
         Scope hierarchy (child proves parent):
             /subscriptions/X/resourceGroups/Y/providers/Z  (event)
@@ -20232,6 +21088,16 @@ class Database:
                 /subscriptions/X/resourceGroups/OTHER
                 /subscriptions/OTHER/...
 
+        AG-F (2026-05-30): Role-name aware attribution. Previously a single
+        ARM event would stamp last_used_at on every role the principal held
+        at the matching scope — so a Key Vault read would mark Storage Blob
+        Reader, Reader, Owner, Network Contributor etc. all as "used today".
+        Now an event is only attributed to roles whose names plausibly grant
+        the operation (Owner/Contributor always match; "Key Vault Reader"
+        only matches Microsoft.KeyVault/*/read operations; etc.). Unknown
+        role names fall back to the legacy scope-only semantics so we never
+        under-attribute when the heuristic doesn't know a role.
+
         Args:
             org_id: Organization ID
             updates: List of dicts with keys: principal_id, subscription_id,
@@ -20239,6 +21105,7 @@ class Database:
         """
         if not updates:
             return 0
+        from app.engines.role_permission_matcher import role_matches_operation
         cursor = self.conn.cursor()
         count = 0
         for u in updates:
@@ -20247,24 +21114,31 @@ class Database:
                 continue
 
             # Build list of ancestor scope prefixes from the event resource_id.
-            # E.g. /subscriptions/X/resourceGroups/Y/providers/Z →
-            #   ['/subscriptions/x/resourcegroups/y/providers/z',
-            #    '/subscriptions/x/resourcegroups/y',
-            #    '/subscriptions/x',
-            #    '/']
             ancestor_scopes = [event_resource]
             parts = event_resource.strip('/').split('/')
-            # Walk up: subscriptions/X/resourceGroups/Y/providers/... → sub/X/rg/Y → sub/X → root
             if len(parts) >= 4 and parts[2].lower() == 'resourcegroups':
-                # Add resource group scope
                 ancestor_scopes.append('/' + '/'.join(parts[:4]))
             if len(parts) >= 2 and parts[0].lower() == 'subscriptions':
-                # Add subscription scope
                 ancestor_scopes.append('/' + '/'.join(parts[:2]))
-            # Root scope always matches
             ancestor_scopes.append('/')
 
-            # Update only roles whose scope matches an ancestor of the event
+            # AG-F: first pull candidate roles at matching scopes, then filter
+            # by whether the role plausibly grants this operation. Two-step
+            # rather than one big UPDATE so we can apply the Python heuristic.
+            cursor.execute("""
+                SELECT id, role_name FROM role_assignments
+                WHERE organization_id = %s
+                  AND principal_id = %s
+                  AND LOWER(scope) = ANY(%s)
+            """, (org_id, u['principal_id'], ancestor_scopes))
+            candidate_rows = cursor.fetchall()
+            matching_ids = [
+                row[0] for row in candidate_rows
+                if role_matches_operation(row[1], u.get('last_used_operation'))
+            ]
+            if not matching_ids:
+                continue
+
             cursor.execute("""
                 UPDATE role_assignments SET
                     last_used_at = GREATEST(last_used_at, %s),
@@ -20277,22 +21151,114 @@ class Database:
                         WHEN %s > NOW() - INTERVAL '90 days' THEN 'dormant'
                         ELSE COALESCE(usage_status, 'stale')
                     END
-                WHERE organization_id = %s
-                  AND principal_id = %s
-                  AND LOWER(scope) = ANY(%s)
+                WHERE id = ANY(%s)
             """, (
                 u['last_used_at'],
                 u['last_used_at'], u['last_used_operation'],
                 u['last_used_at'],
                 u['last_used_at'],
-                org_id,
-                u['principal_id'],
-                ancestor_scopes,
+                matching_ids,
             ))
             count += cursor.rowcount
+        # Feature E (AG-E Step 1): propagate ARM last-used into the
+        # denormalized identity_subscription_access view. This is what
+        # the IdentityDetail Roles tab actually reads — until this ran,
+        # the column was always NULL despite role_assignments having
+        # the data. Single SQL join — much faster than per-row updates.
+        # PG UPDATE...FROM: the target alias `isa` is referenced via WHERE
+        # only; FROM tables can't JOIN onto the target table.
+        cursor.execute("""
+            UPDATE identity_subscription_access isa
+               SET last_activity = ra.last_used_at
+              FROM identities i, role_assignments ra
+             WHERE i.id = isa.identity_db_id
+               AND i.organization_id = %s
+               AND LOWER(ra.principal_id) = LOWER(i.object_id)
+               AND LOWER(ra.scope) = LOWER(isa.scope)
+               AND LOWER(ra.role_name) = LOWER(isa.rbac_role)
+               AND ra.last_used_at IS NOT NULL
+               AND (isa.last_activity IS NULL OR ra.last_used_at > isa.last_activity)
+        """, (org_id,))
+        propagated = cursor.rowcount
         self._commit()
         cursor.close()
+        if propagated:
+            _db_logger.info("AG-E propagated last_activity to %d identity_subscription_access rows for org=%s", propagated, org_id)
         return count
+
+    def update_role_last_used_from_entra_audits(self, org_id: int, updates: list) -> int:
+        """AG-E Phase 2: attribute /auditLogs/directoryAudits events to the
+        Entra directory roles that could have authorized them. The Wiz-grade
+        moat — Microsoft has no per-role exercise log, so we infer from
+        category attribution.
+
+        Args:
+            org_id: Organization ID
+            updates: List of dicts with keys:
+                principal_user_id  — initiatedBy.user.id from the audit event
+                activity_at        — activityDateTime (datetime)
+                category           — audit category (UserManagement, RoleManagement, ...)
+                activity_display_name — specific operation (for last_used_operation)
+
+        Returns: number of entra_role_assignments rows updated.
+        """
+        if not updates:
+            return 0
+        from app.engines.role_permission_matcher import entra_role_matches_audit_category
+        cursor = self.conn.cursor()
+        updated = 0
+        for u in updates:
+            principal_id = (u.get('principal_user_id') or '').strip()
+            activity_at = u.get('activity_at')
+            category = u.get('category') or ''
+            op_name = u.get('activity_display_name') or ''
+            if not principal_id or not activity_at:
+                continue
+
+            # Candidate roles: every Entra role this principal currently holds.
+            # Entra roles are tenant-scoped — no scope hierarchy to walk.
+            cursor.execute("""
+                SELECT era.id, era.role_name
+                  FROM entra_role_assignments era
+                  JOIN identities i ON i.id = era.identity_db_id
+                 WHERE i.organization_id = %s
+                   AND LOWER(i.object_id) = LOWER(%s)
+            """, (org_id, principal_id))
+            candidates = cursor.fetchall() or []
+            matching_ids = [
+                rid for rid, role_name in candidates
+                if entra_role_matches_audit_category(role_name, category)
+            ]
+            if not matching_ids:
+                continue
+            cursor.execute("""
+                UPDATE entra_role_assignments SET
+                    last_used_at = GREATEST(last_used_at, %s),
+                    last_used_operation = CASE
+                        WHEN last_used_at IS NULL OR %s > last_used_at THEN %s
+                        ELSE last_used_operation
+                    END,
+                    usage_status = CASE
+                        WHEN %s > NOW() - INTERVAL '30 days' THEN 'active'
+                        WHEN %s > NOW() - INTERVAL '90 days' THEN 'dormant'
+                        ELSE COALESCE(usage_status, 'stale')
+                    END
+                 WHERE id = ANY(%s)
+            """, (
+                activity_at,
+                activity_at, op_name,
+                activity_at, activity_at,
+                matching_ids,
+            ))
+            updated += cursor.rowcount
+        self._commit()
+        cursor.close()
+        if updated:
+            _db_logger.info(
+                "AG-E Phase 2: attributed %d entra_role_assignments rows from %d directoryAudits events for org=%s",
+                updated, len(updates), org_id,
+            )
+        return updated
 
     # ── Connector Permission Tracking ─────────────────────────────────────
 

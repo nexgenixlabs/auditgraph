@@ -253,7 +253,7 @@ function ScopePanel({ data }: { data: GraphDataResponse['effective_scope'] }) {
       )}
 
       {/* Entra scopes */}
-      {data.entra_scopes.length > 0 && (
+      {data.entra_scopes.length > 0 ? (
         <div>
           <h4 className="text-xs font-semibold text-gray-700 uppercase mb-2">Entra Directory Scopes</h4>
           <div className="space-y-1.5">
@@ -266,6 +266,18 @@ function ScopePanel({ data }: { data: GraphDataResponse['effective_scope'] }) {
                 <RiskBadge level={es.risk_level} />
               </div>
             ))}
+          </div>
+        </div>
+      ) : data.scope_hierarchy.length > 0 && (
+        /* Founder feedback 2026-05-30: explicit "no Entra directory roles"
+           hint so users can tell the difference between "graph is broken"
+           and "this identity legitimately has no Entra directory roles".
+           Only shown when the identity DOES have Azure RBAC access — keeps
+           the "no scoped access" placeholder for fully-empty identities. */
+        <div>
+          <h4 className="text-xs font-semibold text-gray-700 uppercase mb-2">Entra Directory Scopes</h4>
+          <div className="text-xs text-gray-500 px-3 py-2 rounded-lg bg-gray-50 border border-dashed">
+            No Entra directory roles assigned. This identity's access is Azure RBAC only.
           </div>
         </div>
       )}
@@ -667,7 +679,18 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
             >
               <Controls position="bottom-right" showInteractive={false} />
               <Background gap={20} size={1} color="#e2e8f0" />
-              {viewMode === 'technical' && <MiniMap pannable zoomable nodeStrokeWidth={3} />}
+              {viewMode === 'technical' && (
+                <MiniMap
+                  pannable
+                  zoomable
+                  nodeStrokeWidth={3}
+                  position="bottom-left"
+                  /* Founder feedback 2026-05-30: default minimap was too large and
+                     overlapped the actual graph. Shrink + reposition + add a subtle
+                     dark backdrop so it sits cleanly over the graph canvas. */
+                  style={{ width: 130, height: 90, backgroundColor: 'rgba(15,23,42,0.85)' }}
+                />
+              )}
             </ReactFlow>
           </div>
         </>

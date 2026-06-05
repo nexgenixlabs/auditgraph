@@ -571,7 +571,12 @@ function ControlTableRow({ ctrl, meta, sevColor, isCtrlExpanded, hasEvidence, la
                     }}>{eid.risk_level}</span>
                     <span style={{ color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{eid.display_name}</span>
                     <span style={{ fontSize: 9, fontFamily: mono, color: C.textDim }}>{eid.identity_category?.replace(/_/g, ' ')}</span>
-                    <span style={{ fontSize: 12, fontFamily: mono, fontWeight: 800, color: rColor }}>{eid.risk_score}</span>
+                    {/* CVSS-aligned 0-10 only (2026-05-31 directive) */}
+                    <span style={{ fontSize: 12, fontFamily: mono, fontWeight: 800, color: rColor }} title="CVSS-aligned 0-10 severity (FIRST.org CVSS 3.1)">
+                      {typeof (eid as any).risk_score_cvss === 'number'
+                        ? (eid as any).risk_score_cvss.toFixed(1)
+                        : '—'}
+                    </span>
                     <span style={{ fontSize: 10, color: C.textDim }}>→</span>
                   </div>
                 );

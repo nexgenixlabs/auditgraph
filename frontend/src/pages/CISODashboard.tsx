@@ -14,6 +14,8 @@ import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
 import { mapSummaryToViewModel, buildEmptyCISOViewModel, type CISOViewModel, type PostureV31Response } from '../utils/cisoViewModel';
 import { DN } from '../components/dashboard/ciso-shared';
+import AudienceBadge from '../components/AudienceBadge';
+import { CopilotQuickAsk } from '../components/CopilotQuickAsk';
 import { IdentityDrawerProvider } from '../contexts/IdentityDrawerContext';
 import { IdentityContextDrawer } from '../components/dashboard/IdentityContextDrawer';
 import { usePostureDashboard, type PosturePhase } from '../hooks/usePostureDashboard';
@@ -31,6 +33,10 @@ import { ImmediateRisksPanel } from '../components/ciso/ImmediateRisksSection';
 // v3.1 components
 import { NarrativeBanner, PostureScoreHero } from '../components/ciso/ExecutiveSummaryHero';
 import { BlastRadiusCardV31, AttackPathCardV31, IdentityRiskCardV31 } from '../components/ciso/BlastRadiusSection';
+import { AIIdentityRiskCard } from '../components/ciso/AIIdentityRiskCard';
+import { ConnectedAppRiskCard } from '../components/ciso/ConnectedAppRiskCard';
+import { JmlSnapshotCard } from '../components/ciso/JmlSnapshotCard';
+import { ShadowAppCard } from '../components/ciso/ShadowAppCard';
 import { AnomalyWidgetV31 } from '../components/ciso/ActiveThreatsSection';
 import { BusinessImpactWidgetV31 } from '../components/ciso/BusinessImpactSection';
 import { DriftWidgetV31 } from '../components/ciso/ActivityDriftSection';
@@ -283,9 +289,17 @@ function PageHeader() {
   return (
     <>
       <header className="flex items-center justify-between p-3 flex-shrink-0">
-        <div className="flex items-baseline gap-3">
+        <div className="flex items-baseline gap-3 min-w-0">
           <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
-          <span className="text-xs text-gray-400">{getTimezoneLabel()}</span>
+          <AudienceBadge label="BOARD / CISO" variant="amber" />
+          <span className="text-xs text-gray-400 hidden md:inline">Board-ready summary · {getTimezoneLabel()}</span>
+          <span className="text-[10px] text-gray-500 hidden lg:inline ml-2">
+            <span className="text-gray-600">Related:</span>
+            {' '}
+            <DN navigateTo="/command-center"><span className="text-gray-400 hover:text-gray-200 cursor-pointer">↗ Command Center</span></DN>
+            <span className="text-gray-700 mx-1">·</span>
+            <DN navigateTo="/dashboard"><span className="text-gray-400 hover:text-gray-200 cursor-pointer">↗ Risk Monitoring</span></DN>
+          </span>
         </div>
         <div className="flex gap-3 flex-shrink-0">
           <DN navigateTo="/reports/executive">
@@ -457,6 +471,14 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
         </div>
       )}
 
+      {/* AG-Hero-3 (2026-05-31): AI Copilot front-and-center — V31 grid path
+          (the loaded-data render). Earlier edit added it only to the legacy
+          path, so it appeared during loading then vanished once V31 data
+          rendered. Mounting here so it persists in the steady-state view. */}
+      <div className="px-3 pt-2 flex-shrink-0">
+        <CopilotQuickAsk />
+      </div>
+
       {/* ── Main Grid ── */}
       <div className="flex-1 px-3 pb-0 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
 
@@ -504,15 +526,19 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
           </div>
         </div>
 
-        {/* ━━━ ROW 2 — Block 3 (Intel Row) ━━━ */}
-        <div className="col-span-3">
+        {/* ━━━ ROW 2 — Block 3 (Intel Row) — 6 peer tiles in a sub-grid.
+            AI Identity Risk + Connected App Risk surface the OAuth/agent
+            trust-chain narrative alongside the classic Blast/Attack/Identity
+            trio. JML Snapshot adds CIEM-style lifecycle observability.
+            Right rail (col-span-3, row-span-2) is preserved. ━━━ */}
+        <div className="col-span-9 grid grid-cols-6 gap-3">
           <BlastRadiusCardV31 data={data} />
-        </div>
-        <div className="col-span-3">
           <AttackPathCardV31 data={data} />
-        </div>
-        <div className="col-span-3">
           <IdentityRiskCardV31 data={data} />
+          <AIIdentityRiskCard />
+          <ConnectedAppRiskCard />
+          <JmlSnapshotCard />
+          <ShadowAppCard />
         </div>
 
         {/* Right Rail — spans row 2 + row 3 */}
@@ -578,6 +604,10 @@ function LegacyDashboardGrid({ vm, status, primaryGap, usableSources, totalSourc
       {status === 'PARTIAL' && (
         <PartialVisibilityBanner primaryGap={primaryGap} usableSources={usableSources} totalSources={totalSources} />
       )}
+      {/* AG-Hero-3 (2026-05-31): AI Copilot front-and-center on landing page */}
+      <div className="px-3 flex-shrink-0">
+        <CopilotQuickAsk />
+      </div>
       <div className="flex-1 px-3 pb-3 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
         <div className="col-span-5"><NarrativePanel vm={vm} /></div>
         <div className="col-span-4"><RiskScorePanel vm={vm} /></div>

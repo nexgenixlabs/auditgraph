@@ -312,6 +312,12 @@ export default function Dashboard() {
           </div>
           <p className="text-sm" style={{ color: COLORS.textSecondary }}>
             Operational identity risk monitoring — What happened?
+            <span className="ml-3 text-[11px] hidden lg:inline" style={{ color: COLORS.textMuted }}>
+              <span style={{ color: COLORS.textMuted }}>Related:</span>{' '}
+              <Link to="/" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>↗ Executive Posture</Link>
+              <span className="mx-1" style={{ color: COLORS.border }}>·</span>
+              <Link to="/command-center" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>↗ Command Center</Link>
+            </span>
           </p>
           {latest?.completed_at && (
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -385,13 +391,37 @@ export default function Dashboard() {
         <div className="bg-white rounded-xl p-6 text-red-600" style={{ border: `1px solid ${COLORS.border}` }}>{error}</div>
       ) : (
         <div className="space-y-6">
+          {/* Sticky section nav — Risk Monitoring is intentionally section-rich
+              (the SOC needs all of these views), so instead of hiding sections
+              we give the operator one-click navigation. Sticks below the global
+              header (56px) so it's always reachable while scrolling. Slate band
+              with a brand accent bottom-border for visibility + brand identity. */}
+          <nav
+            className="sticky z-20 -mx-4 sm:-mx-5 lg:-mx-6 px-4 sm:px-5 lg:px-6 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-medium bg-slate-50"
+            style={{
+              top: 'var(--header-height, 56px)',
+              borderTop: `1px solid ${COLORS.border}`,
+              borderBottom: `2px solid ${COLORS.accentPrimary}`,
+            }}
+            aria-label="Risk Monitoring sections"
+          >
+            <span className="font-semibold uppercase tracking-wider text-[10px]" style={{ color: COLORS.textMuted }}>Jump to:</span>
+            <a href="#anomaly-alerts" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Alerts</a>
+            <a href="#risk-trend" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Trend</a>
+            <a href="#risk-heatmap" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Heat Map</a>
+            <a href="#drift-analysis" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Drift</a>
+            <a href="#attack-surface" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Attack Surface</a>
+            <a href="#machine-identity" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Machine ID</a>
+            <a href="#credentials" className="hover:opacity-80 transition-opacity" style={{ color: COLORS.accentPrimary }}>Credentials</a>
+          </nav>
+
           {/* Section 2: Active Identity Alerts */}
-          <div id="anomaly-alerts">
+          <div id="anomaly-alerts" className="scroll-mt-24">
             <AnomalyAlerts anomalies={anomalyData?.anomalies ?? []} unresolvedCount={anomalyData?.unresolved_count ?? 0} loading={loading} />
           </div>
 
           {/* Section 3: Risk Trend + Velocity */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div id="risk-trend" className="scroll-mt-24 grid grid-cols-1 md:grid-cols-2 gap-6">
             {trends.length >= 2 && <RiskTrendChart data={trends} />}
             {velocityData && velocityData.transitions.length > 0 && (
               <RiskVelocityChart transitions={velocityData.transitions} retention={velocityData.retention} />
@@ -399,27 +429,29 @@ export default function Dashboard() {
           </div>
 
           {/* Section 4: Identity Risk Heat Map + Distribution */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div id="risk-heatmap" className="scroll-mt-24 grid grid-cols-1 md:grid-cols-2 gap-6">
             <RiskHeatMap categories={categoryCards} />
             <RiskDonutChart counts={riskCounts} onSegmentClick={handleSegmentClick}
               cloudSources={summary?.monitored_resources ? Object.entries(summary.monitored_resources).filter(([, v]) => (v as any)?.subscriptions > 0 || (v as any)?.accounts > 0 || (v as any)?.projects > 0).map(([k]) => k) : undefined} />
           </div>
 
           {/* Section 5: Snapshot Drift Analysis */}
-          <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
-            newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
-            permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
-            credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
+          <div id="drift-analysis" className="scroll-mt-24">
+            <RecentChanges hasData={driftData?.has_drift_data ?? false} currentRunId={driftData?.current_run_id} previousRunId={driftData?.previous_run_id}
+              newIdentities={driftData?.new_identities_count ?? 0} removedIdentities={driftData?.removed_identities_count ?? 0}
+              permissionChanges={driftData?.permission_changes_count ?? 0} riskChanges={driftData?.risk_changes_count ?? 0}
+              credentialChanges={driftData?.credential_changes_count ?? 0} totalChanges={driftData?.total_changes ?? 0} createdAt={driftData?.created_at} />
+          </div>
 
           {/* Section 5b: Attack Surface + Remediation */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div id="attack-surface" className="scroll-mt-24 grid grid-cols-1 md:grid-cols-2 gap-4">
             <AttackSurfaceTile />
             <RemediationTile />
           </div>
 
           {/* Section 6: Machine Identity Exposure */}
           {stats?.workload_exposure && stats.workload_exposure.total > 0 && (
-            <div className="bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
+            <div id="machine-identity" className="scroll-mt-24 bg-white rounded-xl p-5" style={{ border: `1px solid ${COLORS.border}` }}>
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold" style={{ color: COLORS.textPrimary }}>
                   Machine Identity Exposure
@@ -445,7 +477,7 @@ export default function Dashboard() {
           )}
 
           {/* Section 7: Credential Intelligence */}
-          <div className="space-y-4">
+          <div id="credentials" className="scroll-mt-24 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {posture && (
                 <CredentialHealth expired={posture.credential_health.expired} expiringSoon={posture.credential_health.expiring_soon}

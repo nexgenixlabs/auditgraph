@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useConnection } from '../contexts/ConnectionContext';
+import { riskDisplay } from '../utils/riskDisplay';
 import { useAuth } from '../contexts/AuthContext';
+import AIInvestigateDrawer from '../components/AIInvestigateDrawer';
 
 /* ─── Focused View Types ───────────────────────────────────────────── */
 
@@ -80,6 +82,10 @@ interface ApiNode {
   risk_level?: string;
   is_attack_path?: boolean;
   tooltip?: NodeTooltip;
+  is_ai_agent?: boolean;
+  ai_agent_type?: string;
+  ai_platform?: string;
+  ai_confidence?: number;
 }
 
 interface ApiEdge {
@@ -97,6 +103,12 @@ interface GraphNode {
   risk_level: string;
   isAttackPath: boolean;
   tooltip: NodeTooltip | null;
+  // AI Identity Governance (e440e07): nodes whose identity has an
+  // agent_classifications row get a teal ring + AI badge + click→drawer
+  is_ai_agent?: boolean;
+  ai_agent_type?: string;      // ai_agent | ai_privileged_human | possible_ai_agent
+  ai_platform?: string;        // copilot_studio | azure_openai | azure_ml | ...
+  ai_confidence?: number;
 }
 
 interface GraphEdge {
@@ -213,6 +225,10 @@ function mapApiResponse(raw: Record<string, unknown>): GraphData {
       risk_level: n.risk_level || 'low',
       isAttackPath: !!n.is_attack_path,
       tooltip: (n.tooltip as NodeTooltip) || null,
+      is_ai_agent: !!n.is_ai_agent,
+      ai_agent_type: n.ai_agent_type,
+      ai_platform: n.ai_platform,
+      ai_confidence: n.ai_confidence,
     })),
     edges: apiEdges.map(e => ({
       source: e.source,
@@ -278,6 +294,7 @@ const IdentityGraph: React.FC = () => {
 
   // Side panel state
   const [selectedDetail, setSelectedDetail] = useState<IdentityDetail | null>(null);
+  const [aiDrawerIdentityId, setAiDrawerIdentityId] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -588,11 +605,35 @@ const IdentityGraph: React.FC = () => {
       ctx.fillStyle = color;
       ctx.fill();
 
+      // AI Agent ring (teal #24A2A1) — drawn before highlight ring so the
+      // white highlight ring still wins when selected.
+      if (node.is_ai_agent) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#24A2A1';
+        ctx.stroke();
+      }
+
       // Highlight / search ring
       if (isHighlighted || isSearchMatch) {
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#ffffff';
         ctx.stroke();
+      }
+
+      // AI badge (small teal pill bottom-right of node)
+      if (node.is_ai_agent && alpha > 0.3) {
+        const badgeX = pos.x + size / 2 - 1;
+        const badgeY = pos.y + size / 2 - 1;
+        ctx.fillStyle = '#24A2A1';
+        ctx.beginPath();
+        ctx.arc(badgeX, badgeY, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#06090f';
+        ctx.font = 'bold 7px Inter, system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('AI', badgeX, badgeY + 0.5);
+        ctx.textBaseline = 'alphabetic';
       }
 
       // Risk dot indicator (top-right)
@@ -698,6 +739,13 @@ const IdentityGraph: React.FC = () => {
     const node = findNodeAt(e);
     if (node) {
       setHighlightedNode(prev => prev === node.id ? null : node.id);
+      // AI-classified identities open the AI investigate drawer; other
+      // identities open the standard detail panel.
+      if (node.is_ai_agent) {
+        setAiDrawerIdentityId(node.id);
+        setActiveAttackPath(null);
+        return;
+      }
       const identityTypes = ['identity', 'service_principal', 'managed_identity', 'guest'];
       if (identityTypes.includes(node.type)) {
         fetchIdentityDetail(node.id);
@@ -737,7 +785,8 @@ const IdentityGraph: React.FC = () => {
           <div className="text-slate-400 text-[10px]">{t.identity_type || ntype.replace(/_/g, ' ')}</div>
           <div className="flex items-center gap-2 text-[10px]">
             <span className={`px-1.5 py-0.5 rounded ${RISK_BADGE[node.risk_level] || RISK_BADGE.low} border`}>{node.risk_level}</span>
-            <span className="text-slate-400">Score: {t.risk_score}</span>
+            {/* CVSS-aligned 0-10 only (2026-05-31) */}
+            <span className="text-slate-400" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">CVSS: {riskDisplay(t) ?? '—'}</span>
             <span className="text-slate-400">{t.activity_status}</span>
           </div>
           {t.roles.length > 0 && (
@@ -1002,7 +1051,8 @@ const IdentityGraph: React.FC = () => {
                                   {PATH_TYPE_LABEL[path.path_type] || path.path_type.replace(/_/g, ' ')}
                                 </span>
                                 <span className="text-[10px] font-mono text-slate-500">
-                                  Score: {path.risk_score}
+                                  {/* CVSS-aligned 0-10 only */}
+                                  CVSS: {riskDisplay(path) ?? '—'}
                                 </span>
                               </div>
                               <p className="text-sm text-white font-medium mt-1.5 truncate">{path.description}</p>
@@ -1487,7 +1537,8 @@ const IdentityGraph: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2">
                   <div className="bg-slate-900/50 rounded p-2">
                     <p className="text-xs text-slate-400">Risk Score</p>
-                    <p className="text-lg font-semibold text-white">{selectedDetail.risk_score}</p>
+                    {/* CVSS-aligned 0-10 only (2026-05-31) */}
+                    <p className="text-lg font-semibold text-white tabular-nums" title="CVSS-aligned 0-10 (FIRST.org CVSS 3.1)">{riskDisplay(selectedDetail) ?? '—'}</p>
                   </div>
                   <div className="bg-slate-900/50 rounded p-2">
                     <p className="text-xs text-slate-400">Credentials</p>
@@ -1582,6 +1633,14 @@ const IdentityGraph: React.FC = () => {
       )}
 
       </>)}
+
+      {/* AI Investigate Drawer — opens when an AI-classified node is clicked. */}
+      {aiDrawerIdentityId && (
+        <AIInvestigateDrawer
+          identityId={aiDrawerIdentityId}
+          onClose={() => setAiDrawerIdentityId(null)}
+        />
+      )}
     </div>
   );
 };

@@ -312,17 +312,18 @@ export function generateReport(data: ReportData, clientName?: string): void {
   doc.addPage();
   y = addHeader(doc, 'Top Risk Identities', margin);
 
+  // CVSS-aligned 0-10 only — proprietary score never exported (2026-05-31 directive)
   const riskTableData = data.top_risks.map(tr => [
     tr.display_name.length > 30 ? tr.display_name.substring(0, 27) + '...' : tr.display_name,
     (tr.risk_level || '').toUpperCase(),
-    String(tr.risk_score),
+    typeof (tr as any).risk_score_cvss === 'number' ? (tr as any).risk_score_cvss.toFixed(1) : '—',
     (tr.risk_reasons || []).slice(0, 2).join('; ').substring(0, 60),
     tr.remediations.length > 0 ? tr.remediations[0].title.substring(0, 40) : 'None',
   ]);
 
   autoTable(doc, {
     startY: y,
-    head: [['Identity', 'Risk', 'Score', 'Top Risk Reasons', 'Priority Remediation']],
+    head: [['Identity', 'Severity', 'CVSS', 'Top Risk Reasons', 'Priority Remediation']],
     body: riskTableData,
     theme: 'striped',
     headStyles: { fillColor: BLUE, textColor: [255, 255, 255], fontSize: 8 },
@@ -855,16 +856,17 @@ export function generateComplianceReport(data: ReportData, attackSurface: any, c
     doc.text('Top Risk Identities', margin, y);
     y += 8;
 
+    // CVSS-aligned 0-10 only (2026-05-31 directive)
     const topRows = data.top_risks.slice(0, 10).map(r => [
       r.display_name || r.identity_id || '',
       (r.risk_level || 'unknown').toUpperCase(),
-      String(r.risk_score || 0),
+      typeof (r as any).risk_score_cvss === 'number' ? (r as any).risk_score_cvss.toFixed(1) : '—',
       r.identity_category || '',
     ]);
 
     autoTable(doc, {
       startY: y,
-      head: [['Identity', 'Risk Level', 'Score', 'Category']],
+      head: [['Identity', 'Severity', 'CVSS', 'Category']],
       body: topRows,
       theme: 'striped',
       headStyles: { fillColor: [30, 58, 95], fontSize: 8 },
@@ -886,4 +888,247 @@ export function generateComplianceReport(data: ReportData, attackSurface: any, c
   }
 
   doc.save(`compliance-report-${new Date().toISOString().split('T')[0]}.pdf`);
+}
+
+
+// =====================================================================
+// AG-Hero-5 (2026-05-31): Auditor Pack PDF generator
+// =====================================================================
+// Generates a framework-mapped findings PDF: cover page + per-control
+// sections with finding tables. Uses CIS+MITRE tags on each finding
+// (from batch E) — the report copy-pastes directly into a CISO's
+// evidence binder for SOC 2 / HIPAA / PCI / ISO 27001 / CIS audits.
+
+interface AuditorPackData {
+  framework: { code: string; name: string; version: string; publisher: string; scope_note: string };
+  organization: { id: number | null; name: string | null };
+  snapshot: { id: number | null; completed_at: string | null; identities_total: number };
+  controls: Array<{
+    id: string;
+    title: string;
+    description: string;
+    findings_count: number;
+    findings: Array<{
+      identity_id: string;
+      display_name: string;
+      identity_category: string;
+      risk_level: string;
+      risk_score_cvss: number;
+      factor_code: string;
+      factor_description: string;
+      evidence: string;
+      severity: string;
+      mitre: string[];
+    }>;
+  }>;
+  summary: {
+    total_controls: number;
+    controls_with_findings: number;
+    total_findings: number;
+    critical_count: number;
+    high_count: number;
+    medium_count: number;
+    low_count: number;
+  };
+  disclaimer: string;
+  generated_at: string;
+}
+
+export function generateAuditorPack(data: AuditorPackData, clientName?: string): void {
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth(); // 210
+  const margin = 18;
+
+  // ── COVER PAGE ──────────────────────────────────────────────
+  fill(doc, BLUE);
+  doc.rect(0, 0, pageWidth, 60, 'F');
+  txt(doc, [255, 255, 255]);
+  doc.setFontSize(22);
+  doc.setFont('helvetica', 'bold');
+  doc.text(`${data.framework.name}`, margin, 25);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Auditor Pack — Identity & Access Evidence`, margin, 36);
+  doc.setFontSize(10);
+  doc.text(`${data.framework.version} · ${data.framework.publisher}`, margin, 46);
+
+  txt(doc, DARK);
+  let y = 80;
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Scope', margin, y);
+  y += 6;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.text(doc.splitTextToSize(data.framework.scope_note, pageWidth - margin * 2), margin, y);
+  y += 12;
+
+  // Organization + snapshot metadata block
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Engagement', margin, y);
+  y += 6;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  const orgLine = clientName || data.organization.name || 'Unspecified';
+  const snapDate = data.snapshot.completed_at
+    ? new Date(data.snapshot.completed_at).toLocaleString()
+    : 'unknown';
+  doc.text(`Organization:    ${orgLine}`, margin, y); y += 5;
+  doc.text(`Snapshot:        #${data.snapshot.id ?? '?'} captured ${snapDate}`, margin, y); y += 5;
+  doc.text(`Identities scanned: ${data.snapshot.identities_total.toLocaleString()}`, margin, y); y += 5;
+  doc.text(`Report generated: ${new Date(data.generated_at).toLocaleString()}`, margin, y);
+  y += 12;
+
+  // Summary at-a-glance
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  doc.text('At a Glance', margin, y);
+  y += 6;
+  const s = data.summary;
+  const summaryRows = [
+    ['Controls in scope', String(s.total_controls)],
+    ['Controls with findings', `${s.controls_with_findings} / ${s.total_controls}`],
+    ['Total findings', String(s.total_findings)],
+    ['Critical severity', String(s.critical_count)],
+    ['High severity', String(s.high_count)],
+    ['Medium severity', String(s.medium_count)],
+    ['Low severity', String(s.low_count)],
+  ];
+  autoTable(doc, {
+    startY: y,
+    body: summaryRows,
+    theme: 'plain',
+    styles: { fontSize: 9, cellPadding: 1.5 },
+    columnStyles: { 0: { cellWidth: 60, fontStyle: 'bold' }, 1: { cellWidth: 30 } },
+    margin: { left: margin },
+  });
+  y = (doc as any).lastAutoTable.finalY + 12;
+
+  // Disclaimer
+  fill(doc, [255, 247, 237]); // light amber
+  doc.rect(margin, y, pageWidth - margin * 2, 22, 'F');
+  doc.setDrawColor(251, 191, 36);
+  doc.setLineWidth(0.3);
+  doc.rect(margin, y, pageWidth - margin * 2, 22);
+  txt(doc, [120, 53, 15]);
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Auditor Note', margin + 3, y + 5);
+  doc.setFont('helvetica', 'normal');
+  doc.text(doc.splitTextToSize(data.disclaimer, pageWidth - margin * 2 - 6), margin + 3, y + 10);
+
+  // ── PER-CONTROL SECTIONS ────────────────────────────────────
+  txt(doc, DARK);
+  for (const ctrl of data.controls) {
+    doc.addPage();
+    y = 20;
+
+    // Control header
+    fill(doc, BLUE);
+    doc.rect(0, 0, pageWidth, 14, 'F');
+    txt(doc, [255, 255, 255]);
+    doc.setFontSize(13);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${ctrl.id} — ${ctrl.title}`, margin, 9);
+
+    txt(doc, DARK);
+    y = 24;
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'italic');
+    doc.text(doc.splitTextToSize(ctrl.description, pageWidth - margin * 2), margin, y);
+    y += 12;
+
+    if (ctrl.findings_count === 0) {
+      fill(doc, [236, 253, 245]); // light green
+      doc.rect(margin, y, pageWidth - margin * 2, 12, 'F');
+      txt(doc, [6, 95, 70]);
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      doc.text('✓  No identity findings mapped to this control', margin + 4, y + 8);
+      continue;
+    }
+
+    txt(doc, DARK);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Findings (${ctrl.findings_count})`, margin, y);
+    y += 4;
+
+    // Findings table — limit to top 50 per control to keep PDF reasonable
+    const head = [['Identity', 'Severity', 'CVSS', 'Issue', 'MITRE']];
+    const body = ctrl.findings.slice(0, 50).map(f => [
+      (f.display_name || '').substring(0, 32),
+      f.severity.toUpperCase(),
+      f.risk_score_cvss.toFixed(1),
+      (f.factor_description || '').substring(0, 60),
+      (f.mitre || []).slice(0, 2).join(' '),
+    ]);
+
+    autoTable(doc, {
+      startY: y + 2,
+      head,
+      body,
+      theme: 'striped',
+      headStyles: { fillColor: BLUE, textColor: [255, 255, 255], fontSize: 8 },
+      styles: { fontSize: 7.5, cellPadding: 1.5, overflow: 'linebreak' },
+      columnStyles: {
+        0: { cellWidth: 45 },
+        1: { cellWidth: 18 },
+        2: { cellWidth: 14, halign: 'center' },
+        3: { cellWidth: 70 },
+        4: { cellWidth: 25 },
+      },
+      didParseCell: (hookData) => {
+        if (hookData.section === 'body' && hookData.column.index === 1) {
+          const sev = String(hookData.cell.raw || '').toLowerCase();
+          if (sev === 'critical') hookData.cell.styles.textColor = RED;
+          else if (sev === 'high') hookData.cell.styles.textColor = [194, 65, 12] as RGB;
+          else if (sev === 'medium') hookData.cell.styles.textColor = [202, 138, 4] as RGB;
+        }
+      },
+      margin: { left: margin, right: margin },
+    });
+
+    if (ctrl.findings_count > 50) {
+      const fy = (doc as any).lastAutoTable.finalY + 4;
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'italic');
+      txt(doc, [107, 114, 128]);
+      doc.text(`… and ${ctrl.findings_count - 50} more findings (truncated for PDF; see CSV export for full list).`, margin, fy);
+    }
+  }
+
+  // ── BACK COVER — Sign-off ───────────────────────────────────
+  doc.addPage();
+  y = 30;
+  doc.setFontSize(16);
+  doc.setFont('helvetica', 'bold');
+  txt(doc, DARK);
+  doc.text('Auditor Sign-Off', margin, y);
+  y += 12;
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  const signoffText = doc.splitTextToSize(
+    `This Auditor Pack is automated evidence generated by AuditGraph on ${new Date(data.generated_at).toLocaleString()}. ` +
+    `It maps ${data.summary.total_findings} identity findings to ${data.summary.controls_with_findings} of ${data.summary.total_controls} controls in scope ` +
+    `for ${data.framework.name} (${data.framework.version}). The mappings reference the CIS Microsoft Azure Foundations Benchmark via the cis_map field on each control. ` +
+    `Independent audit testing is required to validate findings and complete the control narrative.`,
+    pageWidth - margin * 2
+  );
+  doc.text(signoffText, margin, y);
+  y += signoffText.length * 5 + 20;
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Auditor name:', margin, y); doc.line(margin + 40, y + 1, pageWidth - margin, y + 1);
+  y += 12;
+  doc.text('Audit firm:',   margin, y); doc.line(margin + 40, y + 1, pageWidth - margin, y + 1);
+  y += 12;
+  doc.text('Date:',         margin, y); doc.line(margin + 40, y + 1, pageWidth - margin, y + 1);
+  y += 12;
+  doc.text('Signature:',    margin, y); doc.line(margin + 40, y + 1, pageWidth - margin, y + 1);
+
+  // Save
+  const fname = `auditor-pack-${data.framework.code}-${new Date().toISOString().split('T')[0]}.pdf`;
+  doc.save(fname);
 }
