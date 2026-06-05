@@ -190,9 +190,7 @@ export default function Login() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-slate-900">
         <div className="w-full max-w-lg px-4">
           <div className="text-center mb-6">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-              AG
-            </div>
+            <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Select Organization</h1>
             <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Choose which organization to access</p>
           </div>
@@ -248,9 +246,7 @@ export default function Login() {
             {branding?.logo_url ? (
               <img src={branding.logo_url} alt={branding.company_name} className="mx-auto mb-4" style={{ maxHeight: 48 }} />
             ) : (
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white text-2xl font-bold mb-4">
-                {(branding?.company_name || resolvedOrg?.name || 'AG').substring(0, 2).toUpperCase()}
-              </div>
+              <img src="/auditgraph_icon.png" alt="AuditGraph" className="w-16 h-16 object-contain mb-4 mx-auto" />
             )}
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Set New Password</h1>
             <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Your administrator requires you to set a new password</p>
