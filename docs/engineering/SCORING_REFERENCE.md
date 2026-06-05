@@ -1,6 +1,6 @@
 # AuditGraph Scoring Reference
 
-> Merged from `backend/docs/SCORING.md` + `backend/SCORING_CALIBRATION.md`.
+> Merged from `docs/backend/SCORING.md` + `backend/SCORING_CALIBRATION.md`.
 > Originals archived at `docs/archive/merged/`.
 
 ---

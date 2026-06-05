@@ -131,7 +131,7 @@ class BuilderDataSource(str, Enum):
     "we observed a full row and believe it" (``FULL``) from "we saw
     an older row than our staleness threshold" (``STALE``).
 
-    State meanings (see ``backend/docs/BUILDER_STATE_MATRIX.md``):
+    State meanings (see ``docs/backend/BUILDER_STATE_MATRIX.md``):
 
     * ``NONE``    — skeleton table has **zero rows** for this identity.
                     Every null field in the returned block is an honest
@@ -487,7 +487,7 @@ class ActivityState(_OrgScoped):
     ``lifecycle_state=PROVISIONED``, ``activity_confidence=NONE``, and
     ``data_source=BuilderDataSource.NONE`` — consumers MUST treat the
     enum defaults as placeholders in that case. See E2 state matrix in
-    ``backend/docs/BUILDER_STATE_MATRIX.md``.
+    ``docs/backend/BUILDER_STATE_MATRIX.md``.
     """
 
     lifecycle_state: LifecycleState

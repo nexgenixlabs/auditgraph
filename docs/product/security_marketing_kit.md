@@ -587,5 +587,5 @@ Three architectural guarantees:
 | MFA Policy | `docs/compliance/mfa_policy.md` |
 | Incident Response Plan | `docs/compliance/incident_response_plan.md` |
 | DR Test Procedure | `docs/compliance/dr_test_procedure.md` |
-| Compliance Matrix | `backend/docs/compliance_matrix.md` |
+| Compliance Matrix | `docs/backend/compliance_matrix.md` |
 | CIS Benchmarks | `docs/compliance/CIS.md` |

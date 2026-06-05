@@ -224,9 +224,9 @@ def emit_reachability_inserts(rows):
     for r in rows:
         sql = (
             f"INSERT INTO agent_data_reachability "
-            f"(organization_id, identity_db_id, data_classification, "
+            f"(organization_id, identity_db_id, identity_id, data_classification, "
             f" est_records, write_resource_count, resource_count) "
-            f"SELECT {TARGET_ORG_ID}, i.id, {quote_sql(r['data_classification'])}, "
+            f"SELECT {TARGET_ORG_ID}, i.id, i.identity_id, {quote_sql(r['data_classification'])}, "
             f"  {r['est_records']}, {r['write_resource_count'] or 0}, "
             f"  {r['resource_count'] or 0} "
             f"FROM identities i "

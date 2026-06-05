@@ -1258,7 +1258,7 @@ the backend's response model fields against the TypeScript interfaces in
 
 ## 15. Data Tiers — Platform Contract
 
-See `backend/docs/DATA_TIERS.md` for the full tier definitions covering:
+See `docs/backend/DATA_TIERS.md` for the full tier definitions covering:
 - Tier 1 (Inventory): `cloud_connections`, `cloud_subscriptions` — always available
 - Tier 2 (Analytics): `identities`, `risk_summary`, etc. — requires completed discovery
 - Semantic naming rules (inventory_subscriptions vs subscription_count)
