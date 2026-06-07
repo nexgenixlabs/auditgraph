@@ -1,0 +1,28 @@
+# Cloudflare Workers Static Assets config — serves docs-site/ as
+# the production static site for docs.auditgraph.ai.
+#
+# This file is consumed by the "Create a Worker" flow in the
+# Cloudflare dashboard (Workers and Pages → Create a Worker →
+# Select repository nexgenixlabs/auditgraph).
+#
+# Alternative: the "Create a Pages site" flow does NOT need this
+# file — it asks for "Build output directory" in the UI instead.
+# This file is only relevant for the Workers Static Assets path.
+#
+# Deploy commands:
+#   npx wrangler deploy   (deploys this worker + assets)
+#   npx wrangler dev      (local dev preview)
+
+name = "auditgraph-docs"
+compatibility_date = "2026-06-07"
+
+# Static asset bundling — serve everything in docs-site/ at the root path.
+# AuditGraph docs are a single-page application that loads markdown via
+# JS, so 404s should fall back to index.html for client-side routing.
+[assets]
+directory = "./docs-site"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# No custom Worker code — this is a pure static-asset deployment.
+# (Omit [vars] / [[d1_databases]] / [[kv_namespaces]] / etc. — none needed.)
