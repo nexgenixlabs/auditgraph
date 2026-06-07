@@ -170,6 +170,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-governance',     label: 'Identity Governance', icon: identityIcon },
           // AG-WK3.1: Ownership Center — the SailPoint-tier governance hook
           { to: '/ownership',         label: 'Ownership Center',   icon: identityIcon },
+          // AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
+          { to: '/identity-security/pim', label: 'PIM Overprivilege', icon: roleOptIcon },
         ],
       },
       {

@@ -43252,6 +43252,44 @@ def get_agent_trust_score_handler(identity_id: str):
 
 
 # ============================================================
+# AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
+# ============================================================
+
+def get_pim_overprivilege_handler():
+    """GET /api/identity-security/pim/overprivilege
+
+    Returns org-wide PIM Overprivilege analysis with up to 3 finding
+    types per (identity, role). Pure read-only analysis over the
+    pim_eligibility_state + pim_activation_observations tables.
+
+    Query params:
+      identity — substring filter on identity_id or display_name
+      severity — filter findings by severity (critical/high/medium/low)
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'identities': [], 'findings': [],
+                            'summary': {'total_eligible_assignments': 0,
+                                         'total_findings': 0,
+                                         'by_finding_type': {},
+                                         'by_severity': {}}})
+        from app.engines.pim.pim_overprivilege import compute_pim_overprivilege
+        result = compute_pim_overprivilege(
+            db, org_id,
+            identity_filter=request.args.get('identity'),
+            severity_filter=request.args.get('severity'),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"PIM overprivilege handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
 # AG-WK7.A: Peer Benchmarking
 # ============================================================
 

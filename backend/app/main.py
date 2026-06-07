@@ -2411,6 +2411,12 @@ def create_app():
         from app.api.handlers import get_identity_trust_rollup_handler
         return get_identity_trust_rollup_handler()
 
+    # AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
+    @app.get("/api/identity-security/pim/overprivilege")
+    def pim_overprivilege_route():
+        from app.api.handlers import get_pim_overprivilege_handler
+        return get_pim_overprivilege_handler()
+
     # AG-WK7.A: Peer Benchmarking
     @app.get("/api/peer-benchmarking/snapshot")
     def peer_benchmarking_snapshot_route():
