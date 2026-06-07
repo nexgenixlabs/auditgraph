@@ -521,6 +521,13 @@ def main():
                         help="Don't remove existing aaa0*-prefixed demo rows first")
     args = parser.parse_args()
 
+    # AG-PILOT-SAFETY (2026-06-07): demo-org allowlist guard. Prevents
+    # accidental writes to a customer tenant via typo or stale --org-id.
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _demo_safety import assert_safe_demo_org
+    assert_safe_demo_org(args.org_id, script_name='seed_aiag_demo.py')
+
     logger.info("=" * 60)
     logger.info("  AuditGraph — AIAG Demo Seeder (localhost only)")
     logger.info("=" * 60)

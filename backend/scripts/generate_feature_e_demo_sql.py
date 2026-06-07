@@ -27,6 +27,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--org-id', type=int, required=True)
     args = ap.parse_args()
+
+    # AG-PILOT-SAFETY (2026-06-07): demo-org allowlist guard
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _demo_safety import assert_safe_demo_org
+    assert_safe_demo_org(args.org_id, script_name='generate_feature_e_demo_sql.py')
+
     org_id = args.org_id
 
     print(f"-- AG-FEATURE-E-P2 demo seed — idempotent")

@@ -253,6 +253,13 @@ def main():
     ap.add_argument('--db-sslmode', default=os.getenv('DB_SSLMODE', 'disable'))
     args = ap.parse_args()
 
+    # AG-PILOT-SAFETY (2026-06-07): refuse to write demo data to anything
+    # other than the canonical AuditGraph Demo orgs. Protects against typos
+    # and copy-paste errors that could pollute a customer tenant.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _demo_safety import assert_safe_demo_org
+    assert_safe_demo_org(args.org_id, script_name='seed_pim_demo.py')
+
     conn = psycopg2.connect(
         host=args.db_host, port=args.db_port, dbname=args.db_name,
         user=args.db_user, password=args.db_password, sslmode=args.db_sslmode,
