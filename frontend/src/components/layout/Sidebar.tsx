@@ -172,6 +172,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ownership',         label: 'Ownership Center',   icon: identityIcon },
           // AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
           { to: '/identity-security/pim', label: 'PIM Overprivilege', icon: roleOptIcon },
+          // AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Last-Used Inference
+          { to: '/identity-security/entra-role-activity', label: 'Entra Role Activity', icon: roleOptIcon },
         ],
       },
       {

@@ -2417,6 +2417,12 @@ def create_app():
         from app.api.handlers import get_pim_overprivilege_handler
         return get_pim_overprivilege_handler()
 
+    # AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Last-Used Inference
+    @app.get("/api/identity-security/entra-role-activity")
+    def entra_role_activity_route():
+        from app.api.handlers import get_entra_role_activity_handler
+        return get_entra_role_activity_handler()
+
     # AG-WK7.A: Peer Benchmarking
     @app.get("/api/peer-benchmarking/snapshot")
     def peer_benchmarking_snapshot_route():

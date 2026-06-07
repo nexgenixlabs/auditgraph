@@ -43290,6 +43290,39 @@ def get_pim_overprivilege_handler():
 
 
 # ============================================================
+# AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Activity
+# ============================================================
+
+def get_entra_role_activity_handler():
+    """GET /api/identity-security/entra-role-activity
+
+    Org-wide rollup of Entra directory role assignments + observed
+    activity from auditLogs/directoryAudits. Surfaces dormant
+    privileged assignments as `dormant_directory_role_assignment`
+    findings.
+
+    Query params:
+      dormancy — filter by band (high/medium/low/unknown)
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'rows': [], 'findings': [],
+                            'summary': {'total_assignments': 0,
+                                         'by_bucket': {}, 'by_dormancy': {},
+                                         'total_findings': 0}})
+        from app.engines.entra.role_activity_inference import compute_entra_role_activity
+        return jsonify(compute_entra_role_activity(
+            db, org_id, dormancy_filter=request.args.get('dormancy')))
+    except Exception as e:
+        logger.error(f"Entra role activity handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
 # AG-WK7.A: Peer Benchmarking
 # ============================================================
 
