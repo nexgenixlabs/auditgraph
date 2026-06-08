@@ -83,15 +83,20 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
     estimated_exposure?: {
       low_display: string; mid_display: string; high_display: string;
       classified_resource_count?: number; total_records: number;
-    };
+    } | null;
     exposure_by_scope?: {
       total?:         { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
       ai_reachable?:  { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
       nhi_reachable?: { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
-    };
+    } | null;
+    exposure_status?: 'classification_pending' | string;
+    exposure_message?: string;
   };
   const headline = bi2.estimated_exposure;
   const scopes = bi2.exposure_by_scope;
+  // AG-PILOT-FIX (2026-06-08): explicit "classification pending" message
+  // when fresh scan hasn't tagged data yet — better UX than hiding card
+  const exposurePending = bi2.exposure_status === 'classification_pending';
 
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0"
@@ -150,6 +155,21 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
             ) : null}
           </div>
         </DN>
+      ) : exposurePending ? (
+        /* AG-PILOT-FIX (2026-06-08): Explicit "classification pending"
+           card so the CISO sees what's coming + why no $ figure yet,
+           instead of the card silently hiding. */
+        <div className="mt-2 pt-2 border-t border-white/5">
+          <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
+            Estimated breach exposure
+          </p>
+          <p className="text-xs text-amber-400 mt-1">
+            Classification pending
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-relaxed">
+            {bi2.exposure_message || 'Run a resource scan to populate breach-cost exposure.'}
+          </p>
+        </div>
       ) : null}
     </div>
   );

@@ -9526,6 +9526,21 @@ def get_dashboard_posture():
                     'ai_reachable':  ai_band,
                     'nhi_reachable': nhi_band,
                 }
+            else:
+                # AG-PILOT-FIX (2026-06-08): real-pilot bug — fresh scans
+                # don't populate data_classification on resources, so the
+                # Business Impact $ card was hidden entirely. Show explicit
+                # "classification pending" state instead so the customer
+                # knows what's coming + why nothing's rendered yet.
+                business_impact['estimated_exposure'] = None
+                business_impact['exposure_by_scope'] = None
+                business_impact['exposure_status'] = 'classification_pending'
+                business_impact['exposure_message'] = (
+                    'Data classification has not run yet on your tenant — '
+                    'no classified resources tagged. Run a resource scan or '
+                    'tag your sensitive data containers (PHI / PCI / PII) to '
+                    'see breach-cost exposure in dollars here.'
+                )
         except Exception as _exp_err:
             logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
 
