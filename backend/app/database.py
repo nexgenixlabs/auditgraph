@@ -4147,10 +4147,19 @@ class Database:
     def _dual_write_pim_eligibility_state(self, cursor, identity_db_id: int, data: Dict):
         """Mirror a PIM eligible assignment into pim_eligibility_state.
 
-        Companion to save_pim_eligible (above). Activation-policy fields
-        default to conservative-safe values (require MFA/approval) when
-        not provided; the Phase 2 spec adds real activation-policy pull
-        from /policies/roleManagementPolicies.
+        Companion to save_pim_eligible (above).
+
+        AG-PIM-PHASE2-A (2026-06-07): now accepts optional activation-policy
+        fields in `data` (parsed from /policies/roleManagementPolicies via
+        app/engines/pim/role_policy_parser.py). When present, real values
+        are written; when absent, conservative-safe defaults are used
+        (matches Phase 1 behavior so older callers don't break).
+
+        Expected optional fields in `data`:
+          - 'requires_mfa_on_activation'  (bool)
+          - 'requires_approval'           (bool)
+          - 'requires_justification'      (bool)
+          - 'max_activation_minutes'      (int)
 
         Looks up organization_id from the identity row (the new table
         requires it; the old table doesn't).
@@ -4180,6 +4189,13 @@ class Database:
 
         eligible_since = data.get("start_datetime")
 
+        # AG-PIM-PHASE2-A: use real activation-policy values when discovery
+        # has parsed them; fall back to conservative-safe defaults otherwise.
+        requires_mfa = data.get("requires_mfa_on_activation", True)
+        requires_approval = data.get("requires_approval", False)
+        requires_justification = data.get("requires_justification", True)
+        max_activation_minutes = data.get("max_activation_minutes", 480)
+
         cursor.execute(
             """
             INSERT INTO pim_eligibility_state (
@@ -4192,12 +4208,16 @@ class Database:
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 'eligible', %s,
-                TRUE, FALSE,
-                TRUE, 480
+                %s, %s,
+                %s, %s
             )
             ON CONFLICT (organization_id, identity_db_id, role_name, scope, assignment_type)
             DO UPDATE SET
                 eligible_since = EXCLUDED.eligible_since,
+                requires_mfa_on_activation = EXCLUDED.requires_mfa_on_activation,
+                requires_approval = EXCLUDED.requires_approval,
+                requires_justification = EXCLUDED.requires_justification,
+                max_activation_minutes = EXCLUDED.max_activation_minutes,
                 discovered_at = NOW()
             """,
             (
@@ -4205,6 +4225,8 @@ class Database:
                 data.get("role_name"), data.get("role_definition_id"),
                 scope, scope_type,
                 eligible_since,
+                requires_mfa, requires_approval,
+                requires_justification, max_activation_minutes,
             ),
         )
 
