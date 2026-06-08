@@ -738,8 +738,11 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Navigation */}
-        {step < 6 && (
+        {/* AG-PILOT-WIZARD-SUBS (2026-06-08): bumped step thresholds by 1
+            because Subscriptions step shifted Launch from index 5→6 and
+            Scanning from 6→7. Without this fix Configure (now step 5)
+            had no Next button visible. */}
+        {step < 7 && (
           <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-700">
             <button
               onClick={() => { setStep(step - 1); setError(null); }}
@@ -749,7 +752,7 @@ export default function OnboardingWizard() {
               Back
             </button>
 
-            {step < 5 && (
+            {step < 6 && (
               <button
                 onClick={() => { setStep(step + 1); setError(null); }}
                 disabled={!canNext()}
