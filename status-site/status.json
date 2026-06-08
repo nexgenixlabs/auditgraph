@@ -1,0 +1,71 @@
+{
+  "_comment": "This file is the source of truth for status.auditgraph.ai. Edit by hand for pilot phase; automate via a monitoring agent later (BetterStack, statuspage.io). All times in ISO 8601 UTC. To declare an incident: add to incidents[] with status='investigating', update components affected. To resolve: change status to 'resolved' and add a final update.",
+  "_schema_version": 1,
+
+  "overall_status": "operational",
+  "overall_headline": "All systems operational",
+  "overall_detail": "No incidents reported.",
+  "last_checked": "2026-06-08T00:50:00Z",
+
+  "components": [
+    {
+      "key": "app",
+      "name": "Web Application",
+      "description": "Customer-facing platform UI at app.auditgraph.ai",
+      "status": "operational"
+    },
+    {
+      "key": "api",
+      "name": "Platform API",
+      "description": "REST API at api.auditgraph.ai (and dev.api.auditgraph.ai)",
+      "status": "operational"
+    },
+    {
+      "key": "admin",
+      "name": "Admin Console",
+      "description": "Internal admin portal at admin.auditgraph.ai",
+      "status": "operational"
+    },
+    {
+      "key": "discovery",
+      "name": "Discovery Pipeline",
+      "description": "Azure / AWS / GCP discovery scans + scheduled runs",
+      "status": "operational"
+    },
+    {
+      "key": "docs",
+      "name": "Documentation",
+      "description": "Public docs at docs.auditgraph.ai",
+      "status": "operational"
+    },
+    {
+      "key": "database",
+      "name": "Primary Database",
+      "description": "PostgreSQL cluster (Azure Database for PostgreSQL Flexible Server)",
+      "status": "operational"
+    }
+  ],
+
+  "_example_incident_for_reference_only": {
+    "id": "INC-2026-06-08-001",
+    "title": "Elevated API response times on identity list endpoint",
+    "status": "investigating",
+    "severity": "minor",
+    "started_at": "2026-06-08T14:23:00Z",
+    "resolved_at": null,
+    "affected_components": ["api"],
+    "updates": [
+      {
+        "at": "2026-06-08T14:25:00Z",
+        "status": "investigating",
+        "message": "We're investigating reports of slow response times on the /api/identities endpoint. Other endpoints unaffected."
+      }
+    ]
+  },
+
+  "active_incidents": [],
+
+  "past_incidents": [],
+
+  "scheduled_maintenance": []
+}
