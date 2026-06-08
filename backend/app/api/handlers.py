@@ -1040,7 +1040,20 @@ def get_identities():
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
 
         if not run_ids:
-            return jsonify({"error": "No completed discovery runs found"}), 404
+            # AG-PILOT-DRYRUN (2026-06-08): fresh orgs with no scan yet
+            # should get an empty list, not a 404. Customer's first 5
+            # minutes will hit this before discovery completes.
+            return jsonify({
+                'identities': [],
+                'count': 0,
+                'total': 0,
+                'governance_summary': {
+                    'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0,
+                    'privileged': 0, 'combo': 0, 'data_plane': 0,
+                },
+                'requires_setup': True,
+                'message': 'No discovery scan completed yet. Add a cloud connection to populate this view.',
+            })
 
         # Build WHERE clause on a lightweight base (no correlated subqueries)
         base_from = """FROM identities i
@@ -2841,7 +2854,12 @@ def get_risks():
     try:
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
-            return jsonify({"error": "No completed discovery runs found"}), 404
+            # AG-PILOT-DRYRUN (2026-06-08): empty state for fresh orgs
+            return jsonify({
+                'risks': [], 'count': 0,
+                'requires_setup': True,
+                'message': 'No discovery scan completed yet. Add a cloud connection to populate this view.',
+            })
 
         risk_sql = f"""
             SELECT i.identity_id, i.display_name, i.identity_type, i.identity_category, i.risk_level, i.risk_reasons
@@ -8423,7 +8441,16 @@ def get_dashboard_posture():
     try:
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
-            return jsonify({"error": "No completed discovery runs found"}), 404
+            # AG-PILOT-DRYRUN (2026-06-08): empty state for fresh orgs
+            return jsonify({
+                'posture_score': 0, 'posture_label': 'No Data',
+                'identity_count': 0, 'credential_health': {},
+                'dormant_count': 0, 'previous_run': None,
+                'completed_at': None,
+                'band_breakdown': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0},
+                'requires_setup': True,
+                'message': 'No discovery scan completed yet. Add a cloud connection to populate this view.',
+            })
 
         # Live filtered count across all connection runs (excluding Microsoft SPNs)
         cursor.execute(f"""
