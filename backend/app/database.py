@@ -4093,6 +4093,12 @@ class Database:
         silently, leaving the table empty and forcing the UI to fall
         back to access_paths.pim_eligible JSONB. TODO: follow-up
         migration to add organization_id + RLS to PIM tables.
+
+        AG-PIM-AUTH-DISCOVERY (2026-06-07): ALSO writes to the new
+        pim_eligibility_state table that the PIM Overprivilege engine
+        reads from. Activation policy fields (requires_mfa, etc.)
+        default to conservative-safe values; full policy + activation-
+        history ingest is the Phase 2 spec (see AG_PIM_BRIDGE_SPEC).
         """
         self._ensure_pim_constraints()
         cursor = self.conn.cursor()
@@ -4123,8 +4129,84 @@ class Database:
                 data.get("member_type"),
             ),
         )
+
+        # AG-PIM-AUTH-DISCOVERY: dual-write to new pim_eligibility_state.
+        # Needed for the PIM Overprivilege Detection engine which reads
+        # from this table. Without this bridge, the page would show
+        # "0 assignments" on real customer tenants after first scan.
+        try:
+            self._dual_write_pim_eligibility_state(cursor, identity_db_id, data)
+        except Exception as e:
+            # Don't break discovery if the new table write fails —
+            # old table still gets populated as before.
+            logger.warning("dual-write to pim_eligibility_state failed: %s", str(e)[:120])
+
         self._commit()
         cursor.close()
+
+    def _dual_write_pim_eligibility_state(self, cursor, identity_db_id: int, data: Dict):
+        """Mirror a PIM eligible assignment into pim_eligibility_state.
+
+        Companion to save_pim_eligible (above). Activation-policy fields
+        default to conservative-safe values (require MFA/approval) when
+        not provided; the Phase 2 spec adds real activation-policy pull
+        from /policies/roleManagementPolicies.
+
+        Looks up organization_id from the identity row (the new table
+        requires it; the old table doesn't).
+        """
+        cursor.execute(
+            "SELECT organization_id, identity_id, discovery_run_id "
+            "FROM identities WHERE id = %s",
+            (identity_db_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return  # identity not found; skip
+        organization_id, identity_id, discovery_run_id = row
+
+        # Map directory_scope → (scope, scope_type)
+        scope = data.get("directory_scope") or "/"
+        if scope == "/":
+            scope_type = "directory"
+        elif scope.startswith("/subscriptions/") and "/resourceGroups/" not in scope:
+            scope_type = "subscription"
+        elif "/resourceGroups/" in scope and "/providers/" not in scope:
+            scope_type = "resource_group"
+        elif "/providers/" in scope:
+            scope_type = "resource"
+        else:
+            scope_type = "other"
+
+        eligible_since = data.get("start_datetime")
+
+        cursor.execute(
+            """
+            INSERT INTO pim_eligibility_state (
+                organization_id, discovery_run_id, identity_db_id, identity_id,
+                role_name, role_template_id, scope, scope_type,
+                assignment_type, eligible_since,
+                requires_mfa_on_activation, requires_approval,
+                requires_justification, max_activation_minutes
+            ) VALUES (
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                'eligible', %s,
+                TRUE, FALSE,
+                TRUE, 480
+            )
+            ON CONFLICT (organization_id, identity_db_id, role_name, scope, assignment_type)
+            DO UPDATE SET
+                eligible_since = EXCLUDED.eligible_since,
+                discovered_at = NOW()
+            """,
+            (
+                organization_id, discovery_run_id, identity_db_id, identity_id,
+                data.get("role_name"), data.get("role_definition_id"),
+                scope, scope_type,
+                eligible_since,
+            ),
+        )
 
     def save_pim_activation(self, identity_db_id: int, data: Dict):
         """INSERT a PIM activation record. Tenant scoping via identity_db_id

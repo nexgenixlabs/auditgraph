@@ -1,0 +1,257 @@
+/* ── AuditGraph status page styling — same dark palette as docs.auditgraph.ai */
+
+:root {
+  --bg:           #0a0e1a;
+  --bg-card:     #111827;
+  --bg-card-hover: #1a2333;
+  --border:      #1f2937;
+  --text:        #e5e7eb;
+  --text-muted:  #9ca3af;
+  --text-dim:    #6b7280;
+  --accent:      #3b82f6;
+  --accent-hover: #60a5fa;
+
+  --status-operational: #10b981;
+  --status-degraded:    #f59e0b;
+  --status-partial:     #fb923c;
+  --status-outage:      #ef4444;
+  --status-maintenance: #6366f1;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  line-height: 1.6;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+  width: 100%;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { color: var(--accent-hover); }
+
+/* ── Header */
+.site-header {
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 0;
+}
+.site-header .container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.brand {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 1.125rem;
+}
+.brand-name {
+  color: var(--text);
+}
+.brand-divider {
+  color: var(--text-dim);
+  margin: 0 0.5rem;
+}
+.brand-section {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.site-nav { display: flex; gap: 1.5rem; font-size: 0.875rem; }
+
+/* ── Main */
+main { flex: 1; padding: 2.5rem 0; }
+main > section { margin-bottom: 2.5rem; }
+main h2 {
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+/* ── Status hero (overall) */
+.status-hero {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 1.5rem 2rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+}
+.status-hero--operational { border-left-color: var(--status-operational); }
+.status-hero--degraded    { border-left-color: var(--status-degraded); }
+.status-hero--partial     { border-left-color: var(--status-partial); }
+.status-hero--outage      { border-left-color: var(--status-outage); }
+.status-hero--maintenance { border-left-color: var(--status-maintenance); }
+
+.status-hero-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: pulse 2.5s ease-in-out infinite;
+}
+.status-hero--operational .status-hero-dot { background: var(--status-operational); box-shadow: 0 0 16px var(--status-operational); }
+.status-hero--degraded    .status-hero-dot { background: var(--status-degraded);    box-shadow: 0 0 16px var(--status-degraded); }
+.status-hero--partial     .status-hero-dot { background: var(--status-partial);     box-shadow: 0 0 16px var(--status-partial); }
+.status-hero--outage      .status-hero-dot { background: var(--status-outage);      box-shadow: 0 0 16px var(--status-outage); }
+.status-hero--maintenance .status-hero-dot { background: var(--status-maintenance); box-shadow: 0 0 16px var(--status-maintenance); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.status-hero-text h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.status-hero-text p {
+  color: var(--text-muted);
+  font-size: 0.9375rem;
+  margin: 0;
+}
+
+/* ── Component grid */
+.component-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem;
+}
+.component {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+.component:hover {
+  background: var(--bg-card-hover);
+}
+.component-info { display: flex; flex-direction: column; gap: 0.125rem; }
+.component-name { font-weight: 500; }
+.component-desc { font-size: 0.8125rem; color: var(--text-dim); }
+.component-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.component-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.component-status--operational { color: var(--status-operational); }
+.component-status--operational .dot { background: var(--status-operational); }
+.component-status--degraded { color: var(--status-degraded); }
+.component-status--degraded .dot { background: var(--status-degraded); }
+.component-status--partial { color: var(--status-partial); }
+.component-status--partial .dot { background: var(--status-partial); }
+.component-status--outage { color: var(--status-outage); }
+.component-status--outage .dot { background: var(--status-outage); }
+.component-status--maintenance { color: var(--status-maintenance); }
+.component-status--maintenance .dot { background: var(--status-maintenance); }
+
+/* ── Incidents */
+.incidents { }
+.incident {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 0.75rem;
+}
+.incident--investigating { border-left-color: var(--status-degraded); }
+.incident--identified    { border-left-color: var(--status-partial); }
+.incident--monitoring    { border-left-color: var(--accent); }
+.incident--resolved      { border-left-color: var(--status-operational); }
+.incident-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+}
+.incident-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+.incident-time {
+  color: var(--text-dim);
+  font-size: 0.8125rem;
+}
+.incident-status-tag {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 0.5rem;
+}
+.incident-status-tag--investigating { background: rgba(245, 158, 11, 0.15); color: var(--status-degraded); }
+.incident-status-tag--identified    { background: rgba(251, 146, 60, 0.15); color: var(--status-partial); }
+.incident-status-tag--monitoring    { background: rgba(59, 130, 246, 0.15); color: var(--accent); }
+.incident-status-tag--resolved      { background: rgba(16, 185, 129, 0.15); color: var(--status-operational); }
+.incident-update {
+  margin-top: 0.5rem;
+  font-size: 0.9375rem;
+  color: var(--text);
+}
+.incident-affected {
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+/* ── Info card */
+.info-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+}
+.info-card p { margin-bottom: 0.5rem; }
+.info-card p:last-child { margin-bottom: 0; }
+
+/* ── Footer */
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 1.5rem 0;
+  margin-top: 2rem;
+}
+.site-footer .container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* ── Utility */
+.muted { color: var(--text-muted); }
+.small { font-size: 0.8125rem; }
+.hidden { display: none; }

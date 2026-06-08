@@ -1,6 +1,7 @@
 import React from 'react';
 import type { CISOViewModel, PostureV31Response } from '../../utils/cisoViewModel';
 import { DN } from '../dashboard/ciso-shared';
+import { BreachCostMethodologyButton } from './BreachCostMethodology';
 
 const LEVEL_DOT: Record<string, string> = {
   red: 'bg-[#e8465a]',
@@ -111,9 +112,14 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
         <DN navigateTo="/ai-access/data-reachability">
           <div className="mt-2 pt-2 border-t border-white/5 cursor-pointer hover:opacity-90 transition"
                title={`Total classified-data breach exposure across the tenant (${(headline.total_records || 0).toLocaleString()} records). Range = IBM 2023 industry low/high; mid is the headline. Each scope shows how much of this is reachable by AI agents specifically and by any non-human identity (SPN / MI / AI).`}>
-            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
-              Estimated breach exposure · org-wide
-            </p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
+                Estimated breach exposure · org-wide
+              </p>
+              {/* AG-CISO-Q (2026-06-06): the CISO's first question is "where
+                  does the $ come from?" — this surfaces the methodology one click away */}
+              <BreachCostMethodologyButton compact />
+            </div>
             <p className="text-base font-bold font-mono text-rose-400 mt-0.5">
               {headline.mid_display}
             </p>

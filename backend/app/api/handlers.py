@@ -18972,6 +18972,38 @@ def create_client_connection():
         if isinstance(meta, dict):
             meta.pop('client_secret', None)
             result['metadata'] = meta
+
+        # AG-PILOT-AUTO-DISCOVERY (2026-06-07): trigger discovery in the
+        # background when a connection is added with status=connected and
+        # at least one subscription was discovered. Eliminates "where's
+        # my data?" friction — customer sees populated dashboard in
+        # ~3-5 minutes instead of having to manually click "Run Discovery".
+        discovery_triggered = False
+        if conn.get('status') == 'connected' and discovered_count > 0:
+            try:
+                import threading as _threading
+                from app.scheduler import trigger_manual_discovery
+                _tname = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+                def _auto_discover():
+                    try:
+                        trigger_manual_discovery(db_org_id=tid, org_name=_tname,
+                                                  connection_id=conn['id'])
+                    except Exception as auto_e:
+                        logger.warning(
+                            "Auto-discovery for connection %s failed (non-fatal): %s",
+                            conn['id'], str(auto_e)[:120],
+                        )
+                _t = _threading.Thread(target=_auto_discover, daemon=True)
+                _t.start()
+                discovery_triggered = True
+                logger.info("Auto-discovery triggered for new connection %s on org %s",
+                              conn['id'], tid)
+            except Exception as t_e:
+                # Connection creation already succeeded; auto-discovery is
+                # best-effort. Customer can always trigger manually.
+                logger.warning("Failed to spawn auto-discovery thread: %s", str(t_e)[:120])
+
+        result['discovery_triggered'] = discovery_triggered
         return jsonify({'connection': result}), 201
     finally:
         db.close()
@@ -20322,10 +20354,29 @@ def test_client_connection():
                 msg += (' The Service Principal authenticated but has no RBAC access to any subscription. '
                          'Assign at least Reader role on the target subscription(s) in Azure IAM.')
 
+            # AG-PILOT-PERM-CHECK (2026-06-07): verify Graph API permission
+            # scope matches what AuditGraph needs (no more, no less). Surfaces
+            # the customer's own consent grant — supports the "agentless +
+            # read-only" pitch by proving it from their data.
+            permission_check = None
+            try:
+                from app.api.permission_scope_check import check_azure_app_permissions
+                permission_check = check_azure_app_permissions(
+                    tenant_id=azure_directory_id,
+                    client_id=azure_client_id,
+                    client_secret=azure_client_secret,
+                )
+                logger.info("Permission scope check verdict=%s for org=%s",
+                             permission_check.get('verdict'), tid)
+            except Exception as perm_e:
+                logger.warning("Permission scope check failed (non-fatal): %s",
+                                 str(perm_e)[:120])
+
             return jsonify({
                 'status': 'success',
                 'subscriptions': subs,
                 'message': msg,
+                'permission_check': permission_check,
             })
         except Exception as e:
             # Update test status on failure
@@ -43246,6 +43297,77 @@ def get_agent_trust_score_handler(identity_id: str):
         return jsonify(result)
     except Exception as e:
         logger.error(f"trust-score handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
+# ============================================================
+
+def get_pim_overprivilege_handler():
+    """GET /api/identity-security/pim/overprivilege
+
+    Returns org-wide PIM Overprivilege analysis with up to 3 finding
+    types per (identity, role). Pure read-only analysis over the
+    pim_eligibility_state + pim_activation_observations tables.
+
+    Query params:
+      identity — substring filter on identity_id or display_name
+      severity — filter findings by severity (critical/high/medium/low)
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'identities': [], 'findings': [],
+                            'summary': {'total_eligible_assignments': 0,
+                                         'total_findings': 0,
+                                         'by_finding_type': {},
+                                         'by_severity': {}}})
+        from app.engines.pim.pim_overprivilege import compute_pim_overprivilege
+        result = compute_pim_overprivilege(
+            db, org_id,
+            identity_filter=request.args.get('identity'),
+            severity_filter=request.args.get('severity'),
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"PIM overprivilege handler failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if db: db.close()
+
+
+# ============================================================
+# AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Activity
+# ============================================================
+
+def get_entra_role_activity_handler():
+    """GET /api/identity-security/entra-role-activity
+
+    Org-wide rollup of Entra directory role assignments + observed
+    activity from auditLogs/directoryAudits. Surfaces dormant
+    privileged assignments as `dormant_directory_role_assignment`
+    findings.
+
+    Query params:
+      dormancy — filter by band (high/medium/low/unknown)
+    """
+    db = _db()
+    try:
+        org_id = _org_id()
+        if org_id is None or org_id == -1:
+            return jsonify({'rows': [], 'findings': [],
+                            'summary': {'total_assignments': 0,
+                                         'by_bucket': {}, 'by_dormancy': {},
+                                         'total_findings': 0}})
+        from app.engines.entra.role_activity_inference import compute_entra_role_activity
+        return jsonify(compute_entra_role_activity(
+            db, org_id, dormancy_filter=request.args.get('dormancy')))
+    except Exception as e:
+        logger.error(f"Entra role activity handler failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
     finally:
         if db: db.close()

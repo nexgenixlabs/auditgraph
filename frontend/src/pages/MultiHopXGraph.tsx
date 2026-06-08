@@ -11,6 +11,7 @@
  *   GET /api/ai-security/invocation-graph
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { BreachCostMethodologyButton } from '../components/ciso/BreachCostMethodology';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low';
 
@@ -156,6 +157,7 @@ export default function MultiHopXGraph() {
                            bg-violet-900/40 text-violet-300 border border-violet-800">
             v2 · agent-to-agent
           </span>
+          <BreachCostMethodologyButton compact />
         </div>
         <p className="text-sm text-slate-400 max-w-3xl">
           Transitive reachability: when a low-privilege agent invokes a higher-privilege

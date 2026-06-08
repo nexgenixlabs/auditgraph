@@ -143,7 +143,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         items: [
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
           { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
-          { to: '/command-center', label: 'Command Center', icon: monitorIcon },
+          { to: '/command-center', label: 'Live Operations', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
           { to: '/drift-analysis', label: 'Drift Analysis', icon: driftIcon },
           { to: '/security-findings', label: 'Findings', icon: findingsIcon },
@@ -170,6 +170,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-governance',     label: 'Identity Governance', icon: identityIcon },
           // AG-WK3.1: Ownership Center — the SailPoint-tier governance hook
           { to: '/ownership',         label: 'Ownership Center',   icon: identityIcon },
+          // AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
+          { to: '/identity-security/pim', label: 'PIM Overprivilege', icon: roleOptIcon },
+          // AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Last-Used Inference
+          { to: '/identity-security/entra-role-activity', label: 'Entra Role Activity', icon: roleOptIcon },
         ],
       },
       {

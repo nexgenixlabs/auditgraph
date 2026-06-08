@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AuditGraph — System Status</title>
+  <meta name="description" content="Real-time status of AuditGraph services, including the platform API, web app, admin console, and documentation.">
+  <link rel="icon" href="https://docs.auditgraph.ai/assets/favicon.ico">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <a href="https://auditgraph.ai" class="brand">
+        <span class="brand-name">AuditGraph</span>
+        <span class="brand-divider">·</span>
+        <span class="brand-section">Status</span>
+      </a>
+      <nav class="site-nav">
+        <a href="https://docs.auditgraph.ai">Docs</a>
+        <a href="https://app.auditgraph.ai">Launch App</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- ───────── Overall headline ───────── -->
+    <section id="overall-status" class="status-hero status-hero--operational">
+      <div class="status-hero-dot"></div>
+      <div class="status-hero-text">
+        <h1 id="overall-headline">All systems operational</h1>
+        <p id="overall-detail">No incidents reported. Last checked <time id="last-checked" datetime="">—</time>.</p>
+      </div>
+    </section>
+
+    <!-- ───────── Component status ───────── -->
+    <section class="components">
+      <h2>Components</h2>
+      <div class="component-grid" id="component-grid">
+        <!-- Components inject from status.json -->
+      </div>
+    </section>
+
+    <!-- ───────── Active incidents (hidden when empty) ───────── -->
+    <section id="incidents-active" class="incidents hidden">
+      <h2>Active incidents</h2>
+      <div id="incidents-active-list"></div>
+    </section>
+
+    <!-- ───────── Past incidents ───────── -->
+    <section class="incidents">
+      <h2>Incident history (last 30 days)</h2>
+      <div id="incidents-past-list">
+        <p class="muted">No incidents in the last 30 days.</p>
+      </div>
+    </section>
+
+    <!-- ───────── Maintenance schedule ───────── -->
+    <section class="incidents">
+      <h2>Scheduled maintenance</h2>
+      <div id="maintenance-list">
+        <p class="muted">No maintenance currently scheduled.</p>
+      </div>
+    </section>
+
+    <!-- ───────── Footer info ───────── -->
+    <section class="info-card">
+      <p>
+        Subscribe to updates by following
+        <a href="https://twitter.com/auditgraph" target="_blank" rel="noopener">@auditgraph on X</a>
+        or email <a href="mailto:status@auditgraph.ai">status@auditgraph.ai</a>.
+      </p>
+      <p class="muted small">
+        This page is hosted independently of the main AuditGraph application
+        (Cloudflare Pages, separate edge) so it remains available even during
+        platform incidents.
+      </p>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>AuditGraph — Identity Security Graph™</p>
+      <p class="muted small">
+        See Every Identity. Understand Every Risk.
+        · <a href="https://auditgraph.ai/trust">Trust Center</a>
+        · <a href="https://auditgraph.ai/privacy">Privacy</a>
+      </p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

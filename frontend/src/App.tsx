@@ -72,6 +72,8 @@ import AIThreatConnectors from './pages/AIThreatConnectors';
 import IdentityTrust from './pages/IdentityTrust';
 import OwnershipCenter from './pages/OwnershipCenter';
 import PeerBenchmarking from './pages/PeerBenchmarking';
+import PIMOverprivilege from './pages/PIMOverprivilege';
+import EntraRoleActivity from './pages/EntraRoleActivity';
 import AIRuntime from './pages/AIRuntime';
 import AgentActivityTimeline from './pages/AgentActivityTimeline';
 import AIRisk from './pages/AIRisk';
@@ -393,6 +395,10 @@ function AppContent() {
                   <Route path="/ownership" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><OwnershipCenter /></ErrorBoundary>} />
                   {/* AG-WK7.A: Peer Benchmarking */}
                   <Route path="/peer-benchmarking" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PeerBenchmarking /></ErrorBoundary>} />
+                  {/* AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection */}
+                  <Route path="/identity-security/pim" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><PIMOverprivilege /></ErrorBoundary>} />
+                  {/* AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Last-Used Inference */}
+                  <Route path="/identity-security/entra-role-activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><EntraRoleActivity /></ErrorBoundary>} />
                   {/* AG-182: Per-agent forensic timeline + behavior baseline */}
                   <Route path="/ai-runtime/activity" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AgentActivityTimeline /></ErrorBoundary>} />
                   <Route path="/ai-risk" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIRisk /></ErrorBoundary>} />
