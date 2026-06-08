@@ -9580,14 +9580,66 @@ def get_dashboard_posture():
                         f'(PHI / PCI / Financial) for a precise tenant-specific figure.'
                     )
                 else:
-                    # Truly no classified-eligible resources discovered
-                    business_impact['estimated_exposure'] = None
-                    business_impact['exposure_by_scope'] = None
-                    business_impact['exposure_status'] = 'no_classified_resources'
-                    business_impact['exposure_message'] = (
-                        'No classified-eligible resources (storage / SQL / Cosmos) discovered '
-                        'in your tenant. Breach exposure shows here once resources are scanned.'
-                    )
+                    # AG-PILOT-FIX-V3 (2026-06-08): customer tenant had 0
+                    # classified-eligible resources discovered, but CISO
+                    # still wants a number for the board. Fall back to an
+                    # IBM 2023 industry-baseline scaled by identity count.
+                    # Defensible methodology: IBM Cost of a Data Breach
+                    # Report 2023 — US average $9.48M, global average $4.45M.
+                    # Scale to tenant size using a per-1000-identities ratio
+                    # so larger tenants show proportionally larger exposure.
+                    try:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM identities
+                            WHERE organization_id = %s AND deleted_at IS NULL
+                              AND discovery_run_id = ANY(%s)
+                              AND NOT COALESCE(is_microsoft_system, false)
+                        """, (org_id, run_ids))
+                        identity_row = cursor.fetchone()
+                        identity_count = (identity_row[0] if identity_row else 0) or 0
+                    except Exception:
+                        identity_count = 0
+
+                    if identity_count > 0:
+                        # IBM 2023 baseline scaled by identity count
+                        # ($4.45M global average for ~1000-identity org)
+                        IBM_2023_BASELINE_USD = 4_450_000
+                        scale = max(1.0, identity_count / 1000.0)
+                        baseline_mid  = int(IBM_2023_BASELINE_USD * scale)
+                        baseline_low  = int(baseline_mid * 0.75)
+                        baseline_high = int(baseline_mid * 1.50)
+
+                        from app.engines.scoring.breach_cost import format_dollar_short
+                        business_impact['estimated_exposure'] = {
+                            'low':  baseline_low,
+                            'mid':  baseline_mid,
+                            'high': baseline_high,
+                            'low_display':  format_dollar_short(baseline_low),
+                            'mid_display':  format_dollar_short(baseline_mid),
+                            'high_display': format_dollar_short(baseline_high),
+                            'total_records': 0,
+                            'scope': 'identity_baseline',
+                            'scope_label': f'Industry baseline · {identity_count:,} identities',
+                            'classified_resource_count': 0,
+                            'is_baseline': True,
+                        }
+                        business_impact['exposure_by_scope'] = None
+                        business_impact['exposure_status'] = 'identity_baseline'
+                        business_impact['exposure_message'] = (
+                            f'Industry baseline — IBM 2023 Cost of a Data Breach Report '
+                            f'($4.45M global avg) scaled to your {identity_count:,} identities. '
+                            f'Tag sensitive resources (PHI / PCI / Financial) for a precise '
+                            f'tenant-specific figure based on actual classified data.'
+                        )
+                    else:
+                        # Truly empty tenant — no identities + no resources
+                        business_impact['estimated_exposure'] = None
+                        business_impact['exposure_by_scope'] = None
+                        business_impact['exposure_status'] = 'no_data_yet'
+                        business_impact['exposure_message'] = (
+                            'No identities or classified-eligible resources discovered yet. '
+                            'Breach exposure shows here once your first scan completes.'
+                        )
         except Exception as _exp_err:
             logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
 
