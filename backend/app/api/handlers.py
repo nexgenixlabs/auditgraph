@@ -4111,26 +4111,49 @@ def trigger_discovery():
         finally:
             admin_db.close()
 
+    # AG-PILOT-FIX-TRIGGER-500 (2026-06-08): real-pilot bug found —
+    #   1. `db` was referenced in _run's except branch BEFORE its line 4126
+    #      assignment ran. If the thread errored before main reached that
+    #      line, NameError → silent cleanup failure
+    #   2. _log() ran on the main thread AFTER thread.start() but could
+    #      raise an uncaught exception (no completed discovery_runs row
+    #      yet → _log activity insert may FK-error in some configs), and
+    #      that becomes the customer-visible 500
+    # Fix: log inside a try/except (best-effort), open db BEFORE thread
+    # (so _run closure captures a valid reference), and never let _log
+    # take down the response.
+    logger_local = logging.getLogger(__name__)
+
     def _run():
         try:
             trigger_manual_discovery(db_org_id=tid, org_name=tname,
                                      connection_id=conn_id)
         except Exception as e:
-            try: db.conn.rollback()
-            except Exception: pass
-            logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
+            logger_local.error("Manual discovery thread failed: %s", str(e)[:200], exc_info=True)
 
+    try:
+        db = _db()
+        try:
+            msg = 'Manual discovery run triggered'
+            if conn_id:
+                msg += f' for connection {conn_id}'
+            try:
+                _log(db, 'discovery_triggered', msg)
+            except Exception as log_e:
+                logger_local.warning(
+                    "discovery_triggered activity log write failed (non-fatal): %s",
+                    str(log_e)[:120],
+                )
+        finally:
+            db.close()
+    except Exception as outer_e:
+        # Log endpoint failures shouldn't block the actual scan trigger
+        logger_local.error("trigger_discovery prelude failed: %s", str(outer_e)[:200])
+
+    # Spawn the actual scan AFTER the pre-log so the closure references
+    # an already-closed db won't matter (we don't touch db inside _run)
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-
-    db = _db()
-    try:
-        msg = 'Manual discovery run triggered'
-        if conn_id:
-            msg += f' for connection {conn_id}'
-        _log(db, 'discovery_triggered', msg)
-    finally:
-        db.close()
 
     msg = "Discovery run triggered."
     if conn_id:
@@ -20343,22 +20366,41 @@ def test_client_connection():
                                                last_test_status='success',
                                                status='connected')
 
-                    # Insert discovered subscriptions into cloud_subscriptions
+                    # AG-PILOT-AUTO-ACTIVATE-SUBS (2026-06-08): on FIRST connection
+                    # test (org has no existing active subs), auto-activate all
+                    # discovered subscriptions so first discovery finds something.
+                    # Real-world bug found in pilot Day 0: customer added connection,
+                    # subs were inserted as 'discovered' status only, first scan
+                    # found 0 identities because no subs were 'active'.
+                    # Subsequent tests preserve customer's manual activation choices.
                     cursor = db.conn.cursor()
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM cloud_subscriptions
+                        WHERE organization_id = %s AND status = 'active' AND COALESCE(deleted, FALSE) = FALSE
+                    """, (tid,))
+                    existing_active = cursor.fetchone()[0]
+                    initial_status = 'active' if existing_active == 0 else 'discovered'
+
+                    # Insert discovered subscriptions into cloud_subscriptions
                     for s in subs:
                         cursor.execute("""
                             INSERT INTO cloud_subscriptions
                                 (organization_id, cloud, account_id, account_name,
                                  status, cloud_connection_id)
-                            VALUES (%s, 'azure', %s, %s, 'discovered', %s)
+                            VALUES (%s, 'azure', %s, %s, %s, %s)
                             ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
                                 SET account_name = EXCLUDED.account_name,
                                     cloud_connection_id = EXCLUDED.cloud_connection_id,
                                     deleted = false
-                        """, (tid, s['id'], s['name'], connection_id))
+                        """, (tid, s['id'], s['name'], initial_status, connection_id))
                     cursor.close()
                     db._commit()
-                    logger.info("Inserted %d Azure subscription(s) into cloud_subscriptions for org %s", len(subs), tid)
+                    logger.info(
+                        "Inserted %d Azure subscription(s) for org %s (status=%s — %s)",
+                        len(subs), tid, initial_status,
+                        'auto-activated, first connection' if initial_status == 'active'
+                        else 'discovered only, org has existing active subs',
+                    )
                 finally:
                     db.close()
 
