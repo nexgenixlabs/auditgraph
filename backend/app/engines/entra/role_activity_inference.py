@@ -251,9 +251,72 @@ def compute_entra_role_activity(db, org_id: int,
     }
 
 
+def populate_entra_role_activity(db, org_id: int, run_id: int) -> int:
+    """AG-PILOT-FEATURE-E-WRITER (2026-06-08): minimal producer that
+    materializes entra_role_activity from entra_role_assignments.
+
+    Reads `entra_role_assignments` for the run + org, joins to identities,
+    and upserts a baseline rollup row per (identity, role) with
+    `inference_confidence='unknown'` + `dormancy_band='unknown'`.
+
+    Why baseline + unknown: the full Feature E producer (audit-log
+    attribution via CATEGORIES_REQUIRING cross-product) is a 1-week
+    feature that's still spec-only. Until it ships, the page should
+    show every standing role grant as a row — "no activity data" is
+    a HONEST signal, NOT a fabricated bucket. This matches the moat
+    rule: never invent activity bands on absent data.
+
+    Returns the number of rollup rows written.
+    """
+    cursor = db.conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+              i.id              AS identity_db_id,
+              COALESCE(i.identity_id, i.object_id) AS identity_id,
+              i.identity_category AS principal_type,
+              era.role_name,
+              era.role_template_id
+            FROM entra_role_assignments era
+            JOIN identities i ON i.id = era.identity_db_id
+            WHERE era.organization_id = %s
+              AND era.discovery_run_id = %s
+              AND COALESCE(i.deleted_at, '1970-01-01'::timestamp) < '1971-01-01'::timestamp
+        """, (org_id, run_id))
+        rows = cursor.fetchall()
+        written = 0
+        for r in rows:
+            try:
+                cursor.execute("""
+                    INSERT INTO entra_role_activity
+                        (organization_id, discovery_run_id, identity_db_id, identity_id,
+                         role_name, role_template_id, assignment_principal_type,
+                         last_action_at, days_since_last_action,
+                         activities_30d, activities_90d,
+                         activity_bucket, dormancy_band,
+                         inferred_from, inference_confidence)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s,
+                            NULL, NULL, 0, 0, 'unknown', 'unknown',
+                            'no_telemetry', 'unknown')
+                    ON CONFLICT (organization_id, identity_db_id, role_name)
+                    DO UPDATE SET
+                        discovery_run_id = EXCLUDED.discovery_run_id,
+                        role_template_id = EXCLUDED.role_template_id,
+                        discovered_at    = NOW()
+                """, (org_id, run_id, r[0], r[1], r[3], r[4], r[2] or 'unknown'))
+                written += 1
+            except Exception:
+                db._rollback()
+        db._commit()
+        return written
+    finally:
+        cursor.close()
+
+
 __all__ = [
     'CATEGORIES_REQUIRING',
     '_activity_bucket',
     '_dormancy_band',
     'compute_entra_role_activity',
+    'populate_entra_role_activity',
 ]

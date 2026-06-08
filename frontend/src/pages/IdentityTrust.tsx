@@ -205,7 +205,10 @@ export default function IdentityTrust() {
                     </div>
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <Link to={`/ai-inventory?focus=${encodeURIComponent(w.identity_id)}`}
+                    {/* AG-PILOT-TRUST-ROUTE (2026-06-08): was routing every
+                        click to /ai-inventory even for non-AI identities.
+                        Route to the canonical identity detail page instead. */}
+                    <Link to={`/identities/${encodeURIComponent(w.identity_id)}`}
                           className="text-xs text-violet-300 hover:text-violet-200">
                       Inspect →
                     </Link>

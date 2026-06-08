@@ -3048,14 +3048,12 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                   onFilterApply={handleColumnFilter}
                   labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>}
                 />
-                <FilterableColumnHeader
-                  label="Governance" field="governance_state"
-                  options={columnFilterOptions.governance_state}
-                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
-                  activeValues={columnFilters.governance_state || []}
-                  onFilterApply={handleColumnFilter}
-                  labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>}
-                />
+                {/* AG-PILOT-REMOVE-GOVERNANCE-COL (2026-06-08): "Needs
+                    Review" column was misleading half-baked — the underlying
+                    governance_state computation lacks signals to be precise.
+                    Hidden until we wire real governance signals (access
+                    review status + policy coverage + owner re-cert). Data
+                    still computed server-side for filters that need it. */}
                 <FilterableColumnHeader
                   label="Risk" field="risk_level"
                   options={columnFilterOptions.risk_level}
@@ -3199,11 +3197,6 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                     {/* Lifecycle State */}
                     <td className="px-2 py-2 whitespace-nowrap">
                       <LifecycleLabel state={i.lifecycle_state} />
-                    </td>
-
-                    {/* Governance State */}
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      <GovernanceBadge state={i.governance_state} />
                     </td>
 
                     {/* Risk Level */}

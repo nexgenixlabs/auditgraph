@@ -1711,9 +1711,13 @@ def get_identity_details(identity_id: str):
                    i.organization_id
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            -- AG-PILOT-IDENTITY-LOOKUP (2026-06-08): match by identity_id OR
+            -- object_id. Attack Paths "View Identity" passes object_id (UUID);
+            -- IdentityTrust Inspect passes identity_id. Without OR the 70% of
+            -- identities where identity_id ≠ object_id return 404.
+            WHERE (i.identity_id = %s OR i.object_id = %s) AND i.discovery_run_id = ANY(%s)
         """
-        detail_params = [identity_id, run_ids]
+        detail_params = [identity_id, identity_id, run_ids]
         mon_subs = _monitored_sub_ids(cursor, _org_id(), _connection_id())
         if mon_subs:
             detail_sql += ACTIVATED_SUB_FILTER_SQL
@@ -34626,8 +34630,14 @@ def get_identity_persisted_attack_paths(identity_id):
             cursor.close()
             return jsonify({'paths': [], 'count': 0, 'identity_id': identity_id})
 
+        # AG-PILOT-ATTACK-PATHS-DRAWER (2026-06-08): 70% of real-pilot
+        # identities have identity_id ≠ object_id. attack_paths.source_entity_id
+        # is populated with object_id, never identity_id. So we must look up
+        # the row's object_id and pass that to the match query — otherwise
+        # the per-identity drawer is empty even though /attack-paths shows
+        # paths for the same identity.
         cursor.execute("""
-            SELECT id FROM identities
+            SELECT id, object_id FROM identities
             WHERE identity_id = %s AND discovery_run_id = ANY(%s)
             ORDER BY id DESC LIMIT 1
         """, (identity_id, run_ids))
@@ -34637,7 +34647,9 @@ def get_identity_persisted_attack_paths(identity_id):
             return jsonify({'paths': [], 'count': 0, 'identity_id': identity_id})
 
         db_id = row['id']
-        paths = db.get_attack_paths_for_identity(db_id, identity_id_str=identity_id)
+        object_id = row.get('object_id') or identity_id
+        # Pass object_id as the source_entity_id match key (NOT identity_id)
+        paths = db.get_attack_paths_for_identity(db_id, identity_id_str=object_id)
         cursor.close()
         return jsonify({'paths': paths, 'count': len(paths), 'identity_id': identity_id})
     finally:
@@ -45721,13 +45733,16 @@ def get_ai_runtime_fleet():
         org_id = _org_id()
 
         # ── Platform distribution (where AI runs) ──
+        # AG-PILOT-XORG-LEAK (2026-06-08): added org_id filter — query was
+        # returning identities across all orgs. Visible cross-tenant data.
         cursor.execute("""
             SELECT DISTINCT ON (i.identity_id) ac.detected_platform
             FROM identities i JOIN agent_classifications ac ON ac.identity_db_id = i.id
             WHERE ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+              AND i.organization_id = %s
               AND NOT COALESCE(i.is_microsoft_system, false) AND i.deleted_at IS NULL
             ORDER BY i.identity_id, i.discovery_run_id DESC
-        """)
+        """, (org_id,))
         plat_counts = {}
         total_agents = 0
         for (plat,) in cursor.fetchall():

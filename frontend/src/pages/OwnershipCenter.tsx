@@ -104,9 +104,18 @@ export default function OwnershipCenter() {
       <div>
         <h1 className="text-2xl font-bold text-slate-100">Ownership Center</h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
-          Assign, delegate, and certify human ownership of every non-human
-          identity. Unowned NHIs are the #1 indicator that an incident response
-          will stall (nobody to call, nobody to revoke).
+          Track human ownership of every non-human identity for governance,
+          re-certification, and incident accountability. Unowned NHIs are the
+          #1 indicator that an incident response will stall (nobody to call,
+          nobody to revoke).
+        </p>
+        {/* AG-PILOT-OWNERSHIP-READONLY-BANNER (2026-06-08) */}
+        <p className="text-[11px] text-amber-300 mt-2 max-w-3xl">
+          AuditGraph is <strong>read-only</strong> on your tenant — owner
+          assignments here record in our governance ledger. Each save returns
+          an <span className="font-mono">az cli</span> snippet you can run with
+          a write-permitted Azure account to mirror the ownership in your
+          directory or resource tags.
         </p>
       </div>
 
@@ -225,8 +234,9 @@ function UnownedTable({ items, onAssign }: { items: UnownedItem[]; onAssign: (i:
               </td>
               <td className="px-3 py-2 text-right">
                 <button onClick={() => onAssign(i)}
-                        className="text-xs px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 text-white font-semibold">
-                  Assign owner
+                        className="text-xs px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 text-white font-semibold"
+                        title="Record an owner in AuditGraph's governance ledger + get an Azure CLI snippet to mirror it in your tenant">
+                  Track owner
                 </button>
               </td>
             </tr>
@@ -333,13 +343,23 @@ function AssignModal({ target, onClose, onSuccess }: {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-[#0f172a] rounded-xl border border-white/10 max-w-lg w-full">
+      <div className="bg-[#0f172a] rounded-xl border border-white/10 max-w-xl w-full">
         <div className="p-5 border-b border-white/5">
-          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Assign owner</p>
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Track owner assignment</p>
           <h2 className="text-base font-bold text-slate-100 font-mono mt-1">{target.display_name}</h2>
           <p className="text-[10px] text-slate-500 font-mono mt-0.5">{target.identity_id}</p>
         </div>
         <div className="p-5 space-y-3">
+          {/* AG-PILOT-OWNERSHIP-READONLY (2026-06-08): AuditGraph is
+              read-only on Azure — this dialog records the owner in
+              AuditGraph's governance ledger for re-cert + accountability.
+              Use the CLI snippet below to mirror the owner into Azure. */}
+          <div className="rounded bg-amber-900/20 border border-amber-700/30 p-2.5 text-[11px] text-amber-200 leading-relaxed">
+            <strong>AuditGraph tracks ownership for governance (re-cert + accountability).</strong>
+            {' '}AuditGraph uses read-only RBAC and does <em>not</em> write to Azure. To mirror this
+            owner into your tenant, copy the Azure CLI snippet shown after saving and run it
+            with an Azure account that has write access.
+          </div>
           {err && (
             <div className="rounded bg-rose-900/30 border border-rose-800/40 p-2 text-xs text-rose-200">{err}</div>
           )}
@@ -353,13 +373,43 @@ function AssignModal({ target, onClose, onSuccess }: {
                    className="mt-1 w-full bg-slate-900/60 border border-slate-700 rounded p-2 text-sm text-slate-200" />
             <p className="text-[10px] text-slate-500 mt-1">Owner must re-confirm assignment by this date.</p>
           </div>
+
+          {/* CLI snippet to mirror in Azure */}
+          {ownerEmail && (
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+                Azure CLI · mirror owner in your tenant
+              </label>
+              <pre className="mt-1 bg-slate-950 border border-slate-800 rounded p-2 text-[10px] text-emerald-300 font-mono overflow-x-auto whitespace-pre-wrap break-all">
+{`# Resolve the owner's Entra object id from email
+OWNER_OID=$(az ad user show --id ${ownerEmail || 'OWNER_EMAIL'} --query id -o tsv)
+
+# Add as App Registration owner (works for service principals / AI apps)
+az ad app owner add --id ${target.identity_id} --owner-object-id $OWNER_OID
+
+# Optionally tag the identity's primary scope with the owner label
+# az tag update --resource-id <SCOPE_ID> --operation merge \\
+#   --tags Owner=${ownerEmail || 'owner@yourco.com'} ReCertBy=${expires || 'YYYY-MM-DD'}`}
+              </pre>
+              <button
+                type="button"
+                onClick={() => {
+                  const oid = ownerEmail || 'OWNER_EMAIL';
+                  const cmd = `OWNER_OID=$(az ad user show --id ${oid} --query id -o tsv)\naz ad app owner add --id ${target.identity_id} --owner-object-id $OWNER_OID`;
+                  navigator.clipboard.writeText(cmd);
+                }}
+                className="mt-1 text-[10px] text-violet-300 hover:text-violet-200">
+                Copy CLI snippet
+              </button>
+            </div>
+          )}
         </div>
         <div className="p-3 border-t border-white/5 flex justify-end gap-2">
           <button onClick={onClose} disabled={submitting}
                   className="text-xs text-slate-400 hover:text-slate-200 px-3 py-1.5">Cancel</button>
           <button onClick={submit} disabled={submitting}
                   className="text-xs px-3 py-1.5 rounded bg-violet-700 hover:bg-violet-600 text-white font-semibold disabled:opacity-50">
-            {submitting ? 'Assigning…' : 'Assign'}
+            {submitting ? 'Saving…' : 'Save to AuditGraph ledger'}
           </button>
         </div>
       </div>

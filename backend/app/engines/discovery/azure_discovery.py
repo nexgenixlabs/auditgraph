@@ -1769,6 +1769,45 @@ class AzureDiscoveryEngine:
             logger.warning("Dependency impact analysis failed: %s", e)
             self.db._rollback()
 
+        # AG-PILOT-PIPELINE-WIRING (2026-06-08): three producers existed
+        # but were never wired into the live scan. Real-pilot pages were
+        # empty as a result. Wire each into Step 9c (this slot) so every
+        # completed scan materializes the rollup tables their handlers/
+        # frontends expect. All three are best-effort — a failure in any
+        # is logged but doesn't fail the scan.
+
+        # Step 9c.1: Cognitive Services + AI Model Deployments
+        # Populates azure_cognitive_services_accounts + azure_ai_model_deployments
+        # so /ai-runtime and /ai-runtime/model-registry show real data.
+        try:
+            cs_result = self.discover_cognitive_services_and_deployments(self.run_id)
+            logger.info("Cognitive Services discovery: %s", cs_result)
+        except Exception as e:
+            logger.warning("Cognitive Services discovery failed (non-fatal): %s", e)
+
+        # Step 9c.2: AI Data Reachability auto-classification
+        # Populates agent_data_reachability so /ai-access/data-reachability
+        # shows what AI agents can reach via RBAC into classified data.
+        try:
+            from app.engines.ai.data_reachability_engine import classify_undiscovered_resources
+            reach_count = classify_undiscovered_resources(self.db, self.run_id, self.db_org_id)
+            logger.info("AI data reachability classification: %s entries", reach_count)
+        except Exception as e:
+            logger.warning("AI data reachability classification failed (non-fatal): %s", e)
+
+        # Step 9c.3: Entra Directory Role Activity rollup (Feature E baseline)
+        # Materializes entra_role_activity baseline from entra_role_assignments
+        # so the page shows every standing role grant. Activity bucket /
+        # dormancy band stay 'unknown' until the full audit-log inference
+        # (1-week spec'd feature) ships — moat rule: don't invent bands on
+        # absent data.
+        try:
+            from app.engines.entra.role_activity_inference import populate_entra_role_activity
+            era_count = populate_entra_role_activity(self.db, self.db_org_id, self.run_id)
+            logger.info("Entra role activity baseline: %s rollup entries", era_count)
+        except Exception as e:
+            logger.warning("Entra role activity baseline failed (non-fatal): %s", e)
+
         # Step 10: Evaluate scan integrity and complete discovery run
         self._update_job_progress('finalizing', 92)
         logger.info("Completing discovery run...")
@@ -5891,31 +5930,50 @@ class AzureDiscoveryEngine:
             return name
 
         # --- Eligible assignments ---
+        # AG-PILOT-PIM-PAGINATION (2026-06-08): Graph default page = 100.
+        # Real-pilot customer has 100+ eligible assignments — without
+        # pagination only the first page was persisted.
         eligible_count = 0
         try:
             eligible_response = await asyncio.wait_for(self.graph_client.role_management.directory.role_eligibility_schedule_instances.get(), timeout=GRAPH_SDK_TIMEOUT)
+            all_eligible = []
             if eligible_response and eligible_response.value:
-                for item in eligible_response.value:
-                    principal_id = item.principal_id
-                    role_def_id = item.role_definition_id
-                    role_name = await _get_role_name(role_def_id)
+                all_eligible.extend(eligible_response.value)
+            next_link = getattr(eligible_response, 'odata_next_link', None) if eligible_response else None
+            while next_link:
+                try:
+                    eligible_response = await asyncio.wait_for(
+                        self.graph_client.role_management.directory.role_eligibility_schedule_instances.with_url(next_link).get(),
+                        timeout=GRAPH_SDK_TIMEOUT,
+                    )
+                    if eligible_response and eligible_response.value:
+                        all_eligible.extend(eligible_response.value)
+                    next_link = getattr(eligible_response, 'odata_next_link', None) if eligible_response else None
+                except Exception as e:
+                    logger.warning("PIM eligible pagination failed — returning partial: %s", str(e)[:80])
+                    break
 
-                    if principal_id not in pim_map:
-                        pim_map[principal_id] = {'eligible': [], 'activations': []}
+            for item in all_eligible:
+                principal_id = item.principal_id
+                role_def_id = item.role_definition_id
+                role_name = await _get_role_name(role_def_id)
 
-                    is_permanent = item.end_date_time is None
-                    pim_map[principal_id]['eligible'].append({
-                        'role_name': role_name,
-                        'role_definition_id': role_def_id,
-                        'directory_scope': getattr(item, 'directory_scope_id', '/') or '/',
-                        'assignment_type': 'permanent_eligible' if is_permanent else 'time_bound_eligible',
-                        'start_datetime': item.start_date_time.isoformat() if item.start_date_time else None,
-                        'end_datetime': item.end_date_time.isoformat() if item.end_date_time else None,
-                        'member_type': getattr(item, 'member_type', None),
-                    })
-                    eligible_count += 1
+                if principal_id not in pim_map:
+                    pim_map[principal_id] = {'eligible': [], 'activations': []}
 
-            logger.info("Found %s PIM eligible assignments", eligible_count)
+                is_permanent = item.end_date_time is None
+                pim_map[principal_id]['eligible'].append({
+                    'role_name': role_name,
+                    'role_definition_id': role_def_id,
+                    'directory_scope': getattr(item, 'directory_scope_id', '/') or '/',
+                    'assignment_type': 'permanent_eligible' if is_permanent else 'time_bound_eligible',
+                    'start_datetime': item.start_date_time.isoformat() if item.start_date_time else None,
+                    'end_datetime': item.end_date_time.isoformat() if item.end_date_time else None,
+                    'member_type': getattr(item, 'member_type', None),
+                })
+                eligible_count += 1
+
+            logger.info("Found %s PIM eligible assignments (across all pages)", eligible_count)
 
         except Exception as e:
             err_str = str(e)
@@ -6019,11 +6077,29 @@ class AzureDiscoveryEngine:
                 logger.warning("PIM activation policies error: %s", err_str[:120])
 
         # --- Active activations ---
+        # AG-PILOT-PIM-PAGINATION (2026-06-08): same pagination as eligible
         activation_count = 0
         try:
             activations_response = await asyncio.wait_for(self.graph_client.role_management.directory.role_assignment_schedule_instances.get(), timeout=GRAPH_SDK_TIMEOUT)
+            all_activations = []
             if activations_response and activations_response.value:
-                for item in activations_response.value:
+                all_activations.extend(activations_response.value)
+            next_link = getattr(activations_response, 'odata_next_link', None) if activations_response else None
+            while next_link:
+                try:
+                    activations_response = await asyncio.wait_for(
+                        self.graph_client.role_management.directory.role_assignment_schedule_instances.with_url(next_link).get(),
+                        timeout=GRAPH_SDK_TIMEOUT,
+                    )
+                    if activations_response and activations_response.value:
+                        all_activations.extend(activations_response.value)
+                    next_link = getattr(activations_response, 'odata_next_link', None) if activations_response else None
+                except Exception as e:
+                    logger.warning("PIM activations pagination failed — returning partial: %s", str(e)[:80])
+                    break
+
+            if all_activations:
+                for item in all_activations:
                     # Only track activated (JIT) assignments, skip permanently assigned
                     assignment_type = getattr(item, 'assignment_type', None)
                     if assignment_type and assignment_type.lower() == 'assigned':
@@ -10457,7 +10533,15 @@ class AzureDiscoveryEngine:
                     logger.warning("[consent_grants] delegated page=%d request err: %s", page, e)
                     break
                 if resp.status_code == 403:
+                    # AG-PILOT-CONSENT-403 (2026-06-08): persist the
+                    # denial so the UI can show "Directory.Read.All not
+                    # consented" instead of a confusing empty state.
                     logger.warning("[consent_grants] PERMISSION DENIED on oauth2PermissionGrants — Directory.Read.All required")
+                    try:
+                        self._persist_permission('consent_grants_delegated', 'denied',
+                                                 detail='Directory.Read.All not consented')
+                    except Exception:
+                        pass
                     return
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', '5'))

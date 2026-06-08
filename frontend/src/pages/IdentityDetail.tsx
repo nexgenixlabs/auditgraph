@@ -1868,12 +1868,15 @@ function TimelineTab({ identityId }: { identityId: string }) {
               const colors = EVENT_COLORS[event.event_type] || EVENT_COLORS.risk_change;
               return (
                 <div key={idx} className="flex items-start gap-3 group">
+                  {/* AG-PILOT-TIMELINE-CONTRAST (2026-06-08): customer
+                      reported timeline text was hardly visible. Bumped
+                      ink + sizes for the whole row. */}
                   {/* Timestamp column */}
                   <div className="w-[72px] flex-shrink-0 text-right pt-1">
-                    <div className="text-[10px] text-gray-500 font-mono">
+                    <div className="text-[11px] text-slate-700 font-mono font-medium">
                       {event.timestamp ? new Date(event.timestamp).toLocaleDateString() : '—'}
                     </div>
-                    <div className="text-[9px] text-gray-400">
+                    <div className="text-[10px] text-slate-500">
                       {event.timestamp ? relativeTime(event.timestamp) : ''}
                     </div>
                   </div>
@@ -1886,23 +1889,23 @@ function TimelineTab({ identityId }: { identityId: string }) {
                   {/* Event card */}
                   <div className={`flex-1 rounded-lg border px-3 py-2 ${colors.bg}`}>
                     <div className="flex items-center gap-2 mb-0.5">
-                      <span className="text-[10px] font-bold uppercase text-gray-500">
+                      <span className="text-[11px] font-bold uppercase text-slate-700 tracking-wide">
                         {EVENT_LABELS[event.event_type] || event.event_type}
                       </span>
                       {event.severity && (
-                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
                           event.severity === 'critical' ? 'bg-red-100 text-red-700' :
                           event.severity === 'high' ? 'bg-orange-100 text-orange-700' :
                           event.severity === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                          'bg-gray-100 text-gray-600'
+                          'bg-gray-100 text-gray-700'
                         }`}>
                           {event.severity}
                         </span>
                       )}
                     </div>
-                    <div className="text-xs font-medium text-gray-900">{event.title}</div>
+                    <div className="text-sm font-semibold text-slate-900">{event.title}</div>
                     {event.description && (
-                      <div className="text-[11px] text-gray-600 mt-0.5 line-clamp-2">{event.description}</div>
+                      <div className="text-xs text-slate-700 mt-0.5 line-clamp-2">{event.description}</div>
                     )}
                   </div>
                 </div>
