@@ -9527,20 +9527,67 @@ def get_dashboard_posture():
                     'nhi_reachable': nhi_band,
                 }
             else:
-                # AG-PILOT-FIX (2026-06-08): real-pilot bug — fresh scans
-                # don't populate data_classification on resources, so the
-                # Business Impact $ card was hidden entirely. Show explicit
-                # "classification pending" state instead so the customer
-                # knows what's coming + why nothing's rendered yet.
-                business_impact['estimated_exposure'] = None
-                business_impact['exposure_by_scope'] = None
-                business_impact['exposure_status'] = 'classification_pending'
-                business_impact['exposure_message'] = (
-                    'Data classification has not run yet on your tenant — '
-                    'no classified resources tagged. Run a resource scan or '
-                    'tag your sensitive data containers (PHI / PCI / PII) to '
-                    'see breach-cost exposure in dollars here.'
-                )
+                # AG-PILOT-FIX-V2 (2026-06-08): real-pilot CISO wants a
+                # number, not a "classification pending" message. Compute
+                # a BASELINE estimate using:
+                #   - all discovered classified-eligible resources (storage/sql/cosmos)
+                #   - assume PII (lowest IBM 2023 tier — $165/record midpoint)
+                #   - baseline record count of 10,000 per resource when unknown
+                # Labeled explicitly as "baseline — refine by tagging" so
+                # the CISO knows it's not a precise figure but has a number
+                # to anchor the board conversation.
+                try:
+                    cursor.execute("""
+                        SELECT (
+                          SELECT COUNT(*) FROM azure_storage_accounts WHERE organization_id = %s
+                        ) + (
+                          SELECT COUNT(*) FROM azure_sql_databases WHERE organization_id = %s
+                        ) + (
+                          SELECT COUNT(*) FROM azure_cosmos_databases WHERE organization_id = %s
+                        ) AS total_resources
+                    """, (org_id, org_id, org_id))
+                    res_row = cursor.fetchone()
+                    total_resources = (res_row[0] if res_row else 0) or 0
+                except Exception:
+                    total_resources = 0
+
+                if total_resources > 0:
+                    # Baseline: 10K records/resource × IBM 2023 PII tier
+                    # ($148 low, $165 mid, $183 high per record)
+                    baseline_records = total_resources * 10_000
+                    baseline_low  = baseline_records * 148
+                    baseline_mid  = baseline_records * 165
+                    baseline_high = baseline_records * 183
+                    from app.engines.scoring.breach_cost import format_dollar_short
+                    business_impact['estimated_exposure'] = {
+                        'low':  baseline_low,
+                        'mid':  baseline_mid,
+                        'high': baseline_high,
+                        'low_display':  format_dollar_short(baseline_low),
+                        'mid_display':  format_dollar_short(baseline_mid),
+                        'high_display': format_dollar_short(baseline_high),
+                        'total_records': baseline_records,
+                        'scope': 'baseline',
+                        'scope_label': f'Baseline estimate — {total_resources} resources (assumes PII tier)',
+                        'classified_resource_count': total_resources,
+                        'is_baseline': True,
+                    }
+                    business_impact['exposure_by_scope'] = None
+                    business_impact['exposure_status'] = 'baseline_estimate'
+                    business_impact['exposure_message'] = (
+                        f'Baseline estimate using IBM 2023 PII per-record cost ($165 mid). '
+                        f'Tag your {total_resources} classified-eligible resources '
+                        f'(PHI / PCI / Financial) for a precise tenant-specific figure.'
+                    )
+                else:
+                    # Truly no classified-eligible resources discovered
+                    business_impact['estimated_exposure'] = None
+                    business_impact['exposure_by_scope'] = None
+                    business_impact['exposure_status'] = 'no_classified_resources'
+                    business_impact['exposure_message'] = (
+                        'No classified-eligible resources (storage / SQL / Cosmos) discovered '
+                        'in your tenant. Breach exposure shows here once resources are scanned.'
+                    )
         except Exception as _exp_err:
             logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
 
@@ -24966,10 +25013,14 @@ def get_identity_federated_credentials(identity_id: str):
     federated section without paying for the full lineage payload.
     Returns the credentials list + per-credential risk posture +
     a top-level summary suitable for a CISO-facing card.
+
+    AG-PILOT-FIX (2026-06-08): real-pilot 500 — code used db.cursor()
+    but Database has no top-level cursor() method. Replaced with
+    db.conn.cursor() to match the actual API.
     """
     db = Database(_tenant_id())
     try:
-        cursor = db.cursor()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({
