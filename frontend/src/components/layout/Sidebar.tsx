@@ -152,18 +152,17 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        // Per-identity controls. Same pages for now; "Identity Inventory"
-        // unification (one page with Human / NHI / AI tabs) lands in
-        // weeks 3-4. Today the rows are AI-prefixed because the existing
-        // pages only cover AI — but the SECTION is type-agnostic so the
-        // mental model is right from day one.
-        label: 'Identity Security',
+        // AG-PILOT-IA (2026-06-08): renamed to "IDENTITY" — the spine of
+        // the product. AI Inventory removed from sidebar (it's now a tab
+        // within Identity Inventory). Section header reads as the actual
+        // capability rather than positioning as "AI security".
+        label: 'Identity',
         color: '#8b5cf6',
         items: [
+          // Identity Inventory has Humans / NHIs / AI Agents / Privileged tabs
+          // built-in; the separate AI Inventory link was redundant
           { to: '/identity-explorer', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/ai-inventory',      label: 'AI Inventory',       icon: agentBotIcon },
           { to: '/ai-access',         label: 'Identity Access',    icon: effectiveAccessIcon },
-          // AG-181 (Tier 2C): J/M/L drift — will generalize to all NHI in week 5-6
           // AG-WK2: Identity Trust — universal 9-dim Trust across SPNs+MIs+AI
           { to: '/identity-trust',    label: 'Identity Trust',     icon: roleOptIcon },
           { to: '/ai-lifecycle',      label: 'Identity Lifecycle', icon: identityIcon },
@@ -193,32 +192,38 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        // Cross-cutting attack analytics. Per peer review v4: Attack Paths +
-        // AI Attack Paths will eventually merge into one graph (2027 problem).
+        // AG-PILOT-IA (2026-06-08): Attack Paths kept unified; the
+        // AI variant is now a filter chip on the main page, not a
+        // separate item. Reduces sidebar noise + signals that attack-
+        // path analysis covers all identity types.
         label: 'Attack Surface',
         color: '#dc2626',
         items: [
           { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
-          { to: '/ai-risk/attack-paths', label: 'AI Attack Paths', icon: roleOptIcon },
+          // /ai-risk/attack-paths route preserved (deep links still work);
+          // surfaced via filter chip on /attack-paths instead of sidebar
           { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
           { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
         ],
       },
       {
-        // AI WORKLOAD layer — NOT identity. Model + plugin + vector + threat
-        // signal ingestion. No "AI identities" live here (they're in Identity
-        // Security as a subtype of NHI).
-        label: 'AI Security',
+        // AG-PILOT-IA (2026-06-08): renamed "AI Security" → "Workload
+        // Security". This section is about the AI WORKLOAD layer (runtime,
+        // models, supply chain, threats), NOT identity. AI identities
+        // live in the Identity section as a subtype of NHI.
+        // Item names also drop the "AI" prefix — context comes from the
+        // section, not redundant per-item branding.
+        label: 'Workload Security',
         color: '#a78bfa',
         items: [
-          { to: '/ai-runtime', label: 'AI Runtime', icon: agentBotIcon },
+          { to: '/ai-runtime', label: 'Runtime', icon: agentBotIcon },
           { to: '/ai-runtime/model-registry', label: 'Model Registry', icon: agentBotIcon },
-          { to: '/ai-runtime/supply-chain', label: 'AI Supply Chain', icon: agentBotIcon },
+          { to: '/ai-runtime/supply-chain', label: 'Supply Chain', icon: agentBotIcon },
           { to: '/ai-runtime/threat-connectors', label: 'Threat Connectors', icon: agentBotIcon },
-          { to: '/ai-findings', label: 'AI Findings', icon: roleOptIcon },
-          // AI Abuse Scenarios (Tier 2.1) — promoted from drawer to page view.
-          // Was labeled "AI Risk"; renamed for clarity (the page IS the scenarios).
-          { to: '/ai-risk', label: 'AI Abuse Scenarios', icon: roleOptIcon },
+          { to: '/ai-findings', label: 'Findings', icon: roleOptIcon },
+          // Was "AI Abuse Scenarios" → "Threat Scenarios" — reads as
+          // security analysis, not AI-specific gimmick. Same engine.
+          { to: '/ai-risk', label: 'Threat Scenarios', icon: roleOptIcon },
         ],
       },
       {
