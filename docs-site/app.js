@@ -70,6 +70,8 @@
         { slug: 'screen-ai-inventory',        title: 'AI Inventory' },
         { slug: 'screen-identity-trust',      title: 'Identity Trust' },
         { slug: 'screen-ownership-center',    title: 'Ownership Center' },
+        { slug: 'screen-pim-overprivilege',   title: 'PIM Overprivilege' },
+        { slug: 'screen-entra-role-activity', title: 'Entra Role Activity' },
         { slug: 'screen-multi-hop-xgraph',    title: 'Multi-Hop XGRAPH' },
         { slug: 'screen-data-reachability',   title: 'Data Reachability' },
         { slug: 'screen-ai-abuse-scenarios',  title: 'AI Abuse Scenarios' },
