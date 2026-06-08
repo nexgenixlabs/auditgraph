@@ -4232,7 +4232,12 @@ class Database:
 
     def save_pim_activation(self, identity_db_id: int, data: Dict):
         """INSERT a PIM activation record. Tenant scoping via identity_db_id
-        FK (see save_pim_eligible header note)."""
+        FK (see save_pim_eligible header note).
+
+        AG-PIM-PHASE2-B (2026-06-07): also dual-writes to the new
+        pim_activation_observations table that the PIM Overprivilege engine
+        reads from. Same compatibility shim pattern as save_pim_eligible.
+        """
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -4258,8 +4263,81 @@ class Database:
                 data.get("created_datetime"),
             ),
         )
+
+        # AG-PIM-PHASE2-B: dual-write to pim_activation_observations.
+        # The new engine needs historical activation timestamps to compute
+        # activity_frequency + last_activation. Best-effort — never breaks
+        # the legacy write.
+        try:
+            self._dual_write_pim_activation_observation(cursor, identity_db_id, data)
+        except Exception as e:
+            logger.warning("dual-write to pim_activation_observations failed: %s", str(e)[:120])
+
         self._commit()
         cursor.close()
+
+    def _dual_write_pim_activation_observation(self, cursor, identity_db_id: int, data: Dict):
+        """Mirror a PIM activation record into pim_activation_observations.
+
+        Companion to save_pim_activation (above). Uses the
+        roleAssignmentScheduleRequests-sourced data the discovery pipeline
+        already pulls (activation_start as the timestamp, justification, etc.).
+
+        Idempotency: the table has UNIQUE (organization_id, audit_event_id);
+        we synthesize a deterministic audit_event_id from
+        (identity_db_id, role_def_id, activation_start). Same source data
+        on a re-scan produces the same key, ON CONFLICT DO NOTHING.
+        """
+        activation_start = data.get("activation_start") or data.get("created_datetime")
+        if not activation_start:
+            return  # without a timestamp the observation isn't useful
+
+        cursor.execute(
+            "SELECT organization_id, identity_id FROM identities WHERE id = %s",
+            (identity_db_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+        organization_id, identity_id = row
+
+        role_name = data.get("role_name")
+        role_def_id = data.get("role_definition_id")
+        scope = data.get("directory_scope") or "/"
+        justification = data.get("justification")
+
+        # Synthetic event_id — deterministic, so re-runs are idempotent
+        event_id = f"pim-req:{identity_db_id}:{role_def_id or 'unknown'}:{activation_start}"
+
+        # Compute duration if both start and end present
+        duration_minutes = None
+        activation_end = data.get("activation_end")
+        if activation_start and activation_end:
+            try:
+                from datetime import datetime as _dt
+                start_dt = _dt.fromisoformat(activation_start.replace('Z', '+00:00')) if isinstance(activation_start, str) else activation_start
+                end_dt = _dt.fromisoformat(activation_end.replace('Z', '+00:00')) if isinstance(activation_end, str) else activation_end
+                duration_minutes = int((end_dt - start_dt).total_seconds() // 60)
+            except Exception:
+                duration_minutes = None
+
+        cursor.execute(
+            """
+            INSERT INTO pim_activation_observations (
+                organization_id, identity_db_id, identity_id,
+                role_name, role_template_id, scope,
+                activated_at, activation_duration_minutes,
+                justification, audit_event_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (organization_id, audit_event_id) DO NOTHING
+            """,
+            (
+                organization_id, identity_db_id, identity_id,
+                role_name, role_def_id, scope,
+                activation_start, duration_minutes,
+                justification, event_id,
+            ),
+        )
 
     def update_identity_pim_summary(self, identity_db_id: int):
         """Update denormalized PIM counts on identities table"""

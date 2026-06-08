@@ -5924,6 +5924,100 @@ class AzureDiscoveryEngine:
             else:
                 logger.warning("PIM eligible assignments error: %s", err_str[:80])
 
+        # --- AG-PIM-PHASE2-A (2026-06-07): Activation policies per role ---
+        # Pulls /policies/roleManagementPolicies + parses each to extract the
+        # activation requirements (MFA, approval, justification, max duration).
+        # Result merged into each eligible item below so save_pim_eligible
+        # writes real policy values to pim_eligibility_state (instead of the
+        # Phase 1 conservative-safe defaults). Without this, the
+        # pim_weak_activation_control finding never fires on real client data.
+        policy_by_role_def_id: dict[str, dict] = {}
+        try:
+            from app.engines.pim.role_policy_parser import parse_role_management_policy
+            # Collect unique role_definition_ids we've observed in eligibles
+            role_def_ids_seen = {
+                e['role_definition_id']
+                for v in pim_map.values()
+                for e in v.get('eligible', [])
+                if e.get('role_definition_id')
+            }
+            if role_def_ids_seen:
+                # Pull policy assignments (scope='/' = directory scope), each
+                # contains a policyId we then fetch with rules expanded
+                token = self.credential.get_token("https://graph.microsoft.com/.default")
+                headers = {"Authorization": f"Bearer {token.token}"}
+
+                async with aiohttp.ClientSession(timeout=GRAPH_HTTP_TIMEOUT) as session:
+                    # 1) GET policyAssignments filtered to directory scope
+                    pa_url = (
+                        "https://graph.microsoft.com/v1.0/policies/"
+                        "roleManagementPolicyAssignments"
+                        "?$filter=scopeId eq '/' and scopeType eq 'DirectoryRole'"
+                    )
+                    role_def_to_policy_id: dict[str, str] = {}
+                    while pa_url:
+                        async with self._graph_semaphore:
+                            async with session.get(pa_url, headers=headers) as resp:
+                                if resp.status != 200:
+                                    logger.warning(
+                                        "PIM policy assignments fetch failed: HTTP %s",
+                                        resp.status,
+                                    )
+                                    break
+                                body = await resp.json()
+                        for item in body.get('value', []):
+                            rdid = item.get('roleDefinitionId')
+                            pid = item.get('policyId')
+                            if rdid and pid:
+                                role_def_to_policy_id[rdid] = pid
+                        pa_url = body.get('@odata.nextLink')
+
+                    # 2) For each role_def_id we've actually seen, fetch the
+                    # policy expanded with rules + parse
+                    for rdid in role_def_ids_seen:
+                        pid = role_def_to_policy_id.get(rdid)
+                        if not pid:
+                            continue
+                        policy_url = (
+                            f"https://graph.microsoft.com/v1.0/policies/"
+                            f"roleManagementPolicies/{pid}?$expand=rules"
+                        )
+                        async with self._graph_semaphore:
+                            async with session.get(policy_url, headers=headers) as resp:
+                                if resp.status != 200:
+                                    continue
+                                policy_doc = await resp.json()
+                        parsed = parse_role_management_policy(policy_doc)
+                        if parsed.get('parsed'):
+                            policy_by_role_def_id[rdid] = parsed
+
+                # 3) Merge parsed policy values into each eligible item
+                merge_count = 0
+                for principal_id, v in pim_map.items():
+                    for eligible in v.get('eligible', []):
+                        rdid = eligible.get('role_definition_id')
+                        parsed = policy_by_role_def_id.get(rdid)
+                        if parsed:
+                            eligible['requires_mfa_on_activation'] = parsed['requires_mfa_on_activation']
+                            eligible['requires_approval']          = parsed['requires_approval']
+                            eligible['requires_justification']     = parsed['requires_justification']
+                            eligible['max_activation_minutes']     = parsed['max_activation_minutes']
+                            merge_count += 1
+                if merge_count:
+                    logger.info(
+                        "Merged activation policy data into %d eligible assignment(s) "
+                        "across %d distinct directory roles",
+                        merge_count, len(policy_by_role_def_id),
+                    )
+        except Exception as e:
+            # Policy pull is best-effort enrichment — failure shouldn't
+            # break the rest of PIM discovery
+            err_str = str(e)
+            if '403' in err_str or 'Forbidden' in err_str:
+                logger.info("PIM activation policies: requires Policy.Read.All (403)")
+            else:
+                logger.warning("PIM activation policies error: %s", err_str[:120])
+
         # --- Active activations ---
         activation_count = 0
         try:
