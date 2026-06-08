@@ -17,7 +17,7 @@
     "axios": "^1.13.2",
     "dompurify": "^3.3.3",
     "express": "^5.2.1",
-    "http-proxy-middleware": "^3.0.5",
+    "http-proxy-middleware": "^4.1.0",
     "jspdf": "^4.1.0",
     "jspdf-autotable": "^5.0.7",
     "react": "^19.2.3",
