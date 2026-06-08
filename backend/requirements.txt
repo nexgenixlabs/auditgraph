@@ -96,7 +96,7 @@ sendgrid>=6.10.0
 
 # API Security & Validation
 jsonschema>=4.20.0
-tenacity>=8.2.0
+tenacity>=9.1.2
 
 # Phase 3 async layer (FastAPI routes under app/api/routes/*) —
 # additive, does not replace the sync psycopg2 Flask stack.
