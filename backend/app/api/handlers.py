@@ -18972,6 +18972,38 @@ def create_client_connection():
         if isinstance(meta, dict):
             meta.pop('client_secret', None)
             result['metadata'] = meta
+
+        # AG-PILOT-AUTO-DISCOVERY (2026-06-07): trigger discovery in the
+        # background when a connection is added with status=connected and
+        # at least one subscription was discovered. Eliminates "where's
+        # my data?" friction — customer sees populated dashboard in
+        # ~3-5 minutes instead of having to manually click "Run Discovery".
+        discovery_triggered = False
+        if conn.get('status') == 'connected' and discovered_count > 0:
+            try:
+                import threading as _threading
+                from app.scheduler import trigger_manual_discovery
+                _tname = g.current_user.get('org_name') if hasattr(g, 'current_user') and g.current_user else None
+                def _auto_discover():
+                    try:
+                        trigger_manual_discovery(db_org_id=tid, org_name=_tname,
+                                                  connection_id=conn['id'])
+                    except Exception as auto_e:
+                        logger.warning(
+                            "Auto-discovery for connection %s failed (non-fatal): %s",
+                            conn['id'], str(auto_e)[:120],
+                        )
+                _t = _threading.Thread(target=_auto_discover, daemon=True)
+                _t.start()
+                discovery_triggered = True
+                logger.info("Auto-discovery triggered for new connection %s on org %s",
+                              conn['id'], tid)
+            except Exception as t_e:
+                # Connection creation already succeeded; auto-discovery is
+                # best-effort. Customer can always trigger manually.
+                logger.warning("Failed to spawn auto-discovery thread: %s", str(t_e)[:120])
+
+        result['discovery_triggered'] = discovery_triggered
         return jsonify({'connection': result}), 201
     finally:
         db.close()
@@ -20322,10 +20354,29 @@ def test_client_connection():
                 msg += (' The Service Principal authenticated but has no RBAC access to any subscription. '
                          'Assign at least Reader role on the target subscription(s) in Azure IAM.')
 
+            # AG-PILOT-PERM-CHECK (2026-06-07): verify Graph API permission
+            # scope matches what AuditGraph needs (no more, no less). Surfaces
+            # the customer's own consent grant — supports the "agentless +
+            # read-only" pitch by proving it from their data.
+            permission_check = None
+            try:
+                from app.api.permission_scope_check import check_azure_app_permissions
+                permission_check = check_azure_app_permissions(
+                    tenant_id=azure_directory_id,
+                    client_id=azure_client_id,
+                    client_secret=azure_client_secret,
+                )
+                logger.info("Permission scope check verdict=%s for org=%s",
+                             permission_check.get('verdict'), tid)
+            except Exception as perm_e:
+                logger.warning("Permission scope check failed (non-fatal): %s",
+                                 str(perm_e)[:120])
+
             return jsonify({
                 'status': 'success',
                 'subscriptions': subs,
                 'message': msg,
+                'permission_check': permission_check,
             })
         except Exception as e:
             # Update test status on failure
