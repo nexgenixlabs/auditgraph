@@ -20426,13 +20426,13 @@ class Database:
         cloud_connection_id is required (NOT NULL constraint post-migration 037).
         organization_id is kept for denormalization but auto-synced by trigger.
 
-        AG-PILOT-AUTO-ACTIVATE-SUBS-V2 (2026-06-08): the onboarding
-        wizard calls create_client_connection (not test) which routes
-        through here — so the previous test-endpoint-only auto-activate
-        fix never fired in the wizard. Now: on FIRST connection (zero
-        existing active subs for the org), auto-activate everything so
-        first discovery scan finds identities. Subsequent calls preserve
-        whatever the customer has chosen manually.
+        AG-PILOT-DO-NOT-AUTO-ACTIVATE (2026-06-08): reverted the previous
+        auto-activate-on-first-connection logic per founder direction.
+        Auto-activating EVERY discovered subscription is wrong default —
+        the customer pays per monitored subscription and the activation
+        choice is theirs. The onboarding wizard now has an explicit
+        'Subscriptions' step where the customer picks which subs to
+        activate before proceeding to discovery.
         """
         self._ensure_cloud_subscriptions_table()
         if not subs_list:
@@ -20440,20 +20440,6 @@ class Database:
         if not connection_id:
             raise ValueError("cloud_connection_id is required for insert_discovered_subscriptions")
         cursor = self.conn.cursor()
-
-        # First-connection check — count existing active subs across org
-        existing_active = 0
-        try:
-            cursor.execute("""
-                SELECT COUNT(*) FROM cloud_subscriptions
-                WHERE organization_id = %s AND status = 'active'
-                  AND COALESCE(deleted, FALSE) = FALSE
-            """, (organization_id,))
-            existing_active = (cursor.fetchone() or (0,))[0] or 0
-        except Exception:
-            self._rollback()
-        initial_status = 'active' if existing_active == 0 else 'discovered'
-
         inserted = 0
         rate = 6900 if cloud == 'azure' else (7900 if cloud == 'aws' else 7400)
         for sub in subs_list:
@@ -20465,10 +20451,10 @@ class Database:
                 cursor.execute("""
                     INSERT INTO cloud_subscriptions
                         (organization_id, cloud, account_id, account_name, status, cloud_connection_id, rate_cents)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, 'discovered', %s, %s)
                     ON CONFLICT (cloud_connection_id, account_id)
                     DO UPDATE SET account_name = COALESCE(EXCLUDED.account_name, cloud_subscriptions.account_name)
-                """, (organization_id, cloud, sub_id, sub_name, initial_status, connection_id, rate))
+                """, (organization_id, cloud, sub_id, sub_name, connection_id, rate))
                 inserted += 1
             except Exception:
                 self._rollback()

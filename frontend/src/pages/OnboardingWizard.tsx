@@ -9,7 +9,10 @@ import { DiscoveryProgressModal } from '../components/settings/DiscoveryProgress
 // highest-risk identity from the just-completed run. Turns the wizard
 // from "settings form → orphan landing" into Wiz-style "connect →
 // first finding in <2min".
-const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch', 'Scanning'];
+// AG-PILOT-WIZARD-SUBS (2026-06-08): added explicit Subscriptions step
+// between Test and Configure. Customer picks which discovered subs to
+// monitor (billed per-sub) instead of platform auto-activating everything.
+const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Subscriptions', 'Configure', 'Launch', 'Scanning'];
 
 interface TestResult {
   status: string;
@@ -59,6 +62,10 @@ export default function OnboardingWizard() {
   const [azureClientSecret, setAzureClientSecret] = useState('');
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // AG-PILOT-WIZARD-SUBS (2026-06-08): track which subs the customer
+  // explicitly chose to monitor. Wizard's new Subscriptions step.
+  const [activatingSubIds, setActivatingSubIds] = useState<string[]>([]);
+  const [activatingSubs, setActivatingSubs] = useState(false);
   const [discoveryInterval, setDiscoveryInterval] = useState('12');
   const [emailEnabled, setEmailEnabled] = useState(false);
   const [emailTo, setEmailTo] = useState('');
@@ -112,9 +119,11 @@ export default function OnboardingWizard() {
       return false; // AWS/GCP not yet supported
     }
     if (step === 3) return testResult?.status === 'success';
-    if (step === 4) return !emailEnabled || /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(emailTo.trim());
+    // AG-PILOT-WIZARD-SUBS: at least 1 sub must be picked before proceeding
+    if (step === 4) return activatingSubIds.length > 0;
+    if (step === 5) return !emailEnabled || /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(emailTo.trim());
     return true;
-  }, [step, orgName, selectedCloud, azureTenantId, azureClientId, azureClientSecret, testResult, emailEnabled, emailTo]);
+  }, [step, orgName, selectedCloud, azureTenantId, azureClientId, azureClientSecret, testResult, activatingSubIds, emailEnabled, emailTo]);
 
   // Auto-trigger test when arriving at Step 3 (Test Connection) with credentials filled
   const autoTestTriggered = React.useRef(false);
@@ -183,6 +192,22 @@ export default function OnboardingWizard() {
         sessionStorage.removeItem(stepKey(orgId));
       }
 
+      // AG-PILOT-WIZARD-SUBS (2026-06-08): activate the customer's
+      // chosen subscriptions BEFORE triggering discovery. Without this,
+      // first scan would find 0 identities because no subs are 'active'.
+      if (activatingSubIds.length > 0) {
+        try {
+          await fetch('/api/subscriptions/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_ids: activatingSubIds }),
+          });
+        } catch (subErr) {
+          // Non-fatal — customer can activate manually from Subs page
+          console.warn('Failed to activate selected subscriptions', subErr);
+        }
+      }
+
       // 2. Trigger the initial scan immediately so the wizard hands off
       //    to a live scan progress experience instead of an empty
       //    /subscriptions page.
@@ -208,7 +233,7 @@ export default function OnboardingWizard() {
       //    most-recent completed job) and the user sees what's there.
       setScanConnectionId(triggeredConnectionId);
       setShowScanModal(true);
-      setStep(6);
+      setStep(7);
     } catch (e: any) {
       setError(e?.message || 'Setup failed');
     } finally {
@@ -502,8 +527,70 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 4: Configure */}
+        {/* AG-PILOT-WIZARD-SUBS (2026-06-08): Step 4 — Subscriptions
+            Customer picks which discovered subs to monitor. Each
+            activated sub is a separately billed monitoring unit. */}
         {step === 4 && (
+          <div className="space-y-5">
+            <div>
+              <h2 className="text-xl font-bold text-white">Activate Subscriptions</h2>
+              <p className="text-sm text-gray-400 mt-2">
+                Choose which subscriptions to monitor. Each activated subscription is billed separately
+                — you can add or remove subs from the Subscriptions page anytime.
+              </p>
+            </div>
+
+            <div className="bg-gray-800 rounded-lg p-4 max-h-96 overflow-y-auto space-y-1">
+              {(testResult?.subscriptions || []).map(s => (
+                <label key={s.id} className="flex items-center gap-3 p-2.5 rounded hover:bg-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-600 text-blue-600"
+                    checked={activatingSubIds.includes(s.id)}
+                    onChange={e => {
+                      if (e.target.checked) {
+                        setActivatingSubIds(prev => [...prev, s.id]);
+                      } else {
+                        setActivatingSubIds(prev => prev.filter(x => x !== s.id));
+                      }
+                    }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-white truncate">{s.name}</div>
+                    <div className="text-[11px] font-mono text-gray-500 truncate">{s.id}</div>
+                  </div>
+                  <div className="text-xs text-gray-400">$69/mo</div>
+                </label>
+              ))}
+              {(!testResult?.subscriptions || testResult.subscriptions.length === 0) && (
+                <p className="text-sm text-amber-400 p-2">
+                  No subscriptions discovered. Go back and verify your credentials grant Reader RBAC on at least one subscription.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <button
+                onClick={() => setActivatingSubIds((testResult?.subscriptions || []).map(s => s.id))}
+                className="text-blue-400 hover:text-blue-300">
+                Select all
+              </button>
+              <span className="text-gray-400">
+                {activatingSubIds.length} of {testResult?.subscriptions?.length || 0} selected
+                {activatingSubIds.length > 0 && (
+                  <> · <span className="text-white font-medium">${activatingSubIds.length * 69}/mo</span></>
+                )}
+              </span>
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-400">{error}</p>
+            )}
+          </div>
+        )}
+
+        {/* Step 5: Configure (was step 4 before adding Subscriptions step) */}
+        {step === 5 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-bold text-white">Configure Snapshots</h2>
@@ -559,8 +646,8 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 5: Launch */}
-        {step === 5 && (
+        {/* Step 6: Launch (was step 5 before adding Subscriptions step) */}
+        {step === 6 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-bold text-white">Review &amp; Launch</h2>
@@ -583,8 +670,11 @@ export default function OnboardingWizard() {
                 <span className="font-mono text-xs text-gray-300">{azureTenantId.slice(0, 8)}...</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Subscriptions Found</span>
-                <span className="font-medium text-green-400">{testResult?.subscriptions?.length || 0}</span>
+                <span className="text-gray-400">Subscriptions to Monitor</span>
+                <span className="font-medium text-green-400">
+                  {activatingSubIds.length} of {testResult?.subscriptions?.length || 0}
+                  <span className="text-gray-500 ml-2">(${activatingSubIds.length * 69}/mo)</span>
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Snapshot Frequency</span>
@@ -615,10 +705,10 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 6: Scanning — first-finding handoff. Renders behind the
+        {/* Step 7: Scanning — first-finding handoff. Renders behind the
             modal; serves as the page content if the user closes the modal
-            without navigating. */}
-        {step === 6 && (
+            without navigating. (was step 6 before adding Subscriptions) */}
+        {step === 7 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-bold text-white">First scan running…</h2>

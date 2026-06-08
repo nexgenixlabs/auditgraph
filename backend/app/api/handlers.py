@@ -20480,40 +20480,28 @@ def test_client_connection():
                                                last_test_status='success',
                                                status='connected')
 
-                    # AG-PILOT-AUTO-ACTIVATE-SUBS (2026-06-08): on FIRST connection
-                    # test (org has no existing active subs), auto-activate all
-                    # discovered subscriptions so first discovery finds something.
-                    # Real-world bug found in pilot Day 0: customer added connection,
-                    # subs were inserted as 'discovered' status only, first scan
-                    # found 0 identities because no subs were 'active'.
-                    # Subsequent tests preserve customer's manual activation choices.
+                    # AG-PILOT-DO-NOT-AUTO-ACTIVATE (2026-06-08):
+                    # Reverted auto-activate per founder direction.
+                    # Customer activates subs explicitly via the wizard
+                    # Subscriptions step or via the Subscriptions page —
+                    # they pay per monitored sub and the choice is theirs.
                     cursor = db.conn.cursor()
-                    cursor.execute("""
-                        SELECT COUNT(*) FROM cloud_subscriptions
-                        WHERE organization_id = %s AND status = 'active' AND COALESCE(deleted, FALSE) = FALSE
-                    """, (tid,))
-                    existing_active = cursor.fetchone()[0]
-                    initial_status = 'active' if existing_active == 0 else 'discovered'
-
-                    # Insert discovered subscriptions into cloud_subscriptions
                     for s in subs:
                         cursor.execute("""
                             INSERT INTO cloud_subscriptions
                                 (organization_id, cloud, account_id, account_name,
                                  status, cloud_connection_id)
-                            VALUES (%s, 'azure', %s, %s, %s, %s)
+                            VALUES (%s, 'azure', %s, %s, 'discovered', %s)
                             ON CONFLICT (organization_id, cloud, account_id) DO UPDATE
                                 SET account_name = EXCLUDED.account_name,
                                     cloud_connection_id = EXCLUDED.cloud_connection_id,
                                     deleted = false
-                        """, (tid, s['id'], s['name'], initial_status, connection_id))
+                        """, (tid, s['id'], s['name'], connection_id))
                     cursor.close()
                     db._commit()
                     logger.info(
-                        "Inserted %d Azure subscription(s) for org %s (status=%s — %s)",
-                        len(subs), tid, initial_status,
-                        'auto-activated, first connection' if initial_status == 'active'
-                        else 'discovered only, org has existing active subs',
+                        "Inserted %d Azure subscription(s) for org %s (status=discovered — customer chooses)",
+                        len(subs), tid,
                     )
                 finally:
                     db.close()
@@ -27531,13 +27519,59 @@ def get_subscriptions_stats():
 
 
 def activate_subscription():
-    """POST /api/subscriptions/activate — activate a subscription for monitoring."""
+    """POST /api/subscriptions/activate — activate one or more subscriptions for monitoring.
+
+    Accepts either:
+      - {'id': <db_row_id>}  (legacy single-sub mode)
+      - {'account_ids': ['<azure_sub_uuid>', ...]}  (AG-PILOT-WIZARD-SUBS:
+        bulk mode used by the onboarding wizard's Subscriptions step)
+    """
     db = _db()
     try:
         data = request.get_json(silent=True) or {}
         sub_id = data.get('id')
+        account_ids = data.get('account_ids')
+
+        # AG-PILOT-WIZARD-SUBS: bulk activation by account_id (Azure sub UUIDs)
+        if account_ids and isinstance(account_ids, list):
+            tid = _org_id()
+            user = getattr(g, 'current_user', None)
+            user_id = user.get('id') if user else None
+            activated = 0
+            failed_ids = []
+            cursor = db.conn.cursor()
+            try:
+                # Resolve account_ids → DB row ids for the current org
+                cursor.execute("""
+                    SELECT id, account_id FROM cloud_subscriptions
+                    WHERE organization_id = %s AND account_id = ANY(%s)
+                      AND COALESCE(deleted, FALSE) = FALSE
+                """, (tid, account_ids))
+                rows = cursor.fetchall()
+                for row in rows:
+                    row_id, acc_id = row[0], row[1]
+                    try:
+                        result = db.activate_cloud_subscription(row_id, user_id, organization_id=tid)
+                        if result:
+                            activated += 1
+                        else:
+                            failed_ids.append(acc_id)
+                    except Exception as e:
+                        logger.warning("Failed to activate sub %s: %s", acc_id, str(e)[:80])
+                        failed_ids.append(acc_id)
+            finally:
+                cursor.close()
+            _log(db, 'subscription_activated',
+                 f'Wizard bulk-activated {activated} subscription(s)',
+                 {'account_ids': account_ids, 'activated': activated, 'failed': failed_ids})
+            return jsonify({
+                'activated': activated,
+                'failed': failed_ids,
+                'total_requested': len(account_ids),
+            })
+
         if not sub_id:
-            return jsonify({'error': 'Subscription id is required'}), 400
+            return jsonify({'error': 'Subscription id or account_ids list is required'}), 400
 
         tid = _org_id()
 
