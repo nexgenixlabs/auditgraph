@@ -6,7 +6,7 @@ anyio==3.7.1
 async-timeout==5.0.1
 attrs==25.4.0
 azure-common==1.1.28
-azure-core==1.38.0
+azure-core==1.39.0
 azure-identity==1.15.0
 azure-mgmt-authorization==4.0.0
 azure-mgmt-core==1.6.0
