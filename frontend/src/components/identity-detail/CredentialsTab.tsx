@@ -69,10 +69,18 @@ export function CredentialsTab({ identity, data }: CredentialsTabProps) {
   // identity authenticated entirely via federated credentials — wrong
   // signal. Make all three cards federation-aware so secret + federated
   // are surfaced together as the unified credential posture.
+  // AG-PILOT-CREDS-UNIFIED-V2 (2026-06-09): handle the edge case where
+  // `has_federated_credentials` is TRUE but `federated_cred_count` is 0
+  // (Graph API returned 403 on /federatedIdentityCredentials or
+  // discovery hasn't fetched records yet). Show "Federated (records
+  // unavailable)" rather than the misleading "0 credentials".
   const passwordCount = identity.credential_count ?? 0;
   const federatedCount = id.federated_cred_count ?? 0;
   const totalCreds = passwordCount + federatedCount;
   const isHumanLike = identity.identity_category === 'human_user' || identity.identity_category === 'guest';
+  // Flag-only federated trust (no record details fetched)
+  const federatedFlagOnly =
+    (!!id.has_federated_credentials || !!id.is_federated) && federatedCount === 0;
 
   return (
     <div className="space-y-4">
@@ -91,6 +99,11 @@ export function CredentialsTab({ identity, data }: CredentialsTabProps) {
                 {federatedCount > 0 && <span className="text-purple-700 font-medium">{federatedCount} federated</span>}
               </div>
             </div>
+          ) : federatedFlagOnly ? (
+            <div>
+              <div className="text-base font-bold text-purple-700">Federated</div>
+              <div className="text-[10px] text-purple-600 mt-0.5">Trust flagged · records pending</div>
+            </div>
           ) : (
             <div>
               <div className="text-2xl font-bold text-gray-900">0</div>
@@ -107,6 +120,10 @@ export function CredentialsTab({ identity, data }: CredentialsTabProps) {
               <span className="text-purple-700">Federated only</span>
             ) : federatedCount > 0 && passwordCount > 0 ? (
               <span className="text-amber-700">Mixed: secrets + federated</span>
+            ) : federatedFlagOnly ? (
+              <span className="text-purple-700" title="Discovery flagged this SPN as federated but Graph API did not return the federated identity credential records. Re-run discovery, or verify the connector has consent on Application.Read.All / federatedIdentityCredentials.">
+                Federated (records unavailable)
+              </span>
             ) : identity.credential_status ? (
               <span className={
                 safeLower(identity.credential_status) === 'valid' ? 'text-green-700' :
@@ -137,8 +154,8 @@ export function CredentialsTab({ identity, data }: CredentialsTabProps) {
               </div>
             ) : passwordCount > 0 ? (
               <span className="text-yellow-600" title="Credentials exist but have no expiration set">No expiration set</span>
-            ) : federatedCount > 0 ? (
-              <span className="text-purple-700" title="Federated credentials are issued just-in-time and do not expire on a fixed date">Federated (no expiry)</span>
+            ) : federatedCount > 0 || federatedFlagOnly ? (
+              <span className="text-purple-700" title="Federated credentials are issued just-in-time per request and do not have a fixed expiry date.">Federated (no expiry)</span>
             ) : (
               <span className="text-gray-400 italic">N/A</span>
             )}
