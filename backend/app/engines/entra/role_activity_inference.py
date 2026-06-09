@@ -252,40 +252,74 @@ def compute_entra_role_activity(db, org_id: int,
 
 
 def populate_entra_role_activity(db, org_id: int, run_id: int) -> int:
-    """AG-PILOT-FEATURE-E-WRITER (2026-06-08): minimal producer that
-    materializes entra_role_activity from entra_role_assignments.
+    """AG-PILOT-FEATURE-E-WRITER (2026-06-08, ENHANCED 2026-06-09):
+    materializes entra_role_activity from entra_role_assignments using
+    the per-row last_used_at that _collect_entra_audit_activity has
+    already populated via CATEGORIES_REQUIRING cross-product
+    attribution.
 
-    Reads `entra_role_assignments` for the run + org, joins to identities,
-    and upserts a baseline rollup row per (identity, role) with
-    `inference_confidence='unknown'` + `dormancy_band='unknown'`.
-
-    Why baseline + unknown: the full Feature E producer (audit-log
-    attribution via CATEGORIES_REQUIRING cross-product) is a 1-week
-    feature that's still spec-only. Until it ships, the page should
-    show every standing role grant as a row — "no activity data" is
-    a HONEST signal, NOT a fabricated bucket. This matches the moat
-    rule: never invent activity bands on absent data.
+    Activity bucket / dormancy band logic:
+      - If last_used_at IS NULL → bucket='unknown', band='unknown'
+        (honest "no telemetry" signal — moat rule)
+      - If observed: compute days_since_last_action, derive bucket and
+        band per the rules in _activity_bucket / _dormancy_band
 
     Returns the number of rollup rows written.
     """
     cursor = db.conn.cursor()
     try:
+        # Read assignments + the last_used_at that the audit puller
+        # already populated. Aggregate when an identity has multiple
+        # assignments of the same role at different scopes (rare for
+        # Entra; usually tenant-wide).
         cursor.execute("""
             SELECT
               i.id              AS identity_db_id,
               COALESCE(i.identity_id, i.object_id) AS identity_id,
               i.identity_category AS principal_type,
               era.role_name,
-              era.role_template_id
+              era.role_template_id,
+              MAX(era.last_used_at) AS last_used_at,
+              MAX(era.last_used_operation) AS last_used_operation
             FROM entra_role_assignments era
             JOIN identities i ON i.id = era.identity_db_id
             WHERE era.organization_id = %s
               AND era.discovery_run_id = %s
               AND COALESCE(i.deleted_at, '1970-01-01'::timestamp) < '1971-01-01'::timestamp
+            GROUP BY i.id, i.identity_id, i.object_id, i.identity_category,
+                     era.role_name, era.role_template_id
         """, (org_id, run_id))
         rows = cursor.fetchall()
+        now = datetime.now(timezone.utc)
         written = 0
         for r in rows:
+            (identity_db_id, identity_id, principal_type, role_name,
+             role_template_id, last_used_at, last_used_operation) = r
+
+            if last_used_at:
+                # Architecture-derived: real attribution from audit logs
+                # (or PIM activations) is present
+                if last_used_at.tzinfo is None:
+                    last_used_at = last_used_at.replace(tzinfo=timezone.utc)
+                days_since = max(0, int((now - last_used_at).total_seconds() // 86400))
+                # 90-day activity count we don't have without aggregation
+                # — leave as 1 to indicate "observed at least once"
+                activities_30d = 1 if days_since <= 30 else 0
+                activities_90d = 1 if days_since <= 90 else 0
+                bucket = _activity_bucket(activities_30d, activities_90d)
+                band   = _dormancy_band(days_since)
+                inferred_from = 'auditLogs/directoryAudits'
+                confidence = 'observed'
+            else:
+                last_used_at = None
+                days_since = None
+                activities_30d = 0
+                activities_90d = 0
+                bucket = 'unknown'
+                band = 'unknown'
+                inferred_from = 'no_telemetry'
+                confidence = 'unknown'
+
             try:
                 cursor.execute("""
                     INSERT INTO entra_role_activity
@@ -296,14 +330,28 @@ def populate_entra_role_activity(db, org_id: int, run_id: int) -> int:
                          activity_bucket, dormancy_band,
                          inferred_from, inference_confidence)
                     VALUES (%s, %s, %s, %s, %s, %s, %s,
-                            NULL, NULL, 0, 0, 'unknown', 'unknown',
-                            'no_telemetry', 'unknown')
+                            %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (organization_id, identity_db_id, role_name)
                     DO UPDATE SET
-                        discovery_run_id = EXCLUDED.discovery_run_id,
-                        role_template_id = EXCLUDED.role_template_id,
-                        discovered_at    = NOW()
-                """, (org_id, run_id, r[0], r[1], r[3], r[4], r[2] or 'unknown'))
+                        discovery_run_id       = EXCLUDED.discovery_run_id,
+                        role_template_id       = EXCLUDED.role_template_id,
+                        last_action_at         = EXCLUDED.last_action_at,
+                        days_since_last_action = EXCLUDED.days_since_last_action,
+                        activities_30d         = EXCLUDED.activities_30d,
+                        activities_90d         = EXCLUDED.activities_90d,
+                        activity_bucket        = EXCLUDED.activity_bucket,
+                        dormancy_band          = EXCLUDED.dormancy_band,
+                        inferred_from          = EXCLUDED.inferred_from,
+                        inference_confidence   = EXCLUDED.inference_confidence,
+                        discovered_at          = NOW()
+                """, (
+                    org_id, run_id, identity_db_id, identity_id,
+                    role_name, role_template_id, principal_type or 'unknown',
+                    last_used_at, days_since,
+                    activities_30d, activities_90d,
+                    bucket, band,
+                    inferred_from, confidence,
+                ))
                 written += 1
             except Exception:
                 db._rollback()
