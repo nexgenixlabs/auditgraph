@@ -1949,9 +1949,17 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
   }
 
   if (paths.length === 0) {
+    // AG-PILOT-NO-PATH-CONTEXT (2026-06-09): "no paths" on a CRITICAL
+    // identity confused customers — risk comes from direct privilege,
+    // not chains. Explain explicitly that critical risk can be standalone.
     return (
-      <div className="text-center py-16 text-sm text-gray-500">
-        No attack paths found for this identity.
+      <div className="text-center py-12 px-4 max-w-2xl mx-auto">
+        <p className="text-sm font-semibold text-gray-700">No multi-hop attack chains found for this identity.</p>
+        <p className="text-xs text-gray-500 mt-2 leading-relaxed">
+          A "critical" identity does not always have attack paths. Risk can come from <em>direct</em>
+          privilege (e.g. Global Administrator on the tenant) without any chain or escalation step.
+          To see what makes this identity critical, check the <strong>Risk</strong> and <strong>Access</strong> tabs.
+        </p>
       </div>
     );
   }

@@ -26649,6 +26649,104 @@ def get_identity_timeline(identity_id):
             except Exception:
                 db._rollback()
 
+        # AG-PILOT-TIMELINE-GRANT-HISTORY (2026-06-09): timeline was missing
+        # the architectural events that define an identity's history.
+        # Customer (Jason Collins) has had Global Admin "forever" — but
+        # timeline only showed recent findings. Add:
+        #   - Azure RBAC role grants (role_assignments.created_on)
+        #   - Entra directory role grants (entra_role_assignments.assigned_at)
+        #   - Credential creation (credentials.start_datetime)
+        #   - Federated credential add (federated_credentials.created_datetime)
+        # These come straight from the architecture — no logs needed.
+
+        # 7. Azure RBAC role grants
+        if not event_types or 'role_granted' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT created_on, role_name, scope
+                    FROM role_assignments
+                    WHERE identity_db_id = %s AND created_on IS NOT NULL
+                    ORDER BY created_on DESC LIMIT 50
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    role_name = r[1] or 'role'
+                    scope = (r[2] or '').rsplit('/', 1)[-1] or '/'
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'role_granted',
+                        'severity': 'info',
+                        'title': f"Granted {role_name}",
+                        'description': f"Role assignment created at scope {r[2]}" if r[2] else "Role assignment created",
+                        'metadata': {'role_name': r[1], 'scope': r[2], 'scope_label': scope},
+                    })
+            except Exception:
+                db._rollback()
+
+        # 8. Entra directory role grants
+        if not event_types or 'role_granted' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT assigned_at, role_name, role_template_id
+                    FROM entra_role_assignments
+                    WHERE identity_db_id = %s AND assigned_at IS NOT NULL
+                    ORDER BY assigned_at DESC LIMIT 50
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'role_granted',
+                        'severity': 'high' if r[1] and 'admin' in (r[1] or '').lower() else 'info',
+                        'title': f"Granted Entra role: {r[1] or 'directory role'}",
+                        'description': "Directory role assignment created in Entra ID",
+                        'metadata': {'role_name': r[1], 'role_template_id': r[2], 'source': 'entra'},
+                    })
+            except Exception:
+                db._rollback()
+
+        # 9. Credential creation
+        if not event_types or 'credential_created' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT start_datetime, display_name, credential_type, end_datetime
+                    FROM credentials
+                    WHERE identity_db_id = %s AND start_datetime IS NOT NULL
+                    ORDER BY start_datetime DESC LIMIT 25
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    label = r[1] or (r[2] or 'credential')
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'credential_created',
+                        'severity': 'info',
+                        'title': f"Credential added: {label}",
+                        'description': (f"Credential type: {r[2] or 'unknown'}"
+                                        + (f". Expires {r[3].isoformat()}" if r[3] else "")),
+                        'metadata': {'display_name': r[1], 'credential_type': r[2]},
+                    })
+            except Exception:
+                db._rollback()
+
+        # 10. Federated credential added
+        if not event_types or 'federated_credential_added' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT collected_at, name, issuer, subject
+                    FROM federated_credentials
+                    WHERE identity_db_id = %s
+                    ORDER BY collected_at DESC LIMIT 25
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'federated_credential_added',
+                        'severity': 'high',
+                        'title': f"Federated credential: {r[1] or 'unnamed'}",
+                        'description': f"Issuer: {r[2] or 'unknown'} · Subject: {r[3] or 'unknown'}",
+                        'metadata': {'name': r[1], 'issuer': r[2], 'subject': r[3]},
+                    })
+            except Exception:
+                db._rollback()
+
         cursor.close()
 
         # Apply date filters

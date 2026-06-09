@@ -5763,19 +5763,26 @@ class AzureDiscoveryEngine:
         app_roles_map = {}
         found_count = 0
         
+        # AG-PILOT-SP-APP-ROLES (2026-06-09): real-pilot bug — sp.get('id')
+        # returned None because the SP objects in this list use 'object_id'
+        # and 'identity_id' (app_id) keys post-normalization, not 'id'.
+        # Result: sp_app_roles was globally empty across every tenant.
+        # Fix: use object_id for the Graph API call and identity_id (app_id)
+        # as the map key to align with permissions_map.
         for sp in service_principals:
-            identity_id = sp.get('id')
-            if not identity_id:
+            sp_object_id = sp.get('object_id') or sp.get('id')
+            identity_id = sp.get('identity_id') or sp.get('app_id') or sp_object_id
+            if not sp_object_id:
                 continue
-            
+
             try:
                 # Fetch app role assignments (same endpoint as permissions)
                 response = await asyncio.wait_for(self.graph_client.service_principals.by_service_principal_id(
-                    identity_id
+                    sp_object_id
                 ).app_role_assignments.get(), timeout=GRAPH_SDK_TIMEOUT)
-                
+
                 assignments = response.value if response and response.value else []
-                
+
                 # Filter OUT Microsoft Graph (we store those separately)
                 custom_app_roles = [
                     {
@@ -5788,13 +5795,13 @@ class AzureDiscoveryEngine:
                     for assignment in assignments
                     if assignment.resource_display_name and assignment.resource_display_name.lower() != 'microsoft graph'
                 ]
-                
+
                 if custom_app_roles:
                     app_roles_map[identity_id] = custom_app_roles
                     found_count += 1
-                    logger.info("%s: %s app role(s)", sp.get('displayName', 'Unknown'), len(custom_app_roles))
-                
-            except Exception as e:
+                    logger.info("%s: %s app role(s)", sp.get('display_name') or sp.get('displayName', 'Unknown'), len(custom_app_roles))
+
+            except Exception:
                 # Silently skip if no permissions or access denied
                 continue
         

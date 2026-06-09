@@ -253,7 +253,10 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
     const subCount = data.coverage?.sub_count ?? 0;
     return (
       <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 transition">
-        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium mb-1">Privilege Exposure</span>
+        {/* AG-PILOT-RENAME-PRIV-EXPOSURE (2026-06-09): customer feedback —
+            "Privilege Exposure" was confusing because the content is
+            literally an attack path. Renamed to "Top Attack Path". */}
+        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium mb-1">Top Attack Path</span>
         <div className="border-l-2 border-[#22C55E] pl-3 mt-2">
           <div className="flex items-center gap-1.5">
             <span className="text-[13px] text-[#22C55E]">&#10003;</span>
@@ -278,7 +281,8 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
   // Determine if the top path is a single-hop direct privilege vs multi-hop escalation
   const isDirect = top.path_type === 'lateral_movement' || top.path_type === 'direct_escalation'
     || (top.path_type && !top.path_type.includes('chain'));
-  const headerLabel = isDirect ? 'Top Privilege Exposure' : 'Top Escalation Path';
+  // AG-PILOT-RENAME-PRIV-EXPOSURE (2026-06-09): renamed direct case
+  const headerLabel = isDirect ? 'Top Attack Path' : 'Top Escalation Path';
   const typeBadge = isDirect ? 'Direct' : 'Multi-hop';
   const typeBadgeColor = isDirect ? 'rgba(245,158,11,0.15)' : 'rgba(232,70,90,0.15)';
   const typeBadgeText = isDirect ? '#f59e0b' : '#e8465a';

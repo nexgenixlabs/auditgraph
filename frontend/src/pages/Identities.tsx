@@ -3308,10 +3308,29 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                         }
 
                         // P3: Workload origin from verdict (reply_url, ARM binding, etc.)
-                        if (i.workload_origin && !['role_inference', 'heuristic_github', 'heuristic_terraform', 'heuristic_automation', 'display_name_fallback', 'signin_pattern_fallback'].includes(i.workload_origin_source || '')) {
+                        // AG-PILOT-LINEAGE-NONE (2026-06-09): added 'none' to the
+                        // excluded sources. Without it, an orphan SPN with
+                        // workload_origin='Unknown' / source='none' rendered as
+                        // a "Verified Origin" badge containing the literal text
+                        // "Unknown" — the customer-reported confusion.
+                        if (i.workload_origin && !['none', 'role_inference', 'heuristic_github', 'heuristic_terraform', 'heuristic_automation', 'display_name_fallback', 'signin_pattern_fallback'].includes(i.workload_origin_source || '')) {
                           return lineageBtn(
                             <span className="text-[10px] text-blue-700 font-medium truncate group-hover:text-blue-800">{i.workload_origin}</span>,
                             i.workload_origin_source === 'reply_url' ? 'Reply URL' : i.workload_origin_source === 'arm_binding' ? 'ARM Binding' : 'Verified Origin'
+                          );
+                        }
+
+                        // AG-PILOT-LINEAGE-ORPHAN (2026-06-09): explicit
+                        // "Orphan SPN" badge when no signal can place its
+                        // lineage. Far more informative than the previous
+                        // "Verified Origin: Unknown".
+                        if ((i.workload_origin_source || 'none') === 'none' && i.identity_category && i.identity_category.startsWith('service_principal')) {
+                          return lineageBtn(
+                            <>
+                              <span className="text-[10px] text-amber-700 font-medium truncate group-hover:text-amber-800">Orphan SPN</span>
+                              <span className="px-1 py-0 rounded text-[7px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0">?</span>
+                            </>,
+                            'No app-reg / no reply URL / no role inference — review whether this SPN is still needed'
                           );
                         }
 
