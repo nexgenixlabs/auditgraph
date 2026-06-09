@@ -100,51 +100,54 @@ export function BlastRadiusCardV31({ data }: { data: PostureV31Response }) {
   const tierNum = (br.role_tier || '').replace('T', '');
   const impactColor = tierNum <= '1' ? '#e8465a' : tierNum === '2' ? '#FF7216' : '#6b7280';
 
+  // AG-PILOT-CISO-CLICKABLE (2026-06-08): whole card now navigates to
+  // the identity's detail page. Previously only the small name link in
+  // the corner was clickable — customer reported the card "looked
+  // clickable but did nothing".
+  const navHref = `/identities/${br.identity_string_id || br.identity_id}`;
   return (
-    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition"
-         title={exploitText}>
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium"
-              title="Worst-case impact if this identity is compromised"
-              style={{ cursor: 'help', borderBottom: '1px dotted currentColor' }}>
-          Blast Radius
-        </span>
-        <div className="flex items-center gap-2 min-w-0 max-w-[60%] justify-end">
-          <DN navigateTo={`/identities/${br.identity_string_id || br.identity_id}`}>
-            <span className="text-xs text-gray-500 truncate cursor-pointer hover:text-gray-300 transition">{br.identity_name}</span>
-          </DN>
-          {!!br.more_count && br.more_count > 0 && (
-            <span className="text-[10px] font-mono text-gray-500 shrink-0">+{br.more_count} more</span>
-          )}
+    <DN navigateTo={navHref}>
+      <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition cursor-pointer"
+           title={exploitText}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">
+            Blast Radius
+          </span>
+          <div className="flex items-center gap-2 min-w-0 max-w-[60%] justify-end">
+            <span className="text-xs text-gray-500 truncate">{br.identity_name}</span>
+            {!!br.more_count && br.more_count > 0 && (
+              <span className="text-[10px] font-mono text-gray-500 shrink-0">+{br.more_count} more</span>
+            )}
+          </div>
         </div>
-      </div>
-      <span className="text-xs font-semibold text-gray-300 mb-1 mt-1">If compromised:</span>
-      <div className="space-y-0.5">
-        {br.scope_string && (
-          <p className="text-xs text-gray-400 truncate">
-            <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
+        <span className="text-xs font-semibold text-gray-300 mb-1 mt-1">If compromised:</span>
+        <div className="space-y-0.5">
+          {br.scope_string && (
+            <p className="text-xs text-gray-400 truncate">
+              <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
+            </p>
+          )}
+          {br.role_tier && (
+            <p className="text-xs text-gray-400 truncate">
+              <span className="text-red-400/70 mr-1">•</span>Tier {br.role_tier} access
+            </p>
+          )}
+          {roleCount > 3 ? (
+            <p className="text-xs text-gray-400 truncate" title={exploitText}>
+              <span className="text-red-400/70 mr-1">•</span>
+              Grants <span className="font-mono text-gray-300">{roleCount}</span> privileged role{roleCount === 1 ? '' : 's'}
+            </p>
+          ) : exploitText ? (
+            <p className="text-xs text-gray-500 truncate" title={exploitText}>{exploitText}</p>
+          ) : null}
+        </div>
+        {br.impact_label && (
+          <p className="text-[11px] font-medium mt-auto pt-1.5" style={{ color: impactColor }}>
+            Impact: {br.impact_label}
           </p>
         )}
-        {br.role_tier && (
-          <p className="text-xs text-gray-400 truncate">
-            <span className="text-red-400/70 mr-1">•</span>Tier {br.role_tier} access
-          </p>
-        )}
-        {roleCount > 3 ? (
-          <p className="text-xs text-gray-400 truncate" title={exploitText}>
-            <span className="text-red-400/70 mr-1">•</span>
-            Grants <span className="font-mono text-gray-300">{roleCount}</span> privileged role{roleCount === 1 ? '' : 's'}
-          </p>
-        ) : exploitText ? (
-          <p className="text-xs text-gray-500 truncate" title={exploitText}>{exploitText}</p>
-        ) : null}
       </div>
-      {br.impact_label && (
-        <p className="text-[11px] font-medium mt-auto pt-1.5" style={{ color: impactColor }}>
-          Impact: {br.impact_label}
-        </p>
-      )}
-    </div>
+    </DN>
   );
 }
 
@@ -295,8 +298,11 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
   const borderColor = top.severity === 'critical' ? 'rgba(232,70,90,0.6)'
     : top.severity === 'high' ? 'rgba(245,158,11,0.5)' : undefined;
 
+  // AG-PILOT-CISO-CLICKABLE (2026-06-08): card now navigates as a unit.
+  const cardHref = navId ? `/attack-paths?highlight=${navId}` : '/attack-paths';
   return (
-    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 transition"
+    <DN navigateTo={cardHref}>
+    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition cursor-pointer"
          style={borderColor ? { borderLeftWidth: 3, borderLeftColor: borderColor, borderLeftStyle: 'solid' } : undefined}>
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-2">
@@ -314,9 +320,7 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
         )}
       </div>
       <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary, #E6EDF3)', marginBottom: 2 }}>{interpretation}</p>
-      <DN navigateTo={navId ? `/attack-paths?highlight=${navId}` : '/attack-paths'}>
-        <p className="truncate cursor-pointer hover:underline transition" style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-muted, #484F58)' }}>{chain}</p>
-      </DN>
+      <p className="truncate" style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-muted, #484F58)' }}>{chain}</p>
       {compositionLine && (
         <p style={{ fontSize: 10, color: 'var(--text-muted, #484F58)', fontStyle: 'italic', marginTop: 4 }}>{compositionLine}</p>
       )}
@@ -327,13 +331,12 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
         </p>
       )}
       {totalPaths > 0 && (
-        <DN navigateTo="/attack-paths">
-          <p className="cursor-pointer hover:underline mt-auto pt-1" style={{ fontSize: 11, fontWeight: 500, color: 'var(--teal, #24A2A1)' }}>
-            View all {totalPaths} paths →
-          </p>
-        </DN>
+        <p className="mt-auto pt-1" style={{ fontSize: 11, fontWeight: 500, color: 'var(--teal, #24A2A1)' }}>
+          View all {totalPaths} paths →
+        </p>
       )}
     </div>
+    </DN>
   );
 }
 

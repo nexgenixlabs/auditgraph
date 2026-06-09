@@ -41813,6 +41813,14 @@ def get_ai_agents_enriched():
             params.append(platform)
 
         cursor = db.conn.cursor()
+        # AG-PILOT-AI-INVENTORY-XORG (2026-06-08): real-pilot regression —
+        # the AI Inventory list query had no org filter, so it returned
+        # identities across all tenants (demo org 9 included). When the
+        # customer clicked one of those identities the per-identity
+        # investigate endpoint correctly scoped to THEIR org and 404'd.
+        org_id = _org_id()
+        org_filter_sql = " AND i.organization_id = %s "
+        org_params = [org_id]
 
         # Count
         cursor.execute(f"""
@@ -41821,11 +41829,12 @@ def get_ai_agents_enriched():
                 FROM identities i
                 JOIN agent_classifications ac ON ac.identity_db_id = i.id
                 WHERE {type_filter}{platform_filter}
+                  {org_filter_sql}
                   AND NOT COALESCE(i.is_microsoft_system, false)
                   AND i.deleted_at IS NULL
                 ORDER BY i.identity_id, i.discovery_run_id DESC
             ) deduped
-        """, params)
+        """, params + org_params)
         total = _scalar(cursor, 0)
 
         offset = (page - 1) * per_page
@@ -41855,13 +41864,14 @@ def get_ai_agents_enriched():
                 FROM identities i
                 JOIN agent_classifications ac ON ac.identity_db_id = i.id
                 WHERE {type_filter}{platform_filter}
+                  {org_filter_sql}
                   AND NOT COALESCE(i.is_microsoft_system, false)
                   AND i.deleted_at IS NULL
                 ORDER BY i.identity_id, i.discovery_run_id DESC
             ) deduped
             ORDER BY risk_score DESC NULLS LAST
             LIMIT %s OFFSET %s
-        """, params + [per_page, offset])
+        """, params + org_params + [per_page, offset])
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
