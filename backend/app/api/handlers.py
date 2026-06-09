@@ -1713,8 +1713,9 @@ def get_identity_details(identity_id: str):
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
             -- AG-PILOT-IDENTITY-LOOKUP (2026-06-08): match by identity_id OR
             -- object_id. Attack Paths "View Identity" passes object_id (UUID);
-            -- IdentityTrust Inspect passes identity_id. Without OR the 70% of
-            -- identities where identity_id ≠ object_id return 404.
+            -- IdentityTrust Inspect passes identity_id. Without OR the
+            -- majority of identities where identity_id differs from
+            -- object_id return 404.
             WHERE (i.identity_id = %s OR i.object_id = %s) AND i.discovery_run_id = ANY(%s)
         """
         detail_params = [identity_id, identity_id, run_ids]
@@ -30837,7 +30838,7 @@ def get_correlation_accounts():
                 'is_zombie': (not l['enabled'] or l['deleted_at'] is not None) and is_zombie,
                 'risk_score': l['risk_score'],
                 'risk_level': l['risk_level'],
-                'privilege_tier': f"T{l['tier']}" if l['tier'] is not None else 'T3',
+                'privilege_tier': f"T{l['privilege_tier']}" if l['privilege_tier'] is not None else 'T3',
                 'link_method': l['link_method'],
                 'link_confidence': l['link_confidence'],
                 'verified': l['verified'],
