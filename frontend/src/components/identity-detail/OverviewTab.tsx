@@ -1198,10 +1198,14 @@ export default function OverviewTab({
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
+                    {/* AG-PILOT-CONNECTIONS-LABELS (2026-06-09): customer
+                        feedback — "Source IPv6 hard to read for non-IT;
+                        Target shows 1 (no meaning)". Clearer labels +
+                        operation context. */}
                     <tr className="text-left text-gray-400 text-[10px] uppercase tracking-wider">
-                      <th className="pb-1.5 pr-3">Caller</th>
-                      <th className="pb-1.5 pr-3">Source IP</th>
-                      <th className="pb-1.5 pr-3">Target</th>
+                      <th className="pb-1.5 pr-3">From</th>
+                      <th className="pb-1.5 pr-3">IP address</th>
+                      <th className="pb-1.5 pr-3">Action</th>
                       <th className="pb-1.5">When</th>
                     </tr>
                   </thead>
@@ -1234,7 +1238,21 @@ export default function OverviewTab({
                           <td className="py-1.5 pr-3 text-gray-600 font-mono text-[11px] whitespace-nowrap" title={c.caller_ip_address || ''}>
                             {formatIpDisplay(c.caller_ip_address || '')}
                           </td>
-                          <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[180px]" title={c.operation_short}>{c.resource_name || c.operation_short}</td>
+                          <td className="py-1.5 pr-3 text-gray-700 truncate max-w-[220px]" title={`${c.operation_short || ''}${c.resource_name ? ' on ' + c.resource_name : ''}`}>
+                            {/* AG-PILOT-CONNECTIONS-LABELS: prefer the
+                                operation (verb) over resource_name. If
+                                resource_name is too short to be meaningful
+                                (e.g. "1", "0"), fall back to operation. */}
+                            {(() => {
+                              const rn = (c.resource_name || '').trim();
+                              const op = (c.operation_short || '').trim();
+                              const showResource = rn.length >= 3;
+                              if (op && showResource) return `${op} on ${rn}`;
+                              if (op) return op;
+                              if (showResource) return rn;
+                              return '—';
+                            })()}
+                          </td>
                           <td className="py-1.5 text-gray-600 whitespace-nowrap" title={ts?.full}>{ts?.relative || '\u2014'}</td>
                         </tr>
                       );

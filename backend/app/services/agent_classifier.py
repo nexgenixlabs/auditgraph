@@ -98,24 +98,56 @@ def classify_identity(display_name, app_id=None, permissions=None,
                 'detected_platform': 'azure_ai' if wt_lower == 'ai_service' else 'azure_ml',
             }
 
-    # 3. Check role_assignments against AI scope/role patterns (high confidence)
+    # 3. Check role_assignments against AI scope/role patterns
+    # AG-PILOT-AI-CLASSIFY (2026-06-09): customer reported humans
+    # showing 95% confidence "AI-PRIVILEGED HUMAN" just because they
+    # had a Reader-level role on an AI scope. Tightened so that:
+    #   - Humans require WRITE-level role on AI scope (Contributor /
+    #     Owner / Foundry User / Cognitive Services Contributor / AI
+    #     Developer / ML Data Scientist), not just any presence
+    #   - Reader-only on AI scope is NOT enough to classify
+    #   - NHIs still get classified at lower confidence (0.75) if only
+    #     role-match — display_name/workload_type carry higher weight
+    AI_WRITE_ROLE_KEYWORDS = (
+        'contributor', 'owner', 'foundry user', 'foundry developer',
+        'cognitive services contributor', 'cognitive services user',
+        'ai administrator', 'ai developer', 'azure ai',
+        'machine learning', 'ml data scientist', 'ml engineer',
+        'azureml data scientist', 'azureml compute operator',
+        'search service contributor',
+    )
+    def _has_ai_write_role(ras):
+        for ra in (ras or []):
+            rn = (ra.get('role_name') or '').lower()
+            if any(k in rn for k in AI_WRITE_ROLE_KEYWORDS):
+                return True
+        return False
+
     if role_assignments:
         platform, confidence = match_roles(role_assignments)
         if platform and confidence >= AUTO_CLASSIFY_THRESHOLD:
+            ai_write = _has_ai_write_role(role_assignments)
             if is_human:
-                # Humans with AI roles → ai_privileged_human (never ai_agent)
+                # Humans: require a write-level AI role. Read-only on
+                # AI scope is governance hygiene, not AI workload access.
+                if ai_write:
+                    return {
+                        'agent_identity_type': 'ai_privileged_human',
+                        'classification_confidence': min(confidence, 0.85),
+                        'classification_reason': f'role_scope_match (write-level): {platform}',
+                        'detected_platform': platform,
+                    }
+                # Reader-only → don't classify as ai_privileged_human
+            else:
+                # NHIs: role-scope-match alone keeps lower confidence
+                # because the strongest signals are app_id_match (#1)
+                # and workload_type_match (#2)
                 return {
-                    'agent_identity_type': 'ai_privileged_human',
-                    'classification_confidence': confidence,
-                    'classification_reason': f'role_scope_match: {platform}',
+                    'agent_identity_type': 'ai_agent' if ai_write else 'possible_ai_agent',
+                    'classification_confidence': min(confidence, 0.85 if ai_write else 0.7),
+                    'classification_reason': f'role_scope_match{" (write-level)" if ai_write else " (read-only)"}: {platform}',
                     'detected_platform': platform,
                 }
-            return {
-                'agent_identity_type': 'ai_agent',
-                'classification_confidence': confidence,
-                'classification_reason': f'role_scope_match: {platform}',
-                'detected_platform': platform,
-            }
 
     # 4. Check display_name against patterns (regex)
     # Humans never match display_name patterns (those are SPN naming conventions)
@@ -168,11 +200,16 @@ def classify_identity(display_name, app_id=None, permissions=None,
         if matches:
             best = max(matches, key=lambda m: m[1])
             perm_name, confidence, platform = best
+            # AG-PILOT-AI-CLASSIFY (2026-06-09): humans rarely have
+            # API permissions that signal AI workload; humans get
+            # their Microsoft Graph permissions via group membership.
+            # Don't classify a human just because their group has
+            # Cognitive Services permissions.
             if is_human:
                 return {
                     'agent_identity_type': 'ai_privileged_human',
-                    'classification_confidence': confidence,
-                    'classification_reason': f'permission_match: {perm_name}',
+                    'classification_confidence': min(confidence, 0.7),
+                    'classification_reason': f'permission_match (low-confidence on human): {perm_name}',
                     'detected_platform': platform,
                 }
             return {

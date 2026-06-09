@@ -113,10 +113,21 @@ export function BlastRadiusCardV31({ data }: { data: PostureV31Response }) {
           <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">
             Blast Radius
           </span>
+          {/* AG-PILOT-BLAST-MORE (2026-06-09): the +N more chip was
+              decorative-only. Customer asked: "what about those N
+              other identities?" Make it a separate click target that
+              opens the full at-risk list sorted by blast_radius DESC. */}
           <div className="flex items-center gap-2 min-w-0 max-w-[60%] justify-end">
             <span className="text-xs text-gray-500 truncate">{br.identity_name}</span>
             {!!br.more_count && br.more_count > 0 && (
-              <span className="text-[10px] font-mono text-gray-500 shrink-0">+{br.more_count} more</span>
+              <DN navigateTo="/identities?privileged=true&sort_field=blast_radius_score&sort_dir=desc">
+                <span
+                  className="text-[10px] font-mono text-violet-300 hover:text-violet-200 shrink-0 px-1.5 py-0.5 rounded border border-violet-700/40 bg-violet-900/20 cursor-pointer"
+                  title={`See all ${(br.more_count || 0) + 1} privileged identities ranked by blast radius`}
+                  onClick={(e) => e.stopPropagation()}>
+                  +{br.more_count} more →
+                </span>
+              </DN>
             )}
           </div>
         </div>
@@ -377,10 +388,15 @@ export function IdentityRiskCard({ vm }: { vm: CISOViewModel }) {
 export function IdentityRiskCardV31({ data }: { data: PostureV31Response }) {
   const ir = data.identity_risk;
   const total = ir.total;
+  // AG-PILOT-IDENTITY-RISK-LINKS (2026-06-09): customer reported every
+  // row navigated to the same view (ghost). Root cause: the page's URL
+  // sync didn't recognise ?filter=ghost — it only reads activity_status,
+  // owner_status, identity_category. Mapped each row to the filter
+  // params that actually take effect.
   const rows = [
-    { label: 'Dormant privileged identities', count: ir.dormant, filter: 'dormant' },
-    { label: 'Ghost identities (access not revoked)', count: ir.ghost, filter: 'ghost' },
-    { label: 'Unowned service principals', count: ir.unowned_nhi, filter: 'unowned_nhi' },
+    { label: 'Dormant privileged identities', count: ir.dormant, href: '/identities?activity_status=dormant_strict&privileged=true' },
+    { label: 'Ghost identities (access not revoked)', count: ir.ghost, href: '/identities?status=Disabled&hasRoles=true' },
+    { label: 'Unowned service principals', count: ir.unowned_nhi, href: '/identities?identity_category=service_principal&owner_status=unowned' },
   ].filter(r => r.count > 0).sort((a, b) => b.count - a.count);
 
   return (
@@ -397,7 +413,7 @@ export function IdentityRiskCardV31({ data }: { data: PostureV31Response }) {
         <>
           <div className="space-y-0.5 flex-1">
             {rows.map((r, i) => (
-              <DN key={r.filter} navigateTo={`/identities?filter=${r.filter}`}>
+              <DN key={r.label} navigateTo={r.href}>
                 <div className={`flex items-center justify-between text-xs cursor-pointer hover:bg-white/[0.02] rounded px-1 -mx-1 ${i === 0 ? 'font-medium text-gray-200' : 'text-gray-400'}`}>
                   <span className="truncate mr-2">
                     {i === 0 && <span className="text-[9px] font-semibold uppercase tracking-wider text-[#f59e0b] mr-1">Primary Risk:</span>}

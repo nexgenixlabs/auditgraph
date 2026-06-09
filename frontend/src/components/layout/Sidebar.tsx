@@ -165,7 +165,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-access',         label: 'Identity Access',    icon: effectiveAccessIcon },
           // AG-WK2: Identity Trust — universal 9-dim Trust across SPNs+MIs+AI
           { to: '/identity-trust',    label: 'Identity Trust',     icon: roleOptIcon },
-          { to: '/ai-lifecycle',      label: 'Identity Lifecycle', icon: identityIcon },
+          // AG-PILOT-LIFECYCLE-JML (2026-06-09): customer reported the
+          // page only showed AI events even though sidebar said
+          // "Identity Lifecycle". /lifecycle = all-identity JML page;
+          // /ai-lifecycle remains available for the AI-only deep dive.
+          { to: '/lifecycle',         label: 'Identity Lifecycle (JML)', icon: identityIcon },
           { to: '/ai-governance',     label: 'Identity Governance', icon: identityIcon },
           // AG-WK3.1: Ownership Center — the SailPoint-tier governance hook
           { to: '/ownership',         label: 'Ownership Center',   icon: identityIcon },
