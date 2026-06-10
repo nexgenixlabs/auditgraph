@@ -205,12 +205,14 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
               { to: '/identity-trust?type=ai',             label: 'Trust',             icon: roleOptIcon },
               { to: '/lifecycle?type=ai',                  label: 'Lifecycle',         icon: agentBotIcon },
               { to: '/ai-governance',                      label: 'Governance',        icon: agentBotIcon },
+              { to: '/ownership?type=ai',                  label: 'Ownership',         icon: identityIcon },
               { to: '/attack-paths?source_type=ai',        label: 'Attack Paths',      icon: findingsIcon },
             ],
           },
-          // Universal / fallback — all identities together
-          { to: '/identity-explorer', label: 'All Identities', icon: identityIcon },
-          { to: '/ownership',         label: 'Ownership Center', icon: identityIcon },
+          // AG-IA-P5 (2026-06-10): All Identities + Ownership Center removed
+          // from this top-level group — each bucket has its own inventory and
+          // its own ownership view. Cross-bucket "all" still lives at
+          // /identity-explorer and /ownership but not as nav clutter here.
         ],
       },
       {
@@ -243,7 +245,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Exposure Management',
         color: '#dc2626',
         items: [
-          { to: '/attack-paths',                label: 'Attack Paths',     icon: findingsIcon },
+          // AG-IA-P5 (2026-06-10): Top-level "Attack Paths" removed — each
+          // Identity bucket has its own scoped Attack Paths entry, this one
+          // was rendering the same unscoped list and felt duplicated.
           { to: '/blast-radius',                label: 'Blast Radius',     icon: attackIcon },
           { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
           { to: '/attack-simulator',            label: 'Attack Simulator',  icon: attackIcon },

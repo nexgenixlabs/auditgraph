@@ -12,6 +12,25 @@ import { useConnection } from '../contexts/ConnectionContext';
 import LoadingState from '../components/LoadingState';
 import { NoDataInScopeState } from '../components/EmptyState';
 
+/**
+ * AG-IA-P5.3 (2026-06-10): switched from /api/spns/stats to /api/identities
+ * because the former returns 0 for tenants where the SPN exposure scoring
+ * job hasn't run (founder reported "No non-human identities in scope" while
+ * NHI Inventory clearly showed 146 NHIs). The identities endpoint is the
+ * canonical source for NHI counts and per-row credential / activity state.
+ */
+interface NhiRow {
+  id: number;
+  identity_category: string;
+  risk_level: string;
+  risk_score: number;
+  credential_count?: number;
+  credential_risk?: string;
+  owner_name?: string | null;
+  blast_radius_score?: number | null;
+  activity_status?: string | null;
+}
+
 interface SpnStats {
   total: number;
   custom: number;
@@ -104,12 +123,44 @@ export default function NHIGovernance() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch(withConnection('/api/spns/stats'))
+    // AG-IA-P5.3 (2026-06-10): build the stats payload from per-row data
+    // rather than the SPN-only summary endpoint. The identities endpoint
+    // is the canonical NHI source and always returns data when NHIs exist.
+    fetch(withConnection('/api/identities?identity_category=service_principal,managed_identity_system,managed_identity_user,workload&limit=500'))
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         if (cancelled) return;
-        if (!d) { setError('fetch_error'); return; }
-        setStats(d);
+        const rows: NhiRow[] = Array.isArray(d?.identities) ? d.identities : [];
+        if (rows.length === 0) { setStats(null); return; }
+        const custom = rows.length;
+        const byRisk: Record<string, number> = {};
+        const byBlast: Record<string, number> = {};
+        let expired = 0, expiringSoon = 0, orphaned = 0, critical = 0, highRisk = 0, canEscalate = 0;
+        rows.forEach(r => {
+          const rl = r.risk_level || 'info';
+          byRisk[rl] = (byRisk[rl] || 0) + 1;
+          if (rl === 'critical') critical++;
+          if (rl === 'high') highRisk++;
+          if (r.credential_risk === 'expired') expired++;
+          if (r.credential_risk === 'expiring_soon') expiringSoon++;
+          const score = r.risk_score || 0;
+          if (score >= 70) canEscalate++;
+          if (!r.owner_name && score >= 70) orphaned++;
+          const blast = (r.blast_radius_score || 0) >= 80 ? 'critical' : (r.blast_radius_score || 0) >= 60 ? 'high' : (r.blast_radius_score || 0) >= 40 ? 'medium' : 'low';
+          byBlast[blast] = (byBlast[blast] || 0) + 1;
+        });
+        setStats({
+          total: custom,
+          custom,
+          critical,
+          high_risk: highRisk,
+          expired_credentials: expired,
+          expiring_soon: expiringSoon,
+          by_blast_radius: byBlast,
+          by_risk: byRisk,
+          can_escalate_count: canEscalate,
+          orphaned_privileged: orphaned,
+        });
       })
       .catch(() => { if (!cancelled) setError('fetch_error'); })
       .finally(() => { if (!cancelled) setLoading(false); });

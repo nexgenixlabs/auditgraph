@@ -165,13 +165,13 @@ export default function NHIInventory() {
             <div className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">By type</div>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
               <StatCard label="Service Principals" value={stats.service_principals}
-                color="#f97316" navTo="/identity-explorer?identity_category=service_principal" />
+                color="#f97316" navTo="/identity-explorer/nhi?identity_category=service_principal" />
               <StatCard label="System MIs" value={stats.managed_identity_system}
-                color="#f59e0b" navTo="/identity-explorer?identity_category=managed_identity_system" />
+                color="#f59e0b" navTo="/identity-explorer/nhi?identity_category=managed_identity_system" />
               <StatCard label="User MIs" value={stats.managed_identity_user}
-                color="#eab308" navTo="/identity-explorer?identity_category=managed_identity_user" />
+                color="#eab308" navTo="/identity-explorer/nhi?identity_category=managed_identity_user" />
               <StatCard label="Workloads" value={stats.workloads}
-                color="#10b981" navTo="/identity-explorer?identity_category=workload" />
+                color="#10b981" navTo="/identity-explorer/nhi?identity_category=workload" />
               <StatCard label="AI Agents" value={stats.ai_agents}
                 color="#a78bfa" navTo="/ai-inventory" />
             </div>
@@ -182,15 +182,15 @@ export default function NHIInventory() {
             <div className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">Hygiene gaps</div>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
               <StatCard label="Unowned" value={stats.unowned} sublabel="No human accountable"
-                color="#dc2626" danger navTo="/identity-explorer?owner_status=unowned&identity_category=service_principal" />
+                color="#dc2626" danger navTo="/identity-explorer/nhi?owner_status=unowned&identity_category=service_principal" />
               <StatCard label="Dormant" value={stats.dormant} sublabel="No activity in 90d"
-                color="#dc2626" danger navTo="/identity-explorer?activity_status=dormant_strict&identity_category=service_principal" />
+                color="#dc2626" danger navTo="/identity-explorer/nhi?activity_status=dormant_strict&identity_category=service_principal" />
               <StatCard label="Critical Risk" value={stats.critical}
-                color="#dc2626" danger navTo="/identity-explorer?risk_level=critical&identity_category=service_principal" />
+                color="#dc2626" danger navTo="/identity-explorer/nhi?risk_level=critical&identity_category=service_principal" />
               <StatCard label="Expired Secrets" value={stats.expired_secrets}
-                color="#f59e0b" navTo="/identity-explorer?credential_status=expired&identity_category=service_principal" />
+                color="#f59e0b" navTo="/identity-explorer/nhi?credential_status=expired&identity_category=service_principal" />
               <StatCard label="Federated only" value={stats.federated_only} sublabel="OIDC trust, no static secret"
-                color="#a78bfa" navTo="/identity-explorer?has_federated=true&identity_category=service_principal" />
+                color="#a78bfa" navTo="/identity-explorer/nhi?has_federated=true&identity_category=service_principal" />
             </div>
           </div>
 

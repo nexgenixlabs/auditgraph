@@ -75,6 +75,7 @@ import HumanGovernance from './pages/HumanGovernance';
 import NHIGovernance from './pages/NHIGovernance';
 import HumanInventory from './pages/HumanInventory';
 import BlastRadiusPage from './pages/BlastRadiusPage';
+import NHISecrets from './pages/NHISecrets';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
 import MultiHopXGraph from './pages/MultiHopXGraph';
@@ -376,12 +377,11 @@ function AppContent() {
                   <Route path="/human/inventory" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanInventory /></ErrorBoundary>} />
                   <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
                   <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
-                  {/* AG-IA-P2 (2026-06-10): NHI Secrets lands on the dedicated SPN
-                      Dashboard where credential posture is first-class (filters
-                      for expiring/expired/escalation paths). Issue #9 — the prior
-                      redirect filtered to /identity-explorer with a hasCredentials
-                      param that didn't exist in the filter logic. */}
-                  <Route path="/nhi/secrets" element={<Navigate to="/spns" replace />} />
+                  {/* AG-IA-P5.4 (2026-06-10): NHI Secrets is now a purpose-built
+                      4-bucket page (expired / expiring / federated-only / no-creds)
+                      instead of redirecting to SPN Dashboard which buried the
+                      credential lens behind general SPN filters. */}
+                  <Route path="/nhi/secrets" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHISecrets /></ErrorBoundary>} />
                   <Route path="/nhi/ownership" element={<Navigate to="/ownership?type=nhi" replace />} />
                   <Route path="/nhi/attack-paths" element={<Navigate to="/attack-paths?source_type=nhi" replace />} />
                   <Route path="/blast-radius" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><BlastRadiusPage /></ErrorBoundary>} />

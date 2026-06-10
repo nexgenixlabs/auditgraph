@@ -1186,14 +1186,23 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
       else if (cat === 'service_principal') counts.service_principal++;
       else counts.nhi_other++;
     }
-    setAllGroups([
-      { id: 'cat_guest', name: 'All Guest Users', color: '', group_type: 'auto', member_count: counts.guest },
+    // AG-IA-P5.5 (2026-06-10): scope-aware group options. Hiding NHI group
+    // chips when tabScope is 'humans' (and vice-versa) — issue #1 from
+    // founder review: Human Inventory was offering "All Managed Identities"
+    // and "All Service Principals" in the Group filter which made no sense.
+    const humanGroups = [
+      { id: 'cat_guest',      name: 'All Guest Users', color: '', group_type: 'auto', member_count: counts.guest },
       { id: 'cat_human_user', name: 'All Human Users', color: '', group_type: 'auto', member_count: counts.human_user },
-      { id: 'cat_managed_identity', name: 'All Managed Identities', color: '', group_type: 'auto', member_count: counts.managed_identity },
-      { id: 'cat_service_principal', name: 'All Service Principals', color: '', group_type: 'auto', member_count: counts.service_principal },
-      { id: 'cat_nhi_other', name: 'All SPNs / Workloads', color: '', group_type: 'auto', member_count: counts.nhi_other },
-    ]);
-  }, [identities]);
+    ];
+    const nhiGroups = [
+      { id: 'cat_managed_identity',   name: 'All Managed Identities', color: '', group_type: 'auto', member_count: counts.managed_identity },
+      { id: 'cat_service_principal',  name: 'All Service Principals', color: '', group_type: 'auto', member_count: counts.service_principal },
+      { id: 'cat_nhi_other',          name: 'All SPNs / Workloads',   color: '', group_type: 'auto', member_count: counts.nhi_other },
+    ];
+    if (tabScope === 'humans') setAllGroups(humanGroups);
+    else if (tabScope === 'nhi') setAllGroups(nhiGroups);
+    else setAllGroups([...humanGroups, ...nhiGroups]);
+  }, [identities, tabScope]);
 
   // Phase 7: Load snapshots for selector (refetch on org switch)
   useEffect(() => {
