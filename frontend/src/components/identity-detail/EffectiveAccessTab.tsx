@@ -5,6 +5,8 @@ import {
   DataSource,
 } from './types';
 import { getRoleUsageBadge, type RoleUsageEntry } from '../../utils/roleUtils';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../LoadingState';
 
 interface EffectiveAccessTabProps {
   effectiveAccessData: EffectiveAccessData | null;
@@ -17,8 +19,9 @@ export function EffectiveAccessTab({ effectiveAccessData, effectiveAccessLoading
   const roleUsage = (data as any)?.role_usage as Record<string, RoleUsageEntry> | undefined;
   return (
     <div className="space-y-4">
+      {/* AG-POLISH-D (2026-06-10) */}
       {effectiveAccessLoading ? (
-        <div className="text-center py-8 text-gray-400">Loading effective access...</div>
+        <LoadingState size="sm" message="Loading effective access…" detail="Computing transitive role closure for this identity" />
       ) : !effectiveAccessData || effectiveAccessData.effective_access.length === 0 ? (
         <div className="text-center py-8">
           <div className="text-sm text-gray-500">No role assignments found for this identity.</div>

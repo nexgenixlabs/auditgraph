@@ -8,6 +8,8 @@ import {
   safeLower,
 } from './types';
 import { TIME_MS } from '../../constants/metrics';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../LoadingState';
 
 // AG-148: Issuer type display labels
 const ISSUER_TYPE_LABELS: Record<string, string> = {
@@ -216,7 +218,8 @@ export function FederatedCredentialsSection({
   if (loading) {
     return (
       <div className="mt-4 border-t border-gray-100 pt-4">
-        <div className="text-sm text-gray-400">Loading federated credentials…</div>
+        {/* AG-POLISH-D (2026-06-10) */}
+        <LoadingState size="sm" message="Loading federated credentials…" detail="Fetching /federatedIdentityCredentials for this app registration" />
       </div>
     );
   }
