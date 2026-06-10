@@ -9,6 +9,8 @@
  * Source: GET /api/identity-security/pim/overprivilege?identity=&severity=
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low';
 
@@ -111,10 +113,11 @@ export default function PIMOverprivilege() {
         </p>
         <h1 className="text-2xl font-bold text-slate-100 mt-1">PIM Overprivilege Detection</h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
+          {/* AG-POLISH-C (2026-06-10): jargon-aware. */}
           Identifies privileged eligibility customers carry but never exercise.
-          Reads PIM eligible + active assignments + activation policy. Activation
-          history requires Entra ID P2 (centralized auditLogs) — gracefully degrades
-          when unavailable.
+          Reads <TermTooltip term="PIM">PIM</TermTooltip> eligible + active assignments +
+          activation policy. Activation history requires <TermTooltip term="PIM">Entra ID P2</TermTooltip>
+          {' '}(centralized auditLogs) — gracefully degrades when unavailable.
         </p>
       </div>
 

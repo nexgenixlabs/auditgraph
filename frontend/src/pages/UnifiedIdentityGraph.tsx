@@ -13,6 +13,8 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 interface Tier {
   key: 'human' | 'nhi' | 'ai' | 'model' | 'data';
@@ -175,9 +177,10 @@ export default function UnifiedIdentityGraph() {
           <span className="text-slate-400">Why this matters</span>
         </div>
         <p className="text-sm text-slate-200 mt-2 leading-relaxed">
+          {/* AG-POLISH-C (2026-06-10): hoverable shorthand */}
           Most identity products see <code className="text-amber-300 font-mono text-xs">User → Role → Resource</code>.
           {' '}AuditGraph sees
-          {' '}<code className="text-emerald-300 font-mono text-xs">Human → SPN → MI → AI Agent → Model → Dataset</code>
+          {' '}<code className="text-emerald-300 font-mono text-xs">Human → <TermTooltip term="SPN">SPN</TermTooltip> → <TermTooltip term="MI">MI</TermTooltip> → AI Agent → Model → Dataset</code>
           {' '}— all connected, all derived from architecture, all without writing a
           single change to your tenant. No competitor surfaces the full chain in one
           graph today.
