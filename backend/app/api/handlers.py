@@ -16741,24 +16741,34 @@ def get_dashboard_jml_snapshot():
     AG-JML (2026-06-01): CIEM-style observability of the JML lifecycle
     WITHOUT becoming an IGA tool. Composes existing signals (no new
     detection beyond mover_stale_access) into the joiner/mover/leaver
-    framing every auditor recognizes:
+    framing every auditor recognizes.
 
-      - Joiners: identities created in the last 30 days with privileged
-        role assignments (the "joiner-with-Owner" risk pattern).
-      - Movers: open mover_stale_access anomalies (department/title
-        changed AND prior privileged roles still attached).
-      - Leavers: ghost_identity anomalies (disabled in cloud, role
-        assignments retained) — pure leaver tail.
-
-    Returns counts + top-N samples per bucket so a dashboard tile can
-    render "12 joiners · 3 movers · 5 leavers" with deep-links into
-    /identities filtered views.
+    AG-PHASE3 (2026-06-09): scope-aware via ?type= (human|nhi|ai|all).
+    Same engine, three first-class views — same pattern as Identity Trust.
     """
     db = _db()
     try:
         cursor = db.conn.cursor()
         org_id = _org_id()
         run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+
+        # AG-PHASE3: identity scope filter
+        scope = (request.args.get('type') or request.args.get('scope') or 'all').lower().strip()
+        if scope not in ('human', 'nhi', 'ai', 'all'):
+            scope = 'all'
+        if scope == 'human':
+            cat_clause = "identity_category IN ('human_user', 'guest')"
+        elif scope == 'nhi':
+            cat_clause = ("identity_category IN ('service_principal',"
+                          "'managed_identity_system','managed_identity_user','workload')")
+        elif scope == 'ai':
+            # Approximate AI cohort using identity_type_normalized; richer
+            # mapping (via agent_classifications) handled by /api/dashboard/ai-jml-snapshot
+            cat_clause = ("(identity_type_normalized = 'ai_agent' "
+                          "OR identity_category = 'ai_agent')")
+        else:
+            cat_clause = "identity_category IS NOT NULL"
+
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -16766,11 +16776,12 @@ def get_dashboard_jml_snapshot():
                 'movers':  {'count': 0, 'top': []},
                 'leavers': {'count': 0, 'top': []},
                 'reason': 'no_completed_run',
+                'identity_scope': scope,
             })
 
         # Joiners: created in last 30 days with critical/high risk
         # (i.e. they came in with elevated access — joiner-risk pattern).
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT identity_id, display_name, risk_level, created_datetime
               FROM identities
              WHERE discovery_run_id = ANY(%s)
@@ -16778,6 +16789,7 @@ def get_dashboard_jml_snapshot():
                AND created_datetime >= NOW() - INTERVAL '30 days'
                AND risk_level IN ('critical', 'high')
                AND COALESCE(is_microsoft_system, false) = false
+               AND {cat_clause}
              ORDER BY created_datetime DESC NULLS LAST
              LIMIT 5
         """, (run_ids, org_id))
@@ -16796,7 +16808,8 @@ def get_dashboard_jml_snapshot():
                AND created_datetime >= NOW() - INTERVAL '30 days'
                AND risk_level IN ('critical', 'high')
                AND COALESCE(is_microsoft_system, false) = false
-        """, (run_ids, org_id))
+               AND {cat_clause}
+        """.replace("{cat_clause}", cat_clause), (run_ids, org_id))
         joiner_count = int(cursor.fetchone()[0] or 0)
 
         # Movers: open mover_stale_access anomalies — DISTINCT identities,
@@ -16840,7 +16853,7 @@ def get_dashboard_jml_snapshot():
         # the CISO dashboard tile + this drill-down to agree, count UNIQUE
         # disabled-but-privileged identities in the latest snapshot — the
         # same definition the CISO "ghost accounts" metric uses.
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT i.identity_id, i.display_name, 'critical' AS severity,
                    CONCAT('Ghost identity: ', i.display_name, ' (disabled) retains role(s)') AS title,
                    i.created_datetime AS created_at
@@ -16852,6 +16865,7 @@ def get_dashboard_jml_snapshot():
                     EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                     OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
                )
+               AND {cat_clause}
              ORDER BY i.created_datetime DESC NULLS LAST
              LIMIT 5
         """, (run_ids, org_id))
@@ -16865,7 +16879,7 @@ def get_dashboard_jml_snapshot():
             }
             for r in cursor.fetchall()
         ]
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT count(DISTINCT i.identity_id) FROM identities i
              WHERE i.discovery_run_id = ANY(%s)
                AND i.organization_id = %s
@@ -16874,6 +16888,7 @@ def get_dashboard_jml_snapshot():
                     EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                     OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
                )
+               AND {cat_clause}
         """, (run_ids, org_id))
         leaver_count = int(cursor.fetchone()[0] or 0)
 
@@ -16882,6 +16897,7 @@ def get_dashboard_jml_snapshot():
             'joiners': {'count': joiner_count, 'top': joiner_top},
             'movers':  {'count': mover_count,  'top': mover_top},
             'leavers': {'count': leaver_count, 'top': leaver_top},
+            'identity_scope': scope,
         })
     except Exception as e:
         logger.warning("get_dashboard_jml_snapshot error: %s", e)

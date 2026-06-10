@@ -95,12 +95,23 @@ export default function LifecycleJml() {
   const [error, setError] = useState(false);
   const [active, setActive] = useState<Bucket>('leavers');
 
+  // AG-PHASE3 (2026-06-09): scope-aware. Same component powers
+  // /lifecycle?type=human / nhi / ai. Backend takes the same param.
+  const params = new URLSearchParams(window.location.search);
+  const scope = (params.get('type') || params.get('scope') || 'all').toLowerCase();
+  const scopeTitle = ({
+    human: 'Human Lifecycle (JML)',
+    nhi: 'Non-Human Identity Lifecycle (JML)',
+    ai: 'AI Identity Lifecycle (JML)',
+    all: 'Identity Lifecycle (JML)',
+  } as Record<string, string>)[scope] || 'Identity Lifecycle (JML)';
+
   useEffect(() => {
-    fetch('/api/dashboard/jml-snapshot')
+    fetch(`/api/dashboard/jml-snapshot?type=${encodeURIComponent(scope)}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error('fetch_failed')))
       .then((d: JmlResp) => setData(d))
       .catch(() => setError(true));
-  }, []);
+  }, [scope]);
 
   const totals = useMemo(() => {
     if (!data) return { j: 0, m: 0, l: 0, total: 0 };
@@ -155,15 +166,24 @@ export default function LifecycleJml() {
       {/* Header */}
       <div>
         <div className="flex items-center gap-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
-          CIEM Observability
+          {/* AG-PHASE3 (2026-06-09): scope-aware breadcrumb */}
+          <span style={{ color: scope === 'human' ? '#3b82f6' : scope === 'ai' ? '#a78bfa' : scope === 'nhi' ? '#f97316' : '#64748b' }}>
+            Identity
+          </span>
+          <span className="text-gray-300">·</span>
+          <span>{scope === 'human' ? 'Human' : scope === 'ai' ? 'AI Identity' : scope === 'nhi' ? 'Non-Human' : 'All Types'}</span>
           <span className="text-gray-300">·</span>
           <span>Lifecycle</span>
         </div>
-        <h1 className="text-2xl font-semibold text-gray-900 mt-1">Joiners · Movers · Leavers</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 mt-1">{scopeTitle}</h1>
         <p className="text-sm text-gray-600 mt-2 max-w-3xl">
-          AuditGraph flags the three lifecycle patterns auditors care about most — without touching your
-          IGA. We <span className="font-medium">observe</span> what your directory + role assignments + HR
-          fields say, then surface the identities where the lifecycle state has drifted from policy.
+          {scope === 'nhi'
+            ? 'Joiners, movers, and leavers across every non-human identity — service principals, managed identities, workloads, CI/CD identities, and AI agents. Each pattern is architecture-derived: new credential creation = Joiner; role escalation or owner change = Mover; credential expiry or decommission = Leaver. Read-only inference; no IGA write.'
+            : scope === 'human'
+            ? 'Joiners, movers, and leavers for the human directory — employees, contractors, and guests. We observe Entra ID + role assignments + HR signals and surface lifecycle drift.'
+            : scope === 'ai'
+            ? 'AI agent lifecycle events — new agents detected, model/permission/owner changes, decommissions in the window.'
+            : 'AuditGraph flags the three lifecycle patterns auditors care about most across all identity types — humans, NHIs, and AI agents. We observe what your directory + role assignments + HR fields say, then surface identities where the lifecycle state has drifted from policy.'}
         </p>
       </div>
 
