@@ -375,7 +375,12 @@ function AppContent() {
                   <Route path="/human/inventory" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanInventory /></ErrorBoundary>} />
                   <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
                   <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
-                  <Route path="/nhi/secrets" element={<Navigate to="/identity-explorer?identity_category=service_principal&hasCredentials=true" replace />} />
+                  {/* AG-IA-P2 (2026-06-10): NHI Secrets lands on the dedicated SPN
+                      Dashboard where credential posture is first-class (filters
+                      for expiring/expired/escalation paths). Issue #9 — the prior
+                      redirect filtered to /identity-explorer with a hasCredentials
+                      param that didn't exist in the filter logic. */}
+                  <Route path="/nhi/secrets" element={<Navigate to="/spns" replace />} />
                   <Route path="/nhi/ownership" element={<Navigate to="/ownership?type=nhi" replace />} />
                   <Route path="/nhi/attack-paths" element={<Navigate to="/attack-paths?source_type=nhi" replace />} />
                   <Route path="/blast-radius" element={<Navigate to="/identity-explorer?sort_field=blast_radius_score&sort_dir=desc" replace />} />

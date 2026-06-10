@@ -120,7 +120,8 @@ export default function IdentityTrust() {
         <p className="text-[10px] uppercase tracking-wider text-rose-300 font-bold mb-1">Headline</p>
         <p className="text-xl font-semibold text-rose-100 leading-snug">
           <span className="font-mono">{data.below_threshold_count}</span> of{' '}
-          <span className="font-mono">{summary.total}</span> non-human identities
+          <span className="font-mono">{summary.total}</span>{' '}
+          {scope === 'human' ? 'human identities' : scope === 'ai' ? 'AI agent identities' : scope === 'all' ? 'identities' : 'non-human identities'}
           {' '}have Trust below {threshold} ({summary.failPct}%) — review the worst
           {' '}to remediate first.
         </p>
@@ -141,7 +142,9 @@ export default function IdentityTrust() {
                 </p>
               </div>
               <p className={`text-3xl font-bold font-mono mt-1 ${st.text}`}>{count}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">{pct}% of NHIs</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {pct}% of {scope === 'human' ? 'humans' : scope === 'ai' ? 'AI agents' : scope === 'all' ? 'identities' : 'NHIs'}
+              </p>
             </div>
           );
         })}
@@ -245,7 +248,7 @@ export default function IdentityTrust() {
             {data.worst_identities.length === 0 && (
               <tr>
                 <td colSpan={4} className="px-3 py-8 text-center text-sm text-slate-500">
-                  No NHIs evaluated yet — run a discovery scan.
+                  No {scope === 'human' ? 'humans' : scope === 'ai' ? 'AI agents' : scope === 'all' ? 'identities' : 'NHIs'} evaluated yet — run a discovery scan.
                 </td>
               </tr>
             )}

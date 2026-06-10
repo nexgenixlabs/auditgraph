@@ -75,8 +75,8 @@ const BUCKET_META: Record<Bucket, {
     pillBg: 'bg-orange-50',
     pillText: 'text-orange-700',
     story: 'Changed role or department in HR — but kept their old privileged access.',
-    what: 'Open mover_stale_access anomalies — identities whose department or job_title changed since the prior snapshot while their prior critical/high privileged roles remain attached.',
-    signal: 'anomalies.anomaly_type = mover_stale_access AND resolved = false',
+    what: 'Identities whose department or job title changed since the prior snapshot, but the prior critical/high privileged roles are still attached.',
+    signal: 'role-set unchanged across an HR attribute change',
     why: '"Permission creep" is the #1 driver of standing-privilege risk. The mover scenario is exactly how engineers end up with Contributor on every subscription they ever touched — IGA tools assign roles, almost none of them clean up.',
   },
   leavers: {
@@ -85,8 +85,8 @@ const BUCKET_META: Record<Bucket, {
     pillBg: 'bg-red-50',
     pillText: 'text-red-700',
     story: 'Disabled in the directory — but the role assignments are still live.',
-    what: 'Open ghost_identity anomalies — identities that are disabled (enabled=false) yet still have one or more active role assignments. SailPoint-style deprovisioning often disables the user object without unwinding the roles.',
-    signal: 'anomalies.anomaly_type = ghost_identity AND resolved = false',
+    what: 'Disabled in the directory, but the role assignments are still live. SailPoint-style deprovisioning often disables the account object without unwinding the roles attached to it.',
+    signal: 'disabled identities with one or more active role assignments',
     why: 'Disabled-but-privileged is the canonical breach precursor — a disabled account whose credentials leaked still resolves into a session if the role assignments outlive the directory state. This is the bucket auditors look at first.',
   },
 };
