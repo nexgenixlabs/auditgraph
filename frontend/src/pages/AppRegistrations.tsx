@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { RISK_BADGE, safeLower, TIME_MS } from '../constants/metrics';
+// AG-POLISH-D (2026-06-10)
+import { TableSkeletonRow } from '../components/LoadingState';
 import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -715,11 +717,20 @@ export default function AppRegistrations() {
               </tr>
             </thead>
             <tbody className="divide-y" style={{ borderColor: 'var(--border-default)' }}>
+              {/* AG-POLISH-D (2026-06-10) */}
               {loading && (
-                <tr><td colSpan={8} className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>Loading...</td></tr>
+                <TableSkeletonRow columns={8} count={4} />
               )}
               {!loading && sorted.length === 0 && (
-                <tr><td colSpan={8} className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>No app registrations found</td></tr>
+                <tr><td colSpan={8} className="py-12">
+                  <div className="text-center max-w-md mx-auto">
+                    <svg className="w-10 h-10 mx-auto mb-3 text-slate-600" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                    </svg>
+                    <div className="text-sm font-semibold text-slate-300">No app registrations found</div>
+                    <p className="text-xs text-slate-500 mt-1">Run a discovery to enumerate every App Registration in your tenant — including ownerless and orphaned apps.</p>
+                  </div>
+                </td></tr>
               )}
               {!loading && sorted.map(row => {
                 const cs = credStatus(row);

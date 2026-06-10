@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { formatDate } from '../utils/displayHelpers';
 import {
   type TenantData, type Nav, type Framework, type FilterType, type DrillPanelState,
@@ -79,8 +81,10 @@ export default function Overview() {
       <div style={{
         minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
         background: P.bgPage,
-        fontFamily: F.data, fontSize: 14, color: P.textMuted,
-      }}>Loading...</div>
+      }}>
+        {/* AG-POLISH-D (2026-06-10) */}
+        <LoadingState message="Loading overview…" detail="Pulling the latest snapshot" />
+      </div>
     );
   }
 
