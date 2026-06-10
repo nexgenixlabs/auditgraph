@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useCopilot } from '../contexts/CopilotContext';
 import { AccessGraphTab } from '../components/graph';
@@ -1605,7 +1607,8 @@ function SensitiveAccessTab({ identityId, roleBasedFallback, identityCategory }:
     })();
   }, [identityId, withConnection]);
 
-  if (loading) return <div className="p-8 text-center text-gray-500">Loading sensitive access data...</div>;
+  {/* AG-POLISH-D (2026-06-10) */}
+  if (loading) return <div className="p-8"><LoadingState size="sm" message="Loading sensitive access data…" detail="Resolving PHI / PCI / PII reachability for this identity" /></div>;
   if (!data || !data.sensitive_resources || data.sensitive_resources.length === 0) {
     // Role-based fallback: show sensitive roles even without classified resources
     if (roleBasedFallback && roleBasedFallback.length > 0) {

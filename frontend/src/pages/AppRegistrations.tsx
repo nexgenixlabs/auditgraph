@@ -2,7 +2,7 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useLocation } from 'react-router-dom';
 import { RISK_BADGE, safeLower, TIME_MS } from '../constants/metrics';
 // AG-POLISH-D (2026-06-10)
-import { TableSkeletonRow } from '../components/LoadingState';
+import { TableSkeletonRow, LoadingState } from '../components/LoadingState';
 import { downloadCSV, exportFilename, buildExportMeta } from '../utils/exportUtils';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -817,9 +817,10 @@ export default function AppRegistrations() {
       {selectedAppId && detail && !detailLoading && (
         <AppRegDrillDown detail={detail} onClose={() => setSelectedAppId(null)} />
       )}
+      {/* AG-POLISH-D (2026-06-10) */}
       {selectedAppId && detailLoading && (
         <div className="fixed inset-y-0 right-0 w-[480px] shadow-lg border-l z-50 flex items-center justify-center" style={{ backgroundColor: 'var(--bg-secondary)', borderColor: 'var(--border-default)' }}>
-          <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>Loading...</div>
+          <LoadingState message="Loading app registration detail…" size="sm" />
         </div>
       )}
 

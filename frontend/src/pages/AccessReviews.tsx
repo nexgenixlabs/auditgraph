@@ -747,8 +747,9 @@ export default function AccessReviews() {
                   </div>
                 )}
 
+                {/* AG-POLISH-D (2026-06-10) */}
                 {reviewsLoading ? (
-                  <div style={{ textAlign: 'center', padding: 40, color: AR.textMuted }}>Loading reviews...</div>
+                  <LoadingState message="Loading reviews…" size="sm" />
                 ) : reviews.length === 0 ? (
                   <EmptyState title="No identities match the current filters" description="Adjust the filter chips above or expand the date range." />
                 ) : (
