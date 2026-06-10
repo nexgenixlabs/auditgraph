@@ -11,6 +11,8 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 interface WorstIdentity {
   identity_db_id: number;
@@ -101,13 +103,15 @@ export default function IdentityTrust() {
         </div>
         <h1 className="text-2xl font-bold text-slate-100 mt-1">{scopeLabel}</h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
-          {scope === 'human'
-            ? 'Trust Score (0-100) across every human identity in your tenant — employees, contractors, and guests. 9 dimensions: Ownership · Secrets (MFA + credential rotation) · Egress · Telemetry · Oversight · Data Access · Network · Privileged Reach · Origin.'
-            : scope === 'ai'
-            ? 'Trust Score (0-100) across every AI agent identity in your tenant. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · Model Exposure · Supply Chain.'
-            : scope === 'all'
-            ? 'Trust Score (0-100) across every identity in your tenant — humans, NHIs, and AI. 9 dimensions universal across types.'
-            : 'Trust Score (0-100) across every non-human identity in your tenant — service principals, managed identities, workloads, CI/CD identities, and AI agents. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · Privileged Reach · Supply Chain.'}
+          {scope === 'human' ? (
+            <>Trust Score (0-100) across every human identity in your tenant — employees, contractors, and guests. 9 dimensions: Ownership · Secrets (MFA + credential rotation) · Egress · Telemetry · Oversight · Data Access · Network · <TermTooltip term="Blast Radius">Privileged Reach</TermTooltip> · Origin.</>
+          ) : scope === 'ai' ? (
+            <>Trust Score (0-100) across every AI agent identity in your tenant. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · Model Exposure · Supply Chain.</>
+          ) : scope === 'all' ? (
+            <>Trust Score (0-100) across every identity in your tenant — humans, <TermTooltip term="NHI">NHIs</TermTooltip>, and AI. 9 dimensions universal across types.</>
+          ) : (
+            <>Trust Score (0-100) across every non-human identity in your tenant — <TermTooltip term="SPN">service principals</TermTooltip>, <TermTooltip term="MI">managed identities</TermTooltip>, workloads, CI/CD identities, and AI agents. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · <TermTooltip term="Blast Radius">Privileged Reach</TermTooltip> · Supply Chain.</>
+          )}
         </p>
       </div>
 

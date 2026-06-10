@@ -22,6 +22,8 @@
  */
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 interface JmlSample {
   identity_id: string;
@@ -177,13 +179,15 @@ export default function LifecycleJml() {
         </div>
         <h1 className="text-2xl font-semibold text-gray-900 mt-1">{scopeTitle}</h1>
         <p className="text-sm text-gray-600 mt-2 max-w-3xl">
-          {scope === 'nhi'
-            ? 'Joiners, movers, and leavers across every non-human identity — service principals, managed identities, workloads, CI/CD identities, and AI agents. Each pattern is architecture-derived: new credential creation = Joiner; role escalation or owner change = Mover; credential expiry or decommission = Leaver. Read-only inference; no IGA write.'
-            : scope === 'human'
-            ? 'Joiners, movers, and leavers for the human directory — employees, contractors, and guests. We observe Entra ID + role assignments + HR signals and surface lifecycle drift.'
-            : scope === 'ai'
-            ? 'AI agent lifecycle events — new agents detected, model/permission/owner changes, decommissions in the window.'
-            : 'AuditGraph flags the three lifecycle patterns auditors care about most across all identity types — humans, NHIs, and AI agents. We observe what your directory + role assignments + HR fields say, then surface identities where the lifecycle state has drifted from policy.'}
+          {scope === 'nhi' ? (
+            <><TermTooltip term="JML">Joiners, movers, and leavers</TermTooltip> across every non-human identity — <TermTooltip term="SPN">service principals</TermTooltip>, <TermTooltip term="MI">managed identities</TermTooltip>, workloads, <TermTooltip term="FIC">CI/CD identities</TermTooltip>, and AI agents. Each pattern is architecture-derived: new credential creation = Joiner; role escalation or owner change = Mover; credential expiry or decommission = Leaver. Read-only inference; no IGA write.</>
+          ) : scope === 'human' ? (
+            <><TermTooltip term="JML">Joiners, movers, and leavers</TermTooltip> for the human directory — employees, contractors, and guests. We observe Entra ID + role assignments + HR signals and surface lifecycle drift.</>
+          ) : scope === 'ai' ? (
+            <>AI agent lifecycle events — new agents detected, model/permission/owner changes, decommissions in the window.</>
+          ) : (
+            <>AuditGraph flags the three lifecycle patterns auditors care about most across all identity types — humans, <TermTooltip term="NHI">NHIs</TermTooltip>, and AI agents. We observe what your directory + role assignments + HR fields say, then surface identities where the lifecycle state has drifted from policy.</>
+          )}
         </p>
       </div>
 

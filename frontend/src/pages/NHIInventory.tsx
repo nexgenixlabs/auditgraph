@@ -13,6 +13,8 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 interface NhiStats {
   service_principals: number;
@@ -117,8 +119,12 @@ export default function NHIInventory() {
         </div>
         <h1 className="text-2xl font-bold text-slate-100 mt-1">Non-Human Identity Inventory</h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
-          Every non-human identity in your tenant — service principals, managed identities,
-          workloads, CI/CD identities, and AI agents — in one pane. Read-only,
+          {/* AG-POLISH-C (2026-06-10): jargon-aware. Every cap term has
+              a tooltip the CISO can hover for the precise definition. */}
+          Every <TermTooltip term="NHI">non-human identity</TermTooltip> in your tenant —
+          {' '}<TermTooltip term="SPN">service principals</TermTooltip>,
+          {' '}<TermTooltip term="MI">managed identities</TermTooltip>, workloads,
+          CI/CD identities, and AI agents — in one pane. Read-only,
           architecture-derived. AuditGraph never asks for write access.
         </p>
       </div>
