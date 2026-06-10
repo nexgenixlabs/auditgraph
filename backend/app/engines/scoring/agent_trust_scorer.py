@@ -623,7 +623,11 @@ def compute_agent_trust_batch(
                    credential_status,
                    credential_expiration,
                    organization_id,
-                   discovery_run_id
+                   discovery_run_id,
+                   /* AG-PHASE-ENGINE-DEPTH (2026-06-10): supply chain
+                      signals for non-AI NHIs need these fields. */
+                   federated_issuer_types,
+                   has_federated_credentials
               FROM identities
              WHERE id = ANY(%s)
             """,
@@ -640,8 +644,30 @@ def compute_agent_trust_batch(
             "owner_count", "last_sign_in", "last_activity_date",
             "credential_status", "credential_expiration",
             "organization_id", "discovery_run_id",
+            "federated_issuer_types", "has_federated_credentials",
         ])
         meta_by_id[int(rec["id"])] = rec
+
+    # AG-PHASE-ENGINE-DEPTH (2026-06-10): batch-fetch federated_credentials
+    # subjects per identity so detect_signals can flag permissive subject
+    # patterns. Best-effort: failures don't break the rest of the batch.
+    try:
+        cursor.execute(
+            """
+            SELECT identity_db_id, subject
+              FROM federated_credentials
+             WHERE identity_db_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        for r in cursor.fetchall():
+            rec_id = r['identity_db_id'] if isinstance(r, dict) else r[0]
+            subj = r['subject'] if isinstance(r, dict) else r[1]
+            if rec_id in meta_by_id:
+                meta_by_id[rec_id].setdefault('federated_subjects', []).append(subj or '')
+    except Exception:
+        # federated_credentials table may not exist on older tenants — silent skip
+        pass
 
     # 2) Role assignments.
     roles_by_id: dict[int, list[dict[str, Any]]] = {i: [] for i in ids}
