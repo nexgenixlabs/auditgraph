@@ -25103,7 +25103,10 @@ def get_identity_federated_credentials(identity_id: str):
                 WHERE fc.identity_db_id = %s
                 ORDER BY fc.name
             """, (db_id,))
-            for r in cursor.fetchall():
+            rows_fetched = cursor.fetchall()
+            logger.info("[federated-credentials] db_id=%s rows_fetched=%d flag=%s count=%s",
+                        db_id, len(rows_fetched), flag, count)
+            for r in rows_fetched:
                 aud = r['audiences'] if isinstance(r['audiences'], list) else []
                 risk = _classify_federated_risk(r['issuer'], r['subject'], aud)
                 creds.append({
@@ -25121,7 +25124,12 @@ def get_identity_federated_credentials(identity_id: str):
                 col = r.get('collected_at')
                 if col and (last_collected is None or col > last_collected):
                     last_collected = col
-        except Exception:
+        except Exception as _fed_err:
+            # AG-PILOT-FED-CREDS-LOGGING (2026-06-09): the silent rollback
+            # was hiding the real cause of "credentials: []" even when DB
+            # has rows. Log it so we can see why.
+            logger.warning("[federated-credentials] query failed for db_id=%s: %s",
+                           db_id, _fed_err, exc_info=True)
             cursor.connection.rollback()
 
         # Fallback: legacy credentials table.
@@ -42010,6 +42018,45 @@ def get_ai_agents_enriched():
                 except Exception:
                     pass
 
+        # AG-PILOT-AI-AGENTS-MODELS (2026-06-09): customer asked to see
+        # WHICH model each identity has access to (gpt-4, gpt-4o-mini,
+        # claude, etc.) — not just the access level. Join identity role
+        # scopes to azure_ai_model_deployments via the Cognitive Services
+        # account resource_id. An identity reaches a deployment when its
+        # role scope is the deployment's account_resource_id OR an
+        # ancestor (subscription / RG / MG). Best-effort.
+        models_by_id = {}
+        if db_ids:
+            try:
+                cursor.execute("SAVEPOINT _enriched_models")
+                cursor.execute("""
+                    WITH agent_scopes AS (
+                      SELECT DISTINCT ra.identity_db_id, LOWER(ra.scope) AS scope
+                        FROM role_assignments ra
+                       WHERE ra.identity_db_id = ANY(%s)
+                         AND ra.scope IS NOT NULL
+                    )
+                    SELECT s.identity_db_id, d.model_name, d.model_format
+                      FROM agent_scopes s
+                      JOIN azure_ai_model_deployments d
+                        ON  LOWER(d.account_resource_id) = s.scope
+                         OR LOWER(d.account_resource_id) LIKE s.scope || '/%%'
+                """, (db_ids,))
+                for r in cursor.fetchall():
+                    iid = id_map.get(r[0], str(r[0]))
+                    if iid not in models_by_id:
+                        models_by_id[iid] = []
+                    label = r[1] or 'unknown'
+                    if r[2] and r[2].lower() != 'openai':
+                        label = f"{label} ({r[2]})"
+                    if label not in models_by_id[iid]:
+                        models_by_id[iid].append(label)
+                cursor.execute("RELEASE SAVEPOINT _enriched_models")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT _enriched_models")
+                except Exception:
+                    pass
         cursor.close()
 
         items = []
@@ -42064,6 +42111,10 @@ def get_ai_agents_enriched():
             # AG-162: expose role names so frontend can filter by role
             # (e.g., click "Contributor" in AI Access → filter to agents holding Contributor).
             item['role_names'] = sorted({r['role_name'] for r in roles if r.get('role_name')})
+
+            # AG-PILOT-AI-AGENTS-MODELS (2026-06-09): which actual AI models
+            # this identity reaches via RBAC. Sorted so display is stable.
+            item['models'] = sorted(models_by_id.get(identity_id, []))
 
             # Remove internal db_id from response
             item.pop('db_id', None)

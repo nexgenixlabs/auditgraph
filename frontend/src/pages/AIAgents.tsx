@@ -43,6 +43,7 @@ interface AgentRow {
   risk_dimensions: Record<string, RiskDimension>;
   role_count: number;
   role_names?: string[];   // AG-162: exposed for URL ?role= filtering
+  models?: string[];       // AG-PILOT-AI-AGENTS-MODELS: AI models this identity reaches via RBAC
 }
 
 const NHI_CATEGORIES = new Set(['service_principal', 'managed_identity_system', 'managed_identity_user', 'app', 'workload']);
@@ -269,6 +270,29 @@ export default function AIAgents() {
         )}
       </td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.model_access} /></td>
+      {/* AG-PILOT-AI-AGENTS-MODELS (2026-06-09): actual model names this
+          identity reaches (e.g. gpt-4o, claude-3.5). Up to 2 visible
+          + "+N more" tooltip. Hyphen when discovery hasn't observed
+          any deployments through this identity's scopes. */}
+      <td className="text-left px-2 py-2">
+        {row.models && row.models.length > 0 ? (
+          <div className="flex flex-wrap gap-1 max-w-[180px]">
+            {row.models.slice(0, 2).map((m, i) => (
+              <span key={i} className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-900/40 text-violet-200 border border-violet-700/40 truncate max-w-[110px]"
+                    title={m}>
+                {m}
+              </span>
+            ))}
+            {row.models.length > 2 && (
+              <span className="text-[10px] text-slate-400 self-center" title={row.models.slice(2).join(', ')}>
+                +{row.models.length - 2}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-[10px] text-slate-600">—</span>
+        )}
+      </td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.key_vault_access} /></td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.data_access} /></td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.telemetry} /></td>
@@ -331,6 +355,12 @@ export default function AIAgents() {
             title="Access LEVEL to model deployments (Owner / Contributor / Reader). Not the model name."
             onClick={() => handleSort('model_access')}>
           Model Access <SortIcon col="model_access" />
+        </th>
+        {/* AG-PILOT-AI-AGENTS-MODELS (2026-06-09): the actual deployed
+            models reachable through this identity's RBAC. */}
+        <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-44"
+            title="The actual AI models this identity can reach via RBAC (e.g. gpt-4o, claude-3.5-sonnet). Derived from discovered model deployments under each role scope.">
+          Models
         </th>
         <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-24"
             title="Access LEVEL to Key Vault (secrets / certificates / keys)."
