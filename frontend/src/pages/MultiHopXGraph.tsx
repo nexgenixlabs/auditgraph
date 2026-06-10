@@ -152,7 +152,7 @@ export default function MultiHopXGraph() {
     <div className="p-6 max-w-[1400px] mx-auto space-y-5">
       <div>
         <div className="flex items-center gap-2 mb-1">
-          <h1 className="text-2xl font-bold text-slate-100">Multi-Hop XGRAPH</h1>
+          <h1 className="text-2xl font-bold text-slate-100">Identity Exposure Graph</h1>
           <span className="text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded
                            bg-violet-900/40 text-violet-300 border border-violet-800">
             v2 · agent-to-agent

@@ -72,12 +72,9 @@ interface TierCounts {
 
 const EMPTY_COUNTS: TierCounts = { human: 0, nhi: 0, ai: 0, model: 0, data: 0 };
 
-function TierCard({ tier, count, edgeCount }: { tier: Tier; count: number; edgeCount?: number }) {
-  return (
-    <div
-      className="bg-[#0f172a] rounded-xl p-4 transition hover:scale-[1.01]"
-      style={{ borderLeft: `4px solid ${tier.color}`, border: `1px solid ${tier.color}40` }}
-    >
+function TierCard({ tier, count, edgeCount, to }: { tier: Tier; count: number; edgeCount?: number; to?: string }) {
+  const body = (
+    <>
       <div className="flex items-baseline justify-between">
         <div className="text-[10px] uppercase tracking-wider font-bold" style={{ color: tier.color }}>
           {tier.label}
@@ -90,8 +87,19 @@ function TierCard({ tier, count, edgeCount }: { tier: Tier; count: number; edgeC
           ↓ <span className="text-slate-300 font-mono">{edgeCount.toLocaleString()}</span> active edges into the tier below
         </p>
       )}
-    </div>
+      {to && (
+        <p className="text-[10px] mt-2 font-medium" style={{ color: tier.color }}>
+          Open {tier.label.toLowerCase()} →
+        </p>
+      )}
+    </>
   );
+  const cls = "bg-[#0f172a] rounded-xl p-4 transition hover:scale-[1.01] block";
+  const sty = { borderLeft: `4px solid ${tier.color}`, border: `1px solid ${tier.color}40` };
+  if (to) {
+    return <Link to={to} className={`${cls} hover:bg-slate-900/60`} style={sty} title={`Drill into ${tier.label}`}>{body}</Link>;
+  }
+  return <div className={cls} style={sty}>{body}</div>;
 }
 
 function ConnectorEdge({ count, color }: { count: number; color: string }) {
@@ -195,15 +203,15 @@ export default function UnifiedIdentityGraph() {
       ) : (
         <div>
           <div className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">Tier ladder</div>
-          <TierCard tier={TIERS[0]} count={counts.human} edgeCount={edges.human_to_nhi} />
+          <TierCard tier={TIERS[0]} count={counts.human} edgeCount={edges.human_to_nhi} to="/human/inventory" />
           <ConnectorEdge count={edges.human_to_nhi} color="#3b82f6" />
-          <TierCard tier={TIERS[1]} count={counts.nhi} edgeCount={edges.nhi_to_ai} />
+          <TierCard tier={TIERS[1]} count={counts.nhi} edgeCount={edges.nhi_to_ai} to="/nhi" />
           <ConnectorEdge count={edges.nhi_to_ai} color="#f97316" />
-          <TierCard tier={TIERS[2]} count={counts.ai} edgeCount={edges.ai_to_model} />
+          <TierCard tier={TIERS[2]} count={counts.ai} edgeCount={edges.ai_to_model} to="/ai-inventory" />
           <ConnectorEdge count={edges.ai_to_model} color="#a78bfa" />
-          <TierCard tier={TIERS[3]} count={counts.model} edgeCount={edges.model_to_data} />
+          <TierCard tier={TIERS[3]} count={counts.model} edgeCount={edges.model_to_data} to="/ai-runtime/model-registry" />
           <ConnectorEdge count={edges.model_to_data} color="#ec4899" />
-          <TierCard tier={TIERS[4]} count={counts.data} />
+          <TierCard tier={TIERS[4]} count={counts.data} to="/ai-access/data-reachability" />
         </div>
       )}
 

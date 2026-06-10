@@ -250,10 +250,12 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        // AG-PHASE1-WORKLOAD (2026-06-09): Workload Security is now the
-        // SMALLEST section — runtime / models / supply chain only. AI
-        // identities live in IDENTITY > AI Identity, not here.
-        label: 'Workload Security',
+        // AG-IA-P3 (2026-06-10): Renamed to AI Workload Security to be
+        // honest — these surfaces are AI-runtime-specific (model registry,
+        // AI threat scenarios, AI supply chain). Issue #21 from founder
+        // review: prior label "Workload Security" implied cross-cutting
+        // but the contents are AI-only.
+        label: 'AI Workload Security',
         color: '#a78bfa',
         items: [
           { to: '/ai-runtime',                    label: 'Runtime',           icon: agentBotIcon },
@@ -261,7 +263,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/ai-runtime/supply-chain',       label: 'Supply Chain',      icon: agentBotIcon },
           { to: '/ai-runtime/threat-connectors',  label: 'Threat Connectors', icon: agentBotIcon },
           { to: '/ai-findings',                   label: 'Findings',          icon: roleOptIcon },
-          { to: '/ai-risk',                       label: 'Threat Scenarios',  icon: roleOptIcon },
+          { to: '/ai-risk',                       label: 'AI Threat Scenarios', icon: roleOptIcon },
         ],
       },
       {
@@ -282,7 +284,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/compliance-posture', label: 'Compliance Posture', icon: complianceIcon },
           { to: '/compliance', label: 'Compliance Evidence', icon: complianceIcon },
           { to: '/access-reviews', label: 'Access Reviews', icon: accessReviewIcon },
-          { to: '/ai-runtime/activity', label: 'Activity Timeline', icon: activityIcon },
+          { to: '/ai-runtime/activity', label: 'AI Activity Timeline', icon: activityIcon },
           // AG-WK7.A: Peer Benchmarking — network-effect moat
           { to: '/peer-benchmarking', label: 'Peer Benchmarking', icon: roleOptIcon },
           { to: '/reports', label: 'Reports & Exports', icon: reportsIcon, matchPrefixes: ['/reports', '/exports'] },

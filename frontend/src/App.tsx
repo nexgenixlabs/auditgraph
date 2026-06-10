@@ -74,6 +74,7 @@ import NHIAccess from './pages/NHIAccess';
 import HumanGovernance from './pages/HumanGovernance';
 import NHIGovernance from './pages/NHIGovernance';
 import HumanInventory from './pages/HumanInventory';
+import BlastRadiusPage from './pages/BlastRadiusPage';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
 import MultiHopXGraph from './pages/MultiHopXGraph';
@@ -383,7 +384,7 @@ function AppContent() {
                   <Route path="/nhi/secrets" element={<Navigate to="/spns" replace />} />
                   <Route path="/nhi/ownership" element={<Navigate to="/ownership?type=nhi" replace />} />
                   <Route path="/nhi/attack-paths" element={<Navigate to="/attack-paths?source_type=nhi" replace />} />
-                  <Route path="/blast-radius" element={<Navigate to="/identity-explorer?sort_field=blast_radius_score&sort_dir=desc" replace />} />
+                  <Route path="/blast-radius" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><BlastRadiusPage /></ErrorBoundary>} />
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
                   <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
