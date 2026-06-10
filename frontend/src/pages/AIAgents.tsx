@@ -44,6 +44,9 @@ interface AgentRow {
   role_count: number;
   role_names?: string[];   // AG-162: exposed for URL ?role= filtering
   models?: string[];       // AG-PILOT-AI-AGENTS-MODELS: AI models this identity reaches via RBAC
+  // AG-PILOT-AI-AGENTS-MODELS-V2: how confident we are about model_access
+  //   'verified' | 'no_match' | 'pending' | 'n/a'
+  model_access_verification?: string;
 }
 
 const NHI_CATEGORIES = new Set(['service_principal', 'managed_identity_system', 'managed_identity_user', 'app', 'workload']);
@@ -269,11 +272,30 @@ export default function AIAgents() {
           <span className="text-[10px] text-slate-600">—</span>
         )}
       </td>
-      <td className="text-center px-2 py-2"><AccessBadge level={row.model_access} /></td>
+      {/* AG-PILOT-AI-AGENTS-MODELS-V2 (2026-06-09): badge changes per
+          verification state so we never claim "Owner on models" when
+          we haven't actually observed any deployments. */}
+      <td className="text-center px-2 py-2">
+        <div className="inline-flex items-center gap-0.5">
+          <AccessBadge level={row.model_access} />
+          {row.model_access_verification === 'no_match' && row.model_access && row.model_access !== 'none' && (
+            <span className="text-[9px] font-bold text-amber-400"
+                  title="Role NAME implies model access but NO deployments were found under this identity's role scopes. Possible false positive — verify in the role's Cognitive Services / AI Foundry resources.">
+              ?
+            </span>
+          )}
+          {row.model_access_verification === 'pending' && row.model_access && row.model_access !== 'none' && (
+            <span className="text-[9px] font-bold text-slate-500"
+                  title="Discovery has not yet enumerated AI model deployments for this tenant. Re-run scan to verify which models are actually reachable.">
+              ⋯
+            </span>
+          )}
+        </div>
+      </td>
       {/* AG-PILOT-AI-AGENTS-MODELS (2026-06-09): actual model names this
           identity reaches (e.g. gpt-4o, claude-3.5). Up to 2 visible
-          + "+N more" tooltip. Hyphen when discovery hasn't observed
-          any deployments through this identity's scopes. */}
+          + "+N more" tooltip. Status message when no deployments
+          observed instead of an opaque hyphen. */}
       <td className="text-left px-2 py-2">
         {row.models && row.models.length > 0 ? (
           <div className="flex flex-wrap gap-1 max-w-[180px]">
@@ -289,6 +311,14 @@ export default function AIAgents() {
               </span>
             )}
           </div>
+        ) : row.model_access_verification === 'pending' ? (
+          <span className="text-[10px] text-slate-500 italic" title="Discovery has not yet enumerated AI model deployments for this tenant. Re-run discovery to populate.">
+            scan pending
+          </span>
+        ) : row.model_access_verification === 'no_match' ? (
+          <span className="text-[10px] text-amber-400" title="Identity has a role whose name implies model access, but no actual deployments were found under any of its role scopes.">
+            none in scope
+          </span>
         ) : (
           <span className="text-[10px] text-slate-600">—</span>
         )}

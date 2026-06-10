@@ -42025,7 +42025,24 @@ def get_ai_agents_enriched():
         # account resource_id. An identity reaches a deployment when its
         # role scope is the deployment's account_resource_id OR an
         # ancestor (subscription / RG / MG). Best-effort.
+        # AG-PILOT-AI-AGENTS-MODELS-V2 (2026-06-09): track verification
+        # state so the UI can distinguish (a) "no deployments discovered
+        # in this tenant yet" (model_access is unverified) from (b)
+        # "deployments exist but none match this identity's scope" (the
+        # role-name-pattern model_access may be a false positive).
         models_by_id = {}
+        org_has_deployments = False
+        try:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM azure_ai_model_deployments
+                     WHERE organization_id = %s LIMIT 1
+                )
+            """, (org_id,))
+            r = cursor.fetchone()
+            org_has_deployments = bool(r[0]) if r else False
+        except Exception:
+            org_has_deployments = False
         if db_ids:
             try:
                 cursor.execute("SAVEPOINT _enriched_models")
@@ -42115,6 +42132,23 @@ def get_ai_agents_enriched():
             # AG-PILOT-AI-AGENTS-MODELS (2026-06-09): which actual AI models
             # this identity reaches via RBAC. Sorted so display is stable.
             item['models'] = sorted(models_by_id.get(identity_id, []))
+
+            # AG-PILOT-AI-AGENTS-MODELS-V2 (2026-06-09): verification state.
+            # 'verified'   → models found that match identity's scopes
+            # 'no_match'   → deployments exist org-wide but none under
+            #                this identity's scopes (model_access from
+            #                role NAME is suspect — likely false positive)
+            # 'pending'    → discovery hasn't populated deployments yet;
+            #                model_access cannot be verified
+            # 'n/a'        → identity claims no model access either way
+            if access_levels['model_access'] in ('none', None, ''):
+                item['model_access_verification'] = 'n/a'
+            elif item['models']:
+                item['model_access_verification'] = 'verified'
+            elif org_has_deployments:
+                item['model_access_verification'] = 'no_match'
+            else:
+                item['model_access_verification'] = 'pending'
 
             # Remove internal db_id from response
             item.pop('db_id', None)
