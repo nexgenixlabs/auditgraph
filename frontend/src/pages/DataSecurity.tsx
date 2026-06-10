@@ -3,6 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 import EmptyState from '../components/ui/EmptyState';
+// AG-POLISH-D (2026-06-10): skeleton loading row
+import { TableSkeletonRow } from '../components/LoadingState';
 import { normalizeScore } from '../utils/identityRiskScore';
 
 // ─── Theme-aware constants ───
@@ -635,8 +637,9 @@ export default function DataSecurity() {
                 </tr>
               </thead>
               <tbody>
+                {/* AG-POLISH-D (2026-06-10): consistent skeleton loading */}
                 {loading ? (
-                  <tr><td colSpan={9} style={{ padding: 40, textAlign: 'center', color: G.textMuted }}>Loading...</td></tr>
+                  <TableSkeletonRow columns={9} count={5} />
                 ) : sorted.length === 0 ? (
                   <tr><td colSpan={9}><EmptyState compact title="No resources found" description="Try clearing filters or running a discovery scan." /></td></tr>
                 ) : sorted.map(r => {
