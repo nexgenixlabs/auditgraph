@@ -10,6 +10,8 @@
  *   GET /api/ai-security/supply-chain/<id>     — per-agent tree
  */
 import React, { useCallback, useEffect, useState } from 'react';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low';
 
@@ -112,7 +114,8 @@ export default function AISupplyChain() {
       .catch((e: Error) => setError(e.message));
   }, [selectedAgent]);
 
-  if (loading && !rollup) return <div className="p-6 text-sm text-slate-400">Loading supply chain…</div>;
+  {/* AG-POLISH-D (2026-06-10) */}
+  if (loading && !rollup) return <div className="p-6"><LoadingState message="Loading supply chain…" detail="Walking model → plugin → vector store → API dependencies" /></div>;
   if (error) return <div className="p-6 text-sm text-rose-400">{error}</div>;
   if (!rollup) return null;
 

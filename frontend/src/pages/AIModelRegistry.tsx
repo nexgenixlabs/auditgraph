@@ -12,6 +12,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/ToastProvider';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 type EffectiveStatus = 'approved' | 'pending_review' | 'rejected' | 'revoked' | 'unverified' | 'expired';
 
@@ -137,8 +139,9 @@ export default function AIModelRegistry() {
     load();
   };
 
+  {/* AG-POLISH-D (2026-06-10) */}
   if (loading && !data) {
-    return <div className="p-6 text-sm text-slate-400">Loading model registry…</div>;
+    return <div className="p-6"><LoadingState message="Loading model registry…" detail="Enumerating Cognitive Services + AI Foundry deployments" /></div>;
   }
   if (error) {
     return <div className="p-6 text-sm text-rose-400">{error}</div>;

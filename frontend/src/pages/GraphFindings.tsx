@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -244,8 +246,9 @@ export default function GraphFindings() {
       )}
 
       {/* Main content */}
+      {/* AG-POLISH-D (2026-06-10) */}
       {loading ? (
-        <div className="text-center text-slate-400 py-12">Loading attack paths...</div>
+        <LoadingState message="Loading attack paths…" detail="Running BFS over identity-to-resource edges" />
       ) : paths.length === 0 ? (
         <div className="text-center py-16 bg-slate-800/50 rounded-xl border border-slate-700/50">
           <svg className="w-16 h-16 text-slate-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
