@@ -483,6 +483,37 @@ function V31DashboardGrid({ data, coreOnly }: { data: PostureV31Response; coreOn
         <CopilotQuickAsk />
       </div>
 
+      {/* AG-POLISH-B (2026-06-09): Unified Identity Graph promo banner.
+          Promotes the patent moat onto the executive landing so every
+          demo lands on the strongest differentiator: the full
+          Human → NHI → AI → Model → Data chain in one graph. */}
+      <div className="px-3 pt-2 flex-shrink-0">
+        <a href="/unified-graph"
+           className="block bg-gradient-to-r from-emerald-950/60 via-violet-950/60 to-rose-950/60 border border-emerald-700/30 rounded-lg px-4 py-2.5 hover:border-emerald-500/50 transition-all cursor-pointer group">
+          <div className="flex items-center gap-3 justify-between">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
+                <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M3 12h18M12 3a15 15 0 010 18M12 3a15 15 0 000 18" />
+                </svg>
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-400">
+                  Patent-track · NEW
+                </div>
+                <div className="text-xs font-semibold text-slate-100 truncate">
+                  Unified Identity Graph — Human → NHI → AI Agent → Model → Data, in one view
+                </div>
+              </div>
+            </div>
+            <span className="text-[11px] font-medium text-emerald-300 group-hover:text-emerald-200 flex-shrink-0">
+              Open Graph →
+            </span>
+          </div>
+        </a>
+      </div>
+
       {/* ── Main Grid ── */}
       <div className="flex-1 px-3 pb-0 overflow-hidden grid grid-cols-12 gap-3" style={{ gridTemplateRows: '120px 140px 1fr' }}>
 
