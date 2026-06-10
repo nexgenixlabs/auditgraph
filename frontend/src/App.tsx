@@ -72,6 +72,8 @@ import WhatsNew from './pages/WhatsNew';
 import AIAccess from './pages/AIAccess';
 import HumanAccess from './pages/HumanAccess';
 import NHIAccess from './pages/NHIAccess';
+import HumanGovernance from './pages/HumanGovernance';
+import NHIGovernance from './pages/NHIGovernance';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
 import MultiHopXGraph from './pages/MultiHopXGraph';
@@ -368,6 +370,8 @@ function AppContent() {
                       "AI Access" page bleeding across Human/NHI/AI. */}
                   <Route path="/human/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanAccess /></ErrorBoundary>} />
                   <Route path="/nhi/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIAccess /></ErrorBoundary>} />
+                  <Route path="/human/governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanGovernance /></ErrorBoundary>} />
+                  <Route path="/nhi/governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIGovernance /></ErrorBoundary>} />
                   <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
                   <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
                   <Route path="/nhi/secrets" element={<Navigate to="/identity-explorer?identity_category=service_principal&hasCredentials=true" replace />} />
