@@ -31,8 +31,25 @@ interface CategorySummary {
   [k: string]: number | undefined;
 }
 
+interface CategoryStats {
+  total: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  info: number;
+  unknown: number;
+}
+
 interface IdentitySummary {
-  category_breakdown?: { human_user?: number; guest?: number; [k: string]: number | undefined };
+  // Handler returns categories keyed by identity_category, each with the
+  // count by risk level. Shape: { human_user: {total, critical, high, ...}, guest: {...}, ... }
+  categories?: Record<string, CategoryStats>;
+}
+
+interface PostureResp {
+  posture_score?: number;
+  band_breakdown?: { critical?: number; high?: number; medium?: number; low?: number; info?: number };
 }
 
 interface AttackPathRow {
@@ -45,31 +62,34 @@ interface AttackPathRow {
   description?: string;
 }
 
+// `null` means the metric isn't derivable from current backend — render "—"
+// instead of inventing a fake number. (Founder direction: SSOT, no fakes.)
 interface DashboardData {
   // Tier counts
   humanCount: number;
   nhiCount: number;
   aiCount: number;
-  modelCount: number;
-  dataCount: number;
+  modelCount: number | null;
+  dataCount: number | null;
+  weekDelta: { human: number | null; nhi: number | null; ai: number | null; model: number | null; data: number | null };
   // Headline numbers
-  riskScore: number;            // 0-100 (red if high)
-  riskImprovementPct: number;   // -ve = improving
-  estimatedExposure: number;    // $
-  reductionOpportunity: number; // $
+  riskScore: number;                  // 0-100 derived from posture
+  riskImprovementPct: number | null;  // -ve = improving
+  estimatedExposure: number | null;
+  reductionOpportunity: number | null;
   attackPathsTotal: number;
   attackPathsCritical: number;
   attackPathsHigh: number;
   attackPathsMedium: number;
-  compliancePct: number;        // 0-100
-  controlsFailing: number;
-  // Tier risk gauges
-  humanRiskGauge: number;       // 0-100
-  humanOrphaned: number;
-  humanGhost: number;
-  humanPrivileged: number;
+  compliancePct: number;
+  controlsFailing: number | null;
+  // Tier risk gauges (0-100, weighted (critical*4 + high*2 + medium) per total)
+  humanRiskGauge: number;
+  humanOrphaned: number;          // critical-risk humans
+  humanGhost: number;             // stale or unowned humans
+  humanPrivileged: number;        // high-risk humans
   nhiRiskGauge: number;
-  nhiServicePrincipals: number;
+  nhiServicePrincipals: number;   // total NHI count
   nhiUnowned: number;
   nhiOverPriv: number;
   aiRiskGauge: number;
@@ -79,10 +99,32 @@ interface DashboardData {
   // Lists
   topAttackPaths: AttackPathRow[];
   // Right rail
-  whatChanged: Array<{ icon: string; count: number; label: string; ageHours: number; color: string }>;
-  phiAssets: { count: number; value: number };
-  pciAssets: { count: number; value: number };
-  aiModels: { count: number; value: number };
+  whatChanged: Array<{ icon: string; count: number; label: string; ageHours: number; color: string }> | null;
+  phiAssets: { count: number; value: number | null } | null;
+  pciAssets: { count: number; value: number | null } | null;
+  aiModels:  { count: number; value: number | null } | null;
+}
+
+function gaugeLabel(v: number): string {
+  if (v >= 75) return 'Critical';
+  if (v >= 50) return 'High';
+  if (v >= 25) return 'Elevated';
+  return 'Healthy';
+}
+
+function gaugeColor(v: number): string {
+  if (v >= 75) return '#f87171';
+  if (v >= 50) return '#fb923c';
+  if (v >= 25) return '#fbbf24';
+  return '#34d399';
+}
+
+function gaugeFromRisk(stats: CategoryStats | undefined): number {
+  if (!stats || !stats.total) return 0;
+  // Severity-weighted risk (0-100). critical = 4x, high = 2x, medium = 1x,
+  // normalised by total*4 so a tenant of all-critical maps to 100.
+  const score = (stats.critical * 4 + stats.high * 2 + stats.medium) / (stats.total * 4) * 100;
+  return Math.round(Math.max(0, Math.min(100, score)));
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -165,27 +207,29 @@ const TIER_ICONS = {
 function TierCircle({
   label, count, color, change, icon, onClick,
 }: {
-  label: string; count: number; color: string; change: number; icon: React.ReactNode; onClick: () => void;
+  label: string; count: number | null; color: string; change: number | null; icon: React.ReactNode; onClick: () => void;
 }) {
   return (
     <button onClick={onClick} className="flex flex-col items-center group flex-shrink-0">
       <div className="relative">
-        {/* Outer halo */}
-        <div className="absolute inset-0 rounded-full blur-2xl opacity-50 group-hover:opacity-80 transition"
-          style={{ background: color, transform: 'scale(1.4)' }} />
-        {/* Solid disc */}
-        <div className="relative w-24 h-24 rounded-full flex items-center justify-center transition group-hover:scale-105"
+        {/* Soft halo — much subtler than the previous neon blast */}
+        <div className="absolute inset-0 rounded-full blur-lg opacity-25 group-hover:opacity-40 transition"
+          style={{ background: color, transform: 'scale(1.1)' }} />
+        {/* Solid disc — flat radial gradient, restrained shadow */}
+        <div className="relative w-20 h-20 rounded-full flex items-center justify-center transition group-hover:scale-[1.03]"
           style={{
-            background: `radial-gradient(circle at 30% 30%, ${color}DD, ${color}88)`,
-            boxShadow: `0 0 40px ${color}66, inset 0 0 20px ${color}55`,
-            border: `2px solid ${color}`,
+            background: `radial-gradient(circle at 35% 30%, ${color}, ${color}AA 80%)`,
+            boxShadow: `0 4px 16px ${color}33`,
+            border: `1px solid ${color}66`,
           }}>
-          <span className="text-white">{icon}</span>
+          <span className="text-white/95">{icon}</span>
         </div>
       </div>
-      <p className="mt-3 text-3xl font-bold text-white font-mono">{count.toLocaleString()}</p>
-      <p className="text-xs text-slate-400 mt-1 text-center max-w-[120px] leading-tight">{label}</p>
-      <p className="text-[10px] text-emerald-400 mt-1">↑ {change} this week</p>
+      <p className="mt-3 text-2xl font-bold text-white font-mono">{count === null ? '—' : count.toLocaleString()}</p>
+      <p className="text-[11px] text-slate-400 mt-0.5 text-center max-w-[110px] leading-tight">{label}</p>
+      {change !== null && (
+        <p className="text-[10px] text-emerald-400/80 mt-0.5">↑ {change} this week</p>
+      )}
     </button>
   );
 }
@@ -269,94 +313,172 @@ export default function CISODashboard() {
     let cancelled = false;
     setLoading(true);
     Promise.all([
+      // Category counts (NHI + AI agents)
       fetch('/api/identities/category-summary').then(r => r.ok ? r.json() : null) as Promise<CategorySummary | null>,
+      // Per-category totals + risk distribution (humans, guests, +risk gauges)
       fetch('/api/identity-summary').then(r => r.ok ? r.json() : null) as Promise<IdentitySummary | null>,
+      // Attack paths
       fetch(withConnection('/api/attack-paths?limit=10')).then(r => r.ok ? r.json() : null),
+      // SPN exposure stats (NHI unowned / can-escalate)
       fetch(withConnection('/api/spns/stats')).then(r => r.ok ? r.json() : null),
-    ]).then(([cat, idSum, attackResp, spnStats]) => {
+      // Posture rollup (drives Identity Risk Score + Compliance Posture)
+      fetch(withConnection('/api/dashboard/posture')).then(r => r.ok ? r.json() : null) as Promise<PostureResp | null>,
+      // Model registry (Models tier count)
+      fetch('/api/ai-security/model-registry').then(r => r.ok ? r.json() : null),
+      // Recent activity (What Changed panel)
+      fetch('/api/activity?limit=10').then(r => r.ok ? r.json() : null),
+    ]).then(([cat, idSum, attackResp, spnStats, posture, modelReg, activity]) => {
       if (cancelled) return;
-      const categorySummary = cat || {};
-      const humans = (idSum?.category_breakdown?.human_user || 0) + (idSum?.category_breakdown?.guest || 0);
-      const nhi = (categorySummary.service_principal || 0) + (categorySummary.managed_identity_system || 0) +
-                  (categorySummary.managed_identity_user || 0) + (categorySummary.workload || 0);
+      const categorySummary: CategorySummary = cat || {};
+      const cats = idSum?.categories || {};
+
+      // ── Identity counts (real, from SSOT) ────────────────────────
+      const humans = (cats.human_user?.total || 0) + (cats.guest?.total || 0);
+      const nhi = (categorySummary.service_principal || 0) +
+                  (categorySummary.managed_identity_system || 0) +
+                  (categorySummary.managed_identity_user || 0) +
+                  (categorySummary.workload || 0);
       const ai = categorySummary.ai_agent || 0;
+      const modelCount = Array.isArray(modelReg?.models) ? modelReg.models.length : null;
+      // Data Sources: no rollup endpoint exists today. Render "—" until one lands.
+      const dataCount: number | null = null;
+
+      // ── Attack paths ────────────────────────────────────────────
       const paths: AttackPathRow[] = Array.isArray(attackResp?.paths) ? attackResp.paths
                   : Array.isArray(attackResp?.attack_paths) ? attackResp.attack_paths
                   : Array.isArray(attackResp?.items) ? attackResp.items : [];
-
       const critN = paths.filter(p => (p.severity || '').toLowerCase() === 'critical').length;
       const highN = paths.filter(p => (p.severity || '').toLowerCase() === 'high').length;
       const medN  = paths.filter(p => (p.severity || '').toLowerCase() === 'medium').length;
 
+      // ── Identity Risk Score + Compliance Posture (from posture rollup) ──
+      const postureScore = Math.max(0, Math.min(100, Math.round(posture?.posture_score ?? 0)));
+      const riskScore = 100 - postureScore;
+
+      // ── Per-bucket risk gauges (severity-weighted from identity-summary) ──
+      const humanCat: CategoryStats = {
+        total: humans,
+        critical: (cats.human_user?.critical || 0) + (cats.guest?.critical || 0),
+        high: (cats.human_user?.high || 0) + (cats.guest?.high || 0),
+        medium: (cats.human_user?.medium || 0) + (cats.guest?.medium || 0),
+        low: (cats.human_user?.low || 0) + (cats.guest?.low || 0),
+        info: 0, unknown: 0,
+      };
+      const nhiCat: CategoryStats = ['service_principal', 'managed_identity_system', 'managed_identity_user', 'workload']
+        .reduce<CategoryStats>((acc, k) => {
+          const c = cats[k]; if (!c) return acc;
+          return {
+            total: acc.total + c.total, critical: acc.critical + c.critical,
+            high: acc.high + c.high, medium: acc.medium + c.medium,
+            low: acc.low + c.low, info: 0, unknown: 0,
+          };
+        }, { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0, unknown: 0 });
+      // No AI-specific category in identity-summary — derive proportionally from
+      // category-summary's ai_agent count and assume same critical/high ratio as NHI.
+      const aiRatio = nhiCat.total > 0 ? ai / nhiCat.total : 0;
+      const aiCat: CategoryStats = {
+        total: ai,
+        critical: Math.round(nhiCat.critical * aiRatio),
+        high: Math.round(nhiCat.high * aiRatio),
+        medium: Math.round(nhiCat.medium * aiRatio),
+        low: Math.round(nhiCat.low * aiRatio),
+        info: 0, unknown: 0,
+      };
+
+      // ── What Changed (from /api/activity) ───────────────────────
+      const acts: any[] = Array.isArray(activity?.entries) ? activity.entries
+                       : Array.isArray(activity?.activities) ? activity.activities
+                       : Array.isArray(activity) ? activity : [];
+      const whatChanged = acts.slice(0, 5).map(a => {
+        const created = a.created_at || a.timestamp || a.occurred_at;
+        let ageHours = 0;
+        if (created) {
+          const diff = Date.now() - new Date(created).getTime();
+          ageHours = Math.max(0, Math.round(diff / 3_600_000));
+        }
+        const action = (a.action || a.event_type || '').toLowerCase();
+        const colorFor = (s: string) => s.includes('privileg') ? '#60a5fa'
+                                     : s.includes('ai_agent') ? '#a78bfa'
+                                     : s.includes('permission') ? '#22d3ee'
+                                     : s.includes('attack') || s.includes('critical') ? '#f87171'
+                                     : s.includes('service_principal') || s.includes('spn') ? '#fb923c'
+                                     : '#94a3b8';
+        return {
+          icon: '●', count: 1,
+          label: a.description || a.message || action || 'change',
+          ageHours, color: colorFor(action),
+        };
+      });
+
       setData({
-        humanCount: humans || 298,
-        nhiCount: nhi || 143,
-        aiCount: ai || 13,
-        modelCount: Math.round((ai || 13) * 1.5) || 20,
-        dataCount: 125,
-        riskScore: 48,
-        riskImprovementPct: -4,
-        estimatedExposure: 81_600_000,
-        reductionOpportunity: 19_400_000,
-        attackPathsTotal: paths.length || 13,
-        attackPathsCritical: critN || 5,
-        attackPathsHigh: highN || 4,
-        attackPathsMedium: medN || 4,
-        compliancePct: 84,
-        controlsFailing: 12,
-        humanRiskGauge: 61,
-        humanOrphaned: 35,
-        humanGhost: 30,
-        humanPrivileged: 15,
-        nhiRiskGauge: 78,
-        nhiServicePrincipals: spnStats?.total || 143,
-        nhiUnowned: spnStats?.orphaned_privileged || 35,
-        nhiOverPriv: spnStats?.can_escalate_count || 12,
-        aiRiskGauge: 76,
-        aiAgents: ai || 13,
-        aiOwnerless: 5,
-        aiExcessivePerms: 3,
+        humanCount: humans,
+        nhiCount: nhi,
+        aiCount: ai,
+        modelCount,
+        dataCount,
+        weekDelta: { human: null, nhi: null, ai: null, model: null, data: null },
+        riskScore,
+        riskImprovementPct: null,        // No previous-period rollup endpoint yet
+        estimatedExposure: null,         // No FX rollup endpoint yet
+        reductionOpportunity: null,
+        attackPathsTotal: paths.length,
+        attackPathsCritical: critN,
+        attackPathsHigh: highN,
+        attackPathsMedium: medN,
+        compliancePct: postureScore,
+        controlsFailing: null,           // No compliance-controls endpoint surfaced yet
+        humanRiskGauge: gaugeFromRisk(humanCat),
+        humanOrphaned: humanCat.critical,
+        humanGhost: humanCat.high,
+        humanPrivileged: humanCat.medium,
+        nhiRiskGauge: gaugeFromRisk(nhiCat),
+        nhiServicePrincipals: nhiCat.total,
+        nhiUnowned: spnStats?.orphaned_privileged || 0,
+        nhiOverPriv: spnStats?.can_escalate_count || 0,
+        aiRiskGauge: gaugeFromRisk(aiCat),
+        aiAgents: ai,
+        aiOwnerless: aiCat.critical,
+        aiExcessivePerms: aiCat.high,
         topAttackPaths: paths.slice(0, 5),
-        whatChanged: [
-          { icon: '👤', count: 3,  label: 'New privileged accounts',  ageHours: 1, color: '#60a5fa' },
-          { icon: '🤖', count: 2,  label: 'New AI agents onboarded',  ageHours: 3, color: '#a78bfa' },
-          { icon: '🔑', count: 14, label: 'Permission changes',        ageHours: 4, color: '#22d3ee' },
-          { icon: '⚠', count: 1,  label: 'Critical attack path',     ageHours: 6, color: '#f87171' },
-          { icon: '🔧', count: 5,  label: 'New service principals',    ageHours: 8, color: '#fb923c' },
-        ],
-        phiAssets: { count: 45, value: 32_100_000 },
-        pciAssets: { count: 18, value: 21_400_000 },
-        aiModels: { count: Math.round((ai || 13) * 1.5) || 20, value: 28_100_000 },
+        whatChanged: whatChanged.length > 0 ? whatChanged : null,
+        phiAssets: null,
+        pciAssets: null,
+        aiModels: modelCount !== null ? { count: modelCount, value: null } : null,
       });
       setLoading(false);
     }).catch(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [withConnection, selectedConnectionId]);
 
-  const fallbackAttackPaths = useMemo(() => ([
-    { id: 1, severity: 'critical', source_entity_name: 'Human', path_type: 'Contributor → SPN → KeyVault → PHI Data' },
-    { id: 2, severity: 'high',     source_entity_name: 'AI Agent', path_type: 'Storage Account → SQL DB → PCI Data' },
-    { id: 3, severity: 'high',     source_entity_name: 'Orphaned User', path_type: 'Owner Role → IAM Change → Data' },
-    { id: 4, severity: 'medium',   source_entity_name: 'SPN', path_type: 'Excessive Perms → Blob Storage → Sensitive Data' },
-    { id: 5, severity: 'medium',   source_entity_name: 'Guest User', path_type: 'Reader → SharePoint → Confidential Data' },
-  ] as AttackPathRow[]), []);
+  // Real attack paths only — no demo fallback. Empty list shows a green-tick state.
+  const attackPathsRender: AttackPathRow[] = data?.topAttackPaths ?? [];
 
-  const attackPathsRender = (data?.topAttackPaths.length ? data.topAttackPaths : fallbackAttackPaths);
+  // AG-CISO-V4.1 (2026-06-10): derive Immediate Risks + Remediations from
+  // the same identity-summary + spn-stats responses already fetched.
+  // No hardcoded counts. Items hide if their underlying count is 0.
+  const immediateRisks = useMemo(() => {
+    if (!data) return [];
+    return [
+      { count: data.nhiUnowned,        label: 'Unowned Service Principals',           severity: 'critical' as const },
+      { count: data.humanGhost,        label: 'Stale Humans (>90d no sign-in)',       severity: 'high'     as const },
+      { count: data.aiExcessivePerms,  label: 'AI Agents with excessive permissions', severity: 'high'     as const },
+      { count: data.humanOrphaned,     label: 'Critical-Risk Humans',                 severity: 'critical' as const },
+      { count: data.nhiOverPriv,       label: 'NHIs that can escalate privilege',     severity: 'medium'   as const },
+    ].filter(r => r.count > 0);
+  }, [data]);
 
-  const immediateRisks = useMemo(() => ([
-    { count: data?.nhiUnowned || 35, label: 'Unowned Service Principals',     severity: 'critical' as const, icon: '👥' },
-    { count: 30, label: 'Ghost Identities (no recent activity)',              severity: 'high' as const,     icon: '👻' },
-    { count: 7,  label: 'AI Agents with excessive permissions',               severity: 'high' as const,     icon: '🔓' },
-    { count: 12, label: 'Dormant Privileged Accounts',                        severity: 'medium' as const,   icon: '💤' },
-    { count: 7,  label: 'Cross-tenant access paths',                          severity: 'medium' as const,   icon: '🔗' },
-  ]), [data]);
-
-  const topRemediations = useMemo(() => ([
-    { rank: 1, title: 'Remove Excessive Permissions', sub: '108 identities', reduction: 90, time: '12m' },
-    { rank: 2, title: 'Disable Orphaned Accounts',    sub: '35 accounts',    reduction: 75, time: '8m'  },
-    { rank: 3, title: 'Rotate SPN Secrets',           sub: '18 principals',  reduction: 60, time: '15m' },
-    { rank: 4, title: 'Restrict Guest Access',        sub: '21 guests',      reduction: 45, time: '10m' },
-  ]), []);
+  // Top remediations are derived from the same data — each entry only
+  // appears if there's something to remediate.
+  const topRemediations = useMemo(() => {
+    if (!data) return [];
+    const remediations = [
+      { rank: 1, title: 'Remove Excessive NHI Permissions',  count: data.nhiOverPriv,   sub: 'service principals' },
+      { rank: 2, title: 'Assign Owners to Orphan NHIs',      count: data.nhiUnowned,    sub: 'unowned NHIs' },
+      { rank: 3, title: 'Triage Critical-Risk Humans',       count: data.humanOrphaned, sub: 'humans' },
+      { rank: 4, title: 'Restrict AI Agent Permissions',     count: data.aiExcessivePerms, sub: 'AI agents' },
+    ];
+    return remediations.filter(r => r.count > 0).map((r, i) => ({ ...r, rank: i + 1, sub: `${r.count} ${r.sub}` }));
+  }, [data]);
 
   const askArgus = () => {
     if (!argusQuery.trim()) { navigate('/argus'); return; }
@@ -418,23 +540,27 @@ export default function CISODashboard() {
         <HeroCard
           label="IDENTITY RISK SCORE"
           value={`${data.riskScore}`}
-          valueColor="#f87171"
-          sublabel="Critical Exposure"
-          footer={<span className="flex items-center gap-1 text-emerald-400">↓ {Math.abs(data.riskImprovementPct)}% improvement this week</span>}
+          valueColor={data.riskScore >= 70 ? '#f87171' : data.riskScore >= 40 ? '#fb923c' : '#34d399'}
+          sublabel={data.riskScore >= 70 ? 'Critical Exposure' : data.riskScore >= 40 ? 'Elevated' : 'Healthy'}
+          footer={data.riskImprovementPct === null
+            ? <span className="text-slate-500">No prior-period baseline yet</span>
+            : <span className="flex items-center gap-1 text-emerald-400">↓ {Math.abs(data.riskImprovementPct)}% improvement this week</span>}
           footerColor="#34d399"
           icon={<span className="text-xs font-mono">/100</span>}
-          iconColor="#ef4444"
+          iconColor={data.riskScore >= 70 ? '#ef4444' : data.riskScore >= 40 ? '#f97316' : '#10b981'}
           progressValue={data.riskScore}
         />
         <HeroCard
           label="ESTIMATED EXPOSURE"
-          value={fmtMoney(data.estimatedExposure)}
-          valueColor="#f87171"
-          sublabel="Potential financial impact"
-          footer={<span className="flex items-center gap-1 text-emerald-400">↓ {fmtMoney(data.reductionOpportunity)} risk reduction opportunity</span>}
+          value={data.estimatedExposure === null ? '—' : fmtMoney(data.estimatedExposure)}
+          valueColor={data.estimatedExposure === null ? '#94a3b8' : '#f87171'}
+          sublabel={data.estimatedExposure === null ? 'Financial impact rollup not configured' : 'Potential financial impact'}
+          footer={data.reductionOpportunity === null
+            ? <span className="text-slate-500">Add asset valuations in Settings → Exposure</span>
+            : <span className="flex items-center gap-1 text-emerald-400">↓ {fmtMoney(data.reductionOpportunity)} risk reduction opportunity</span>}
           footerColor="#34d399"
           icon={<svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}
-          iconColor="#ef4444"
+          iconColor={data.estimatedExposure === null ? '#64748b' : '#ef4444'}
         />
         <HeroCard
           label="ATTACK PATHS"
@@ -455,12 +581,14 @@ export default function CISODashboard() {
         <HeroCard
           label="COMPLIANCE POSTURE"
           value={`${data.compliancePct}%`}
-          valueColor="#34d399"
-          sublabel="Overall compliance score"
-          footer={<span className="flex items-center gap-1 text-amber-400">● {data.controlsFailing} controls failing</span>}
+          valueColor={data.compliancePct >= 80 ? '#34d399' : data.compliancePct >= 50 ? '#fbbf24' : '#f87171'}
+          sublabel="Overall posture score"
+          footer={data.controlsFailing === null
+            ? <span className="text-slate-500">Detailed control mapping forthcoming</span>
+            : <span className="flex items-center gap-1 text-amber-400">● {data.controlsFailing} controls failing</span>}
           footerColor="#fbbf24"
           icon={<svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>}
-          iconColor="#10b981"
+          iconColor={data.compliancePct >= 80 ? '#10b981' : data.compliancePct >= 50 ? '#f59e0b' : '#ef4444'}
           progressValue={data.compliancePct}
         />
       </div>
@@ -482,15 +610,15 @@ export default function CISODashboard() {
             <p className="text-xs text-slate-500 mb-5">Explore how identities, workloads, and data are connected across your environment.</p>
             {/* Tier circles row */}
             <div className="flex items-center justify-center gap-2">
-              <TierCircle label="Human Identities"     count={data.humanCount} color="#3b82f6" change={8}  icon={TIER_ICONS.human}   onClick={() => navigate('/human/inventory')} />
+              <TierCircle label="Human Identities"     count={data.humanCount} color="#3b82f6" change={data.weekDelta.human} icon={TIER_ICONS.human} onClick={() => navigate('/human/inventory')} />
               <ConnectorDots color="#3b82f6" />
-              <TierCircle label="Non-Human Identities" count={data.nhiCount}   color="#f97316" change={5}  icon={TIER_ICONS.nhi}     onClick={() => navigate('/nhi')} />
+              <TierCircle label="Non-Human Identities" count={data.nhiCount}   color="#f97316" change={data.weekDelta.nhi}   icon={TIER_ICONS.nhi}   onClick={() => navigate('/nhi')} />
               <ConnectorDots color="#f97316" />
-              <TierCircle label="AI Agents"            count={data.aiCount}    color="#a78bfa" change={2}  icon={TIER_ICONS.ai}      onClick={() => navigate('/ai-inventory')} />
+              <TierCircle label="AI Agents"            count={data.aiCount}    color="#a78bfa" change={data.weekDelta.ai}    icon={TIER_ICONS.ai}    onClick={() => navigate('/ai-inventory')} />
               <ConnectorDots color="#a78bfa" />
-              <TierCircle label="Models"               count={data.modelCount} color="#ec4899" change={1}  icon={TIER_ICONS.model}   onClick={() => navigate('/ai-runtime/model-registry')} />
+              <TierCircle label="Models"               count={data.modelCount} color="#ec4899" change={data.weekDelta.model} icon={TIER_ICONS.model} onClick={() => navigate('/ai-runtime/model-registry')} />
               <ConnectorDots color="#ec4899" />
-              <TierCircle label="Data Sources"         count={data.dataCount}  color="#10b981" change={12} icon={TIER_ICONS.data}    onClick={() => navigate('/ai-access/data-reachability')} />
+              <TierCircle label="Data Sources"         count={data.dataCount}  color="#10b981" change={data.weekDelta.data}  icon={TIER_ICONS.data}  onClick={() => navigate('/ai-access/data-reachability')} />
             </div>
             {/* Bottom strip */}
             <div className="mt-6 pt-4 border-t border-white/5 flex items-center justify-between gap-3 flex-wrap">
@@ -502,12 +630,14 @@ export default function CISODashboard() {
                 </span>
                 <span className="flex items-center gap-2 text-xs">
                   <span className="text-orange-400">⚠</span>
-                  <span className="font-bold text-orange-400 font-mono">35</span>
+                  <span className="font-bold text-orange-400 font-mono">{data.nhiUnowned}</span>
                   <span className="text-slate-400">Orphaned Identities</span>
                 </span>
                 <span className="flex items-center gap-2 text-xs">
                   <span className="text-amber-400">🔑</span>
-                  <span className="font-bold text-amber-400 font-mono">7</span>
+                  <span className="font-bold text-amber-400 font-mono">
+                    {data.dataCount === null ? '—' : data.dataCount}
+                  </span>
                   <span className="text-slate-400">Critical Data Assets</span>
                 </span>
               </div>
@@ -520,29 +650,38 @@ export default function CISODashboard() {
           {/* Row 3: 3 identity-bucket risk cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <RiskGaugeCard
-              bucket="HUMAN IDENTITY RISK" color="#fb923c" label="High" gaugeValue={data.humanRiskGauge}
+              bucket="HUMAN IDENTITY RISK"
+              color={gaugeColor(data.humanRiskGauge)}
+              label={gaugeLabel(data.humanRiskGauge)}
+              gaugeValue={data.humanRiskGauge}
               items={[
-                { count: data.humanOrphaned,  label: 'Orphaned Accounts', severity: 'critical' },
-                { count: data.humanGhost,     label: 'Ghost Users',       severity: 'high' },
-                { count: data.humanPrivileged,label: 'Privileged Users',  severity: 'medium' },
+                { count: data.humanOrphaned,   label: 'Critical-risk humans', severity: 'critical' },
+                { count: data.humanGhost,      label: 'High-risk humans',     severity: 'high' },
+                { count: data.humanPrivileged, label: 'Medium-risk humans',   severity: 'medium' },
               ]}
               viewHref="/human/inventory" onClick={() => {}}
             />
             <RiskGaugeCard
-              bucket="NON-HUMAN IDENTITY RISK" color="#f87171" label="Critical" gaugeValue={data.nhiRiskGauge}
+              bucket="NON-HUMAN IDENTITY RISK"
+              color={gaugeColor(data.nhiRiskGauge)}
+              label={gaugeLabel(data.nhiRiskGauge)}
+              gaugeValue={data.nhiRiskGauge}
               items={[
-                { count: data.nhiServicePrincipals, label: 'Service Principals', severity: 'critical' },
-                { count: data.nhiUnowned,           label: 'Unowned',            severity: 'high' },
-                { count: data.nhiOverPriv,          label: 'Over Privileged',    severity: 'medium' },
+                { count: data.nhiServicePrincipals, label: 'Total NHIs',          severity: 'critical' },
+                { count: data.nhiUnowned,           label: 'Orphaned + Privileged', severity: 'high' },
+                { count: data.nhiOverPriv,          label: 'Can Escalate',        severity: 'medium' },
               ]}
               viewHref="/nhi" onClick={() => {}}
             />
             <RiskGaugeCard
-              bucket="AI IDENTITY RISK" color="#f87171" label="Critical" gaugeValue={data.aiRiskGauge}
+              bucket="AI IDENTITY RISK"
+              color={gaugeColor(data.aiRiskGauge)}
+              label={gaugeLabel(data.aiRiskGauge)}
+              gaugeValue={data.aiRiskGauge}
               items={[
-                { count: data.aiAgents,         label: 'AI Agents',              severity: 'critical' },
-                { count: data.aiOwnerless,      label: 'Ownerless',              severity: 'high' },
-                { count: data.aiExcessivePerms, label: 'Excessive Permissions',  severity: 'medium' },
+                { count: data.aiAgents,         label: 'AI Agents',            severity: 'critical' },
+                { count: data.aiOwnerless,      label: 'Critical-risk AI',     severity: 'high' },
+                { count: data.aiExcessivePerms, label: 'High-risk AI',         severity: 'medium' },
               ]}
               viewHref="/ai-inventory" onClick={() => {}}
             />
@@ -557,7 +696,9 @@ export default function CISODashboard() {
                 <Link to="/attack-paths" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
               </div>
               <div className="space-y-2">
-                {attackPathsRender.map((p, i) => {
+                {attackPathsRender.length === 0 ? (
+                  <p className="text-[11px] text-emerald-400/70 text-center py-6">✓ No active attack paths.</p>
+                ) : attackPathsRender.map((p, i) => {
                   const tone = severityTone(p.severity);
                   return (
                     <Link key={p.id || i} to={`/attack-paths/${p.id || ''}`}
@@ -582,7 +723,9 @@ export default function CISODashboard() {
                 <Link to="/findings" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
               </div>
               <div className="space-y-2">
-                {immediateRisks.map((r, i) => {
+                {immediateRisks.length === 0 ? (
+                  <p className="text-[11px] text-emerald-400/70 text-center py-6">✓ No immediate risks detected.</p>
+                ) : immediateRisks.map((r, i) => {
                   const tone = severityTone(r.severity);
                   return (
                     <div key={i} className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-800/40 transition text-xs">
@@ -601,21 +744,19 @@ export default function CISODashboard() {
             <div className="rounded-xl p-5 bg-[#0f172a]/80 border border-white/5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Top Remediation Actions</h3>
-                <span className="text-[10px] text-slate-500 flex gap-3">
-                  <span>Risk Reduction</span>
-                  <span>Est. Time</span>
-                </span>
+                <span className="text-[10px] text-slate-500">Affected count</span>
               </div>
               <div className="space-y-2">
-                {topRemediations.map(r => (
+                {topRemediations.length === 0 ? (
+                  <p className="text-[11px] text-emerald-400/70 text-center py-6">✓ No remediations queued.</p>
+                ) : topRemediations.map(r => (
                   <Link key={r.rank} to="/remediation" className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-800/40 transition text-xs">
                     <span className="w-5 h-5 rounded-full bg-violet-500/15 border border-violet-500/40 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">{r.rank}</span>
                     <div className="flex-1 min-w-0">
                       <p className="text-slate-200 truncate">{r.title}</p>
                       <p className="text-[10px] text-slate-500">{r.sub}</p>
                     </div>
-                    <span className="text-emerald-400 font-bold font-mono">{r.reduction}%</span>
-                    <span className="text-slate-400 font-mono flex items-center gap-1">{r.time} <span className="text-emerald-400">↗</span></span>
+                    <span className="text-amber-400 font-bold font-mono">{r.count}</span>
                   </Link>
                 ))}
               </div>
@@ -641,17 +782,18 @@ export default function CISODashboard() {
               <Link to="/activity" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
             </div>
             <div className="space-y-2">
-              {data.whatChanged.map((c, i) => (
+              {data.whatChanged ? data.whatChanged.map((c, i) => (
                 <Link key={i} to="/activity" className="flex items-center gap-3 p-1.5 rounded hover:bg-slate-800/40 transition text-xs">
                   <span className="w-7 h-7 rounded-lg flex items-center justify-center text-sm flex-shrink-0"
                     style={{ background: `${c.color}15`, color: c.color, border: `1px solid ${c.color}40` }}>
                     {c.icon}
                   </span>
-                  <span className="font-bold font-mono w-10 text-right" style={{ color: c.color }}>+{c.count}</span>
                   <span className="flex-1 text-slate-300 truncate">{c.label}</span>
                   <span className="text-[10px] text-slate-500 flex-shrink-0">{c.ageHours}h ago</span>
                 </Link>
-              ))}
+              )) : (
+                <p className="text-[11px] text-slate-500 text-center py-6">No activity in the last 24 hours.</p>
+              )}
             </div>
             <Link to="/activity" className="block mt-3 text-center text-[10px] text-violet-400 hover:text-violet-300">
               See all activity →
@@ -669,29 +811,37 @@ export default function CISODashboard() {
             </div>
             <div className="mb-4">
               <p className="text-[10px] text-slate-500 flex items-center gap-1">Estimated Exposure <span>›</span></p>
-              <p className="text-3xl font-bold text-red-400 mt-1">{fmtMoney(data.estimatedExposure)}</p>
+              <p className="text-3xl font-bold mt-1" style={{ color: data.estimatedExposure === null ? '#94a3b8' : '#f87171' }}>
+                {data.estimatedExposure === null ? '—' : fmtMoney(data.estimatedExposure)}
+              </p>
             </div>
             <div className="grid grid-cols-3 gap-2 mb-4">
               <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-2.5">
                 <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">PHI Assets</p>
-                <p className="text-lg font-bold text-white mt-1 font-mono">{data.phiAssets.count}</p>
-                <p className="text-[10px] text-red-400 font-mono">{fmtMoney(data.phiAssets.value)}</p>
+                <p className="text-lg font-bold text-white mt-1 font-mono">{data.phiAssets ? data.phiAssets.count : '—'}</p>
+                <p className="text-[10px] text-slate-500 font-mono">{data.phiAssets?.value === null ? 'no valuation' : ''}</p>
               </div>
               <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-2.5">
                 <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">PCI Assets</p>
-                <p className="text-lg font-bold text-white mt-1 font-mono">{data.pciAssets.count}</p>
-                <p className="text-[10px] text-red-400 font-mono">{fmtMoney(data.pciAssets.value)}</p>
+                <p className="text-lg font-bold text-white mt-1 font-mono">{data.pciAssets ? data.pciAssets.count : '—'}</p>
+                <p className="text-[10px] text-slate-500 font-mono">{data.pciAssets?.value === null ? 'no valuation' : ''}</p>
               </div>
               <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-2.5">
                 <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">AI Models</p>
-                <p className="text-lg font-bold text-white mt-1 font-mono">{data.aiModels.count}</p>
-                <p className="text-[10px] text-red-400 font-mono">{fmtMoney(data.aiModels.value)}</p>
+                <p className="text-lg font-bold text-white mt-1 font-mono">{data.aiModels ? data.aiModels.count : '—'}</p>
+                <p className="text-[10px] text-slate-500 font-mono">{data.aiModels?.value === null ? 'no valuation' : ''}</p>
               </div>
             </div>
             <div>
               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Risk Reduction Opportunity</p>
-              <p className="text-2xl font-bold text-emerald-400 mt-1">{fmtMoney(data.reductionOpportunity * 1.1)}</p>
-              <p className="text-[10px] text-slate-500 mt-1">By addressing top remediation actions</p>
+              <p className="text-2xl font-bold mt-1" style={{ color: data.reductionOpportunity === null ? '#94a3b8' : '#34d399' }}>
+                {data.reductionOpportunity === null ? '—' : fmtMoney(data.reductionOpportunity)}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-1">
+                {data.reductionOpportunity === null
+                  ? 'Connect asset-valuation source to enable'
+                  : 'By addressing top remediation actions'}
+              </p>
             </div>
           </div>
 
