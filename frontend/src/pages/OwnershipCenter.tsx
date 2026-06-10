@@ -12,6 +12,8 @@
  *   POST /api/ownership/assign           — assign or update an owner
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 interface Summary {
   total_nhi: number;
@@ -95,7 +97,8 @@ export default function OwnershipCenter() {
       : `All ${summary.total_nhi} non-human identities have an active owner — solid governance posture.`;
   }, [summary]);
 
-  if (loading && !summary) return <div className="p-6 text-sm text-slate-400">Loading Ownership Center…</div>;
+  {/* AG-POLISH-D (2026-06-10) */}
+  if (loading && !summary) return <div className="p-6"><LoadingState message="Loading Ownership Center…" detail="Cross-referencing NHIs against owner attestations + lineage signals" /></div>;
   if (error) return <div className="p-6 text-sm text-rose-400">{error}</div>;
   if (!summary || !unowned) return null;
 

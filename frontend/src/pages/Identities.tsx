@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+// AG-POLISH-D (2026-06-10)
+import { TableSkeletonRow } from '../components/LoadingState';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
@@ -3076,8 +3078,9 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
+              {/* AG-POLISH-D (2026-06-10) */}
               {loading ? (
-                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">Loading…</td></tr>
+                <TableSkeletonRow columns={colSpan} count={6} />
               ) : error ? (
                 <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (

@@ -14,6 +14,8 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useToast } from '../components/ToastProvider';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -105,8 +107,9 @@ export default function AIThreatConnectors() {
     connectors.reduce((s, c) => s + c.total_signals, 0)
   , [connectors]);
 
+  {/* AG-POLISH-D (2026-06-10) */}
   if (loading && connectors.length === 0) {
-    return <div className="p-6 text-sm text-slate-400">Loading threat connectors…</div>;
+    return <div className="p-6"><LoadingState message="Loading threat connectors…" detail="Polling partner webhooks: Azure Content Filter, AWS Bedrock Guardrails, Lakera, NeMo" /></div>;
   }
   if (error) return <div className="p-6 text-sm text-rose-400">{error}</div>;
 
