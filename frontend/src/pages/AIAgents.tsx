@@ -322,15 +322,33 @@ export default function AIAgents() {
         </th>
         <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-28">AI Service</th>
         <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-40">RBAC Roles</th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-20" onClick={() => handleSort('model_access')}>
-          Model <SortIcon col="model_access" />
+        {/* AG-PILOT-AI-AGENTS-COLS (2026-06-09): customer interpreted
+            "Model" header as "which model is this identity using" but
+            the column shows RBAC access level (Owner / Contributor /
+            Reader / etc.) into the model deployment. Renamed to be
+            unambiguous + added tooltips on every access-level column. */}
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-24"
+            title="Access LEVEL to model deployments (Owner / Contributor / Reader). Not the model name."
+            onClick={() => handleSort('model_access')}>
+          Model Access <SortIcon col="model_access" />
         </th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-20" onClick={() => handleSort('key_vault_access')}>
-          Key Vault <SortIcon col="key_vault_access" />
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-24"
+            title="Access LEVEL to Key Vault (secrets / certificates / keys)."
+            onClick={() => handleSort('key_vault_access')}>
+          KV Access <SortIcon col="key_vault_access" />
         </th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-20">Data</th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-20">Telemetry</th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-20">Egress</th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-24"
+            title="Access LEVEL to data plane (Storage / SQL / Cosmos).">
+          Data Access
+        </th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-24"
+            title="Telemetry coverage: whether this agent is being observed (App Insights, diagnostic settings).">
+          Telemetry
+        </th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-24"
+            title="Network egress posture: whether this agent's outbound traffic is restricted or unrestricted.">
+          Egress
+        </th>
         <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-16" onClick={() => handleSort('risk_score')}>
           Risk <SortIcon col="risk_score" />
         </th>
