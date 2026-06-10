@@ -29,7 +29,6 @@ import ConnectedApps from './pages/ConnectedApps';
 import ShadowApps from './pages/ShadowApps';
 import AIAttackPaths from './pages/AIAttackPaths';
 import AIBoardScorecard from './pages/AIBoardScorecard';
-import AILifecycle from './pages/AILifecycle';
 import AIDataReachability from './pages/AIDataReachability';
 import Argus from './pages/Argus';
 import Reports from './pages/Reports';
@@ -74,6 +73,7 @@ import HumanAccess from './pages/HumanAccess';
 import NHIAccess from './pages/NHIAccess';
 import HumanGovernance from './pages/HumanGovernance';
 import NHIGovernance from './pages/NHIGovernance';
+import HumanInventory from './pages/HumanInventory';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
 import MultiHopXGraph from './pages/MultiHopXGraph';
@@ -372,6 +372,7 @@ function AppContent() {
                   <Route path="/nhi/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIAccess /></ErrorBoundary>} />
                   <Route path="/human/governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanGovernance /></ErrorBoundary>} />
                   <Route path="/nhi/governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIGovernance /></ErrorBoundary>} />
+                  <Route path="/human/inventory" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanInventory /></ErrorBoundary>} />
                   <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
                   <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
                   <Route path="/nhi/secrets" element={<Navigate to="/identity-explorer?identity_category=service_principal&hasCredentials=true" replace />} />
@@ -401,8 +402,10 @@ function AppContent() {
                   <Route path="/ai-risk/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIAttackPaths /></ErrorBoundary>} />
                   {/* AG-179: AI Board Scorecard */}
                   <Route path="/board-scorecard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIBoardScorecard /></ErrorBoundary>} />
-                  {/* AG-181: AI Agent Lifecycle (J/M/L) */}
-                  <Route path="/ai-lifecycle" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AILifecycle /></ErrorBoundary>} />
+                  {/* AG-IA-P1 (2026-06-10): /ai-lifecycle now redirects to the scope-aware
+                      LifecycleJml so AI / Human / NHI share one engine. The standalone
+                      AILifecycle component is retired but kept importable for bookmarks. */}
+                  <Route path="/ai-lifecycle" element={<Navigate to="/lifecycle?type=ai" replace />} />
                   {/* AG-161: 5-pillar AI Security IA. Legacy routes below redirect into new pillars. */}
                   <Route path="/ai-inventory" element={<Navigate to="/ai-inventory/graph" replace />} />
                   <Route path="/ai-inventory/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIInventory /></ErrorBoundary>} />
