@@ -125,6 +125,8 @@ from app.api.handlers import (
     get_identity_groups_handler,
     query_identities,
     get_query_fields,
+    # AG-PHASE1+4 (2026-06-09): NHI Inventory category counts
+    get_identity_category_summary,
     get_anomalies_list,
     get_anomaly_stats_handler,
     get_anomaly_detail,
@@ -3140,6 +3142,11 @@ def create_app():
     @app.get("/api/identities/query/fields")
     def identities_query_fields():
         return get_query_fields()
+
+    # AG-PHASE1+4 (2026-06-09): NHI Inventory hero page consumes this.
+    @app.get("/api/identities/category-summary")
+    def identities_category_summary():
+        return get_identity_category_summary()
 
     @app.post("/api/identities/risk-history/batch")
     def batch_risk_hist():

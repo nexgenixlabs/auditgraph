@@ -93,7 +93,10 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
         <div className="leading-tight hidden sm:block">
           <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>AuditGraph</span>
           <p className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
-            {user?.org_name || 'Identity Risk OS'}
+            {/* AG-PHASE1-BRAND (2026-06-09): tenant name takes priority,
+                else show the platform tagline so the brand says what we
+                are at a glance. */}
+            {user?.org_name || 'Identity Security Graph'}
           </p>
         </div>
       </Link>

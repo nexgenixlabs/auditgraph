@@ -152,82 +152,109 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        // AG-PILOT-IA (2026-06-08): renamed to "IDENTITY" — the spine of
-        // the product. AI Inventory removed from sidebar (it's now a tab
-        // within Identity Inventory). Section header reads as the actual
-        // capability rather than positioning as "AI security".
+        // AG-PHASE1-IA (2026-06-09): peer-review pivot to "Identity
+        // Security Graph platform for Human, Non-Human, and AI
+        // Identities". Identity is now the spine with three first-class
+        // identity-type subsections, each with its own depth. Same
+        // routes — labels and grouping change. AI demoted from peer
+        // category to NHI subtype, matching the buyer mental model
+        // ("show me all non-humans" is the CISO's first question).
         label: 'Identity',
         color: '#8b5cf6',
         items: [
-          // Identity Inventory has Humans / NHIs / AI Agents / Privileged tabs
-          // built-in; the separate AI Inventory link was redundant
-          { to: '/identity-explorer', label: 'Identity Inventory', icon: identityIcon },
-          { to: '/ai-access',         label: 'Identity Access',    icon: effectiveAccessIcon },
-          // AG-WK2: Identity Trust — universal 9-dim Trust across SPNs+MIs+AI
-          { to: '/identity-trust',    label: 'Identity Trust',     icon: roleOptIcon },
-          // AG-PILOT-LIFECYCLE-JML (2026-06-09): customer reported the
-          // page only showed AI events even though sidebar said
-          // "Identity Lifecycle". /lifecycle = all-identity JML page;
-          // /ai-lifecycle remains available for the AI-only deep dive.
-          { to: '/lifecycle',         label: 'Identity Lifecycle (JML)', icon: identityIcon },
-          { to: '/ai-governance',     label: 'Identity Governance', icon: identityIcon },
-          // AG-WK3.1: Ownership Center — the SailPoint-tier governance hook
-          { to: '/ownership',         label: 'Ownership Center',   icon: identityIcon },
-          // AG-PIM-OVERPRIV (2026-06-07): PIM Overprivilege Detection
-          { to: '/identity-security/pim', label: 'PIM Overprivilege', icon: roleOptIcon },
-          // AG-FEATURE-E-P2 (2026-06-07): Entra Directory Role Last-Used Inference
-          { to: '/identity-security/entra-role-activity', label: 'Entra Role Activity', icon: roleOptIcon },
+          {
+            label: 'Human',
+            icon: identityIcon,
+            brandColor: '#3b82f6',
+            navigateTo: '/identity-explorer/humans',
+            items: [
+              { to: '/identity-explorer/humans',           label: 'Inventory',         icon: identityIcon },
+              { to: '/ai-access?type=human',               label: 'Access',            icon: effectiveAccessIcon },
+              { to: '/identity-trust?type=human',          label: 'Trust',             icon: roleOptIcon },
+              { to: '/lifecycle?type=human',               label: 'Lifecycle',         icon: identityIcon },
+              { to: '/ai-governance?type=human',           label: 'Governance',        icon: identityIcon },
+              { to: '/identity-security/pim?type=human',   label: 'PIM',               icon: roleOptIcon },
+              { to: '/identity-security/entra-role-activity', label: 'Role Activity',  icon: roleOptIcon },
+            ],
+          },
+          {
+            label: 'Non-Human',
+            icon: nonHumanIcon,
+            brandColor: '#f97316',
+            navigateTo: '/nhi',
+            items: [
+              { to: '/nhi',                                label: 'Inventory',         icon: nonHumanIcon },
+              { to: '/nhi/access',                         label: 'Access',            icon: effectiveAccessIcon },
+              { to: '/nhi/trust',                          label: 'Trust',             icon: roleOptIcon },
+              { to: '/nhi/lifecycle',                      label: 'Lifecycle',         icon: identityIcon },
+              { to: '/nhi/secrets',                        label: 'Secrets',           icon: secretsIcon },
+              { to: '/nhi/ownership',                      label: 'Ownership',         icon: identityIcon },
+              { to: '/nhi/attack-paths',                   label: 'Attack Paths',      icon: findingsIcon },
+            ],
+          },
+          {
+            label: 'AI Identity',
+            icon: agentBotIcon,
+            brandColor: '#a78bfa',
+            navigateTo: '/ai-inventory',
+            items: [
+              { to: '/ai-inventory',                       label: 'Inventory',         icon: agentBotIcon },
+              { to: '/ai-access',                          label: 'Access',            icon: effectiveAccessIcon },
+              { to: '/identity-trust?type=ai',             label: 'Trust',             icon: roleOptIcon },
+              { to: '/ai-lifecycle',                       label: 'Lifecycle',         icon: agentBotIcon },
+            ],
+          },
+          // Universal / fallback — all identities together
+          { to: '/identity-explorer', label: 'All Identities', icon: identityIcon },
+          { to: '/ownership',         label: 'Ownership Center', icon: identityIcon },
         ],
       },
       {
-        // Graph-based analytical surfaces. "Graph Intelligence" replaces
-        // "Identity Topology" per peer review v4 — execs don't use "topology".
+        // AG-PHASE1-GRAPH (2026-06-09): Graph Intelligence becomes the
+        // moat surface. Multi-Hop XGRAPH renamed to "Identity Exposure
+        // Graph" so it stops reading AI-only (it isn't — the engine
+        // handles any identity type's transitive reach).
         label: 'Graph Intelligence',
         color: '#0891b2',
         items: [
           { to: '/identity-graph', label: 'Identity Graph', icon: identityIcon },
-          { to: '/access-graph', label: 'Access Graph', icon: accessGraphIcon },
-          // AG-T3.1: Multi-Hop XGRAPH — moved from Attack Surface (it's a
-          // graph view first, attack surface second)
-          { to: '/ai-attack-paths/multi-hop', label: 'Multi-Hop XGRAPH', icon: roleOptIcon },
+          { to: '/access-graph',   label: 'Access Graph',   icon: accessGraphIcon },
+          // Renamed from "Multi-Hop XGRAPH". Same route preserved for
+          // back-compat deep links. The engine is identity-type-agnostic
+          // — humans + NHIs + AI all chain in one graph.
+          { to: '/ai-attack-paths/multi-hop', label: 'Identity Exposure Graph', icon: roleOptIcon },
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/effective-access', label: 'Effective Access Explorer', icon: effectiveAccessIcon }] : []),
           ...(SHOW_ADVANCED_FEATURES ? [{ to: '/sensitive-access', label: 'Sensitive Data Access', icon: sensitiveDataIcon }] : []),
           { to: '/role-mining', label: 'Role Optimization', icon: roleOptIcon },
         ],
       },
       {
-        // AG-PILOT-IA (2026-06-08): Attack Paths kept unified; the
-        // AI variant is now a filter chip on the main page, not a
-        // separate item. Reduces sidebar noise + signals that attack-
-        // path analysis covers all identity types.
-        label: 'Attack Surface',
+        // AG-PHASE1-EXPOSURE (2026-06-09): renamed "Attack Surface" to
+        // "Exposure Management" — matches the CISO vocabulary the peer
+        // reviewer flagged. Executives buy exposure management, not
+        // attack surface tooling.
+        label: 'Exposure Management',
         color: '#dc2626',
         items: [
-          { to: '/attack-paths', label: 'Attack Paths', icon: findingsIcon },
-          // /ai-risk/attack-paths route preserved (deep links still work);
-          // surfaced via filter chip on /attack-paths instead of sidebar
+          { to: '/attack-paths',                label: 'Attack Paths',     icon: findingsIcon },
+          { to: '/blast-radius',                label: 'Blast Radius',     icon: attackIcon },
           { to: '/ai-access/data-reachability', label: 'Data Reachability', icon: effectiveAccessIcon },
-          { to: '/attack-simulator', label: 'Attack Simulator', icon: attackIcon },
+          { to: '/attack-simulator',            label: 'Attack Simulator',  icon: attackIcon },
         ],
       },
       {
-        // AG-PILOT-IA (2026-06-08): renamed "AI Security" → "Workload
-        // Security". This section is about the AI WORKLOAD layer (runtime,
-        // models, supply chain, threats), NOT identity. AI identities
-        // live in the Identity section as a subtype of NHI.
-        // Item names also drop the "AI" prefix — context comes from the
-        // section, not redundant per-item branding.
+        // AG-PHASE1-WORKLOAD (2026-06-09): Workload Security is now the
+        // SMALLEST section — runtime / models / supply chain only. AI
+        // identities live in IDENTITY > AI Identity, not here.
         label: 'Workload Security',
         color: '#a78bfa',
         items: [
-          { to: '/ai-runtime', label: 'Runtime', icon: agentBotIcon },
-          { to: '/ai-runtime/model-registry', label: 'Model Registry', icon: agentBotIcon },
-          { to: '/ai-runtime/supply-chain', label: 'Supply Chain', icon: agentBotIcon },
-          { to: '/ai-runtime/threat-connectors', label: 'Threat Connectors', icon: agentBotIcon },
-          { to: '/ai-findings', label: 'Findings', icon: roleOptIcon },
-          // Was "AI Abuse Scenarios" → "Threat Scenarios" — reads as
-          // security analysis, not AI-specific gimmick. Same engine.
-          { to: '/ai-risk', label: 'Threat Scenarios', icon: roleOptIcon },
+          { to: '/ai-runtime',                    label: 'Runtime',           icon: agentBotIcon },
+          { to: '/ai-runtime/model-registry',     label: 'Model Registry',    icon: agentBotIcon },
+          { to: '/ai-runtime/supply-chain',       label: 'Supply Chain',      icon: agentBotIcon },
+          { to: '/ai-runtime/threat-connectors',  label: 'Threat Connectors', icon: agentBotIcon },
+          { to: '/ai-findings',                   label: 'Findings',          icon: roleOptIcon },
+          { to: '/ai-risk',                       label: 'Threat Scenarios',  icon: roleOptIcon },
         ],
       },
       {
@@ -239,9 +266,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       },
       {
-        // Merged "Board" + "Observability" + "Evidence" → single Governance
-        // & Assurance section. Board Scorecard moved up to Command Center
-        // (where execs land). Activity Timeline + Compliance + Reports here.
+        // AG-PHASE1-GOVERNANCE (2026-06-09): cross-identity-type
+        // governance lives here. Per-type Governance/PIM links remain
+        // available inside their Identity sub-sections.
         label: 'Governance & Assurance',
         color: '#ca8a04',
         items: [

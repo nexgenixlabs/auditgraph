@@ -16398,6 +16398,170 @@ def query_identities():
         db.close()
 
 
+def get_identity_category_summary():
+    """GET /api/identities/category-summary — NHI Inventory hero counts.
+
+    AG-PHASE1+4 (2026-06-09): per-category identity counts the
+    SailPoint-killer numbers page renders. One round-trip computes
+    everything via grouping + per-bucket aggregates.
+
+    Returns:
+      {
+        service_principal: N,
+        managed_identity_system: N,
+        managed_identity_user: N,
+        workload: N,
+        ai_agent: N,
+        ci_cd: N,
+        unowned_nhi: N,
+        dormant_nhi: N,
+        critical_nhi: N,
+        expired_secrets_nhi: N,
+        federated_only_nhi: N,
+      }
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'service_principal': 0, 'managed_identity_system': 0,
+                'managed_identity_user': 0, 'workload': 0, 'ai_agent': 0,
+                'ci_cd': 0, 'unowned_nhi': 0, 'dormant_nhi': 0,
+                'critical_nhi': 0, 'expired_secrets_nhi': 0,
+                'federated_only_nhi': 0,
+            })
+
+        NHI_CATEGORIES = (
+            'service_principal',
+            'managed_identity_system',
+            'managed_identity_user',
+            'workload',
+        )
+
+        # ── Category counts ──
+        cursor.execute("""
+            SELECT identity_category, COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL
+              AND NOT COALESCE(is_microsoft_system, false)
+            GROUP BY identity_category
+        """, (org_id, run_ids))
+        by_cat = {r[0]: int(r[1] or 0) for r in cursor.fetchall()}
+
+        # ── AI agent count via agent_classifications join ──
+        ai_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id) FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE i.organization_id = %s AND i.discovery_run_id = ANY(%s)
+                  AND i.deleted_at IS NULL
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+            """, (org_id, run_ids))
+            row = cursor.fetchone()
+            ai_count = int((row[0] if row else 0) or 0)
+        except Exception:
+            pass
+
+        # ── CI/CD identities — detect via federated_issuer_types ──
+        ci_cd = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) FROM identities
+                WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+                  AND deleted_at IS NULL
+                  AND federated_issuer_types::text ILIKE ANY (ARRAY[
+                    '%%github_actions%%', '%%azure_devops%%',
+                    '%%terraform_cloud%%', '%%gitlab%%', '%%jenkins%%'
+                  ])
+            """, (org_id, run_ids))
+            row = cursor.fetchone()
+            ci_cd = int((row[0] if row else 0) or 0)
+        except Exception:
+            pass
+
+        # ── NHI hygiene aggregates ──
+        nhi_cats_arr = list(NHI_CATEGORIES)
+
+        # unowned: SPN with no owner records
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND (COALESCE(owner_count, 0) = 0
+                   OR owner_display_name IS NULL OR owner_display_name = '')
+        """, (org_id, run_ids, nhi_cats_arr))
+        unowned_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # dormant: no activity in 90d
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND (last_activity_date IS NULL OR last_activity_date < NOW() - INTERVAL '90 days')
+        """, (org_id, run_ids, nhi_cats_arr))
+        dormant_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # critical risk level
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND risk_level = 'critical'
+        """, (org_id, run_ids, nhi_cats_arr))
+        critical_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # expired secrets
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND credential_expiration IS NOT NULL
+              AND credential_expiration < NOW()
+        """, (org_id, run_ids, nhi_cats_arr))
+        expired_secrets_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # federated only: has federated creds + no password secrets
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND COALESCE(has_federated_credentials, false) = true
+              AND COALESCE(credential_count, 0) = 0
+        """, (org_id, run_ids, nhi_cats_arr))
+        federated_only_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        cursor.close()
+        return jsonify({
+            'service_principal':        by_cat.get('service_principal', 0),
+            'managed_identity_system':  by_cat.get('managed_identity_system', 0),
+            'managed_identity_user':    by_cat.get('managed_identity_user', 0),
+            'workload':                 by_cat.get('workload', 0),
+            'ai_agent':                 ai_count,
+            'ci_cd':                    ci_cd,
+            'unowned_nhi':              unowned_nhi,
+            'dormant_nhi':              dormant_nhi,
+            'critical_nhi':             critical_nhi,
+            'expired_secrets_nhi':      expired_secrets_nhi,
+            'federated_only_nhi':       federated_only_nhi,
+        })
+    except Exception as e:
+        logger.error("get_identity_category_summary failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
 def get_query_fields():
     """GET /api/identities/query/fields — Return queryable field definitions."""
     all_fields = {}

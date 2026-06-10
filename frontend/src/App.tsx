@@ -63,6 +63,8 @@ import AIAgents from './pages/AIAgents';
 // AIAgentsStandalone, and AIPermissions pages are now wrapped inside these
 // pillars; legacy URLs redirect (see Route declarations below).
 import AIInventory from './pages/AIInventory';
+// AG-PHASE1+4 (2026-06-09): NHI Inventory — the SailPoint-killer numbers page
+import NHIInventory from './pages/NHIInventory';
 import AIAccess from './pages/AIAccess';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
@@ -347,6 +349,17 @@ function AppContent() {
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
                   <Route path="/identity-explorer" element={<Navigate to="/identity-explorer/humans" replace />} />
                   <Route path="/identity-explorer/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExplorer /></ErrorBoundary>} />
+                  {/* AG-PHASE1+4 (2026-06-09): NHI Inventory + sub-routes.
+                      Sub-routes use existing pages with filter query params
+                      until Phase 4 builds dedicated NHI-typed versions. */}
+                  <Route path="/nhi" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIInventory /></ErrorBoundary>} />
+                  <Route path="/nhi/access" element={<Navigate to="/ai-access?type=nhi" replace />} />
+                  <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
+                  <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
+                  <Route path="/nhi/secrets" element={<Navigate to="/identity-explorer?identity_category=service_principal&hasCredentials=true" replace />} />
+                  <Route path="/nhi/ownership" element={<Navigate to="/ownership?type=nhi" replace />} />
+                  <Route path="/nhi/attack-paths" element={<Navigate to="/attack-paths?source_type=nhi" replace />} />
+                  <Route path="/blast-radius" element={<Navigate to="/identity-explorer?sort_field=blast_radius_score&sort_dir=desc" replace />} />
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
                   <Route path="/identity-exposures" element={<Navigate to="/security-findings" replace />} />
                   <Route path="/drift-analysis" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><DriftAnalysis /></ErrorBoundary>} />
