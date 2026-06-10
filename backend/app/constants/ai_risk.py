@@ -513,6 +513,27 @@ RISK_SIGNALS: dict[str, dict] = {
         "mitre": [],
         "remediation": "Assign a human owner via the AuditGraph governance workflow.",
     },
+    # AG-PHASE-ENGINE-DEPTH (2026-06-10): supply-chain signals for non-AI
+    # NHIs — drives the Supply Chain dim of NHI Trust Score so the
+    # dimension stops being AI-only. Same dim, different signal.
+    "unverified_federated_origin": {
+        "weight": 20,
+        "title": "Federated identity credential uses a permissive subject pattern",
+        "rationale": "An SPN with a federated credential whose subject is org-wide (organization:* / repo:org/*) lets ANY repo or pipeline in that organization assume the identity. Required pins (workspace, branch, environment) are missing.",
+        "nist": ["AC-3 (Access Enforcement)", "AC-6 (Least Privilege)"],
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+        "mitre": ["T1199 (Trusted Relationship)"],
+        "remediation": "Tighten the federated credential subject to the smallest scope that satisfies the workflow (specific repo + branch + environment).",
+    },
+    "ci_cd_with_owner_role": {
+        "weight": 22,
+        "title": "CI/CD federated identity holds Owner / Contributor at subscription scope",
+        "rationale": "GitHub Actions / Azure DevOps / Terraform Cloud identities should hold the smallest role that lets their workflow run. Subscription Owner means a malicious PR can take over the tenant.",
+        "nist": ["AC-6 (Least Privilege)", "CM-2 (Baseline Configuration)"],
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+        "mitre": ["T1199 (Trusted Relationship)", "T1098 (Account Manipulation)"],
+        "remediation": "Replace the broad role with resource-group-scoped Contributor or a custom role tailored to the workflow's actual ARM operations.",
+    },
 }
 
 
@@ -598,6 +619,51 @@ def detect_signals(agent_meta: dict, role_assignments: list[dict],
     # 10) no_owner
     if not agent_meta.get('owner_display_name'):
         add('no_owner', evidence='No human owner assigned')
+
+    # AG-PHASE-ENGINE-DEPTH (2026-06-10): supply-chain signals for NHIs.
+    # Drives the Supply Chain dim of NHI Trust Score so it stops being
+    # AI-only. agent_meta should carry the federated_issuer_types +
+    # federated_subject_patterns enriched from federated_credentials.
+    issuer_types = agent_meta.get('federated_issuer_types') or []
+    if isinstance(issuer_types, str):
+        try:
+            import json as _json
+            issuer_types = _json.loads(issuer_types) if issuer_types.strip().startswith('[') else [issuer_types]
+        except Exception:
+            issuer_types = [issuer_types]
+    is_cicd = bool(set(issuer_types) & {
+        'github_actions', 'azure_devops', 'terraform_cloud', 'gitlab', 'jenkins',
+    })
+
+    # 11) unverified_federated_origin — broad subject pattern on a CI/CD identity
+    fed_subjects = agent_meta.get('federated_subjects') or []
+    if isinstance(fed_subjects, str):
+        fed_subjects = [fed_subjects]
+    PERMISSIVE_SUBJECT_PATTERNS = (
+        'organization:*', 'repo:*:*', 'sc://*', 'project:*:*', '*:*',
+    )
+    for subj in fed_subjects:
+        s = str(subj or '').strip()
+        if not s:
+            continue
+        if any(p in s.lower() for p in PERMISSIVE_SUBJECT_PATTERNS):
+            add('unverified_federated_origin',
+                evidence=f"Federated subject too permissive: {s}")
+            break
+        # repo:org/repo:* without :ref:refs/heads/main pin
+        if s.lower().startswith('repo:') and ':ref:' not in s.lower() and ':environment:' not in s.lower():
+            add('unverified_federated_origin',
+                evidence=f"GitHub Actions OIDC subject lacks ref/environment pin: {s}")
+            break
+
+    # 12) ci_cd_with_owner_role — CI/CD identity holds Owner/Contributor at sub scope
+    if is_cicd:
+        BROAD_AT_SUB = {'Owner', 'Contributor', 'User Access Administrator'}
+        for ra in sub_scope_roles:
+            if (ra.get('role_name') or '') in BROAD_AT_SUB:
+                add('ci_cd_with_owner_role',
+                    evidence=f"{ra.get('role_name')} on {ra.get('scope', '')} via {', '.join(sorted(set(issuer_types)))}")
+                break
 
     return fired
 

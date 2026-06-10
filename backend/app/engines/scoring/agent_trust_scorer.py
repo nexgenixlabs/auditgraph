@@ -169,7 +169,15 @@ AGENT_TRUST_DIMENSIONS: list[dict[str, Any]] = [
     {
         "key":         "supply_chain",
         "label":       "Supply Chain",
-        "signal_keys": ["unverified_model_provenance"],
+        # AG-PHASE-ENGINE-DEPTH (2026-06-10): added CI/CD federated
+        # signals so the dim fires for non-AI NHIs too. For AI agents
+        # this becomes "model provenance"; for NHIs it becomes
+        # "Origin / Lineage". Same dim, scope-aware label is handled
+        # in the UI (Identity Trust page reads the dim from the
+        # identity_scope when rendering).
+        "signal_keys": ["unverified_model_provenance",
+                          "unverified_federated_origin",
+                          "ci_cd_with_owner_role"],
         "weight":      DEFAULTS["supply_chain_penalty_fail"],
     },
 ]
