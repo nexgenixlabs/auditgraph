@@ -65,6 +65,8 @@ import AIAgents from './pages/AIAgents';
 import AIInventory from './pages/AIInventory';
 // AG-PHASE1+4 (2026-06-09): NHI Inventory — the SailPoint-killer numbers page
 import NHIInventory from './pages/NHIInventory';
+// AG-PHASE6 (2026-06-09): Unified Identity Graph — the patent claim, end-to-end
+import UnifiedIdentityGraph from './pages/UnifiedIdentityGraph';
 import AIAccess from './pages/AIAccess';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
@@ -353,6 +355,8 @@ function AppContent() {
                       Sub-routes use existing pages with filter query params
                       until Phase 4 builds dedicated NHI-typed versions. */}
                   <Route path="/nhi" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIInventory /></ErrorBoundary>} />
+                  {/* AG-PHASE6 (2026-06-09): Unified Identity Graph */}
+                  <Route path="/unified-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><UnifiedIdentityGraph /></ErrorBoundary>} />
                   <Route path="/nhi/access" element={<Navigate to="/ai-access?type=nhi" replace />} />
                   <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
                   <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />

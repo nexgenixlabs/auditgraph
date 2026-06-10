@@ -217,6 +217,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         label: 'Graph Intelligence',
         color: '#0891b2',
         items: [
+          // AG-PHASE6 (2026-06-09): Unified Identity Graph at the top
+          // — this is the patent moat the peer reviewer named gold.
+          { to: '/unified-graph', label: 'Unified Identity Graph', icon: identityIcon },
           { to: '/identity-graph', label: 'Identity Graph', icon: identityIcon },
           { to: '/access-graph',   label: 'Access Graph',   icon: accessGraphIcon },
           // Renamed from "Multi-Hop XGRAPH". Same route preserved for
