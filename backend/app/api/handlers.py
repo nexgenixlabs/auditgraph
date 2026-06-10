@@ -34824,6 +34824,33 @@ def get_attack_paths_list():
             conditions.append("ap.source_entity_type = %s")
             params.append(source_entity_type)
 
+        # AG-PHASE5 (2026-06-09): source_type groups multiple
+        # source_entity_type values for the per-identity-type pages.
+        # nhi = service_principal + managed_identity_system/user + workload
+        # human = human_user + guest
+        # ai = ai_agent + possible_ai_agent
+        # cicd = federated workload identities (GitHub Actions, Terraform Cloud, ADO)
+        source_type = (request.args.get('source_type') or '').strip().lower()
+        if source_type == 'nhi':
+            conditions.append("ap.source_entity_type IN ('service_principal','managed_identity_system','managed_identity_user','workload','ai_agent')")
+        elif source_type == 'human':
+            conditions.append("ap.source_entity_type IN ('human_user','guest')")
+        elif source_type == 'ai':
+            conditions.append("ap.source_entity_type IN ('ai_agent','possible_ai_agent')")
+        elif source_type == 'cicd':
+            # Match identities flagged as CI/CD via federated_issuer_types
+            conditions.append("""
+                ap.source_entity_id IN (
+                  SELECT identity_id FROM identities
+                   WHERE organization_id = %s
+                     AND federated_issuer_types::text ILIKE ANY (ARRAY[
+                       '%%github_actions%%', '%%azure_devops%%',
+                       '%%terraform_cloud%%', '%%gitlab%%', '%%jenkins%%'
+                     ])
+                )
+            """)
+            params.append(org_id)
+
         where = "WHERE " + " AND ".join(conditions)
 
         cursor.execute(f"""
