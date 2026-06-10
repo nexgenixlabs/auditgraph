@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState, TableSkeletonRow } from '../components/LoadingState';
 import { useConnection } from '../contexts/ConnectionContext';
 import OrphanedFindingPanel from '../components/correlation/OrphanedFindingPanel';
 
@@ -527,7 +529,7 @@ export default function IdentityCorrelation() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {linkedLoading && (
-                  <tr><td colSpan={8} className="text-center py-12 text-gray-400">Loading...</td></tr>
+                  <TableSkeletonRow columns={8} count={4} />
                 )}
                 {!linkedLoading && filteredLinked.length === 0 && (
                   <tr><td colSpan={8} className="text-center py-12 text-gray-400">No linked identities found</td></tr>
@@ -629,7 +631,7 @@ export default function IdentityCorrelation() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {findingsLoading && (
-                  <tr><td colSpan={8} className="text-center py-12 text-gray-400">Loading...</td></tr>
+                  <TableSkeletonRow columns={8} count={4} />
                 )}
                 {!findingsLoading && findings.length === 0 && (
                   <tr><td colSpan={8} className="text-center py-12 text-gray-400">No orphaned findings found</td></tr>
@@ -769,7 +771,7 @@ export default function IdentityCorrelation() {
       )}
       {selectedHumanId != null && detailLoading && (
         <div className="fixed inset-y-0 right-0 w-[480px] bg-white border-l border-gray-200 shadow-xl z-50 flex items-center justify-center">
-          <div className="text-sm text-gray-400">Loading...</div>
+          <LoadingState size="sm" message="Loading detail…" />
         </div>
       )}
       {selectedHumanId != null && linkedDetail && !detailLoading && (
@@ -891,7 +893,7 @@ export default function IdentityCorrelation() {
       )}
       {selectedFindingId != null && findingDetailLoading && (
         <div className="fixed inset-y-0 right-0 w-[480px] bg-white border-l border-gray-200 shadow-xl z-50 flex items-center justify-center">
-          <div className="text-sm text-gray-400">Loading...</div>
+          <LoadingState size="sm" message="Loading detail…" />
         </div>
       )}
       {selectedFindingId != null && findingDetail && !findingDetailLoading && (
