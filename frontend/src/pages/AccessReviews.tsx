@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useToast } from '../components/ToastProvider';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import EmptyState from '../components/ui/EmptyState';
@@ -547,8 +549,9 @@ export default function AccessReviews() {
       </div>
 
       {/* Loading */}
+      {/* AG-POLISH-D (2026-06-10) */}
       {loading && campaigns.length === 0 && !loadError && (
-        <div style={{ textAlign: 'center', padding: 60, color: AR.textMuted }}>Loading campaigns...</div>
+        <LoadingState message="Loading access review campaigns…" />
       )}
 
       {/* Error State */}
