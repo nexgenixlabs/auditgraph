@@ -51,14 +51,25 @@ export default function IdentityTrust() {
   const [error, setError] = useState<string | null>(null);
   const [threshold, setThreshold] = useState<number>(50);
 
+  // AG-PHASE2 (2026-06-09): scope-aware Trust page. Reads ?type=
+  // so Human / NHI / AI tabs all use the same component.
+  const params = new URLSearchParams(window.location.search);
+  const scope = (params.get('type') || params.get('scope') || 'nhi').toLowerCase();
+  const scopeLabel = ({
+    human: 'Human Trust',
+    nhi: 'Non-Human Identity Trust',
+    ai: 'AI Identity Trust',
+    all: 'Identity Trust',
+  } as Record<string, string>)[scope] || 'Identity Trust';
+
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/identity-trust/rollup?threshold=${threshold}`)
+    fetch(`/api/identity-trust/rollup?threshold=${threshold}&type=${encodeURIComponent(scope)}`)
       .then(r => r.json())
       .then((d: TrustRollup) => { setData(d); setLoading(false); })
       .catch((e: Error) => { setError(e.message); setLoading(false); });
-  }, [threshold]);
+  }, [threshold, scope]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -80,12 +91,23 @@ export default function IdentityTrust() {
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-slate-100">Identity Trust</h1>
+        {/* AG-PHASE2 (2026-06-09): scope-aware title + copy */}
+        <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider font-bold text-gray-500">
+          <span style={{ color: scope === 'human' ? '#3b82f6' : scope === 'ai' ? '#a78bfa' : '#f97316' }}>Identity</span>
+          <span>·</span>
+          <span>{scope === 'human' ? 'Human' : scope === 'ai' ? 'AI Identity' : scope === 'all' ? 'All Types' : 'Non-Human'}</span>
+          <span>·</span>
+          <span>Trust</span>
+        </div>
+        <h1 className="text-2xl font-bold text-slate-100 mt-1">{scopeLabel}</h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
-          Trust Score (0-100) across every non-human identity in your tenant —
-          SPNs, managed identities, and AI agents. Each identity is graded across
-          9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight ·
-          Data Access · Network · Model Exposure · Supply Chain.
+          {scope === 'human'
+            ? 'Trust Score (0-100) across every human identity in your tenant — employees, contractors, and guests. 9 dimensions: Ownership · Secrets (MFA + credential rotation) · Egress · Telemetry · Oversight · Data Access · Network · Privileged Reach · Origin.'
+            : scope === 'ai'
+            ? 'Trust Score (0-100) across every AI agent identity in your tenant. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · Model Exposure · Supply Chain.'
+            : scope === 'all'
+            ? 'Trust Score (0-100) across every identity in your tenant — humans, NHIs, and AI. 9 dimensions universal across types.'
+            : 'Trust Score (0-100) across every non-human identity in your tenant — service principals, managed identities, workloads, CI/CD identities, and AI agents. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · Privileged Reach · Supply Chain.'}
         </p>
       </div>
 

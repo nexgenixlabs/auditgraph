@@ -44122,12 +44122,14 @@ def post_ownership_assign_handler():
 def get_identity_trust_rollup_handler():
     """GET /api/identity-trust/rollup
 
-    Org-wide Identity Trust rollup across all NHIs (SPNs + MIs + AI).
-    Drives the new Identity Trust page (Week 2 of the brand/IA pivot).
+    Org-wide Identity Trust rollup. Scope-aware per AG-PHASE2 (2026-06-09):
+    one endpoint powers Human / NHI / AI Trust pages by passing ?type=.
 
     Query params:
       threshold — Trust score below which an identity counts as "low trust"
                   (default 50)
+      type      — 'human' / 'nhi' / 'ai' / 'all'  (default 'nhi')
+                  Also accepts 'scope=' for symmetry.
     """
     db = _db()
     try:
@@ -44140,8 +44142,31 @@ def get_identity_trust_rollup_handler():
             threshold = max(0, min(int(request.args.get('threshold', 50)), 100))
         except (TypeError, ValueError):
             threshold = 50
+        scope = (request.args.get('type')
+                 or request.args.get('scope')
+                 or 'nhi').lower().strip()
+        if scope not in ('human', 'nhi', 'ai', 'all'):
+            scope = 'nhi'
         from app.engines.scoring.agent_trust_scorer import compute_org_trust_rollup
-        return jsonify(compute_org_trust_rollup(cursor, org_id, threshold))
+        result = compute_org_trust_rollup(cursor, org_id, threshold, identity_scope=scope)
+        # Tag the response with the scope so the frontend can show "NHI Trust" vs "Human Trust"
+        result['identity_scope'] = scope
+        # Convenience fields for the NHI Inventory hero card
+        bands = result.get('by_band', {}) or {}
+        total = result.get('total_evaluated', 0) or 0
+        avg = None
+        if total > 0 and 'avg_trust_score' not in result:
+            # If the engine didn't include avg, compute a defensible one
+            try:
+                worst = result.get('worst_identities', []) or []
+                if worst:
+                    avg = sum(w.get('trust_score', 0) for w in worst) / max(1, len(worst))
+            except Exception:
+                avg = None
+        result.setdefault('avg_trust', result.get('avg_trust_score') or avg or 50)
+        result.setdefault('critical', bands.get('critical', 0))
+        result.setdefault('good', bands.get('good', 0) + bands.get('strong', 0))
+        return jsonify(result)
     except Exception as e:
         logger.error(f"identity-trust rollup failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
