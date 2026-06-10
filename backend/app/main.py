@@ -36,6 +36,7 @@ from app.api.handlers import (
     get_risks,
     get_identity_summary,
     get_dashboard_posture,
+    get_dashboard_business_impact,
     get_dashboard_compliance,
     get_overview_insights,
     get_attack_surface_score,
@@ -3025,6 +3026,11 @@ def create_app():
     @app.get("/api/dashboard/posture")
     def dashboard_posture():
         return get_dashboard_posture()
+
+    # AG-CISO-V4.2 (2026-06-10): Business Impact rollup for Command Center
+    @app.get("/api/dashboard/business-impact")
+    def dashboard_business_impact():
+        return get_dashboard_business_impact()
 
     @app.get("/api/dashboard/credential-intelligence")
     def dashboard_credential_intelligence():

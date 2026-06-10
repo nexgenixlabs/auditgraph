@@ -204,6 +204,11 @@ const TIER_ICONS = {
   data:    <svg viewBox="0 0 24 24" fill="currentColor" className="w-7 h-7"><path d="M12 3C7.58 3 4 4.79 4 7v10c0 2.21 3.59 4 8 4s8-1.79 8-4V7c0-2.21-3.58-4-8-4m6 14c0 .5-2.13 2-6 2s-6-1.5-6-2v-2.23c1.61.78 3.72 1.23 6 1.23s4.39-.45 6-1.23V17m0-4.55c-1.3.95-3.58 1.55-6 1.55s-4.7-.6-6-1.55V9.64c1.47.83 3.61 1.36 6 1.36s4.53-.53 6-1.36v2.81M12 9C8.13 9 6 7.5 6 7s2.13-2 6-2 6 1.5 6 2-2.13 2-6 2"/></svg>,
 };
 
+/**
+ * AG-CISO-V4.2 — restrained, "solid ball" tier circle. No more outer
+ * halo. The 3D-ball look comes from a single radial gradient (highlight
+ * top-left) + a contained inset shadow (no exterior glow).
+ */
 function TierCircle({
   label, count, color, change, icon, onClick,
 }: {
@@ -211,19 +216,13 @@ function TierCircle({
 }) {
   return (
     <button onClick={onClick} className="flex flex-col items-center group flex-shrink-0">
-      <div className="relative">
-        {/* Soft halo — much subtler than the previous neon blast */}
-        <div className="absolute inset-0 rounded-full blur-lg opacity-25 group-hover:opacity-40 transition"
-          style={{ background: color, transform: 'scale(1.1)' }} />
-        {/* Solid disc — flat radial gradient, restrained shadow */}
-        <div className="relative w-20 h-20 rounded-full flex items-center justify-center transition group-hover:scale-[1.03]"
-          style={{
-            background: `radial-gradient(circle at 35% 30%, ${color}, ${color}AA 80%)`,
-            boxShadow: `0 4px 16px ${color}33`,
-            border: `1px solid ${color}66`,
-          }}>
-          <span className="text-white/95">{icon}</span>
-        </div>
+      <div className="relative w-20 h-20 rounded-full flex items-center justify-center transition group-hover:scale-[1.04]"
+        style={{
+          background: `radial-gradient(circle at 32% 28%, ${color}FF 0%, ${color}E6 45%, ${color}99 100%)`,
+          boxShadow: `inset 0 -8px 16px rgba(0,0,0,0.35), inset 4px 6px 14px rgba(255,255,255,0.15)`,
+          border: `1px solid rgba(255,255,255,0.10)`,
+        }}>
+        <span className="text-white drop-shadow-sm">{icon}</span>
       </div>
       <p className="mt-3 text-2xl font-bold text-white font-mono">{count === null ? '—' : count.toLocaleString()}</p>
       <p className="text-[11px] text-slate-400 mt-0.5 text-center max-w-[110px] leading-tight">{label}</p>
@@ -234,25 +233,35 @@ function TierCircle({
   );
 }
 
-function ConnectorDots({ color }: { color: string }) {
+/**
+ * AG-CISO-V4.2 — curved connector with animated traveling dots.
+ *
+ * A single SVG defines a cubic Bezier path between the two tier nodes
+ * (alternating wave above/below center). Three small circles use
+ * `animateMotion` to ride the path, giving the "flow" effect the founder
+ * called out as missing.
+ */
+function ConnectorDots({ color, waveUp = true }: { color: string; waveUp?: boolean }) {
+  const pathId = useMemo(() => `flow-${Math.random().toString(36).slice(2, 9)}`, []);
+  // Path goes from (0, mid) → (W, mid) with a single cubic bezier curve.
+  // waveUp flips the curve so adjacent connectors alternate.
+  const W = 180;
+  const H = 80;
+  const mid = H / 2;
+  const ctrlY = waveUp ? mid - 28 : mid + 28;
+  const d = `M0,${mid} C${W * 0.3},${ctrlY} ${W * 0.7},${ctrlY} ${W},${mid}`;
   return (
-    <div className="flex-1 relative h-24 flex items-center justify-center min-w-[60px] max-w-[180px]">
-      <svg className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
-        <line x1="0" y1="50%" x2="100%" y2="50%" stroke={`${color}40`} strokeWidth="1" strokeDasharray="2 4" />
+    <div className="flex-1 relative min-w-[80px] max-w-[200px]" style={{ height: H }}>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-full overflow-visible">
+        <path id={pathId} d={d} fill="none" stroke={`${color}30`} strokeWidth="1" strokeDasharray="2 4" />
+        {[0, 1, 2].map(i => (
+          <circle key={i} r="2.5" fill={color} style={{ filter: `drop-shadow(0 0 4px ${color})` }}>
+            <animateMotion dur="3.6s" repeatCount="indefinite" begin={`${i * 1.2}s`}>
+              <mpath href={`#${pathId}`} />
+            </animateMotion>
+          </circle>
+        ))}
       </svg>
-      {/* Animated traveling dots */}
-      {[0, 1, 2, 3].map(i => (
-        <span key={i}
-          className="absolute w-1.5 h-1.5 rounded-full"
-          style={{
-            background: color,
-            boxShadow: `0 0 8px ${color}, 0 0 16px ${color}88`,
-            animation: `flowRight 3s linear infinite`,
-            animationDelay: `${i * 0.75}s`,
-            top: '50%',
-            marginTop: '-3px',
-          }} />
-      ))}
     </div>
   );
 }
@@ -327,7 +336,9 @@ export default function CISODashboard() {
       fetch('/api/ai-security/model-registry').then(r => r.ok ? r.json() : null),
       // Recent activity (What Changed panel)
       fetch('/api/activity?limit=10').then(r => r.ok ? r.json() : null),
-    ]).then(([cat, idSum, attackResp, spnStats, posture, modelReg, activity]) => {
+      // Business Impact rollup ($ valuations for PHI / PCI / AI Models)
+      fetch('/api/dashboard/business-impact').then(r => r.ok ? r.json() : null),
+    ]).then(([cat, idSum, attackResp, spnStats, posture, modelReg, activity, bizImpact]) => {
       if (cancelled) return;
       const categorySummary: CategorySummary = cat || {};
       const cats = idSum?.categories || {};
@@ -418,9 +429,9 @@ export default function CISODashboard() {
         dataCount,
         weekDelta: { human: null, nhi: null, ai: null, model: null, data: null },
         riskScore,
-        riskImprovementPct: null,        // No previous-period rollup endpoint yet
-        estimatedExposure: null,         // No FX rollup endpoint yet
-        reductionOpportunity: null,
+        riskImprovementPct: null,                            // No previous-period rollup endpoint yet
+        estimatedExposure: bizImpact?.total_exposure ?? null,
+        reductionOpportunity: bizImpact?.reduction_opportunity ?? null,
         attackPathsTotal: paths.length,
         attackPathsCritical: critN,
         attackPathsHigh: highN,
@@ -441,9 +452,11 @@ export default function CISODashboard() {
         aiExcessivePerms: aiCat.high,
         topAttackPaths: paths.slice(0, 5),
         whatChanged: whatChanged.length > 0 ? whatChanged : null,
-        phiAssets: null,
-        pciAssets: null,
-        aiModels: modelCount !== null ? { count: modelCount, value: null } : null,
+        phiAssets: bizImpact?.phi_assets ? { count: bizImpact.phi_assets.count, value: bizImpact.phi_assets.value } : null,
+        pciAssets: bizImpact?.pci_assets ? { count: bizImpact.pci_assets.count, value: bizImpact.pci_assets.value } : null,
+        aiModels:  bizImpact?.ai_models  ? { count: bizImpact.ai_models.count,  value: bizImpact.ai_models.value }
+                  : modelCount !== null   ? { count: modelCount, value: null }
+                  : null,
       });
       setLoading(false);
     }).catch(() => { if (!cancelled) setLoading(false); });
@@ -497,12 +510,6 @@ export default function CISODashboard() {
   return (
     <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
       <style>{`
-        @keyframes flowRight {
-          0%   { left: 0%;   opacity: 0; }
-          15%  { opacity: 1; }
-          85%  { opacity: 1; }
-          100% { left: 100%; opacity: 0; }
-        }
         @keyframes pulseGlow {
           0%, 100% { box-shadow: 0 0 8px rgba(16, 185, 129, 0.6); }
           50%      { box-shadow: 0 0 16px rgba(16, 185, 129, 1); }
@@ -611,13 +618,13 @@ export default function CISODashboard() {
             {/* Tier circles row */}
             <div className="flex items-center justify-center gap-2">
               <TierCircle label="Human Identities"     count={data.humanCount} color="#3b82f6" change={data.weekDelta.human} icon={TIER_ICONS.human} onClick={() => navigate('/human/inventory')} />
-              <ConnectorDots color="#3b82f6" />
+              <ConnectorDots color="#3b82f6" waveUp={true} />
               <TierCircle label="Non-Human Identities" count={data.nhiCount}   color="#f97316" change={data.weekDelta.nhi}   icon={TIER_ICONS.nhi}   onClick={() => navigate('/nhi')} />
-              <ConnectorDots color="#f97316" />
+              <ConnectorDots color="#f97316" waveUp={false} />
               <TierCircle label="AI Agents"            count={data.aiCount}    color="#a78bfa" change={data.weekDelta.ai}    icon={TIER_ICONS.ai}    onClick={() => navigate('/ai-inventory')} />
-              <ConnectorDots color="#a78bfa" />
+              <ConnectorDots color="#a78bfa" waveUp={true} />
               <TierCircle label="Models"               count={data.modelCount} color="#ec4899" change={data.weekDelta.model} icon={TIER_ICONS.model} onClick={() => navigate('/ai-runtime/model-registry')} />
-              <ConnectorDots color="#ec4899" />
+              <ConnectorDots color="#ec4899" waveUp={false} />
               <TierCircle label="Data Sources"         count={data.dataCount}  color="#10b981" change={data.weekDelta.data}  icon={TIER_ICONS.data}  onClick={() => navigate('/ai-access/data-reachability')} />
             </div>
             {/* Bottom strip */}
@@ -819,17 +826,23 @@ export default function CISODashboard() {
               <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-2.5">
                 <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">PHI Assets</p>
                 <p className="text-lg font-bold text-white mt-1 font-mono">{data.phiAssets ? data.phiAssets.count : '—'}</p>
-                <p className="text-[10px] text-slate-500 font-mono">{data.phiAssets?.value === null ? 'no valuation' : ''}</p>
+                <p className="text-[10px] font-mono" style={{ color: data.phiAssets?.value ? '#f87171' : '#64748b' }}>
+                  {data.phiAssets?.value ? fmtMoney(data.phiAssets.value) : '—'}
+                </p>
               </div>
               <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-2.5">
                 <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">PCI Assets</p>
                 <p className="text-lg font-bold text-white mt-1 font-mono">{data.pciAssets ? data.pciAssets.count : '—'}</p>
-                <p className="text-[10px] text-slate-500 font-mono">{data.pciAssets?.value === null ? 'no valuation' : ''}</p>
+                <p className="text-[10px] font-mono" style={{ color: data.pciAssets?.value ? '#f87171' : '#64748b' }}>
+                  {data.pciAssets?.value ? fmtMoney(data.pciAssets.value) : '—'}
+                </p>
               </div>
               <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-2.5">
                 <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">AI Models</p>
                 <p className="text-lg font-bold text-white mt-1 font-mono">{data.aiModels ? data.aiModels.count : '—'}</p>
-                <p className="text-[10px] text-slate-500 font-mono">{data.aiModels?.value === null ? 'no valuation' : ''}</p>
+                <p className="text-[10px] font-mono" style={{ color: data.aiModels?.value ? '#f87171' : '#64748b' }}>
+                  {data.aiModels?.value ? fmtMoney(data.aiModels.value) : '—'}
+                </p>
               </div>
             </div>
             <div>
