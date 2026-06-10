@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRemediationQueue } from '../hooks/useRemediationQueue';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { useToast } from '../components/ToastProvider';
 import {
   STATUS_CONFIG,
@@ -109,10 +111,10 @@ export default function RemediationQueue() {
       </div>
 
       {/* State 1: Loading */}
+      {/* AG-POLISH-D (2026-06-10) */}
       {loading && items.length === 0 && !error && (
-        <div className="rounded-xl border p-8 text-center" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
-          <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto" />
-          <p className="text-xs mt-3" style={{ color: 'var(--text-tertiary)' }}>Loading queue...</p>
+        <div className="rounded-xl border" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
+          <LoadingState message="Loading change control queue…" detail="Surfacing pending remediations + accepted-risk exceptions" />
         </div>
       )}
 
