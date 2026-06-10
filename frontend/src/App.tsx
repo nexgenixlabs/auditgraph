@@ -70,6 +70,8 @@ import UnifiedIdentityGraph from './pages/UnifiedIdentityGraph';
 // AG-POLISH-DEMO (2026-06-10): What's New — sales/demo enablement landing
 import WhatsNew from './pages/WhatsNew';
 import AIAccess from './pages/AIAccess';
+import HumanAccess from './pages/HumanAccess';
+import NHIAccess from './pages/NHIAccess';
 import AIModelRegistry from './pages/AIModelRegistry';
 import AIFindings from './pages/AIFindings';
 import MultiHopXGraph from './pages/MultiHopXGraph';
@@ -361,7 +363,11 @@ function AppContent() {
                   <Route path="/unified-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><UnifiedIdentityGraph /></ErrorBoundary>} />
                   {/* AG-POLISH-DEMO (2026-06-10): What's New / demo landing */}
                   <Route path="/whats-new" element={<ErrorBoundary><WhatsNew /></ErrorBoundary>} />
-                  <Route path="/nhi/access" element={<Navigate to="/ai-access?type=nhi" replace />} />
+                  {/* AG-IA-P1 (2026-06-10): dedicated per-bucket Access pages.
+                      Each bucket renders its own scoped surface — no more shared
+                      "AI Access" page bleeding across Human/NHI/AI. */}
+                  <Route path="/human/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanAccess /></ErrorBoundary>} />
+                  <Route path="/nhi/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIAccess /></ErrorBoundary>} />
                   <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
                   <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
                   <Route path="/nhi/secrets" element={<Navigate to="/identity-explorer?identity_category=service_principal&hasCredentials=true" replace />} />

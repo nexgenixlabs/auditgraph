@@ -169,7 +169,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
             navigateTo: '/identity-explorer/humans',
             items: [
               { to: '/identity-explorer/humans',           label: 'Inventory',         icon: identityIcon },
-              { to: '/ai-access?type=human',               label: 'Access',            icon: effectiveAccessIcon },
+              { to: '/human/access',                       label: 'Access',            icon: effectiveAccessIcon },
               { to: '/identity-trust?type=human',          label: 'Trust',             icon: roleOptIcon },
               { to: '/lifecycle?type=human',               label: 'Lifecycle',         icon: identityIcon },
               { to: '/ai-governance?type=human',           label: 'Governance',        icon: identityIcon },
