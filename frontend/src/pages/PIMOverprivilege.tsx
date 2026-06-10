@@ -196,8 +196,19 @@ export default function PIMOverprivilege() {
             })}
             {data.findings.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-3 py-8 text-center text-sm text-slate-500">
-                  No PIM overprivilege findings at this severity.
+                <td colSpan={5} className="px-3 py-12 text-center">
+                  <div className="max-w-md mx-auto">
+                    <svg className="w-10 h-10 mx-auto mb-3 text-emerald-500/70" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div className="text-sm font-semibold text-slate-300">No PIM overprivilege findings at this severity</div>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      Every eligible PIM assignment we evaluated is either actively
+                      exercised or below the severity threshold. If you expected
+                      findings here, lower the severity filter or verify your
+                      tenant has Entra ID P2 (required for PIM data).
+                    </p>
+                  </div>
                 </td>
               </tr>
             )}

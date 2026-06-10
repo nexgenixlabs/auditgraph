@@ -7,6 +7,8 @@
  * Source: GET /api/identity-security/entra-role-activity?dormancy=
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 type Band = 'high' | 'medium' | 'low' | 'unknown';
 type Bucket = 'daily' | 'weekly' | 'monthly' | 'rare' | 'dormant' | 'unknown';
@@ -105,10 +107,13 @@ export default function EntraRoleActivity() {
           Entra Directory Role Last-Used
         </h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
+          {/* AG-POLISH-C (2026-06-10): jargon now hoverable. CATEGORIES_REQUIRING
+              and PIM both render with dotted-underline + tooltip on hover. */}
           Per-role activity inferred from <code className="text-slate-300">auditLogs/directoryAudits</code> via
-          the CATEGORIES_REQUIRING(role) cross-product. Identifies privileged directory role assignments
-          that haven't been exercised but are still active grants. Requires Entra ID P2 for full inference;
-          gracefully shows "unknown" on tenants without it.
+          the <TermTooltip term="CATEGORIES_REQUIRING">CATEGORIES_REQUIRING</TermTooltip>(role) cross-product.
+          Identifies privileged directory role assignments that haven't been exercised but are still active grants.
+          Requires <TermTooltip term="PIM">Entra ID P2</TermTooltip> for full inference; gracefully shows "unknown"
+          on tenants without it.
         </p>
       </div>
 

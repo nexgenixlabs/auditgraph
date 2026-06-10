@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useAuth } from '../contexts/AuthContext';
+// AG-POLISH-A (2026-06-10): reusable empty-state component
+import { EmptyState, NoDataInScopeState } from '../components/EmptyState';
 
 interface RiskFinding {
   id: string;
@@ -361,9 +363,27 @@ const SecurityFindings: React.FC = () => {
       {/* Content */}
       <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg overflow-hidden">
         {loading ? (
-          <div className="p-8 text-center text-slate-400">Loading...</div>
+          <div className="p-8 text-center text-slate-400">
+            <div className="animate-spin inline-block w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full mr-2" />
+            Loading findings…
+          </div>
         ) : filteredFindings.length === 0 ? (
-          <div className="p-8 text-center text-slate-400">No findings match the current filters</div>
+          /* AG-POLISH-A (2026-06-10): better empty state. If there are
+             NO findings at all in the tenant → "no risk detected" success
+             state. If filters drop everything → "filters too tight" hint. */
+          findings.length === 0 ? (
+            <div className="p-8">
+              <NoDataInScopeState title="No security findings detected" subjects="identities" />
+            </div>
+          ) : (
+            <div className="p-8">
+              <EmptyState
+                variant="info"
+                title="No findings match these filters"
+                description="Try clearing one or more filters above, or switch to grouped view to see findings across all rules."
+              />
+            </div>
+          )
         ) : groupByRule ? (
           /* Grouped view */
           <div className="divide-y divide-slate-700/50">
