@@ -321,7 +321,12 @@ export default function OnboardingWizard() {
       {/* Logo + Title */}
       <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-white">AuditGraph Setup</h1>
-        <p className="text-sm text-gray-400 mt-1">Configure your identity security audit in a few steps</p>
+        {/* AG-PHASE1-BRAND (2026-06-09): platform tagline lands on
+            first contact so prospects know what they're configuring. */}
+        <p className="text-sm text-gray-400 mt-1">
+          Identity Security Graph for Human, Non-Human, and AI Identities
+        </p>
+        <p className="text-xs text-gray-500 mt-1">Agentless · read-only · architecture-derived</p>
       </div>
 
       {/* Progress Bar */}

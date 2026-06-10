@@ -77,7 +77,13 @@ export default function Signup() {
         {/* Logo */}
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-white">AuditGraph</h1>
-          <p className="text-sm text-slate-400 mt-1">
+          <p className="text-sm text-slate-300 mt-1 font-medium">
+            Identity Security Graph
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            For Human, Non-Human, and AI Identities · agentless · read-only
+          </p>
+          <p className="text-sm text-slate-400 mt-3">
             {step === 'info' ? 'Create your account' : 'Choose your plan'}
           </p>
         </div>

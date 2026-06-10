@@ -292,7 +292,11 @@ function PageHeader() {
         <div className="flex items-baseline gap-3 min-w-0">
           <h1 className="text-sm font-semibold text-gray-200">Executive Posture</h1>
           <AudienceBadge label="BOARD / CISO" variant="amber" />
-          <span className="text-xs text-gray-400 hidden md:inline">Board-ready summary · {getTimezoneLabel()}</span>
+          {/* AG-PHASE1-BRAND (2026-06-09): platform tagline visible on
+              the executive landing page so brand context is immediate. */}
+          <span className="text-xs text-gray-400 hidden md:inline">
+            Identity Security Graph · Board-ready summary · {getTimezoneLabel()}
+          </span>
           <span className="text-[10px] text-gray-500 hidden lg:inline ml-2">
             <span className="text-gray-600">Related:</span>
             {' '}
