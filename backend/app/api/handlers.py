@@ -8507,18 +8507,26 @@ def get_dashboard_business_impact():
                 try: cursor.connection.rollback()
                 except Exception: pass
 
-        # AI model count — use ai_models table if present, else count agents
+        # AI model count — canonical source is azure_ai_model_deployments
+        # (deployed inference endpoints). Falls back to agent_classifications
+        # count if the deployments table is missing or empty. SAVEPOINTs so
+        # one failed probe doesn't abort the outer transaction.
         ai_count = 0
         try:
+            cursor.execute("SAVEPOINT _ai_count_sp")
             cursor.execute("""
-                SELECT COUNT(*) FROM ai_models
-                WHERE organization_id = %s
-            """, (_org_id(),))
+                SELECT COUNT(*) FROM azure_ai_model_deployments
+                WHERE discovery_run_id = ANY(%s)
+            """, (run_ids,))
             ai_count = int(_scalar(cursor, 0) or 0)
+            cursor.execute("RELEASE SAVEPOINT _ai_count_sp")
         except Exception:
-            try: cursor.connection.rollback()
+            try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_count_sp")
             except Exception: pass
+
+        if ai_count == 0:
             try:
+                cursor.execute("SAVEPOINT _ai_agents_fallback")
                 cursor.execute("""
                     SELECT COUNT(DISTINCT i.id) FROM identities i
                     JOIN agent_classifications ac ON ac.identity_db_id = i.id
@@ -8526,8 +8534,10 @@ def get_dashboard_business_impact():
                       AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
                 """, (run_ids,))
                 ai_count = int(_scalar(cursor, 0) or 0)
+                cursor.execute("RELEASE SAVEPOINT _ai_agents_fallback")
             except Exception:
-                pass
+                try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_agents_fallback")
+                except Exception: pass
 
         phi_value = classified['PHI'] * PHI_PER_ASSET
         pci_value = classified['PCI'] * PCI_PER_ASSET

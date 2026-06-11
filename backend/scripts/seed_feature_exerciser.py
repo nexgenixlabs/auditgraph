@@ -227,6 +227,44 @@ def populate_blast_radius(cur, run_id):
     log.info(f"Blast radius distribution applied to {cur.rowcount} NHIs")
 
 
+def populate_data_classifications(cur, run_id):
+    """
+    Tag a meaningful sample of storage accounts + key vaults with
+    PHI / PCI / PII so the CISO Business Impact rollup shows realistic
+    asset counts. Idempotent: UPDATE never re-classifies an already-
+    classified row to a different value.
+    """
+    # Storage accounts: ~30% PHI, ~25% PCI, ~20% PII, rest unclassified.
+    cur.execute("""
+        UPDATE azure_storage_accounts
+        SET data_classification = CASE
+            WHEN id %% 10 < 3 THEN 'PHI'
+            WHEN id %% 10 < 5 THEN 'PCI'
+            WHEN id %% 10 < 7 THEN 'PII'
+            ELSE data_classification
+            END
+        WHERE discovery_run_id = %s
+          AND (data_classification IS NULL OR data_classification = '')
+    """, (run_id,))
+    storage_n = cur.rowcount
+
+    # Key vaults: tag a few as PHI / PCI so the "Key Vault" critical-asset
+    # signal lights up too.
+    cur.execute("""
+        UPDATE azure_key_vaults
+        SET data_classification = CASE
+            WHEN id %% 5 = 0 THEN 'PHI'
+            WHEN id %% 5 = 1 THEN 'PCI'
+            ELSE data_classification
+            END
+        WHERE discovery_run_id = %s
+          AND (data_classification IS NULL OR data_classification = '')
+    """, (run_id,))
+    kv_n = cur.rowcount
+
+    log.info(f"Data classifications applied to {storage_n} storage + {kv_n} key vaults")
+
+
 def populate_pim_eligibility(cur, run_id):
     """~20% of privileged humans are PIM-eligible (the good state)."""
     cur.execute("""
@@ -441,6 +479,7 @@ def main():
             populate_owner_distribution(cur, run_id)
             populate_blast_radius(cur, run_id)
             populate_pim_eligibility(cur, run_id)
+            populate_data_classifications(cur, run_id)
 
             log.info("\n--- Step 2: upsert hero demo identities ---")
             planted = upsert_hero_identities(cur, run_id)

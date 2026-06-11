@@ -160,6 +160,60 @@ function CircularProgress({ value, color, size = 80 }: { value: number; color: s
   );
 }
 
+/**
+ * AG-CISO-V4.3 (2026-06-10) — Identity Security Score 2x hero card.
+ *
+ * Peer review (10/10 plan) called this out: the top row needed a hero
+ * metric that screams "pay attention". Doubled width, bigger number,
+ * extra trend lines for week-over-week delta + exposure reduction.
+ */
+function IdentityScoreHero({
+  value, label, trendUp, trendCount, exposureReduction,
+}: {
+  value: number; label: string;
+  trendUp: number | null;          // ↑ N this week, null = no baseline
+  trendCount: number;
+  exposureReduction: number | null;  // ↓ $X exposure reduction
+}) {
+  const color = value >= 70 ? '#f87171' : value >= 40 ? '#fb923c' : '#34d399';
+  return (
+    <div className="rounded-xl p-6 bg-[#0f172a]/80 border border-white/5 relative overflow-hidden xl:col-span-2"
+      style={{ borderLeft: `4px solid ${color}` }}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Identity Security Score</p>
+          <p className="text-7xl font-bold mt-3 leading-none" style={{ color }}>{value}</p>
+          <p className="text-base font-semibold mt-1" style={{ color }}>{label}</p>
+          <div className="flex flex-col gap-1 mt-3 text-xs">
+            {trendUp !== null && trendCount > 0 ? (
+              <span className="flex items-center gap-1.5 text-emerald-400">
+                <span className="text-sm">↑</span> <strong>{trendCount}</strong> improvement this week
+              </span>
+            ) : (
+              <span className="text-slate-500">No prior-period baseline yet</span>
+            )}
+            {exposureReduction !== null && exposureReduction > 0 ? (
+              <span className="flex items-center gap-1.5 text-emerald-400">
+                <span className="text-sm">↓</span> <strong>${exposureReduction >= 1_000_000 ? `${(exposureReduction / 1_000_000).toFixed(1)}M` : `${(exposureReduction / 1_000).toFixed(0)}K`}</strong> exposure reduction
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <div className="flex-shrink-0">
+          <div className="relative">
+            <CircularProgress value={value} color={color} size={120} />
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Score</span>
+              <span className="text-2xl font-bold" style={{ color }}>{value}</span>
+              <span className="text-[9px] font-mono text-slate-500">/100</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HeroCard({
   label, value, valueColor, sublabel, footer, footerColor, icon, iconColor, progressValue,
 }: {
@@ -350,9 +404,14 @@ export default function CISODashboard() {
                   (categorySummary.managed_identity_user || 0) +
                   (categorySummary.workload || 0);
       const ai = categorySummary.ai_agent || 0;
-      const modelCount = Array.isArray(modelReg?.models) ? modelReg.models.length : null;
-      // Data Sources: no rollup endpoint exists today. Render "—" until one lands.
-      const dataCount: number | null = null;
+      const modelCount = Array.isArray(modelReg?.models) ? modelReg.models.length
+                      : (bizImpact?.ai_models?.count ?? null);
+      // Data Sources tier = total classified resources (PHI + PCI + PII).
+      // Pulled from /api/dashboard/business-impact which aggregates from
+      // azure_storage_accounts + azure_key_vaults data_classification columns.
+      const dataCount: number | null = bizImpact
+        ? (bizImpact.phi_assets?.count || 0) + (bizImpact.pci_assets?.count || 0) + (bizImpact.pii_assets?.count || 0)
+        : null;
 
       // ── Attack paths ────────────────────────────────────────────
       const paths: AttackPathRow[] = Array.isArray(attackResp?.paths) ? attackResp.paths
@@ -543,19 +602,14 @@ export default function CISODashboard() {
       </div>
 
       {/* Row 1: 4 hero metric cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        <HeroCard
-          label="IDENTITY RISK SCORE"
-          value={`${data.riskScore}`}
-          valueColor={data.riskScore >= 70 ? '#f87171' : data.riskScore >= 40 ? '#fb923c' : '#34d399'}
-          sublabel={data.riskScore >= 70 ? 'Critical Exposure' : data.riskScore >= 40 ? 'Elevated' : 'Healthy'}
-          footer={data.riskImprovementPct === null
-            ? <span className="text-slate-500">No prior-period baseline yet</span>
-            : <span className="flex items-center gap-1 text-emerald-400">↓ {Math.abs(data.riskImprovementPct)}% improvement this week</span>}
-          footerColor="#34d399"
-          icon={<span className="text-xs font-mono">/100</span>}
-          iconColor={data.riskScore >= 70 ? '#ef4444' : data.riskScore >= 40 ? '#f97316' : '#10b981'}
-          progressValue={data.riskScore}
+      {/* AG-CISO-V4.3: 5-column grid; Identity Security Score is the 2-col hero. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+        <IdentityScoreHero
+          value={data.riskScore}
+          label={data.riskScore >= 70 ? 'Critical Exposure' : data.riskScore >= 40 ? 'Elevated' : 'Healthy'}
+          trendUp={data.riskImprovementPct}
+          trendCount={data.riskImprovementPct ? Math.abs(data.riskImprovementPct) : 0}
+          exposureReduction={data.reductionOpportunity}
         />
         <HeroCard
           label="ESTIMATED EXPOSURE"
