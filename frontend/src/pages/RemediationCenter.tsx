@@ -20,7 +20,7 @@
  *   /api/remediation/generated   remediation queue rows
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -40,9 +40,119 @@ interface Remediation {
   blast_radius?: string;
   automation_ready?: boolean | string;
   ai_confidence?: number;
+  confidence?: number;
   domain?: string;
   target?: string;
   created_at?: string;
+  // Extended fields used by the detail drawer + script generator
+  action_type?: string;
+  role_name?: string;
+  roles?: string[];
+  scope?: string;
+  playbook_name?: string;
+}
+
+// ─── Drawer helpers ────────────────────────────────────────────────
+
+function deriveImpact(a: Remediation): string | null {
+  const allRoles = (a.roles || []).concat(a.role_name ? [a.role_name] : []);
+  if (allRoles.length === 0) return null;
+  const joined = allRoles.map(r => r.toLowerCase()).join(' ');
+  const scope = (a.scope || '').toLowerCase();
+  const isSub = /^\/subscriptions\/[^/]+$/.test(scope);
+  if (joined.includes('owner'))
+    return isSub ? 'Full control of IAM, resources, and billing — complete subscription takeover'
+                 : 'Can modify all resources and grant access within scope';
+  if (joined.includes('user access administrator'))
+    return 'Can grant any role to any identity — privilege escalation to full control';
+  if (joined.includes('global administrator') || joined.includes('privileged role'))
+    return 'Tenant-wide administrative control over all directory objects';
+  if (joined.includes('contributor'))
+    return isSub ? 'Can deploy, modify, or destroy all resources in the subscription'
+                 : 'Can create and modify resources within scope';
+  if (joined.includes('key vault'))
+    return 'Can extract encryption keys, certificates, and stored secrets';
+  return 'Elevated access to cloud resources — review scope and necessity';
+}
+
+function getBreachInfo(roleName: string): { breach: string; penalty: string } | null {
+  const r = (roleName || '').toLowerCase();
+  if (r.includes('owner') || r.includes('contributor'))
+    return {
+      breach: '2020 SolarWinds — compromised build pipeline SPN with Contributor access deployed backdoored updates to 18,000 organizations',
+      penalty: 'Average breach cost $4.45M (IBM 2023) · PCI-DSS 7.1 least-privilege violation',
+    };
+  if (r.includes('key vault') || r.includes('secrets'))
+    return {
+      breach: '2022 LastPass — attacker reached customer vault backups via stolen Key Vault credentials',
+      penalty: 'Class-action settlements + regulatory fines · NIST AC-3 violation',
+    };
+  if (r.includes('user access administrator'))
+    return {
+      breach: '2023 Storm-0558 — Microsoft cloud takeover via UAA-level access lateraled to consumer-key signing',
+      penalty: 'CISA mandate review · ISO 27001 A.9.2.3 violation',
+    };
+  return null;
+}
+
+function generateScript(a: Remediation, format: 'powershell' | 'azure_cli' | 'terraform_note'): string {
+  const name = a.identity_name || '(unknown)';
+  const objId = a.identity_id || '';
+  const role = a.role_name || (a.roles || [])[0] || 'Contributor';
+  const scope = a.scope || '/subscriptions/<sub>';
+  const auditId = String(a.id || '').slice(0, 8);
+
+  if (format === 'terraform_note') {
+    return `# Terraform: Remove azurerm_role_assignment for principal_id="${objId}"
+#   role_definition_name = "${role}"
+#   scope                = "${scope}"
+# Then: terraform plan && terraform apply
+# Audit ID: ${auditId}`;
+  }
+
+  if (format === 'powershell') {
+    return `# ============================================
+# AuditGraph Remediation Prescription
+# Action:    Reduce Privilege (${a.action_type || 'reduce_privilege'})
+# Identity:  ${name}
+# Role:      ${role}
+# Scope:     ${scope}
+# Audit ID:  ${auditId}
+# Governance: AI-prescribed → Human-approved
+# ============================================
+
+Connect-AzAccount
+
+$existing = Get-AzRoleAssignment \`
+  -ObjectId "${objId}" \`
+  -RoleDefinitionName "${role}" \`
+  -Scope "${scope}" \`
+  -ErrorAction SilentlyContinue
+
+if ($existing) {
+  Write-Host "Removing ${role} from ${name}..." -ForegroundColor Cyan
+  Remove-AzRoleAssignment \`
+    -ObjectId "${objId}" \`
+    -RoleDefinitionName "${role}" \`
+    -Scope "${scope}"
+  Write-Host "Removed ${role}" -ForegroundColor Green
+} else {
+  Write-Host "${role} not found — may already be removed" -ForegroundColor Yellow
+}`;
+  }
+
+  // Azure CLI
+  return `# AuditGraph — Reduce Privilege (Azure CLI)
+# Identity: ${name} | Audit ID: ${auditId}
+az role assignment list \\
+  --assignee "${objId}" \\
+  --scope "${scope}" \\
+  --query "[?roleDefinitionName=='${role}']" -o table
+
+az role assignment delete \\
+  --assignee "${objId}" \\
+  --role "${role}" \\
+  --scope "${scope}"`;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -131,6 +241,7 @@ const TAB_LABEL: Record<Tab, string> = {
 };
 
 export default function RemediationCenter() {
+  const navigate = useNavigate();
   const { withConnection, selectedConnectionId } = useConnection();
   const [items, setItems] = useState<Remediation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -140,6 +251,15 @@ export default function RemediationCenter() {
   const [priorityFilter, setPriorityFilter] = useState('');
   const [severityFilter, setSeverityFilter] = useState('');
   const [automationFilter, setAutomationFilter] = useState('');
+  // AG-REM-V2.2 (2026-06-11): drawer state for the per-item detail panel
+  // (Risk Finding · Recommended Remediation · Preview Script · Security
+  // Impact · Decision buttons). Restored from legacy after peer review
+  // flagged that the v2 rebuild was navigating away instead of opening
+  // the prescription drawer.
+  const [selectedAction, setSelectedAction] = useState<Remediation | null>(null);
+  const [scriptOpen, setScriptOpen] = useState(false);
+  const [scriptTab, setScriptTab] = useState<'powershell' | 'azure_cli' | 'terraform_note'>('powershell');
+  const [scriptCopied, setScriptCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -334,8 +454,12 @@ export default function RemediationCenter() {
           const blast = blastTone(r.blast_radius);
           const conf = r.ai_confidence ?? 0;
           return (
-            <Link key={r.id || i} to={r.identity_id ? `/identities/${r.identity_id}` : '/remediation'}
-              className="grid grid-cols-[2fr_100px_120px_90px_110px_110px_110px_140px_30px] gap-3 px-4 py-3 items-center text-xs hover:bg-slate-800/30 transition border-b border-white/5 last:border-b-0">
+            <button key={r.id || i}
+              onClick={() => setSelectedAction(r)}
+              className="grid grid-cols-[2fr_100px_120px_90px_110px_110px_110px_140px_30px] gap-3 px-4 py-3 items-center text-xs hover:bg-slate-800/30 transition border-b border-white/5 last:border-b-0 w-full text-left"
+              style={{
+                background: selectedAction?.id === r.id ? 'rgba(139,92,246,0.08)' : undefined,
+              }}>
               <div className="min-w-0">
                 <p className="text-slate-200 truncate font-medium">{r.title || r.description || 'Remediation'}</p>
                 <p className="text-[10px] text-slate-500 truncate">{r.identity_name || r.target || r.identity_id || ''}</p>
@@ -364,18 +488,246 @@ export default function RemediationCenter() {
                 onChange={e => e.preventDefault()}>
                 <option value="new">{stat.label}</option>
               </select>
-              <button onClick={ev => { ev.preventDefault(); ev.stopPropagation(); }}
-                className="text-slate-500 hover:text-slate-300">
+              <span onClick={ev => { ev.preventDefault(); ev.stopPropagation(); }}
+                className="text-slate-500 hover:text-slate-300 cursor-pointer flex items-center justify-end">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
-              </button>
-            </Link>
+              </span>
+            </button>
           );
         })}
         <div className="px-4 py-2 border-t border-white/5 text-[10px] text-slate-500 text-center">
           Showing {Math.min(filtered.length, 30)} of {filtered.length} remediations
         </div>
       </div>
+
+      {/* AG-REM-V2.2 (2026-06-11): per-action detail drawer — peer-review
+          restoration. Slides in from the right when a row is clicked,
+          showing Risk Finding · Recommended Remediation · Preview Script
+          · Security Impact · Decision buttons (Accept Risk / Plan
+          Remediation / View Identity Detail). */}
+      {selectedAction && (
+        <ActionDrawer
+          action={selectedAction}
+          onClose={() => setSelectedAction(null)}
+          onPreviewScript={() => { setScriptTab('powershell'); setScriptCopied(false); setScriptOpen(true); }}
+          onViewIdentity={() => selectedAction.identity_id && navigate(`/identities/${selectedAction.identity_id}`)}
+        />
+      )}
+
+      {/* Script preview modal */}
+      {scriptOpen && selectedAction && (
+        <ScriptModal
+          action={selectedAction}
+          tab={scriptTab}
+          onTab={setScriptTab}
+          copied={scriptCopied}
+          onCopy={() => {
+            navigator.clipboard.writeText(generateScript(selectedAction, scriptTab));
+            setScriptCopied(true);
+            setTimeout(() => setScriptCopied(false), 2000);
+          }}
+          onClose={() => setScriptOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// ─── Drawer + Modal components ─────────────────────────────────────
+
+function ActionDrawer({
+  action, onClose, onPreviewScript, onViewIdentity,
+}: {
+  action: Remediation;
+  onClose: () => void;
+  onPreviewScript: () => void;
+  onViewIdentity: () => void;
+}) {
+  const tone = priorityTone(action.priority);
+  const conf = action.ai_confidence ?? action.confidence ?? 0;
+  const impact = deriveImpact(action);
+  const breach = getBreachInfo(action.role_name || (action.roles || [])[0] || '');
+  const statusLabel = (action.status || 'new').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return (
+    <>
+      {/* Backdrop */}
+      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+      {/* Drawer */}
+      <aside className="fixed right-0 top-0 bottom-0 w-[400px] bg-[#0f172a] border-l border-white/10 z-50 overflow-y-auto shadow-2xl">
+        <div className="p-5 space-y-4">
+          {/* Header */}
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="font-bold text-lg text-white truncate">{action.title || 'Remediation'}</h3>
+              {action.playbook_name && (
+                <p className="text-xs text-slate-400 mt-1">Playbook: {action.playbook_name}</p>
+              )}
+            </div>
+            <button onClick={onClose} className="p-1 rounded hover:bg-slate-800 text-slate-400 flex-shrink-0">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+
+          {/* Risk Finding */}
+          <div className="space-y-2">
+            <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Risk Finding</p>
+            {action.identity_name && action.identity_id && (
+              <p className="text-sm text-slate-300">
+                Identity:{' '}
+                <button onClick={onViewIdentity} className="text-violet-400 hover:text-violet-300 underline">
+                  {action.identity_name}
+                </button>
+              </p>
+            )}
+            {action.description && (
+              <p className="text-sm text-slate-300 leading-relaxed">{action.description}</p>
+            )}
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <div className="rounded-lg p-2.5 border border-white/5">
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">Risk Reduction</p>
+                <p className="text-lg font-bold text-emerald-400">+{action.risk_reduction || 0}</p>
+              </div>
+              <div className="rounded-lg p-2.5 border border-white/5">
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">AI Confidence</p>
+                <p className="text-lg font-bold" style={{ color: conf >= 85 ? '#34d399' : conf >= 65 ? '#fbbf24' : '#fb923c' }}>{conf}%</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-white/5" />
+
+          {/* Recommended Remediation */}
+          <div className="space-y-2">
+            <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Recommended Remediation</p>
+            <div className="rounded-lg p-3 border-l-2" style={{ borderColor: '#14b8a6', backgroundColor: 'rgba(20,184,166,0.06)' }}>
+              <p className="text-sm font-medium text-slate-100">
+                {action.action_type?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'Reduce Privilege'}
+              </p>
+              {action.role_name && (
+                <p className="text-xs mt-1 text-slate-300">Role: {action.role_name}</p>
+              )}
+              {action.scope && (
+                <p className="text-xs mt-0.5 text-slate-500 break-all">Scope: {action.scope}</p>
+              )}
+            </div>
+            <button onClick={onPreviewScript}
+              className="w-full px-3 py-2 rounded-lg text-xs font-medium border border-white/10 text-slate-200 hover:bg-slate-800 transition flex items-center justify-center gap-1.5">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
+              Preview Script
+            </button>
+          </div>
+
+          {impact && (
+            <>
+              <div className="border-t border-white/5" />
+              {/* Security Impact If Unchanged */}
+              <div className="space-y-2">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Security Impact If Unchanged</p>
+                <div className="rounded-lg overflow-hidden">
+                  <div className="text-xs p-2.5" style={{ background: tone.bg, color: tone.text, borderLeft: `2px solid ${tone.text}` }}>
+                    {impact}
+                  </div>
+                  {breach && (
+                    <>
+                      <div className="text-[11px] p-2.5" style={{ borderLeft: '2px solid #F59E0B', background: 'rgba(245,158,11,0.08)', color: '#FCD34D' }}>
+                        <span className="font-semibold">Real-world precedent:</span> {breach.breach}
+                      </div>
+                      <div className="text-[11px] p-2.5" style={{ borderLeft: '2px solid #EF4444', background: 'rgba(239,68,68,0.08)', color: '#FCA5A5' }}>
+                        <span className="font-semibold">Penalty exposure:</span> {breach.penalty}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="border-t border-white/5" />
+
+          {/* Decision */}
+          <div className="space-y-2">
+            <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Decision</p>
+            <div className="flex gap-2">
+              <button className="flex-1 px-3 py-2 rounded-lg text-xs font-medium border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 transition">
+                Accept Risk
+              </button>
+              <button className="flex-1 px-3 py-2 rounded-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition">
+                Plan Remediation →
+              </button>
+            </div>
+            {action.identity_id && (
+              <button onClick={onViewIdentity}
+                className="w-full px-3 py-2 rounded-lg text-xs font-medium border border-white/10 text-slate-300 hover:bg-slate-800 transition">
+                View Identity Detail
+              </button>
+            )}
+            <p className="text-[10px] text-center text-slate-500">
+              Status: <span style={{ color: statusTone(action.status).text, fontWeight: 600 }}>{statusLabel}</span>
+            </p>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function ScriptModal({
+  action, tab, onTab, copied, onCopy, onClose,
+}: {
+  action: Remediation;
+  tab: 'powershell' | 'azure_cli' | 'terraform_note';
+  onTab: (t: 'powershell' | 'azure_cli' | 'terraform_note') => void;
+  copied: boolean;
+  onCopy: () => void;
+  onClose: () => void;
+}) {
+  const script = generateScript(action, tab);
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/60 z-50" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 pointer-events-none">
+        <div className="rounded-xl bg-[#0f172a] border border-white/10 shadow-2xl w-full max-w-3xl pointer-events-auto"
+          onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between p-4 border-b border-white/5">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Remediation Script</p>
+              <h3 className="text-lg font-bold text-white">{action.title || 'Remediation'}</h3>
+            </div>
+            <button onClick={onClose} className="p-1 rounded hover:bg-slate-800 text-slate-400">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+          <div className="flex items-center gap-1 px-4 pt-3">
+            {(['powershell', 'azure_cli', 'terraform_note'] as const).map(t => (
+              <button key={t} onClick={() => onTab(t)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition"
+                style={{
+                  background: tab === t ? 'rgba(139,92,246,0.20)' : 'transparent',
+                  color: tab === t ? '#a78bfa' : '#94a3b8',
+                  border: `1px solid ${tab === t ? 'rgba(139,92,246,0.40)' : 'rgba(255,255,255,0.05)'}`,
+                }}>
+                {t === 'powershell' ? 'PowerShell' : t === 'azure_cli' ? 'Azure CLI' : 'Terraform'}
+              </button>
+            ))}
+            <button onClick={onCopy}
+              className="ml-auto px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-500/15 text-violet-300 border border-violet-500/40 hover:bg-violet-500/25 transition">
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          </div>
+          <pre className="m-4 p-4 rounded-lg bg-slate-950 border border-white/5 text-[11px] text-slate-300 overflow-auto max-h-[60vh] font-mono leading-relaxed whitespace-pre">
+            {script}
+          </pre>
+          <div className="px-4 py-3 border-t border-white/5 flex items-center justify-between">
+            <p className="text-[10px] text-slate-500">
+              AuditGraph prescribes · Your team decides · Read-only by design
+            </p>
+            <button onClick={onClose} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 transition">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
