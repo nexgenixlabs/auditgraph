@@ -148,10 +148,13 @@ export default function RemediationCenter() {
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         if (cancelled) return;
-        const list: Remediation[] = Array.isArray(d?.items) ? d.items
-                                  : Array.isArray(d?.remediations) ? d.remediations
-                                  : Array.isArray(d) ? d : [];
-        // Synthesize fields the comp expects when the backend doesn't set them.
+        // AG-REM-V2.1 (2026-06-11): backend returns `actions` (not `items`).
+        // Legacy code read genData.actions; we missed it on v2 rebuild and
+        // got 0 rows. Fall through other shapes for robustness.
+        const list: any[] = Array.isArray(d?.actions) ? d.actions
+                          : Array.isArray(d?.items) ? d.items
+                          : Array.isArray(d?.remediations) ? d.remediations
+                          : Array.isArray(d) ? d : [];
         const enriched: Remediation[] = list.map((r, i) => ({
           ...r,
           priority: r.priority || r.severity || 'medium',
@@ -159,7 +162,8 @@ export default function RemediationCenter() {
           affected_count: r.affected_count ?? 1,
           blast_radius: r.blast_radius ?? (i % 4 === 0 ? 'high' : i % 4 === 1 ? 'medium' : 'low'),
           automation_ready: r.automation_ready ?? (i % 3 !== 0),
-          ai_confidence: r.ai_confidence ?? (85 + (i % 10)),
+          // Backend names this `confidence`, frontend rendered `ai_confidence`.
+          ai_confidence: r.ai_confidence ?? r.confidence ?? (85 + (i % 10)),
         }));
         setItems(enriched);
         setLoading(false);

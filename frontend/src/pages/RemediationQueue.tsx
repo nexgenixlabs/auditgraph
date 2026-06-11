@@ -87,7 +87,9 @@ export default function ChangeControlCenter() {
                               : Array.isArray(q?.queue) ? q.queue
                               : Array.isArray(q) ? q : [];
       setItems(list);
-      const gen = Array.isArray(g?.items) ? g.items
+      // Backend ships `actions` (legacy key); fall through other shapes.
+      const gen = Array.isArray(g?.actions) ? g.actions
+                : Array.isArray(g?.items) ? g.items
                 : Array.isArray(g?.remediations) ? g.remediations : [];
       setGenerated(gen);
       setLoading(false);

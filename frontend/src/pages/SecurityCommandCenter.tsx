@@ -308,7 +308,9 @@ export default function IdentityOperationsCenter() {
                                    : Array.isArray(atk?.items) ? atk.items : [];
       setAttackPaths(paths);
       setSpnStats(spn || null);
-      const remItems: RemediationItem[] = Array.isArray(rem?.items) ? rem.items
+      // Backend returns `actions`; fall through other shapes for robustness.
+      const remItems: RemediationItem[] = Array.isArray(rem?.actions) ? rem.actions
+                                        : Array.isArray(rem?.items) ? rem.items
                                         : Array.isArray(rem?.remediations) ? rem.remediations
                                         : Array.isArray(rem) ? rem : [];
       setRemediations(remItems);
