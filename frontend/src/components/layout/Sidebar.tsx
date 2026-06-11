@@ -143,7 +143,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         items: [
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
           { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
-          { to: '/command-center', label: 'Live Operations', icon: monitorIcon },
+          { to: '/command-center', label: 'Identity Operations Center', icon: monitorIcon },
           { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
           { to: '/drift-analysis', label: 'Drift Analysis', icon: driftIcon },
           { to: '/security-findings', label: 'Findings', icon: findingsIcon },
