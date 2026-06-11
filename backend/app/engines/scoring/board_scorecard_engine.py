@@ -186,16 +186,49 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
         for (sc, sid, dname, dim, owner, last_seen) in sortable[:_TOP_WORST_LIMIT]
     ]
 
+    # AG-BOARD-V3 (2026-06-10): board-room metrics for the executive view.
+    # Governance score = mean of the 5 KPIs (an honest summary that moves
+    # the moment any pillar slips). Critical AI Risks = the 3 risk classes
+    # the board actually asks about: ownerless agents, internet-accessible
+    # agents (egress fail), agents reaching sensitive data (data_access fail).
+    kpis = [
+        _pct(with_owner, total), _pct(with_telemetry, total),
+        _pct(private_network, total), _pct(least_privilege, total),
+        _pct(policy_compliant, total),
+    ]
+    governance_score = round(sum(kpis) / len(kpis), 1) if kpis else 0.0
+
+    ownerless = 0
+    internet_accessible = 0
+    sensitive_data_reachable = 0
+    for entry in cohort:
+        iid = int(entry["id"])
+        t = trust.get(iid)
+        if not t:
+            continue
+        if t["ownership"]["grade"] != "PASS":
+            ownerless += 1
+        if t["egress"]["grade"] != "PASS":
+            internet_accessible += 1
+        if t.get("data_access", {}).get("grade") in ("FAIL", "HIGH", "CRITICAL"):
+            sensitive_data_reachable += 1
+
     return {
-        "total_agents":         total,
-        "with_owner_pct":       _pct(with_owner, total),
-        "with_telemetry_pct":   _pct(with_telemetry, total),
-        "private_network_pct":  _pct(private_network, total),
-        "least_privilege_pct":  _pct(least_privilege, total),
-        "policy_compliant_pct": _pct(policy_compliant, total),
-        "distribution":         distribution,
-        "top_10_worst":         top_10_worst,
-        "exceptions_pending":   exceptions_pending,
+        "total_agents":             total,
+        "governance_score":         governance_score,
+        "with_owner_pct":           _pct(with_owner, total),
+        "with_telemetry_pct":       _pct(with_telemetry, total),
+        "private_network_pct":      _pct(private_network, total),
+        "least_privilege_pct":      _pct(least_privilege, total),
+        "policy_compliant_pct":     _pct(policy_compliant, total),
+        "distribution":             distribution,
+        "top_10_worst":             top_10_worst,
+        "exceptions_pending":       exceptions_pending,
+        "critical_risks": {
+            "ownerless":                ownerless,
+            "internet_accessible":      internet_accessible,
+            "sensitive_data_reachable": sensitive_data_reachable,
+        },
     }
 
 

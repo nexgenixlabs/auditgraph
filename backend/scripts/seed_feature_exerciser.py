@@ -265,6 +265,77 @@ def populate_data_classifications(cur, run_id):
     log.info(f"Data classifications applied to {storage_n} storage + {kv_n} key vaults")
 
 
+def populate_board_scorecard_history(cur, _run_id):
+    """
+    Plant 30 days of AI Board Scorecard snapshots so the Trend Over Time
+    chart on /board-scorecard has data on demo day. Each row shows a
+    smooth-ish improvement curve from worse → better, with the most
+    recent snapshot matching what the live engine would compute.
+
+    Idempotent: UPSERT on (organization_id, snapshot_date).
+    """
+    import json
+    # Target final state (matches live compute_board_scorecard for the demo)
+    final = dict(total_agents=13, owner=62, telemetry=100, network=31, privilege=92, policy=92,
+                 strong=2, good=7, elevated=3, critical=1)
+    # Starting state 30 days ago — measurably worse on every dim
+    start = dict(total_agents=10, owner=30, telemetry=60, network=10, privilege=55, policy=45,
+                 strong=1, good=3, elevated=4, critical=2)
+
+    days = 30
+    today = NOW.date()
+    for i in range(days, -1, -1):
+        snapshot_date = today - timedelta(days=i)
+        # Linear interpolation start→final, with mild noise so the line wavers
+        # like a real metric and not a ruler.
+        t = (days - i) / days
+        noise = ((i * 7) % 10 - 5) * 0.4  # deterministic ±2 jitter
+        owner    = round(start['owner']    + (final['owner']    - start['owner'])    * t + noise, 1)
+        telem    = round(start['telemetry']+ (final['telemetry']- start['telemetry'])* t + noise, 1)
+        network  = round(start['network']  + (final['network']  - start['network'])  * t + noise, 1)
+        priv     = round(start['privilege']+ (final['privilege']- start['privilege'])* t + noise, 1)
+        policy   = round(start['policy']   + (final['policy']   - start['policy'])   * t + noise, 1)
+        # Distribution — interpolate
+        total = round(start['total_agents'] + (final['total_agents'] - start['total_agents']) * t)
+        strong   = max(0, round(start['strong']   + (final['strong']   - start['strong'])   * t))
+        good     = max(0, round(start['good']     + (final['good']     - start['good'])     * t))
+        elevated = max(0, round(start['elevated'] + (final['elevated'] - start['elevated']) * t))
+        critical = max(0, round(start['critical'] + (final['critical'] - start['critical']) * t))
+        # Snap to total
+        delta = total - (strong + good + elevated + critical)
+        good += delta  # absorb rounding into the largest bucket
+
+        cur.execute("""
+            INSERT INTO ai_board_scorecard_snapshots
+            (organization_id, snapshot_date, total_agents,
+             with_owner_pct, with_telemetry_pct, private_network_pct,
+             least_privilege_pct, policy_compliant_pct,
+             distribution_strong, distribution_good,
+             distribution_elevated, distribution_critical,
+             top_10_worst_json, exceptions_pending, computed_at)
+            VALUES (%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s::jsonb, 0, NOW())
+            ON CONFLICT (organization_id, snapshot_date) DO UPDATE SET
+              total_agents          = EXCLUDED.total_agents,
+              with_owner_pct        = EXCLUDED.with_owner_pct,
+              with_telemetry_pct    = EXCLUDED.with_telemetry_pct,
+              private_network_pct   = EXCLUDED.private_network_pct,
+              least_privilege_pct   = EXCLUDED.least_privilege_pct,
+              policy_compliant_pct  = EXCLUDED.policy_compliant_pct,
+              distribution_strong   = EXCLUDED.distribution_strong,
+              distribution_good     = EXCLUDED.distribution_good,
+              distribution_elevated = EXCLUDED.distribution_elevated,
+              distribution_critical = EXCLUDED.distribution_critical,
+              computed_at           = NOW()
+        """, (
+            DEMO_ORG_ID, snapshot_date, total,
+            max(0, min(100, owner)), max(0, min(100, telem)), max(0, min(100, network)),
+            max(0, min(100, priv)), max(0, min(100, policy)),
+            strong, good, elevated, critical,
+            json.dumps([]),
+        ))
+    log.info(f"Board scorecard history planted: {days + 1} daily snapshots")
+
+
 def populate_pim_eligibility(cur, run_id):
     """~20% of privileged humans are PIM-eligible (the good state)."""
     cur.execute("""
@@ -480,6 +551,7 @@ def main():
             populate_blast_radius(cur, run_id)
             populate_pim_eligibility(cur, run_id)
             populate_data_classifications(cur, run_id)
+            populate_board_scorecard_history(cur, run_id)
 
             log.info("\n--- Step 2: upsert hero demo identities ---")
             planted = upsert_hero_identities(cur, run_id)

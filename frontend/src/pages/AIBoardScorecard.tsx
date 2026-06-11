@@ -28,12 +28,18 @@ import { Link, useNavigate } from 'react-router-dom';
 
 interface BoardScorecard {
   total_agents: number;
+  governance_score?: number;
   with_owner_pct: number;
   with_telemetry_pct: number;
   private_network_pct: number;
   least_privilege_pct: number;
   policy_compliant_pct: number;
   distribution: { strong: number; good: number; elevated: number; critical: number };
+  critical_risks?: {
+    ownerless: number;
+    internet_accessible: number;
+    sensitive_data_reachable: number;
+  };
   top_10_worst: Array<{
     identity_id: string;
     display_name: string;
@@ -431,6 +437,17 @@ export default function AIBoardScorecard() {
         </div>
       </div>
 
+      {/* Hero: AI Governance Score — the board-room headline */}
+      <GovernanceHero
+        score={data.governance_score ?? Math.round(((data.with_owner_pct + data.with_telemetry_pct + data.private_network_pct + data.least_privilege_pct + data.policy_compliant_pct) / 5) * 10) / 10}
+        totalAgents={data.total_agents}
+        trend={history.length >= 2 ? (() => {
+          const series = history.map(h => (h.with_owner_pct + h.with_telemetry_pct + h.private_network_pct + h.least_privilege_pct + h.policy_compliant_pct) / 5);
+          return series[series.length - 1] - series[0];
+        })() : null}
+        history={history.map(h => (h.with_owner_pct + h.with_telemetry_pct + h.private_network_pct + h.least_privilege_pct + h.policy_compliant_pct) / 5)}
+      />
+
       {/* Row 1: 5 KPI cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-3">
         <KpiCard
@@ -523,131 +540,49 @@ export default function AIBoardScorecard() {
         </div>
       </div>
 
-      {/* Row 3: Filter / Search */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className="flex-1 relative min-w-[260px]">
-          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-          <input value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search agents, names, IDs..."
-            className="w-full pl-9 pr-3 py-2 rounded-lg bg-[#0f172a]/80 border border-white/5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500/40" />
-        </div>
-        <select value={dimensionFilter} onChange={e => setDimensionFilter(e.target.value)}
-          className="px-3 py-2 rounded-lg bg-[#0f172a]/80 border border-white/5 text-xs text-slate-200 focus:outline-none focus:border-violet-500/40">
-          <option value="">All Dimensions</option>
-          <option value="ownership">Ownership</option>
-          <option value="secrets">Secrets</option>
-          <option value="egress">Egress</option>
-          <option value="telemetry">Telemetry</option>
-          <option value="oversight">Oversight</option>
-        </select>
-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-          className="px-3 py-2 rounded-lg bg-[#0f172a]/80 border border-white/5 text-xs text-slate-200 focus:outline-none focus:border-violet-500/40">
-          <option value="">All Status</option>
-          <option value="strong">Strong</option>
-          <option value="good">Good</option>
-          <option value="elevated">Elevated</option>
-          <option value="critical">Critical</option>
-        </select>
-        <select value={ownerFilter} onChange={e => setOwnerFilter(e.target.value)}
-          className="px-3 py-2 rounded-lg bg-[#0f172a]/80 border border-white/5 text-xs text-slate-200 focus:outline-none focus:border-violet-500/40">
-          <option value="">All Owners</option>
-        </select>
-        <button className="px-3 py-2 rounded-lg text-xs font-medium bg-violet-500/15 text-violet-300 border border-violet-500/40 hover:bg-violet-500/25 transition flex items-center gap-1.5">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
-          Filters
-        </button>
-      </div>
-
-      {/* Row 4: Agents table + Insights right rail */}
+      {/* Row 3: Critical AI Risks — board-room focus, not row-level detail */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
-        <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 overflow-hidden">
-          {/*
-            Columns (matches reference comp):
-              [ ☐ ] [ 🤖 ] [ AGENT id ] [ status chip ] [ display name + sub ]
-              [ owner avatar + name ] [ trust score chip ] [ top failing dim ]
-              [ posture bars ] [ last seen ] [ ⋯ ]
-          */}
-          <div className="grid grid-cols-[24px_30px_1.4fr_85px_1.5fr_1.1fr_70px_1.4fr_70px_70px_24px] gap-2 px-4 py-2.5 text-[10px] uppercase tracking-wider font-bold text-slate-500 border-b border-white/5 items-center">
-            <span></span>
-            <span></span>
-            <span>Agent</span>
-            <span></span>
-            <span>Display Name</span>
-            <span>Owner</span>
-            <span>Trust Score</span>
-            <span>Top Failing Dimension</span>
-            <span>Posture</span>
-            <span>Last Seen</span>
-            <span></span>
+        <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Critical AI Risks</h3>
+            <Link to="/ai-inventory" className="text-[10px] text-violet-400 hover:text-violet-300">View Detailed Agent Trust →</Link>
           </div>
-          {filteredAgents.length === 0 ? (
-            <p className="text-xs text-slate-500 text-center py-10">No agents match the current filter.</p>
-          ) : filteredAgents.map(a => {
-            const tone = trustTone(a.trust_score);
-            const dim = dimensionLabel(a.top_dimension_fail);
-            const rowBg = tone.label === 'Critical' ? 'bg-red-950/20 border-l-2 border-l-red-500/60' : '';
-            const ownerName = a.owner ?? null;
-            return (
-              <Link key={a.identity_id}
-                to={`/identities/${a.identity_id}`}
-                className={`grid grid-cols-[24px_30px_1.4fr_85px_1.5fr_1.1fr_70px_1.4fr_70px_70px_24px] gap-2 px-4 py-2.5 items-center text-xs hover:bg-slate-800/30 transition border-b border-white/5 last:border-b-0 ${rowBg}`}>
-                {/* checkbox */}
-                <input type="checkbox" onClick={e => e.stopPropagation()}
-                  className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-violet-500" />
-                {/* robot icon */}
-                <span className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-                  style={{ background: `${tone.text}15`, color: tone.text, border: `1px solid ${tone.border}` }}>
-                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13A2.5 2.5 0 0 0 5 15.5 2.5 2.5 0 0 0 7.5 18a2.5 2.5 0 0 0 2.5-2.5A2.5 2.5 0 0 0 7.5 13m9 0a2.5 2.5 0 0 0-2.5 2.5 2.5 2.5 0 0 0 2.5 2.5 2.5 2.5 0 0 0 2.5-2.5 2.5 2.5 0 0 0-2.5-2.5Z"/></svg>
-                </span>
-                {/* agent id (truncated) */}
-                <span className="font-mono text-slate-400 truncate" title={a.identity_id}>{a.identity_id}</span>
-                {/* status chip */}
-                <span className="font-bold px-1.5 py-0.5 rounded text-[10px] text-center"
-                  style={{ background: tone.bg, color: tone.text, border: `1px solid ${tone.border}` }}>
-                  {tone.label}
-                </span>
-                {/* display name + subline (the underlying identity_type) */}
-                <span className="flex flex-col min-w-0">
-                  <span className="text-slate-200 truncate">{a.display_name}</span>
-                  <span className="text-[10px] text-slate-500 truncate">AI Agent</span>
-                </span>
-                {/* owner avatar + name */}
-                <span className="flex items-center gap-1.5 min-w-0">
-                  {ownerName ? (
-                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0"
-                      style={{ background: ownerColor(ownerName), color: '#fff' }}>
-                      {ownerInitials(ownerName)}
-                    </span>
-                  ) : (
-                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 bg-slate-800 text-slate-500 border border-slate-700">—</span>
-                  )}
-                  <span className="text-slate-300 truncate text-[11px]">{ownerName || 'Unowned'}</span>
-                </span>
-                {/* trust score chip */}
-                <span className="font-mono font-bold px-2 py-0.5 rounded text-center"
-                  style={{ background: tone.bg, color: tone.text, border: `1px solid ${tone.border}` }}>
-                  {a.trust_score}
-                </span>
-                {/* top failing dimension + framework citation */}
-                <span className="flex flex-col min-w-0">
-                  <span className="truncate text-slate-300">{dim.name}</span>
-                  <span className="text-[10px] text-slate-500 truncate">{dim.framework}</span>
-                </span>
-                {/* posture bars */}
-                <PostureBars score={a.trust_score} />
-                {/* last seen */}
-                <span className="text-slate-400 text-[11px]">{timeAgo(a.last_seen)}</span>
-                {/* row menu */}
-                <button onClick={e => { e.preventDefault(); e.stopPropagation(); }}
-                  className="text-slate-500 hover:text-slate-300 transition flex items-center justify-center">
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
-                </button>
-              </Link>
-            );
-          })}
-          <div className="px-4 py-2 border-t border-white/5 text-[10px] text-slate-500 flex items-center justify-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            Auto refreshed just now
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <CriticalRiskCard
+              count={data.critical_risks?.ownerless ?? 0}
+              label="Ownerless Agents"
+              sub="No accountable human owner — incident response will stall"
+              color="#f87171"
+              icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728L5.636 5.636m12.728 12.728L21 21M5.636 5.636L3 3m17 8a8 8 0 11-16 0 8 8 0 0116 0z"/></svg>}
+              link="/identities?category=ai_agent&owner=unowned"
+            />
+            <CriticalRiskCard
+              count={data.critical_risks?.internet_accessible ?? 0}
+              label="Internet-Accessible Agents"
+              sub="No private endpoint / network restriction"
+              color="#fb923c"
+              icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}
+              link="/identities?category=ai_agent&network=public"
+            />
+            <CriticalRiskCard
+              count={data.critical_risks?.sensitive_data_reachable ?? 0}
+              label="Sensitive Datasets Reachable"
+              sub="Agents with PHI / PCI / PII reach paths"
+              color="#fbbf24"
+              icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>}
+              link="/ai-access/data-reachability"
+            />
+          </div>
+
+          {/* Action footer */}
+          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
+            <p className="text-[10px] text-slate-500">
+              Per-agent trust scores live in <Link to="/ai-inventory" className="text-violet-400 hover:text-violet-300">AI Inventory</Link>. Board view stays at the tier-summary level by design.
+            </p>
+            <button className="px-4 py-2 rounded-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition flex items-center gap-2">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              Download Board Pack
+            </button>
           </div>
         </div>
 
@@ -683,5 +618,89 @@ export default function AIBoardScorecard() {
         </aside>
       </div>
     </div>
+  );
+}
+
+/* === Components moved below main to keep main render dense === */
+
+function GovernanceHero({
+  score, totalAgents, trend, history,
+}: { score: number; totalAgents: number; trend: number | null; history: number[] }) {
+  const color = score >= 80 ? '#34d399' : score >= 60 ? '#a3e635' : score >= 40 ? '#fb923c' : '#f87171';
+  const label = score >= 80 ? 'Strong'  : score >= 60 ? 'Good'    : score >= 40 ? 'Elevated' : 'Critical';
+  const minH = history.length > 0 ? Math.min(...history) : 0;
+  const maxH = history.length > 0 ? Math.max(...history) : 100;
+  const range = (maxH - minH) || 1;
+  const W = 220, H = 60;
+  const pts = history.map((v, i) => {
+    const x = (i / Math.max(1, history.length - 1)) * W;
+    const y = H - ((v - minH) / range) * (H - 4) - 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const area = pts ? `0,${H} ${pts} ${W},${H}` : '';
+  return (
+    <div className="rounded-xl p-6 bg-[#0f172a]/80 border border-white/5 relative overflow-hidden"
+      style={{ borderLeft: `4px solid ${color}` }}>
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_220px_140px] gap-6 items-center">
+        <div>
+          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">AI Governance Score</p>
+          <p className="text-7xl font-bold mt-3 leading-none" style={{ color }}>{Math.round(score)}</p>
+          <p className="text-base font-semibold mt-1" style={{ color }}>{label}</p>
+          <div className="flex flex-col gap-1 mt-3 text-xs">
+            <span className="text-slate-400">
+              <strong>{totalAgents}</strong> AI agents in scope
+            </span>
+            {trend !== null ? (
+              <span className="flex items-center gap-1.5" style={{ color: trend >= 0 ? '#34d399' : '#f87171' }}>
+                {trend >= 0 ? '↑' : '↓'} <strong>{Math.abs(Math.round(trend))}</strong> pts vs 30 days ago
+              </span>
+            ) : (
+              <span className="text-slate-500">No prior-period baseline yet</span>
+            )}
+          </div>
+        </div>
+        <div>
+          {history.length >= 2 ? (
+            <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-16">
+              <polygon points={area} fill={`${color}22`} />
+              <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" />
+            </svg>
+          ) : (
+            <p className="text-[11px] text-slate-500 text-center">No trend yet</p>
+          )}
+          <p className="text-[10px] text-slate-500 text-center mt-1">Trend (30 days)</p>
+        </div>
+        <div className="flex-shrink-0">
+          <div className="relative w-28 h-28 mx-auto">
+            <svg width="112" height="112" className="-rotate-90">
+              <circle cx="56" cy="56" r="50" fill="none" stroke="rgba(148,163,184,0.15)" strokeWidth="6" />
+              <circle cx="56" cy="56" r="50" fill="none" stroke={color} strokeWidth="6" strokeLinecap="round"
+                strokeDasharray={`${(score / 100) * 2 * Math.PI * 50} ${2 * Math.PI * 50}`} />
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Score</span>
+              <span className="text-2xl font-bold" style={{ color }}>{Math.round(score)}</span>
+              <span className="text-[9px] font-mono text-slate-500">/100</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CriticalRiskCard({
+  count, label, sub, color, icon, link,
+}: { count: number; label: string; sub: string; color: string; icon: React.ReactNode; link: string }) {
+  return (
+    <Link to={link} className="rounded-xl p-4 flex flex-col gap-2 hover:scale-[1.02] transition"
+      style={{ background: `${color}10`, border: `1px solid ${color}40` }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider font-bold" style={{ color }}>{label}</span>
+        <span style={{ color }}>{icon}</span>
+      </div>
+      <p className="text-4xl font-bold font-mono leading-none" style={{ color }}>{count}</p>
+      <p className="text-[11px] text-slate-400 leading-tight">{sub}</p>
+    </Link>
   );
 }
