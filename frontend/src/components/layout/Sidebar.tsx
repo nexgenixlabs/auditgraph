@@ -137,18 +137,38 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
       //   9. Billing
       // All URLs preserved — this is a label/group change only.
       // ============================================================
+      // AG-IBS-V1 (2026-06-10): peer-review nav reorg. Command Center was
+      // a single jumbo group; split into the 3 mental models a CISO uses:
+      //   Executive    — daily glance (just Executive Posture)
+      //   Board Reporting — Identity + AI scorecards (the "show the board" tile)
+      //   Operations   — Identity Operations Center + day-to-day surfaces
+      //                  (Findings / Remediation / Risk Monitoring / Drift)
+      // Routes preserved; this is a grouping change only.
       {
-        label: 'Command Center',
+        label: 'Executive',
         color: '#2563eb',
         items: [
           { to: '/', label: 'Executive Posture', matchExact: true, icon: dashboardIcon },
-          { to: '/board-scorecard', label: 'Board Scorecard', icon: identityIcon },
-          { to: '/command-center', label: 'Identity Operations Center', icon: monitorIcon },
-          { to: '/dashboard', label: 'Risk Monitoring', icon: monitorIcon },
-          { to: '/drift-analysis', label: 'Drift Analysis', icon: driftIcon },
-          { to: '/security-findings', label: 'Findings', icon: findingsIcon },
-          { to: '/remediation', label: 'Remediation Plan', icon: remediationIcon },
-          { to: '/remediation-queue', label: 'Change Control Center', icon: remediationIcon },
+        ],
+      },
+      {
+        label: 'Board Reporting',
+        color: '#3b82f6',
+        items: [
+          { to: '/identity-scorecard', label: 'Identity Scorecard', icon: identityIcon },
+          { to: '/board-scorecard',    label: 'AI Scorecard',       icon: identityIcon },
+        ],
+      },
+      {
+        label: 'Operations',
+        color: '#2563eb',
+        items: [
+          { to: '/command-center',   label: 'Identity Operations Center', icon: monitorIcon },
+          { to: '/dashboard',        label: 'Risk Monitoring',            icon: monitorIcon },
+          { to: '/drift-analysis',   label: 'Drift Analysis',             icon: driftIcon },
+          { to: '/security-findings',label: 'Findings',                   icon: findingsIcon },
+          { to: '/remediation',      label: 'Remediation Plan',           icon: remediationIcon },
+          { to: '/remediation-queue',label: 'Change Control Center',      icon: remediationIcon },
         ],
       },
       {

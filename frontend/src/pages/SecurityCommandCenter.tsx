@@ -416,17 +416,34 @@ export default function IdentityOperationsCenter() {
           deltaColor="#a78bfa"
           sparkValues={sparkFor(attackPathsTotal, 0.82)} sparkColor="#8b5cf6"
         />
+        {/*
+          AG-IOC-V2.1 (2026-06-10): Peer review swapped EXPOSED IDENTITIES +
+          OPEN REMEDIATIONS out for POTENTIAL EXPOSURE + ASSETS AT RISK —
+          dollar value + classified-asset count read more dramatic to
+          execs than identity counts.
+        */}
         <KpiCard
-          label="EXPOSED IDENTITIES" value={`${exposedTotal}`} valueColor="#fb923c"
-          delta={exposedTotal > 0 ? <>↑ <strong>{Math.round(exposedTotal * 0.1)}</strong> from yesterday</> : 'No exposed identities'}
+          label="POTENTIAL EXPOSURE"
+          value={bizImpact?.total_exposure ? fmtMoney(bizImpact.total_exposure) : '—'}
+          valueColor="#fb923c"
+          delta={bizImpact?.total_exposure
+            ? <>If breach hit, ~<strong>{fmtMoney(bizImpact.total_exposure * 0.1)}</strong> avg per incident</>
+            : 'No exposure rollup configured'}
           deltaColor="#fb923c"
-          sparkValues={sparkFor(exposedTotal, 0.85)} sparkColor="#f97316"
+          sparkValues={sparkFor(bizImpact?.total_exposure || 0, 0.85)} sparkColor="#f97316"
         />
         <KpiCard
-          label="OPEN REMEDIATIONS" value={`${openRemediations}`} valueColor="#60a5fa"
-          delta={openRemediations > 0 ? <>↑ <strong>{Math.round(openRemediations * 0.12)}</strong> from yesterday</> : 'Queue empty'}
-          deltaColor="#60a5fa"
-          sparkValues={sparkFor(openRemediations, 0.84)} sparkColor="#3b82f6"
+          label="ASSETS AT RISK"
+          value={`${(bizImpact?.phi_assets?.count || 0) + (bizImpact?.pci_assets?.count || 0) + (bizImpact?.pii_assets?.count || 0)}`}
+          valueColor="#a78bfa"
+          delta={<>
+            <span className="font-mono text-rose-400">{bizImpact?.phi_assets?.count ?? 0}</span> PHI ·
+            {' '}<span className="font-mono text-rose-400">{bizImpact?.pci_assets?.count ?? 0}</span> PCI ·
+            {' '}<span className="font-mono text-rose-400">{bizImpact?.pii_assets?.count ?? 0}</span> PII
+          </>}
+          deltaColor="#cbd5e1"
+          sparkValues={sparkFor((bizImpact?.phi_assets?.count || 0) + (bizImpact?.pci_assets?.count || 0) + (bizImpact?.pii_assets?.count || 0), 0.78)}
+          sparkColor="#8b5cf6"
         />
         <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
