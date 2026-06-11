@@ -110,6 +110,53 @@ function ownerColor(name?: string | null): string {
   return palette[hash % palette.length];
 }
 
+/**
+ * AG-BOARD-V3.2 (2026-06-10) — Download Board Pack.
+ *
+ * Generates a JSON board pack from the current scorecard data + history
+ * and triggers a browser download. PDF generation is deferred to a
+ * server-side job; this JSON drops into the existing
+ * docs/AG_BOARD_PACK_TEMPLATE workflow until the PDF backend lands.
+ */
+function downloadBoardPack(data: BoardScorecard, history: HistorySnapshot[]) {
+  const pack = {
+    generated_at: new Date().toISOString(),
+    report_type: 'AI Board Scorecard',
+    snapshot: {
+      total_agents: data.total_agents,
+      governance_score: data.governance_score,
+      ownership_coverage_pct: Number(data.with_owner_pct),
+      monitoring_coverage_pct: Number(data.with_telemetry_pct),
+      private_network_pct: Number(data.private_network_pct),
+      least_privilege_pct: Number(data.least_privilege_pct),
+      policy_compliant_pct: Number(data.policy_compliant_pct),
+      distribution: data.distribution,
+      critical_risks: data.critical_risks ?? {},
+    },
+    trend_30_days: history.map(h => ({
+      date: h.snapshot_date,
+      total_agents: h.total_agents,
+      ownership_coverage_pct: Number(h.with_owner_pct),
+      monitoring_coverage_pct: Number(h.with_telemetry_pct),
+      private_network_pct: Number(h.private_network_pct),
+      least_privilege_pct: Number(h.least_privilege_pct),
+      policy_compliant_pct: Number(h.policy_compliant_pct),
+    })),
+    top_10_worst: data.top_10_worst,
+    frameworks: ['NIST AI RMF', 'ISO 42001'],
+  };
+  const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `auditgraph-ai-board-pack-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function dimensionLabel(k: string | null | undefined): { name: string; framework: string } {
   switch ((k || '').toLowerCase()) {
     case 'secrets':       return { name: 'secrets',       framework: 'ISO 42001 · 4.1.4' };
@@ -430,52 +477,55 @@ export default function AIBoardScorecard() {
             Last 7 Days
             <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/></svg>
           </button>
-          <button className="px-3 py-2 rounded-lg text-xs font-medium bg-violet-500/15 text-violet-300 border border-violet-500/40 hover:bg-violet-500/25 transition flex items-center gap-2">
+          <button onClick={() => downloadBoardPack(data, history)}
+            className="px-3 py-2 rounded-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition flex items-center gap-2">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
             Download Board Pack
           </button>
         </div>
       </div>
 
-      {/* Hero: AI Governance Score — the board-room headline */}
+      {/* AG-BOARD-V3.1 (2026-06-10): Number() conversion fixes NaN trend.
+          psycopg2 returns numeric(5,2) columns as strings, which silently
+          broke the math and produced "NaN pts vs 30 days ago". */}
       <GovernanceHero
-        score={data.governance_score ?? Math.round(((data.with_owner_pct + data.with_telemetry_pct + data.private_network_pct + data.least_privilege_pct + data.policy_compliant_pct) / 5) * 10) / 10}
+        score={data.governance_score ?? Math.round(((Number(data.with_owner_pct) + Number(data.with_telemetry_pct) + Number(data.private_network_pct) + Number(data.least_privilege_pct) + Number(data.policy_compliant_pct)) / 5) * 10) / 10}
         totalAgents={data.total_agents}
         trend={history.length >= 2 ? (() => {
-          const series = history.map(h => (h.with_owner_pct + h.with_telemetry_pct + h.private_network_pct + h.least_privilege_pct + h.policy_compliant_pct) / 5);
+          const series = history.map(h => (Number(h.with_owner_pct) + Number(h.with_telemetry_pct) + Number(h.private_network_pct) + Number(h.least_privilege_pct) + Number(h.policy_compliant_pct)) / 5);
           return series[series.length - 1] - series[0];
         })() : null}
-        history={history.map(h => (h.with_owner_pct + h.with_telemetry_pct + h.private_network_pct + h.least_privilege_pct + h.policy_compliant_pct) / 5)}
+        history={history.map(h => (Number(h.with_owner_pct) + Number(h.with_telemetry_pct) + Number(h.private_network_pct) + Number(h.least_privilege_pct) + Number(h.policy_compliant_pct)) / 5)}
       />
 
       {/* Row 1: 5 KPI cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-3">
         <KpiCard
-          label="WITH OWNER" value={data.with_owner_pct}
+          label="OWNERSHIP COVERAGE" value={Number(data.with_owner_pct)}
           citation={`Total Agents: ${data.total_agents}`}
           sparkValues={sparkSeries.with_owner_pct}
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>}
         />
         <KpiCard
-          label="WITH TELEMETRY" value={data.with_telemetry_pct}
+          label="MONITORING COVERAGE" value={Number(data.with_telemetry_pct)}
           citation="NIST AI RMF · Measure 2.1"
           sparkValues={sparkSeries.with_telemetry_pct}
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12.53 18.22l-.53.53-.53-.53a.75.75 0 011.06 0z"/></svg>}
         />
         <KpiCard
-          label="PRIVATE NETWORK" value={data.private_network_pct}
+          label="PRIVATE NETWORK" value={Number(data.private_network_pct)}
           citation="ISO 42001 · 4.1.4"
           sparkValues={sparkSeries.private_network_pct}
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>}
         />
         <KpiCard
-          label="LEAST PRIVILEGE" value={data.least_privilege_pct}
+          label="LEAST PRIVILEGE" value={Number(data.least_privilege_pct)}
           citation="NIST AI RMF · Manage 2.3"
           sparkValues={sparkSeries.least_privilege_pct}
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>}
         />
         <KpiCard
-          label="POLICY COMPLIANT" value={data.policy_compliant_pct}
+          label="POLICY COMPLIANT" value={Number(data.policy_compliant_pct)}
           citation="ISO 42001 · 4.6.2"
           sparkValues={sparkSeries.policy_compliant_pct}
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>}
@@ -579,7 +629,8 @@ export default function AIBoardScorecard() {
             <p className="text-[10px] text-slate-500">
               Per-agent trust scores live in <Link to="/ai-inventory" className="text-violet-400 hover:text-violet-300">AI Inventory</Link>. Board view stays at the tier-summary level by design.
             </p>
-            <button className="px-4 py-2 rounded-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition flex items-center gap-2">
+            <button onClick={() => downloadBoardPack(data, history)}
+              className="px-4 py-2 rounded-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition flex items-center gap-2">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
               Download Board Pack
             </button>

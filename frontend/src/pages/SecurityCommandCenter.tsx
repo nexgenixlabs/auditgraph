@@ -647,23 +647,49 @@ export default function IdentityOperationsCenter() {
         </div>
       </div>
 
-      {/* Row 4: Security Events + Argus Assistant */}
+      {/* AG-IOC-V2.2 (2026-06-10): Identity Activity Feed (peer-review):
+          replaces the empty-when-quiet "Security Events" panel. Pulls real
+          activity_log rows; categorises by action_type → colored event icon
+          + human-readable label + relative time. */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
         <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-5">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Security Events</h3>
+            <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Identity Activity Feed</h3>
             <Link to="/activity" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
           </div>
           <div className="space-y-1">
             {events.length === 0 ? (
-              <p className="text-[11px] text-slate-500 text-center py-6">No recent events.</p>
-            ) : events.slice(0, 5).map((e, i) => {
-              const tone = severityTone(e.severity || 'info');
+              <div className="py-6 text-center">
+                <p className="text-[11px] text-emerald-400/70">✓ Quiet day — no identity-relevant events in scope.</p>
+                <p className="text-[10px] text-slate-500 mt-1">Privileged role assignments, new identities, secret rotations, classification changes — all surface here.</p>
+              </div>
+            ) : events.slice(0, 8).map((e, i) => {
+              const action = (e.action || e.event_type || '').toLowerCase();
+              // Categorize → tone + icon
+              const cat = action.includes('attack') || action.includes('critical') ? 'critical'
+                       : action.includes('privileg') || action.includes('escalat') ? 'high'
+                       : action.includes('ai_agent') || action.includes('ai-agent') ? 'high'
+                       : action.includes('classif') || action.includes('tag') ? 'info'
+                       : action.includes('rotate') || action.includes('rotation') ? 'low'
+                       : action.includes('mfa') || action.includes('auth') ? 'medium'
+                       : 'info';
+              const tone = severityTone(cat);
               const ts = timeStamp(e.created_at || e.timestamp);
+              const icon = action.includes('ai') ? '🤖'
+                         : action.includes('attack') ? '⚠'
+                         : action.includes('privileg') ? '🔑'
+                         : action.includes('rotat') ? '🔄'
+                         : action.includes('classif') || action.includes('tag') ? '🏷'
+                         : action.includes('mfa') ? '🛡'
+                         : '●';
               return (
                 <Link key={i} to="/activity"
-                  className="grid grid-cols-[70px_85px_1.6fr_1.4fr_90px] gap-3 px-2 py-2 rounded-lg hover:bg-slate-800/40 transition text-xs items-center">
+                  className="grid grid-cols-[70px_30px_85px_1.4fr_1.4fr_90px] gap-3 px-2 py-2 rounded-lg hover:bg-slate-800/40 transition text-xs items-center">
                   <span className="text-slate-500 text-[11px]">{ts}</span>
+                  <span className="w-7 h-7 rounded-lg flex items-center justify-center text-sm"
+                    style={{ background: tone.bg, border: `1px solid ${tone.border}` }}>
+                    {icon}
+                  </span>
                   <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded text-center"
                     style={{ background: tone.bg, color: tone.text, border: `1px solid ${tone.border}` }}>{tone.label}</span>
                   <span className="text-slate-200 truncate">{e.description || e.message || e.action || 'event'}</span>
@@ -675,7 +701,7 @@ export default function IdentityOperationsCenter() {
             })}
           </div>
           <div className="mt-3 pt-3 border-t border-white/5 flex items-center justify-between text-[10px] text-slate-500">
-            <span>Showing {Math.min(events.length, 5)} of {events.length} events</span>
+            <span>Showing {Math.min(events.length, 8)} of {events.length} events</span>
             <span className="flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               Auto refresh: ON

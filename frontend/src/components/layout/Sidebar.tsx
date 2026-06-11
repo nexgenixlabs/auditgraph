@@ -159,16 +159,26 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
           { to: '/board-scorecard',    label: 'AI Scorecard',       icon: identityIcon },
         ],
       },
+      // AG-PEER-V3 (2026-06-10): peer-review split Operations into
+      // "Operations" (just the Ops Center) + "Exposure & Risk" (the
+      // day-to-day surfaces). Cleaner hierarchy, fewer top-level items
+      // per group.
       {
         label: 'Operations',
         color: '#2563eb',
         items: [
-          { to: '/command-center',   label: 'Identity Operations Center', icon: monitorIcon },
-          { to: '/dashboard',        label: 'Risk Monitoring',            icon: monitorIcon },
-          { to: '/drift-analysis',   label: 'Drift Analysis',             icon: driftIcon },
-          { to: '/security-findings',label: 'Findings',                   icon: findingsIcon },
-          { to: '/remediation',      label: 'Remediation Plan',           icon: remediationIcon },
-          { to: '/remediation-queue',label: 'Change Control Center',      icon: remediationIcon },
+          { to: '/command-center', label: 'Operations Center', icon: monitorIcon },
+        ],
+      },
+      {
+        label: 'Exposure & Risk',
+        color: '#dc2626',
+        items: [
+          { to: '/dashboard',         label: 'Risk Monitoring',     icon: monitorIcon },
+          { to: '/security-findings', label: 'Findings',            icon: findingsIcon },
+          { to: '/drift-analysis',    label: 'Drift Analysis',      icon: driftIcon },
+          { to: '/remediation',       label: 'Remediation Plan',    icon: remediationIcon },
+          { to: '/remediation-queue', label: 'Change Control',      icon: remediationIcon },
         ],
       },
       {
