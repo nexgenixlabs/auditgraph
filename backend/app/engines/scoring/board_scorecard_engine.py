@@ -81,10 +81,12 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
     try:
         cursor.execute(
             """
-            SELECT i.id, i.identity_id, i.display_name
+            SELECT i.id, i.identity_id, i.display_name,
+                   i.owner_display_name, i.last_seen_auth
               FROM (
                 SELECT DISTINCT ON (i.identity_id)
-                       i.id, i.identity_id, i.display_name
+                       i.id, i.identity_id, i.display_name,
+                       i.owner_display_name, i.last_seen_auth
                   FROM identities i
                   JOIN agent_classifications ac ON ac.identity_db_id = i.id
                  WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
@@ -101,7 +103,7 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
         logger.warning("compute_board_scorecard cohort query failed: %s", exc)
         return _empty_scorecard()
 
-    cohort = [_row(r, ["id", "identity_id", "display_name"]) for r in rows]
+    cohort = [_row(r, ["id", "identity_id", "display_name", "owner_display_name", "last_seen_auth"]) for r in rows]
     cohort = [c for c in cohort if c.get("id") is not None]
     total = len(cohort)
 
@@ -129,8 +131,8 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
 
     distribution = {"strong": 0, "good": 0, "elevated": 0, "critical": 0}
 
-    # (trust_score, identity_id, display_name, top_dim_fail) tuples for sorting
-    sortable: list[tuple[int, str, str, str | None]] = []
+    # (trust_score, identity_id, display_name, top_dim_fail, owner, last_seen)
+    sortable: list[tuple[int, str, str, str | None, str | None, str | None]] = []
 
     for entry in cohort:
         iid = int(entry["id"])
@@ -155,11 +157,19 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
         elif score >= _BAND_ELEV_MIN:   distribution["elevated"] += 1
         else:                           distribution["critical"] += 1
 
+        last_seen_iso = None
+        if entry.get("last_seen_auth"):
+            try:
+                last_seen_iso = entry["last_seen_auth"].isoformat()
+            except Exception:
+                last_seen_iso = str(entry["last_seen_auth"])
         sortable.append((
             score,
             entry.get("identity_id") or "",
             entry.get("display_name") or "",
             _top_dimension_fail(t),
+            entry.get("owner_display_name"),
+            last_seen_iso,
         ))
 
     # 4) Top-10 worst (lowest trust first; deterministic tiebreak on identity_id).
@@ -170,8 +180,10 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
             "display_name":       dname,
             "trust_score":        sc,
             "top_dimension_fail": dim,
+            "owner":              owner,
+            "last_seen":          last_seen,
         }
-        for (sc, sid, dname, dim) in sortable[:_TOP_WORST_LIMIT]
+        for (sc, sid, dname, dim, owner, last_seen) in sortable[:_TOP_WORST_LIMIT]
     ]
 
     return {

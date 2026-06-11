@@ -39,6 +39,8 @@ interface BoardScorecard {
     display_name: string;
     trust_score: number;
     top_dimension_fail: string | null;
+    owner?: string | null;
+    last_seen?: string | null;
   }>;
   exceptions_pending: number;
 }
@@ -72,6 +74,34 @@ function pctTone(value: number, healthyMin: number = 80, borderlineMin: number =
   if (value >= healthyMin) return { text: '#34d399', bg: 'rgba(52,211,153,0.08)',  border: 'rgba(52,211,153,0.30)',  spark: '#10b981' };
   if (value >= borderlineMin) return { text: '#fbbf24', bg: 'rgba(251,191,36,0.08)', border: 'rgba(251,191,36,0.30)', spark: '#f59e0b' };
   return                       { text: '#f87171', bg: 'rgba(248,113,113,0.08)', border: 'rgba(248,113,113,0.30)', spark: '#ef4444' };
+}
+
+function timeAgo(iso?: string | null): string {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const h = Math.round(ms / 3_600_000);
+  if (h < 1) return 'just now';
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
+}
+
+function ownerInitials(name?: string | null): string {
+  if (!name) return '—';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '—';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function ownerColor(name?: string | null): string {
+  if (!name) return '#475569';
+  // Deterministic color per owner — same initials always same hue.
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  const palette = ['#3b82f6', '#a78bfa', '#f97316', '#10b981', '#f43f5e', '#22d3ee', '#fbbf24', '#ec4899'];
+  return palette[hash % palette.length];
 }
 
 function dimensionLabel(k: string | null | undefined): { name: string; framework: string } {
@@ -145,21 +175,33 @@ function PostureDonut({ dist, total }: { dist: BoardScorecard['distribution']; t
     { key: 'elevated', color: '#fb923c', value: dist.elevated, label: 'Elevated (40–59)' },
     { key: 'critical', color: '#f87171', value: dist.critical, label: 'Critical (<40)' },
   ];
-  const R = 60, r = 38, C = 2 * Math.PI * R;
+  // Thinner stroke + smaller radius = clean smooth ring, not chunky pinwheel.
+  // SVG_SIZE = 160; R = 65; STROKE = 14 produces a balanced donut.
+  const SVG_SIZE = 160;
+  const R = 65;
+  const STROKE = 14;
+  const C = 2 * Math.PI * R;
+  // Insert a tiny gap between each non-zero segment so they read as separate
+  // arcs rather than blurring into one band.
+  const visibleSegs = segs.filter(s => s.value > 0);
+  const GAP = visibleSegs.length > 1 ? 1.5 : 0;  // px of stroke
+  const usable = C - GAP * visibleSegs.length;
   let cursor = 0;
   return (
     <div className="flex items-center gap-6">
-      <div className="relative flex-shrink-0">
-        <svg width={140} height={140} viewBox="0 0 140 140" className="-rotate-90">
-          <circle cx="70" cy="70" r={R} fill="none" stroke="rgba(148,163,184,0.10)" strokeWidth={(R - r) * 2} />
-          {segs.map(s => {
-            if (total === 0 || s.value === 0) return null;
-            const dash = (s.value / total) * C;
+      <div className="relative flex-shrink-0" style={{ width: SVG_SIZE, height: SVG_SIZE }}>
+        <svg width={SVG_SIZE} height={SVG_SIZE} viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`} className="-rotate-90">
+          {/* track */}
+          <circle cx={SVG_SIZE / 2} cy={SVG_SIZE / 2} r={R}
+            fill="none" stroke="rgba(148,163,184,0.08)" strokeWidth={STROKE} />
+          {visibleSegs.map(s => {
+            const dash = (s.value / total) * usable;
             const offset = -cursor;
-            cursor += dash;
+            cursor += dash + GAP;
             return (
-              <circle key={s.key} cx="70" cy="70" r={R} fill="none"
-                stroke={s.color} strokeWidth={(R - r) * 2}
+              <circle key={s.key} cx={SVG_SIZE / 2} cy={SVG_SIZE / 2} r={R}
+                fill="none" stroke={s.color} strokeWidth={STROKE}
+                strokeLinecap="round"
                 strokeDasharray={`${dash} ${C - dash}`} strokeDashoffset={offset} />
             );
           })}
@@ -365,7 +407,7 @@ export default function AIBoardScorecard() {
             </svg>
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">Board Scorecard</h1>
+            <h1 className="text-2xl font-bold text-white">AI Board Scorecard</h1>
             <p className="text-sm text-slate-400">Board-ready view of your AI agent posture across NIST AI RMF + ISO 42001 dimensions.</p>
             <div className="flex items-center gap-2 mt-1">
               <span className="text-xs text-slate-500">Snapshot — {data.total_agents} AI agents in scope</span>
@@ -519,37 +561,87 @@ export default function AIBoardScorecard() {
       {/* Row 4: Agents table + Insights right rail */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
         <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 overflow-hidden">
-          <div className="grid grid-cols-[1.3fr_1.6fr_1fr_70px_1.4fr_70px_70px] gap-3 px-4 py-2.5 text-[10px] uppercase tracking-wider font-bold text-slate-500 border-b border-white/5">
+          {/*
+            Columns (matches reference comp):
+              [ ☐ ] [ 🤖 ] [ AGENT id ] [ status chip ] [ display name + sub ]
+              [ owner avatar + name ] [ trust score chip ] [ top failing dim ]
+              [ posture bars ] [ last seen ] [ ⋯ ]
+          */}
+          <div className="grid grid-cols-[24px_30px_1.4fr_85px_1.5fr_1.1fr_70px_1.4fr_70px_70px_24px] gap-2 px-4 py-2.5 text-[10px] uppercase tracking-wider font-bold text-slate-500 border-b border-white/5 items-center">
+            <span></span>
+            <span></span>
             <span>Agent</span>
+            <span></span>
             <span>Display Name</span>
             <span>Owner</span>
-            <span>Trust</span>
+            <span>Trust Score</span>
             <span>Top Failing Dimension</span>
             <span>Posture</span>
-            <span className="text-right">Last Seen</span>
+            <span>Last Seen</span>
+            <span></span>
           </div>
           {filteredAgents.length === 0 ? (
             <p className="text-xs text-slate-500 text-center py-10">No agents match the current filter.</p>
           ) : filteredAgents.map(a => {
             const tone = trustTone(a.trust_score);
             const dim = dimensionLabel(a.top_dimension_fail);
+            const rowBg = tone.label === 'Critical' ? 'bg-red-950/20 border-l-2 border-l-red-500/60' : '';
+            const ownerName = a.owner ?? null;
             return (
               <Link key={a.identity_id}
                 to={`/identities/${a.identity_id}`}
-                className="grid grid-cols-[1.3fr_1.6fr_1fr_70px_1.4fr_70px_70px] gap-3 px-4 py-2.5 items-center text-xs hover:bg-slate-800/30 transition border-b border-white/5 last:border-b-0">
+                className={`grid grid-cols-[24px_30px_1.4fr_85px_1.5fr_1.1fr_70px_1.4fr_70px_70px_24px] gap-2 px-4 py-2.5 items-center text-xs hover:bg-slate-800/30 transition border-b border-white/5 last:border-b-0 ${rowBg}`}>
+                {/* checkbox */}
+                <input type="checkbox" onClick={e => e.stopPropagation()}
+                  className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-violet-500" />
+                {/* robot icon */}
+                <span className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                  style={{ background: `${tone.text}15`, color: tone.text, border: `1px solid ${tone.border}` }}>
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13A2.5 2.5 0 0 0 5 15.5 2.5 2.5 0 0 0 7.5 18a2.5 2.5 0 0 0 2.5-2.5A2.5 2.5 0 0 0 7.5 13m9 0a2.5 2.5 0 0 0-2.5 2.5 2.5 2.5 0 0 0 2.5 2.5 2.5 2.5 0 0 0 2.5-2.5 2.5 2.5 0 0 0-2.5-2.5Z"/></svg>
+                </span>
+                {/* agent id (truncated) */}
                 <span className="font-mono text-slate-400 truncate" title={a.identity_id}>{a.identity_id}</span>
-                <span className="text-slate-200 truncate">{a.display_name}</span>
-                <span className="text-slate-400 truncate">—</span>
-                <span className="font-mono font-bold px-2 py-0.5 rounded text-center inline-flex justify-center"
+                {/* status chip */}
+                <span className="font-bold px-1.5 py-0.5 rounded text-[10px] text-center"
+                  style={{ background: tone.bg, color: tone.text, border: `1px solid ${tone.border}` }}>
+                  {tone.label}
+                </span>
+                {/* display name + subline (the underlying identity_type) */}
+                <span className="flex flex-col min-w-0">
+                  <span className="text-slate-200 truncate">{a.display_name}</span>
+                  <span className="text-[10px] text-slate-500 truncate">AI Agent</span>
+                </span>
+                {/* owner avatar + name */}
+                <span className="flex items-center gap-1.5 min-w-0">
+                  {ownerName ? (
+                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0"
+                      style={{ background: ownerColor(ownerName), color: '#fff' }}>
+                      {ownerInitials(ownerName)}
+                    </span>
+                  ) : (
+                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 bg-slate-800 text-slate-500 border border-slate-700">—</span>
+                  )}
+                  <span className="text-slate-300 truncate text-[11px]">{ownerName || 'Unowned'}</span>
+                </span>
+                {/* trust score chip */}
+                <span className="font-mono font-bold px-2 py-0.5 rounded text-center"
                   style={{ background: tone.bg, color: tone.text, border: `1px solid ${tone.border}` }}>
                   {a.trust_score}
                 </span>
-                <span className="text-slate-300 flex flex-col min-w-0">
-                  <span className="truncate">{dim.name}</span>
+                {/* top failing dimension + framework citation */}
+                <span className="flex flex-col min-w-0">
+                  <span className="truncate text-slate-300">{dim.name}</span>
                   <span className="text-[10px] text-slate-500 truncate">{dim.framework}</span>
                 </span>
+                {/* posture bars */}
                 <PostureBars score={a.trust_score} />
-                <span className="text-slate-500 text-right text-[10px]">—</span>
+                {/* last seen */}
+                <span className="text-slate-400 text-[11px]">{timeAgo(a.last_seen)}</span>
+                {/* row menu */}
+                <button onClick={e => { e.preventDefault(); e.stopPropagation(); }}
+                  className="text-slate-500 hover:text-slate-300 transition flex items-center justify-center">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+                </button>
               </Link>
             );
           })}
