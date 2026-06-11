@@ -376,6 +376,7 @@ export default function AIBoardScorecard() {
   const navigate = useNavigate();
   const [data, setData] = useState<BoardScorecard | null>(null);
   const [history, setHistory] = useState<HistorySnapshot[]>([]);
+  const [bizImpact, setBizImpact] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [dimensionFilter, setDimensionFilter] = useState('');
@@ -388,10 +389,12 @@ export default function AIBoardScorecard() {
     Promise.all([
       fetch('/api/ai-security/board-scorecard').then(r => r.ok ? r.json() : null),
       fetch('/api/ai-security/board-scorecard/history?days=30').then(r => r.ok ? r.json() : null),
-    ]).then(([sc, hist]) => {
+      fetch('/api/dashboard/business-impact').then(r => r.ok ? r.json() : null),
+    ]).then(([sc, hist, biz]) => {
       if (cancelled) return;
       setData(sc || null);
       setHistory(Array.isArray(hist?.history) ? hist.history : []);
+      setBizImpact(biz || null);
       setLoading(false);
     }).catch(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -668,6 +671,67 @@ export default function AIBoardScorecard() {
           </div>
         </aside>
       </div>
+
+      {/* AG-BOARD-V3.3 (2026-06-11): AI Business Impact card — peer review
+          v4. Connects AI governance directly to business risk. Counts +
+          values come from /api/dashboard/business-impact (real IBM 2024
+          breach-cost defaults × discovered model count). */}
+      <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">AI Business Impact</h3>
+            <p className="text-[10px] text-slate-500 mt-0.5">Connecting AI governance to business risk · IBM 2024 breach cost defaults</p>
+          </div>
+          <Link to="/identity-scorecard" className="text-[10px] text-violet-400 hover:text-violet-300">See full impact rollup →</Link>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <BusinessImpactTile
+            label="AI Models"
+            value={(bizImpact?.ai_models?.count ?? data?.total_agents ?? 0).toString()}
+            sub={bizImpact?.ai_models?.value ? `× ${bizImpact?.ai_models?.per_asset >= 1_000_000 ? `$${(bizImpact.ai_models.per_asset / 1_000_000).toFixed(1)}M` : `$${(bizImpact.ai_models.per_asset / 1_000).toFixed(0)}K`} per asset` : 'Deployed inference endpoints'}
+            color="#ec4899"
+            icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>}
+          />
+          <BusinessImpactTile
+            label="Reachable Sensitive Assets"
+            value={((data?.critical_risks?.sensitive_data_reachable ?? 0) +
+                    (bizImpact?.phi_assets?.count ?? 0) +
+                    (bizImpact?.pci_assets?.count ?? 0) +
+                    (bizImpact?.pii_assets?.count ?? 0)).toString()}
+            sub={`${bizImpact?.phi_assets?.count ?? 0} PHI · ${bizImpact?.pci_assets?.count ?? 0} PCI · ${bizImpact?.pii_assets?.count ?? 0} PII`}
+            color="#fb923c"
+            icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>}
+          />
+          <BusinessImpactTile
+            label="Estimated Exposure"
+            value={bizImpact?.total_exposure
+              ? (bizImpact.total_exposure >= 1_000_000
+                  ? `$${(bizImpact.total_exposure / 1_000_000).toFixed(1)}M`
+                  : `$${(bizImpact.total_exposure / 1_000).toFixed(0)}K`)
+              : '—'}
+            sub={bizImpact?.reduction_opportunity
+              ? `${Math.round((bizImpact.reduction_opportunity / bizImpact.total_exposure) * 100)}% reducible`
+              : 'Configure asset valuations'}
+            color="#f87171"
+            icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BusinessImpactTile({ label, value, sub, color, icon }: {
+  label: string; value: string; sub: string; color: string; icon: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl p-4" style={{ background: `${color}10`, border: `1px solid ${color}40` }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] uppercase tracking-wider font-bold" style={{ color }}>{label}</span>
+        <span style={{ color }}>{icon}</span>
+      </div>
+      <p className="text-4xl font-bold font-mono" style={{ color }}>{value}</p>
+      <p className="text-[11px] text-slate-400 mt-1">{sub}</p>
     </div>
   );
 }

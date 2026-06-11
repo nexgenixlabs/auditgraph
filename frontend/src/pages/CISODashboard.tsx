@@ -320,15 +320,32 @@ function ConnectorDots({ color, waveUp = true }: { color: string; waveUp?: boole
   );
 }
 
+/**
+ * AG-CISO-V4.4 (2026-06-11) — RiskGaugeCard with optional `elevated`.
+ *
+ * Peer review v4: AI Risk should be subtly visually distinguished
+ * because AI is AuditGraph's differentiation. Elevated cards get a
+ * violet halo, thicker border, and a "MOAT" pill. Restrained — the
+ * AI card isn't bigger, just more prominent.
+ */
 function RiskGaugeCard({
-  bucket, color, label, gaugeValue, items, viewHref, onClick,
+  bucket, color, label, gaugeValue, items, viewHref, onClick, elevated = false,
 }: {
   bucket: string; color: string; label: string; gaugeValue: number;
   items: Array<{ count: number; label: string; severity: 'critical' | 'high' | 'medium' }>;
-  viewHref: string; onClick: () => void;
+  viewHref: string; onClick: () => void; elevated?: boolean;
 }) {
   return (
-    <div className="rounded-xl p-5 bg-[#0f172a]/80 border border-white/5">
+    <div className={`rounded-xl p-5 bg-[#0f172a]/80 relative ${elevated ? 'border-2' : 'border'}`}
+      style={{
+        borderColor: elevated ? 'rgba(167,139,250,0.50)' : 'rgba(255,255,255,0.05)',
+        boxShadow: elevated ? '0 0 30px rgba(167,139,250,0.18)' : undefined,
+      }}>
+      {elevated && (
+        <span className="absolute -top-2 -right-2 text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-violet-500 text-white shadow-lg shadow-violet-500/40">
+          ★ MOAT
+        </span>
+      )}
       <div className="flex items-start justify-between mb-3">
         <div>
           <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">{bucket}</p>
@@ -745,6 +762,7 @@ export default function CISODashboard() {
                 { count: data.aiExcessivePerms, label: 'High-risk AI',         severity: 'medium' },
               ]}
               viewHref="/ai-inventory" onClick={() => {}}
+              elevated
             />
           </div>
 

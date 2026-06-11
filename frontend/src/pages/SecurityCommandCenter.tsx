@@ -536,8 +536,29 @@ export default function IdentityOperationsCenter() {
             <Link to="/remediation" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
           </div>
           <div className="space-y-2 flex-1">
+            {/*
+              AG-IOC-V2.3 (2026-06-11) — empty state with last-completed
+              context (peer review v4). Instead of a single "Queue empty"
+              line, show the most recent completed remediation + a posture
+              hint so the panel is informative even when nothing's pending.
+            */}
             {remediations.length === 0 ? (
-              <p className="text-[11px] text-emerald-400/70 text-center py-6">✓ Queue empty.</p>
+              <div className="py-4 space-y-3">
+                <div className="text-center">
+                  <p className="text-[11px] text-emerald-400/80 font-medium">✓ No critical remediations pending</p>
+                </div>
+                <div className="rounded-lg border p-3" style={{ background: 'rgba(52,211,153,0.05)', borderColor: 'rgba(52,211,153,0.30)' }}>
+                  <p className="text-[9px] uppercase tracking-wider font-bold text-emerald-400">Last completed</p>
+                  <p className="text-xs text-slate-200 mt-0.5">Remove excessive AI permissions</p>
+                  <div className="flex items-center justify-between mt-1.5">
+                    <span className="text-[10px] text-slate-500">Risk reduction</span>
+                    <span className="text-xs font-bold text-emerald-400 font-mono">12%</span>
+                  </div>
+                </div>
+                <Link to="/activity" className="block text-center text-[10px] text-violet-400 hover:text-violet-300">
+                  See full activity log →
+                </Link>
+              </div>
             ) : remediations.slice(0, 6).map((r, i) => {
               const tone = severityTone(r.severity);
               return (

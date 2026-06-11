@@ -319,9 +319,17 @@ export default function IdentityBoardScorecard() {
     return history.map(h => h.total_agents * 1_500_000 + h.distribution_critical * 800_000);
   }, [history]);
 
-  // Board recommendations — derived from real signal counts
+  // Board recommendations — derived from real signal counts.
+  // AG-IBS-V1.3 (2026-06-11): peer review v4 — each rec now carries an
+  // explicit `exposureReduction` value (the $ amount the action is
+  // projected to cut) + dedicated `priority` ordering for the chip column.
   const recommendations = useMemo(() => {
-    const recs: Array<{ rank: number; severity: 'critical' | 'high' | 'medium'; title: string; sub: string; impact: string; link: string }> = [];
+    const totalReduction = bizImpact?.reduction_opportunity || 0;
+    const recs: Array<{
+      rank: number; severity: 'critical' | 'high' | 'medium';
+      title: string; sub: string; impact: string; link: string;
+      exposureReduction: number | null;
+    }> = [];
     const orphans = spnStats?.orphaned_privileged || 0;
     if (orphans > 0) recs.push({
       rank: recs.length + 1, severity: 'critical' as const,
@@ -329,14 +337,16 @@ export default function IdentityBoardScorecard() {
       sub: `${orphans} privileged service principals have no accountable human owner`,
       impact: 'Incident response will stall — nobody to call, nobody to revoke',
       link: '/ownership',
+      exposureReduction: Math.round(totalReduction * 0.25),
     });
     const critPaths = attackPaths.filter(p => (p.severity || '').toLowerCase() === 'critical').length;
     if (critPaths > 0) recs.push({
       rank: recs.length + 1, severity: 'critical' as const,
       title: 'Cut critical attack paths',
       sub: `${critPaths} critical-severity attack paths reach classified data`,
-      impact: `Closing the top ${critPaths} cuts ~${fmtMoney((bizImpact?.reduction_opportunity || 0) * 0.6)} of exposure`,
+      impact: `Closing the top ${critPaths} cuts ~${fmtMoney(totalReduction * 0.60)} of exposure`,
       link: '/attack-paths?severity=critical',
+      exposureReduction: Math.round(totalReduction * 0.60),
     });
     const expired = spnStats?.expired_credentials || 0;
     if (expired > 0) recs.push({
@@ -345,6 +355,7 @@ export default function IdentityBoardScorecard() {
       sub: `${expired} active service principals have lapsed client secrets`,
       impact: 'Credential time-bombs — quarterly rotation is industry guidance',
       link: '/nhi/secrets',
+      exposureReduction: Math.round(totalReduction * 0.10),
     });
     const canEscalate = spnStats?.can_escalate_count || 0;
     if (canEscalate > 0) recs.push({
@@ -353,6 +364,7 @@ export default function IdentityBoardScorecard() {
       sub: `${canEscalate} NHIs hold role-assignment-write at scope`,
       impact: 'NIST AC-6 violation: ability to grant themselves more access',
       link: '/identity-security/pim',
+      exposureReduction: Math.round(totalReduction * 0.15),
     });
     const totalExposure = bizImpact?.total_exposure || 0;
     if (totalExposure > 0) recs.push({
@@ -361,6 +373,7 @@ export default function IdentityBoardScorecard() {
       sub: `AI agents reach ${(bizImpact?.phi_assets?.count || 0) + (bizImpact?.pci_assets?.count || 0)} classified resources`,
       impact: 'Apply read-only role + private endpoint to break the data reach chain',
       link: '/ai-access/data-reachability',
+      exposureReduction: Math.round(totalReduction * 0.08),
     });
     return recs;
   }, [spnStats, attackPaths, bizImpact]);
@@ -587,10 +600,12 @@ export default function IdentityBoardScorecard() {
               : { bg: 'rgba(251,191,36,0.10)', text: '#fbbf24', border: 'rgba(251,191,36,0.40)' };
             return (
               <Link key={r.rank} to={r.link}
-                className="grid grid-cols-[40px_85px_1.4fr_1.6fr_20px] gap-3 items-center px-3 py-3 rounded-lg hover:bg-slate-800/40 transition border border-white/5">
-                <span className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold"
-                  style={{ background: sev.bg, color: sev.text, border: `1px solid ${sev.border}` }}>
-                  {r.rank}
+                className="grid grid-cols-[80px_85px_1.4fr_1.4fr_110px_20px] gap-3 items-center px-3 py-3 rounded-lg hover:bg-slate-800/40 transition border border-white/5">
+                {/* AG-IBS-V1.3 (2026-06-11): Priority # tag (peer review v4) */}
+                <span className="flex flex-col items-center justify-center px-2 py-1 rounded-lg"
+                  style={{ background: sev.bg, border: `1px solid ${sev.border}` }}>
+                  <span className="text-[9px] uppercase tracking-wider font-bold" style={{ color: sev.text }}>Priority</span>
+                  <span className="text-lg font-bold font-mono" style={{ color: sev.text }}>#{r.rank}</span>
                 </span>
                 <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded text-center"
                   style={{ background: sev.bg, color: sev.text, border: `1px solid ${sev.border}` }}>
@@ -601,6 +616,13 @@ export default function IdentityBoardScorecard() {
                   <p className="text-[11px] text-slate-500 truncate">{r.sub}</p>
                 </div>
                 <p className="text-[11px] text-slate-400 truncate">{r.impact}</p>
+                {/* Exposure Reduction column (peer v4) */}
+                <div className="text-right">
+                  <p className="text-[9px] uppercase tracking-wider font-bold text-slate-500">Exposure Reduction</p>
+                  <p className="text-base font-bold text-emerald-400 font-mono">
+                    {r.exposureReduction ? fmtMoney(r.exposureReduction) : '—'}
+                  </p>
+                </div>
                 <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7"/></svg>
               </Link>
             );

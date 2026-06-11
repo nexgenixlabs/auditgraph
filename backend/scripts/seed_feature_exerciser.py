@@ -265,6 +265,49 @@ def populate_data_classifications(cur, run_id):
     log.info(f"Data classifications applied to {storage_n} storage + {kv_n} key vaults")
 
 
+def populate_activity_feed(cur, _run_id):
+    """
+    Plant ~12 recent activity_log rows spanning the last 24h so the
+    Identity Operations Center "Identity Activity Feed" is alive on demo
+    day. Categories match the icon dispatcher on the frontend (attack /
+    ai_agent / privileged / classification / rotation / mfa / spn).
+
+    Idempotent: every row inserted carries a metadata.demo_seeded=true
+    tag; re-running deletes the prior demo set and reinserts.
+    """
+    import json
+    from datetime import timedelta
+    cur.execute("""
+        DELETE FROM activity_log
+        WHERE organization_id = %s
+          AND metadata::text LIKE '%%demo_seeded%%'
+    """, (DEMO_ORG_ID,))
+    deleted = cur.rowcount
+    events = [
+        ("critical_attack_path_discovered", "New critical attack path discovered", "User → SPN → KeyVault → PHI Data", 1),
+        ("ai_agent_onboarded",              "New AI agent onboarded",              "Agent: demo-ai-rag-indexer-01",    3),
+        ("privileged_role_assigned",        "Privileged role granted",             "User: demo-human-no-mfa-priv-01",  4),
+        ("permission_escalation_detected",  "Permission escalation detected",      "SPN: demo-spn-sub-owner-01",       6),
+        ("secret_rotated",                  "Secret rotated successfully",         "Secret: prod-db-password",         9),
+        ("classification_changed",          "Sensitive dataset tagged",            "Storage: rg-data-prod/phi-records",10),
+        ("ai_agent_excessive_perm",         "AI agent excessive permission flagged","Agent: demo-ai-agent-copilot-overpriv-01", 12),
+        ("mfa_enabled",                     "MFA enabled on privileged human",     "User: Alexandra Torres",           14),
+        ("service_principal_created",       "New service principal created",       "SPN: terraform-automation-sp",     16),
+        ("attack_path_resolved",            "Attack path resolved",                "kv-prod-01 reach-chain closed",    18),
+        ("federated_credential_added",      "Federated credential added",          "SPN: demo-spn-github-actions-fic-01", 20),
+        ("ownership_assigned",              "Ownership assigned to orphan NHI",    "SPN: demo-spn-orphan-critical-01", 22),
+    ]
+    inserted = 0
+    for action, desc, target, hours_ago in events:
+        cur.execute("""
+            INSERT INTO activity_log
+              (action_type, description, metadata, created_at, organization_id)
+            VALUES (%s, %s, %s::jsonb, NOW() - (%s::int * INTERVAL '1 hour'), %s)
+        """, (action, desc, json.dumps({'target': target, 'demo_seeded': True}), hours_ago, DEMO_ORG_ID))
+        inserted += 1
+    log.info(f"Activity feed: replaced {deleted} demo rows with {inserted} fresh (last 24h)")
+
+
 def populate_board_scorecard_history(cur, _run_id):
     """
     Plant 30 days of AI Board Scorecard snapshots so the Trend Over Time
@@ -552,6 +595,7 @@ def main():
             populate_pim_eligibility(cur, run_id)
             populate_data_classifications(cur, run_id)
             populate_board_scorecard_history(cur, run_id)
+            populate_activity_feed(cur, run_id)
 
             log.info("\n--- Step 2: upsert hero demo identities ---")
             planted = upsert_hero_identities(cur, run_id)
