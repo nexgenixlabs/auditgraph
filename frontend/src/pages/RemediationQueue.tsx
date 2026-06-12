@@ -115,14 +115,14 @@ export default function ChangeControlCenter() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-2 border-violet-500 border-t-transparent rounded-full" />
       </div>
     );
   }
 
   return (
-    <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
+    <div className="p-5 w-full space-y-4 min-h-screen">
       {/* Header */}
       <div className="flex items-center gap-3">
         <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-violet-500/30 to-blue-500/30 border border-violet-500/40 flex items-center justify-center">

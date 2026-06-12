@@ -533,6 +533,49 @@ export function SecurityGroupNode({ data }: NodeProps) {
   );
 }
 
+// Sprint C.8 — Sensitive asset node. Surfaces the Identity→Role→Resource→Sensitive
+// Asset chain inside the Access Graph. Classification chip (PHI/PCI/PII/AI Model)
+// is the executive payoff — a CISO can see what data is reachable, not just
+// which storage account name is in scope.
+const SENSITIVE_CLASS_COLOR: Record<string, { border: string; bg: string; text: string }> = {
+  PHI:       { border: 'border-red-400',    bg: 'bg-red-50',    text: 'text-red-700' },
+  PCI:       { border: 'border-amber-400',  bg: 'bg-amber-50',  text: 'text-amber-700' },
+  PII:       { border: 'border-blue-400',   bg: 'bg-blue-50',   text: 'text-blue-700' },
+  'AI Model':{ border: 'border-violet-400', bg: 'bg-violet-50', text: 'text-violet-700' },
+};
+
+export function SensitiveAssetNode({ data }: NodeProps) {
+  const classification = String(data.classification || 'Sensitive');
+  const colors = SENSITIVE_CLASS_COLOR[classification] || { border: 'border-rose-400', bg: 'bg-rose-50', text: 'text-rose-700' };
+  const accessLevel = String(data.access_level || 'Read');
+  const resourceType = String(data.resource_type || 'resource');
+  return (
+    <div
+      title={`${resourceType}: ${data.label}\nClassification: ${classification}\nAccess level: ${accessLevel}\nVia: ${data.via || 'role assignment'}`}
+      className={`px-3 py-2 rounded-lg border-2 ${colors.border} ${colors.bg} shadow-sm max-w-[220px]`}
+    >
+      <Handle type="target" position={Position.Left} className="!bg-rose-400" />
+      <div className="flex items-center gap-2">
+        <svg className={`w-3.5 h-3.5 ${colors.text} flex-shrink-0`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+        </svg>
+        <div className="min-w-0 flex-1">
+          <div className="text-[9px] font-bold uppercase tracking-wider" style={{ color: '#64748b' }}>{resourceType.replace(/_/g, ' ')}</div>
+          <div className={`text-[11px] font-semibold ${colors.text} truncate`}>{String(data.label)}</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-1 mt-1.5">
+        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${colors.bg} ${colors.text} border ${colors.border}`}>
+          {classification}
+        </span>
+        <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-700">
+          {accessLevel}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export const nodeTypes = {
   identity: IdentityNode,
   risk_summary: RiskSummaryNode,
@@ -551,4 +594,5 @@ export const nodeTypes = {
   keyvault: KeyVaultNode,
   keyvault_item: KeyVaultItemNode,
   security_group: SecurityGroupNode,
+  sensitive_asset: SensitiveAssetNode,
 };

@@ -47,7 +47,9 @@ const DIM_LABEL: Record<string, string> = {
   model_exposure: 'Model Exposure', supply_chain: 'Supply Chain',
 };
 
-export default function IdentityTrust() {
+interface IdentityTrustProps { forceType?: string }
+
+export default function IdentityTrust({ forceType }: IdentityTrustProps = {}) {
   const [data, setData] = useState<TrustRollup | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,8 +57,10 @@ export default function IdentityTrust() {
 
   // AG-PHASE2 (2026-06-09): scope-aware Trust page. Reads ?type=
   // so Human / NHI / AI tabs all use the same component.
+  // Lock-V2 (2026-06-11) — `forceType` prop lets bucket pages embed this
+  // without depending on URL query params (the parent owns ?tab= state).
   const params = new URLSearchParams(window.location.search);
-  const scope = (params.get('type') || params.get('scope') || 'nhi').toLowerCase();
+  const scope = (forceType || params.get('type') || params.get('scope') || 'nhi').toLowerCase();
   const scopeLabel = ({
     human: 'Human Trust',
     nhi: 'Non-Human Identity Trust',

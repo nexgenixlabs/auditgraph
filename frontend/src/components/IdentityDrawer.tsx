@@ -12,6 +12,7 @@ import { deriveIdentityState, STATE_COLORS } from '../constants/identityState';
 import { normalizeRoleKey, getRoleUsageBadge, type RoleUsageEntry } from '../utils/roleUtils';
 import StatusBadge from './ui/StatusBadge';
 import { FederatedCredentialsSection } from './identity-detail/CredentialsTab';
+import RiskScoreWaterfall from './identity-detail/shared/RiskScoreWaterfall';
 import { classifyIpOrigin, IP_ORIGIN_COLORS } from '../constants/activitySignals';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -1310,6 +1311,19 @@ function RiskTab({ detail }: { detail: IdentityDetail }) {
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[10px] text-gray-500 uppercase font-semibold">Risk Factors ({factors.length})</h4>
         <RiskBadge level={detail.risk_level} score={detail.risk_score} cvss={(detail as any).risk_score_cvss} />
+      </div>
+
+      {/* Sprint A.3 — credit-score-style breakdown above the factor cards.
+          Tells you HOW the CVSS was assembled before drilling into evidence. */}
+      <RiskScoreWaterfall
+        riskFactors={factors as any}
+        totalCvss={(detail as any).risk_score_cvss}
+        riskLevel={detail.risk_level}
+        mode="compact"
+      />
+
+      <div className="pt-2 border-t border-gray-100">
+        <div className="text-[10px] text-gray-500 uppercase font-semibold mb-2">Evidence &amp; Frameworks</div>
       </div>
 
       {factors.map(f => {

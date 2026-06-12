@@ -358,21 +358,46 @@ export default function IdentityOperationsCenter() {
     [Math.round(current * slope), Math.round(current * (slope + 0.04)), Math.round(current * (slope + 0.07)),
      Math.round(current * (slope + 0.1)), Math.round(current * (slope + 0.05)), Math.round(current * (slope + 0.12)), current];
 
-  const askArgus = () => {
-    if (!argusQuery.trim()) { navigate('/argus'); return; }
-    navigate(`/argus?q=${encodeURIComponent(argusQuery)}`);
-  };
+  // V2.6 (2026-06-11) — in-page chat. Previously every suggestion button
+  // and the Enter key navigated to /argus, dropping the user out of context.
+  // Now: keep the conversation in this panel by POSTing to /api/argus/nl-query
+  // and rendering the thread inline. "Open full chat →" is the explicit
+  // navigation escape hatch.
+  const [argusMessages, setArgusMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  const [argusBusy, setArgusBusy] = useState(false);
+  async function sendArgus(q: string) {
+    if (!q.trim() || argusBusy) return;
+    setArgusMessages(m => [...m, { role: 'user', content: q }]);
+    setArgusQuery('');
+    setArgusBusy(true);
+    try {
+      const r = await fetch('/api/argus/nl-query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q }),
+      });
+      const data = await r.json().catch(() => ({}));
+      const reply = data.answer || data.response || data.result || data.message
+        || 'Argus is still learning this question. Try one of the suggested prompts above.';
+      setArgusMessages(m => [...m, { role: 'assistant', content: String(reply) }]);
+    } catch {
+      setArgusMessages(m => [...m, { role: 'assistant', content: 'Could not reach Argus right now. Try again in a moment.' }]);
+    } finally {
+      setArgusBusy(false);
+    }
+  }
+  const askArgus = () => sendArgus(argusQuery);
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-2 border-violet-500 border-t-transparent rounded-full" />
       </div>
     );
   }
 
   return (
-    <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
+    <div className="p-5 w-full space-y-4 min-h-screen">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -545,19 +570,17 @@ export default function IdentityOperationsCenter() {
               hint so the panel is informative even when nothing's pending.
             */}
             {remediations.length === 0 ? (
-              <div className="py-4 space-y-3">
+              <div className="py-6 space-y-2">
+                {/* V2.5 (2026-06-11) — stripped the hardcoded "Remove
+                    excessive AI permissions · 12%" placeholder which painted
+                    on every empty tenant and looked like a leak. */}
                 <div className="text-center">
                   <p className="text-[11px] text-emerald-400/80 font-medium">✓ No critical remediations pending</p>
                 </div>
-                <div className="rounded-lg border p-3" style={{ background: 'rgba(52,211,153,0.05)', borderColor: 'rgba(52,211,153,0.30)' }}>
-                  <p className="text-[9px] uppercase tracking-wider font-bold text-emerald-400">Last completed</p>
-                  <p className="text-xs text-slate-200 mt-0.5">Remove excessive AI permissions</p>
-                  <div className="flex items-center justify-between mt-1.5">
-                    <span className="text-[10px] text-slate-500">Risk reduction</span>
-                    <span className="text-xs font-bold text-emerald-400 font-mono">12%</span>
-                  </div>
-                </div>
-                <Link to="/activity" className="block text-center text-[10px] text-violet-400 hover:text-violet-300">
+                <p className="text-[10px] text-slate-500 text-center mt-1">
+                  Remediations appear here after the first scan surfaces actionable findings.
+                </p>
+                <Link to="/activity" className="block text-center text-[10px] text-violet-400 hover:text-violet-300 mt-2">
                   See full activity log →
                 </Link>
               </div>
@@ -747,20 +770,53 @@ export default function IdentityOperationsCenter() {
               <svg className="w-4 h-4 text-violet-200" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
             </div>
           </div>
-          <div className="space-y-1.5 mb-3">
-            {[
-              'What are my top 5 risks right now?',
-              'Show me new attack paths discovered today',
-              'Which identities have excessive permissions?',
-              'Generate remediation plan for critical risks',
-            ].map((q, i) => (
-              <button key={i} onClick={() => navigate(`/argus?q=${encodeURIComponent(q)}`)}
-                className="w-full text-left text-[11px] flex items-center gap-2 p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900/90 text-slate-200 border border-slate-800 transition">
-                <span className="text-violet-400">›</span>
-                <span className="truncate">{q}</span>
-              </button>
-            ))}
-          </div>
+          {/* Show suggestions until the user has sent a message; then
+              show the conversation thread inside the same panel. */}
+          {argusMessages.length === 0 ? (
+            <div className="space-y-1.5 mb-3">
+              {[
+                'What are my top 5 risks right now?',
+                'Show me new attack paths discovered today',
+                'Which identities have excessive permissions?',
+                'Generate remediation plan for critical risks',
+              ].map((q, i) => (
+                <button key={i} onClick={() => sendArgus(q)}
+                  className="w-full text-left text-[11px] flex items-center gap-2 p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900/90 text-slate-200 border border-slate-800 transition">
+                  <span className="text-violet-400">›</span>
+                  <span className="truncate">{q}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-2 mb-3 max-h-[280px] overflow-y-auto pr-1">
+              {argusMessages.map((msg, i) => (
+                <div key={i}
+                  className={`text-[11px] rounded-lg p-2 ${
+                    msg.role === 'user'
+                      ? 'bg-violet-500/15 border border-violet-500/30 text-slate-100 ml-4'
+                      : 'bg-slate-900/60 border border-slate-800 text-slate-200 mr-4'
+                  }`}>
+                  <p className="text-[9px] uppercase tracking-wider font-bold mb-1 opacity-70">
+                    {msg.role === 'user' ? 'You' : 'Argus'}
+                  </p>
+                  <p className="leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                </div>
+              ))}
+              {argusBusy && (
+                <div className="text-[11px] rounded-lg p-2 bg-slate-900/60 border border-slate-800 text-slate-400 mr-4">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+                    Argus is thinking…
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center justify-between pt-1">
+                <button onClick={() => setArgusMessages([])}
+                  className="text-[10px] text-slate-500 hover:text-slate-300">Clear chat</button>
+                <Link to="/argus" className="text-[10px] text-violet-400 hover:text-violet-300">Open full chat →</Link>
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <input
               value={argusQuery}

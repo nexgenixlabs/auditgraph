@@ -75,6 +75,7 @@ import HumanGovernance from './pages/HumanGovernance';
 import NHIGovernance from './pages/NHIGovernance';
 import HumanInventory from './pages/HumanInventory';
 import BlastRadiusPage from './pages/BlastRadiusPage';
+import ExposureExplorer from './pages/ExposureExplorer';
 import NHISecrets from './pages/NHISecrets';
 import IdentityBoardScorecard from './pages/IdentityBoardScorecard';
 import AIModelRegistry from './pages/AIModelRegistry';
@@ -99,6 +100,11 @@ import AccessGraph from './pages/AccessGraph';
 import EffectiveAccessExplorer from './pages/EffectiveAccessExplorer';
 import SensitiveDataAccess from './pages/SensitiveDataAccess';
 import CISODashboard from './pages/CISODashboard';
+// Lock-V2 (2026-06-11) — 4 new bucket pages (Identity collapsed 24→4)
+import AllIdentitiesOverview from './pages/AllIdentitiesOverview';
+import HumanIdentityPage from './pages/HumanIdentityPage';
+import NonHumanIdentityPage from './pages/NonHumanIdentityPage';
+import AIIdentityPage from './pages/AIIdentityPage';
 import RemediationCenter from './pages/RemediationCenter';
 import SecurityFindings from './pages/SecurityFindings';
 import GraphFindings from './pages/GraphFindings';
@@ -360,32 +366,67 @@ function AppContent() {
                   <Route path="/security-dashboard" element={<Navigate to="/command-center" replace />} />
                   <Route path="/identity-explorer" element={<Navigate to="/identity-explorer/humans" replace />} />
                   <Route path="/identity-explorer/:tab" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityExplorer /></ErrorBoundary>} />
-                  {/* AG-PHASE1+4 (2026-06-09): NHI Inventory + sub-routes.
-                      Sub-routes use existing pages with filter query params
-                      until Phase 4 builds dedicated NHI-typed versions. */}
-                  <Route path="/nhi" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIInventory /></ErrorBoundary>} />
+                  {/* ─── Lock-V2 (2026-06-11) — Identity collapsed 24→4 ───
+                      4 new bucket pages. 8-tab strip lives INSIDE each page;
+                      old per-bucket sub-routes redirect to ?tab=X form. */}
+                  <Route path="/identity-overview" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AllIdentitiesOverview /></ErrorBoundary>} />
+                  <Route path="/human"             element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanIdentityPage /></ErrorBoundary>} />
+                  <Route path="/non-human"         element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NonHumanIdentityPage /></ErrorBoundary>} />
+                  <Route path="/ai-identity"       element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AIIdentityPage /></ErrorBoundary>} />
+
+                  {/* Lock-V2 redirects — Human bucket sub-pages → ?tab= */}
+                  <Route path="/human/inventory"    element={<Navigate to="/human?tab=inventory" replace />} />
+                  <Route path="/human/access"       element={<Navigate to="/human?tab=access" replace />} />
+                  <Route path="/human/trust"        element={<Navigate to="/human?tab=trust" replace />} />
+                  <Route path="/human/lifecycle"    element={<Navigate to="/human?tab=lifecycle" replace />} />
+                  <Route path="/human/governance"   element={<Navigate to="/human?tab=governance" replace />} />
+                  <Route path="/human/pim"          element={<Navigate to="/human?tab=privilege" replace />} />
+                  <Route path="/human/role-activity" element={<Navigate to="/human?tab=privilege" replace />} />
+                  <Route path="/human/ownership"    element={<Navigate to="/human?tab=ownership" replace />} />
+                  <Route path="/human/attack-paths" element={<Navigate to="/human?tab=attack-paths" replace />} />
+
+                  {/* Lock-V2 redirects — NHI bucket sub-pages → ?tab= */}
+                  <Route path="/nhi"                element={<Navigate to="/non-human" replace />} />
+                  <Route path="/nhi/inventory"      element={<Navigate to="/non-human?tab=inventory" replace />} />
+                  <Route path="/nhi/access"         element={<Navigate to="/non-human?tab=access" replace />} />
+                  <Route path="/nhi/trust"          element={<Navigate to="/non-human?tab=trust" replace />} />
+                  <Route path="/nhi/lifecycle"      element={<Navigate to="/non-human?tab=lifecycle" replace />} />
+                  <Route path="/nhi/governance"     element={<Navigate to="/non-human?tab=governance" replace />} />
+                  <Route path="/nhi/ownership"      element={<Navigate to="/non-human?tab=ownership" replace />} />
+                  <Route path="/nhi/secrets"        element={<Navigate to="/non-human?tab=secrets" replace />} />
+                  <Route path="/nhi/attack-paths"   element={<Navigate to="/non-human?tab=attack-paths" replace />} />
+
+                  {/* Lock-V2 redirects — AI bucket sub-pages → ?tab=
+                      (AI Workload Security pages /ai-runtime/* stay as-is — they
+                      are NOT identity pages, they belong to AI Workload section.) */}
+                  <Route path="/ai-access"          element={<Navigate to="/ai-identity?tab=access" replace />} />
+                  <Route path="/ai-governance"      element={<Navigate to="/ai-identity?tab=governance" replace />} />
+
+                  {/* Lock-V2 — new sidebar entries that point at existing routes.
+                      Exposure Graph = Multi-hop XGraph (identity-type-agnostic).
+                      Role Optimization = Role Mining. AI Workload renames map
+                      to the existing supply-chain / threat-connectors pages. */}
+                  <Route path="/exposure-graph"             element={<Navigate to="/ai-attack-paths/multi-hop" replace />} />
+                  <Route path="/role-optimization"          element={<Navigate to="/role-mining" replace />} />
+                  <Route path="/ai-runtime/prompt-chain"    element={<Navigate to="/ai-runtime/supply-chain" replace />} />
+                  {/* V2.10 (2026-06-12) — was redirecting Tool Connectors →
+                      Threat Source Connectors, which created the off-positioning
+                      "we don't detect, partners do" message. Sidebar entry hidden;
+                      this route now redirects home so anyone with a stale
+                      bookmark or muscle-memory URL lands back on Executive
+                      Posture instead of the deprecated screen. The threat-
+                      connectors page itself stays reachable at its canonical
+                      URL for future use. */}
+                  <Route path="/ai-runtime/tool-connectors" element={<Navigate to="/" replace />} />
+                  <Route path="/billing/subscriptions"      element={<Navigate to="/subscriptions" replace />} />
+
                   {/* AG-PHASE6 (2026-06-09): Unified Identity Graph */}
                   <Route path="/unified-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><UnifiedIdentityGraph /></ErrorBoundary>} />
                   {/* AG-POLISH-DEMO (2026-06-10): What's New / demo landing */}
                   <Route path="/whats-new" element={<ErrorBoundary><WhatsNew /></ErrorBoundary>} />
-                  {/* AG-IA-P1 (2026-06-10): dedicated per-bucket Access pages.
-                      Each bucket renders its own scoped surface — no more shared
-                      "AI Access" page bleeding across Human/NHI/AI. */}
-                  <Route path="/human/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanAccess /></ErrorBoundary>} />
-                  <Route path="/nhi/access" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIAccess /></ErrorBoundary>} />
-                  <Route path="/human/governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanGovernance /></ErrorBoundary>} />
-                  <Route path="/nhi/governance" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHIGovernance /></ErrorBoundary>} />
-                  <Route path="/human/inventory" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><HumanInventory /></ErrorBoundary>} />
-                  <Route path="/nhi/trust" element={<Navigate to="/identity-trust?type=nhi" replace />} />
-                  <Route path="/nhi/lifecycle" element={<Navigate to="/lifecycle?type=nhi" replace />} />
-                  {/* AG-IA-P5.4 (2026-06-10): NHI Secrets is now a purpose-built
-                      4-bucket page (expired / expiring / federated-only / no-creds)
-                      instead of redirecting to SPN Dashboard which buried the
-                      credential lens behind general SPN filters. */}
-                  <Route path="/nhi/secrets" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><NHISecrets /></ErrorBoundary>} />
-                  <Route path="/nhi/ownership" element={<Navigate to="/ownership?type=nhi" replace />} />
-                  <Route path="/nhi/attack-paths" element={<Navigate to="/attack-paths?source_type=nhi" replace />} />
                   <Route path="/blast-radius" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><BlastRadiusPage /></ErrorBoundary>} />
+                  {/* Lock-V1.5 (2026-06-11) — Exposure Explorer per peer review */}
+                  <Route path="/exposure-explorer" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><ExposureExplorer /></ErrorBoundary>} />
                   {/* AG-IBS-V1 (2026-06-10): new Identity Board Scorecard */}
                   <Route path="/identity-scorecard" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityBoardScorecard /></ErrorBoundary>} />
                   <Route path="/identity-graph" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><IdentityGraph /></ErrorBoundary>} />
@@ -394,7 +435,10 @@ function AppContent() {
                   <Route path="/privilege-drift" element={<Navigate to="/drift-analysis" replace />} />
                   <Route path="/attack-paths" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPaths /></ErrorBoundary>} />
                   <Route path="/attack-paths/:pathId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackPathDetailPage /></ErrorBoundary>} />
-                  <Route path="/remediation-queue" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationQueue /></ErrorBoundary>} />
+                  {/* Lock-V1.1 (2026-06-11) — Change Control merged into Remediation
+                      as a workflow-stage tab; bare /remediation-queue redirects.
+                      :itemId deep-links still resolve to the detail page. */}
+                  <Route path="/remediation-queue" element={<Navigate to="/remediation#change-control" replace />} />
                   <Route path="/remediation-queue/:itemId" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><RemediationDetailPage /></ErrorBoundary>} />
                   <Route path="/attack-simulator" element={locked ? <Navigate to="/" replace /> : <ErrorBoundary><AttackSimulator /></ErrorBoundary>} />
                   <Route path="/identities" element={<Navigate to="/identity-explorer/all" replace />} />

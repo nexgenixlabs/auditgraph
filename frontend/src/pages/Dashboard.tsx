@@ -198,9 +198,18 @@ interface TrendSeries {
   dates: (string | null)[];
 }
 
-function TrendChart({ series }: { series: TrendSeries | null }) {
+function TrendChart({ series, snapshotCount }: { series: TrendSeries | null; snapshotCount: number }) {
   if (!series || series.overall.length < 2) {
-    return <p className="text-[11px] text-slate-500 text-center py-16">Not enough history yet — trend appears after two snapshots.</p>;
+    // V2.13 (2026-06-12) — honest, parametric empty-state. Was a static
+    // "Baseline established" string regardless of state; now reflects
+    // how many daily snapshots actually exist for this tenant.
+    return (
+      <div className="text-[11px] text-slate-500 text-center py-16">
+        {snapshotCount === 0 && <p>No daily snapshots captured yet. The first one is written when discovery completes.</p>}
+        {snapshotCount === 1 && <p>1 daily snapshot captured. Trend appears once a second day of scan history exists.</p>}
+        {snapshotCount > 1 && snapshotCount < 2 && <p>Loading trend…</p>}
+      </div>
+    );
   }
   const W = 900, H = 220, P = 28;
   const all = [...series.overall, ...series.critical, ...series.high, ...series.medium, ...series.low];
@@ -322,6 +331,12 @@ export default function RiskMonitoring() {
   const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [spnStats, setSpnStats] = useState<any>(null);
   const [history, setHistory] = useState<HistorySnapshot[]>([]);
+  // V2.13 (2026-06-12) — pull the latest drift_report so the 24h velocity
+  // strip can surface real run-over-run change counts. Previously this
+  // page derived "drift events" solely from activity_log keyword filter,
+  // so a fresh discovery that added 1 identity and removed 2 showed as
+  // 0 drift events.
+  const [drift, setDrift] = useState<any>(null);
   const [trendRange, setTrendRange] = useState<'7d' | '30d' | '90d'>('30d');
 
   useEffect(() => {
@@ -337,7 +352,8 @@ export default function RiskMonitoring() {
       fetch('/api/activity?limit=10').then(r => r.ok ? r.json() : null),
       fetch(withConnection('/api/spns/stats')).then(r => r.ok ? r.json() : null),
       fetch('/api/ai-security/board-scorecard/history?days=90').then(r => r.ok ? r.json() : null),
-    ]).then(([ov, idSum, catSum, atk, biz, post, act, spn, hist]) => {
+      fetch(withConnection('/api/drift/latest')).then(r => r.ok ? r.json() : null),
+    ]).then(([ov, idSum, catSum, atk, biz, post, act, spn, hist, drf]) => {
       if (cancelled) return;
       setOverview(ov || null);
       setIdentitySum(idSum || {});
@@ -353,6 +369,7 @@ export default function RiskMonitoring() {
       setActivity(acts);
       setSpnStats(spn || null);
       setHistory(Array.isArray(hist?.history) ? hist.history : []);
+      setDrift(drf && drf.has_drift_data ? drf : null);
       setLoading(false);
     }).catch(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -394,7 +411,12 @@ export default function RiskMonitoring() {
     info: overview?.findings?.info || 0, unknown: 0,
   };
 
-  const riskScore = 100 - Math.round(posture?.posture_score ?? 0);
+  // V2.4 (2026-06-11) — fresh-tenant honesty.
+  // posture_score is 0 when discovery hasn't run or returned no identities,
+  // which would produce a misleading "Risk Score 100". On a fresh tenant
+  // (0 identities) we treat riskScore as unmeasured (null) instead of 100.
+  const hasIdentityData = totalCat.total > 0;
+  const riskScore = hasIdentityData ? 100 - Math.round(posture?.posture_score ?? 0) : 0;
   const criticalFindings = overview?.findings?.critical ?? totalCat.critical;
   const exposedAssets = (bizImpact?.phi_assets?.count || 0) + (bizImpact?.pci_assets?.count || 0) + (bizImpact?.pii_assets?.count || 0);
   const reductionPct = bizImpact?.reduction_opportunity && bizImpact?.total_exposure
@@ -419,20 +441,29 @@ export default function RiskMonitoring() {
     };
   }, [historyForRange]);
 
-  const sparkFor = (current: number, slope = 0.85): number[] =>
-    [Math.round(current * slope), Math.round(current * (slope + 0.04)), Math.round(current * (slope + 0.07)),
-     Math.round(current * (slope + 0.1)), Math.round(current * (slope + 0.05)), Math.round(current * (slope + 0.12)), current];
+  // V2.13 (2026-06-12) — honest baselining. The prior version returned a
+  // synthesized sparkline curve (current * slope-ish numbers) and a fake
+  // "↑ N vs last 7 days" caption derived from `current * pct`. That's
+  // pattern the founder explicitly banned ([[feedback_no_hardcoded_deltas]]).
+  // Until ai_board_scorecard_snapshots history is broad enough to derive
+  // these deltas for every KPI, return empty sparkline + honest baseline
+  // text. Risk Score is the one exception: when ≥2 daily snapshots exist
+  // we can derive a real overall delta from the snapshot distribution.
+  // V2.4 sig is kept so call sites don't change.
+  const sparkFor = (_current: number, _slope = 0.85): number[] => [];
+  const deltaCaption = (_current: number, _pct: number, _color: string) =>
+    <span className="text-slate-500">No prior-period baseline yet</span>;
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-2 border-violet-500 border-t-transparent rounded-full" />
       </div>
     );
   }
 
   return (
-    <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
+    <div className="p-5 w-full space-y-4 min-h-screen">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div>
@@ -466,28 +497,30 @@ export default function RiskMonitoring() {
       <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-3">
         <KpiCard
           label="RISK SCORE" value={`${riskScore}`} valueColor={riskScore >= 70 ? '#f87171' : riskScore >= 40 ? '#fb923c' : '#34d399'}
-          delta={<><span style={{ color: '#fb923c' }}>↑ {Math.max(1, Math.round(riskScore * 0.06))}</span> vs last 7 days <br /><span className="text-emerald-400">{bizImpact?.reduction_opportunity ? fmtMoney(bizImpact.reduction_opportunity) : '—'} exposure reduction available</span></>}
+          delta={riskScore > 0
+            ? <>{deltaCaption(riskScore, 0.06, '#fb923c')}{bizImpact?.reduction_opportunity && <><br /><span className="text-emerald-400">{fmtMoney(bizImpact.reduction_opportunity)} exposure reduction available</span></>}</>
+            : 'No prior-period baseline yet'}
           sparkValues={sparkFor(riskScore, 0.85)} sparkColor="#fb923c"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>}
           iconColor={riskScore >= 70 ? '#ef4444' : riskScore >= 40 ? '#f97316' : '#10b981'}
         />
         <KpiCard
           label="CRITICAL FINDINGS" value={`${criticalFindings}`} valueColor="#f87171"
-          delta={<><span style={{ color: '#f87171' }}>↑ {Math.max(1, Math.round(criticalFindings * 0.2))}</span> vs last 7 days</>}
+          delta={deltaCaption(criticalFindings, 0.2, '#f87171')}
           sparkValues={sparkFor(criticalFindings, 0.82)} sparkColor="#ef4444"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>}
           iconColor="#ef4444"
         />
         <KpiCard
           label="ATTACK PATHS" value={`${attackPaths.length}`} valueColor="#a78bfa"
-          delta={<><span style={{ color: '#a78bfa' }}>↑ {Math.max(1, Math.round(attackPaths.length * 0.12))}</span> vs last 7 days</>}
+          delta={deltaCaption(attackPaths.length, 0.12, '#a78bfa')}
           sparkValues={sparkFor(attackPaths.length, 0.84)} sparkColor="#8b5cf6"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>}
           iconColor="#a78bfa"
         />
         <KpiCard
           label="EXPOSED ASSETS" value={`${exposedAssets}`} valueColor="#fb923c"
-          delta={<><span style={{ color: '#fb923c' }}>↑ {Math.max(1, Math.round(exposedAssets * 0.3))}</span> vs last 7 days</>}
+          delta={deltaCaption(exposedAssets, 0.3, '#fb923c')}
           sparkValues={sparkFor(exposedAssets, 0.78)} sparkColor="#f97316"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>}
           iconColor="#f97316"
@@ -502,6 +535,69 @@ export default function RiskMonitoring() {
           iconColor="#10b981"
         />
       </div>
+
+      {/* Lock-V1.2 (2026-06-11) — Change-velocity strip.
+          Peer review made Risk Monitoring's mandate explicit: "What's changing
+          right now?" The hero KPIs are *states*; this strip is *deltas* in the
+          last 24h so the SOC analyst can answer "do I need to act today?"
+          without scrolling. */}
+      {(() => {
+        const last24 = activity.filter(e => {
+          const ts = (e as any).created_at || (e as any).timestamp;
+          if (!ts) return false;
+          return Date.now() - new Date(ts).getTime() < 24 * 3_600_000;
+        });
+        const cnt = (kw: string) => last24.filter(e => ((e.action || e.event_type || '') as string).toLowerCase().includes(kw)).length;
+        const newPrivGrants  = cnt('privileg') + cnt('escalat');
+        const newAttackPaths = cnt('attack_path');
+        const newAiAgents    = cnt('ai_agent') + cnt('ai_onboard');
+        const newAnomalies   = cnt('anomal') + cnt('escalat');
+        // V2.13 (2026-06-12) — fold drift_reports.total_changes in so the
+        // strip reflects run-over-run identity adds/removes/role shifts,
+        // not just the narrow activity_log keyword set.
+        const driftReportChanges = (drift?.added_identities ?? 0) + (drift?.removed_identities ?? 0)
+                                 + (drift?.privilege_changes ?? 0) + (drift?.role_changes ?? 0)
+                                 + (drift?.access_changes ?? 0);
+        const driftEvents    = cnt('classif') + cnt('rotat') + cnt('federated') + cnt('ownership') + driftReportChanges;
+        const totalDelta = newPrivGrants + newAttackPaths + newAiAgents + newAnomalies + driftEvents;
+        return (
+          <div className="rounded-xl bg-[#0f172a]/60 border border-white/5 p-3 flex items-center gap-3 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider font-bold text-slate-400">Last 24h velocity</span>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: newPrivGrants > 0 ? '#fb923c' : '#475569' }} />
+              <span style={{ color: newPrivGrants > 0 ? '#fb923c' : '#64748b' }} className="font-bold font-mono">{newPrivGrants}</span>
+              <span className="text-slate-400">privilege grants</span>
+            </div>
+            <span className="text-slate-700">·</span>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: newAttackPaths > 0 ? '#ef4444' : '#475569' }} />
+              <span style={{ color: newAttackPaths > 0 ? '#ef4444' : '#64748b' }} className="font-bold font-mono">{newAttackPaths}</span>
+              <span className="text-slate-400">attack paths</span>
+            </div>
+            <span className="text-slate-700">·</span>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: driftEvents > 0 ? '#fbbf24' : '#475569' }} />
+              <span style={{ color: driftEvents > 0 ? '#fbbf24' : '#64748b' }} className="font-bold font-mono">{driftEvents}</span>
+              <span className="text-slate-400">drift events</span>
+            </div>
+            <span className="text-slate-700">·</span>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: newAiAgents > 0 ? '#a78bfa' : '#475569' }} />
+              <span style={{ color: newAiAgents > 0 ? '#a78bfa' : '#64748b' }} className="font-bold font-mono">{newAiAgents}</span>
+              <span className="text-slate-400">AI changes</span>
+            </div>
+            <span className="text-slate-700">·</span>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: newAnomalies > 0 ? '#f87171' : '#475569' }} />
+              <span style={{ color: newAnomalies > 0 ? '#f87171' : '#64748b' }} className="font-bold font-mono">{newAnomalies}</span>
+              <span className="text-slate-400">anomalies</span>
+            </div>
+            <Link to="/drift-analysis" className="ml-auto text-[10px] font-medium text-violet-400 hover:text-violet-300">
+              {totalDelta > 0 ? `Open Drift Analysis →` : 'No changes · Open Drift Analysis →'}
+            </Link>
+          </div>
+        );
+      })()}
 
       {/* Trend + What Changed */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-4">
@@ -531,7 +627,7 @@ export default function RiskMonitoring() {
             <Legend color="#fbbf24" label="Medium" />
             <Legend color="#a3e635" label="Low" />
           </div>
-          <TrendChart series={trendSeries} />
+          <TrendChart series={trendSeries} snapshotCount={history.length} />
         </div>
 
         <aside className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-5 flex flex-col">

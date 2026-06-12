@@ -319,6 +319,33 @@ export default function RoleMining() {
           sub="of roles actionable" onClick={() => setActiveTab('findings')} />
       </div>
 
+      {/* V2.8 (2026-06-11) — peer review: show risk-reduction estimate so
+          customer sees the value, not just the count. Estimate uses the
+          AuditGraph Methodology v1 weighting: toxic combos sit in the
+          Excessive Privileges factor (30% weight), so closing the top N
+          combos shifts that factor's sub-score proportionally.
+          Formula: ~0.06 pts of overall posture per toxic combo closed,
+          capped at 25 pts (covers the realistic remediation curve). */}
+      {summary.toxic_combos > 0 && (() => {
+        const liftPts = Math.min(25, Math.round(summary.toxic_combos * 0.06 * 10) / 10);
+        return (
+          <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-sm flex items-start gap-3">
+            <span className="w-7 h-7 rounded-lg bg-emerald-100 border border-emerald-300 flex items-center justify-center text-emerald-600 flex-shrink-0">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+            </span>
+            <div className="flex-1">
+              <p className="font-semibold text-emerald-900">
+                Removing these {summary.toxic_combos} toxic combos could lift your Identity Security Score by ~{liftPts} points.
+              </p>
+              <p className="text-[11px] text-emerald-700 mt-0.5">
+                Estimated from AuditGraph Methodology v1 — toxic combos sit in the Excessive Privileges factor (30% weight). Actual lift depends on which combos are closed first.{' '}
+                <Link to="/remediation" className="underline">Open remediation plan →</Link>
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Tab Bar */}
       <div className="flex border-b gap-0">
         {([

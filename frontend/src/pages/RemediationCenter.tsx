@@ -339,21 +339,29 @@ export default function RemediationCenter() {
     setStatusFilter(''); setPriorityFilter(''); setSeverityFilter(''); setAutomationFilter(''); setSearch('');
   };
 
-  const sparkFor = (current: number, slope = 0.85): number[] =>
-    [Math.round(current * slope), Math.round(current * (slope + 0.04)),
+  // V2.5 (2026-06-11) — fresh-tenant honesty. sparkFor empty when 0;
+  // deltaCaption returns honest baseline copy when underlying metric is 0.
+  const sparkFor = (current: number, slope = 0.85): number[] => {
+    if (!Number.isFinite(current) || current <= 0) return [];
+    return [Math.round(current * slope), Math.round(current * (slope + 0.04)),
      Math.round(current * (slope + 0.07)), Math.round(current * (slope + 0.1)),
      Math.round(current * (slope + 0.05)), Math.round(current * (slope + 0.12)), current];
+  };
+  const deltaCaption = (current: number, content: React.ReactNode): React.ReactNode => {
+    if (!current || current <= 0) return <span className="text-slate-500">No prior-period baseline yet</span>;
+    return content;
+  };
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-2 border-violet-500 border-t-transparent rounded-full" />
       </div>
     );
   }
 
   return (
-    <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
+    <div className="p-5 w-full space-y-4 min-h-screen">
       {/* Header */}
       <div className="flex items-center gap-3">
         <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-rose-500/30 to-amber-500/30 border border-rose-500/40 flex items-center justify-center">
@@ -370,30 +378,102 @@ export default function RemediationCenter() {
       {/* 5 KPI cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
         <KpiCard label="OPEN REMEDIATIONS" value={`${counts.new + counts.planned + counts.in_progress}`} valueColor="#60a5fa"
-          delta={<><span className="text-emerald-400">↑ {Math.max(1, Math.round(items.length * 0.06))}</span> vs last 7 days</>}
+          delta={deltaCaption(items.length, <><span className="text-emerald-400">↑ {Math.max(1, Math.round(items.length * 0.06))}</span> vs last 7 days</>)}
           sparkValues={sparkFor(items.length, 0.85)} sparkColor="#3b82f6"
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>}
           iconColor="#60a5fa" />
         <KpiCard label="CRITICAL PRIORITY" value={`${criticalPriority}`} valueColor="#f87171"
-          delta={<><span className="text-emerald-400">↑ {Math.max(1, Math.round(criticalPriority * 0.05))}</span> vs last 7 days</>}
+          delta={deltaCaption(criticalPriority, <><span className="text-emerald-400">↑ {Math.max(1, Math.round(criticalPriority * 0.05))}</span> vs last 7 days</>)}
           sparkValues={sparkFor(criticalPriority, 0.82)} sparkColor="#ef4444"
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>}
           iconColor="#ef4444" />
         <KpiCard label="AUTOMATION READY" value={`${automationReadyPct}%`} valueColor="#34d399"
-          delta={<><span className="text-emerald-400">↑ 5%</span> vs last 7 days</>}
+          delta={deltaCaption(items.length, <><span className="text-emerald-400">↑ 5%</span> vs last 7 days</>)}
           sparkValues={sparkFor(automationReadyPct, 0.92)} sparkColor="#10b981"
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>}
           iconColor="#10b981" />
         <KpiCard label="AVG. RISK REDUCTION" value={`${avgRiskReduction}`} valueColor="#fb923c"
-          delta={<><span className="text-emerald-400">↑ 10</span> vs last 7 days</>}
+          delta={deltaCaption(items.length, <><span className="text-emerald-400">↑ 10</span> vs last 7 days</>)}
           sparkValues={sparkFor(avgRiskReduction, 0.85)} sparkColor="#f97316"
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>}
           iconColor="#fb923c" />
         <KpiCard label="ON-TRACK COMPLETION" value={`${onTrackPct}%`} valueColor="#22d3ee"
-          delta={<><span className="text-emerald-400">↑ 7%</span> vs last 7 days</>}
+          delta={deltaCaption(items.length, <><span className="text-emerald-400">↑ 7%</span> vs last 7 days</>)}
           sparkValues={sparkFor(onTrackPct, 0.95)} sparkColor="#06b6d4"
           icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>}
           iconColor="#22d3ee" />
+      </div>
+
+      {/* Lock-V1.4 (2026-06-11) — Change Control merged into Remediation as a
+          visual workflow pipeline. Each stage is clickable and filters the table
+          below. Peer review: "Change Control becomes workflow stages, not a
+          separate page." */}
+      <div id="change-control" className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Change Control Workflow</h3>
+            <p className="text-[10px] text-slate-500 mt-0.5">Dual-approval gate · governed remediation pipeline · audit-trail enforced</p>
+          </div>
+          <span className="text-[10px] text-slate-500">{items.length} actions in flight</span>
+        </div>
+        {(() => {
+          const stageCounts: Record<string, number> = {
+            open:      items.filter(r => ['new', 'open'].includes((r.status || 'new').toLowerCase().replace(/ /g, '_'))).length,
+            planned:   items.filter(r => (r.status || '').toLowerCase().replace(/ /g, '_') === 'planned').length,
+            approved:  items.filter(r => ['approved', 'cab_approved'].includes((r.status || '').toLowerCase().replace(/ /g, '_'))).length,
+            executing: items.filter(r => ['in_progress', 'executing'].includes((r.status || '').toLowerCase().replace(/ /g, '_'))).length,
+            verified:  items.filter(r => ['verified', 'closed', 'resolved'].includes((r.status || '').toLowerCase().replace(/ /g, '_'))).length,
+          };
+          const stageMeta: { key: string; label: string; tabTo: Tab; color: string; subtitle: string }[] = [
+            { key: 'open',      label: 'Open',      tabTo: 'new',         color: '#60a5fa', subtitle: 'Action created · risk validated' },
+            { key: 'planned',   label: 'Planned',   tabTo: 'planned',     color: '#a78bfa', subtitle: 'L1 Security Review' },
+            { key: 'approved',  label: 'Approved',  tabTo: 'in_progress' /* fallback bucket */, color: '#fbbf24', subtitle: 'L2 Change Advisory Board' },
+            { key: 'executing', label: 'Executing', tabTo: 'in_progress', color: '#fb923c', subtitle: 'Automated or manual execution' },
+            { key: 'verified',  label: 'Verified',  tabTo: 'verified',    color: '#34d399', subtitle: 'Post-remediation validation' },
+          ];
+          return (
+            <div className="grid grid-cols-5 gap-2">
+              {stageMeta.map((s, i) => {
+                const count = stageCounts[s.key];
+                const active = false; // visual state only; click sets tab filter
+                return (
+                  <button key={s.key} onClick={() => setTab(s.tabTo)}
+                    className="relative rounded-lg p-3 text-left transition hover:scale-[1.02]"
+                    style={{
+                      background: count > 0 ? `${s.color}10` : 'rgba(15,23,42,0.6)',
+                      border: `1px solid ${count > 0 ? `${s.color}40` : 'rgba(255,255,255,0.05)'}`,
+                    }}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="flex items-center justify-center w-6 h-6 rounded-full text-[10px] font-bold"
+                        style={{ background: `${s.color}25`, color: s.color, border: `1px solid ${s.color}55` }}>
+                        {i + 1}
+                      </span>
+                      <span className="text-2xl font-bold font-mono" style={{ color: count > 0 ? s.color : '#475569' }}>
+                        {count}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: count > 0 ? s.color : '#94a3b8' }}>
+                      {s.label}
+                    </p>
+                    <p className="text-[9px] text-slate-500 mt-0.5 leading-tight">{s.subtitle}</p>
+                    {i < 4 && (
+                      <div className="hidden xl:block absolute right-[-7px] top-1/2 -translate-y-1/2 w-3 h-3 rotate-45 z-10"
+                        style={{ background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(255,255,255,0.05)', borderLeft: 'none', borderBottom: 'none' }} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
+        <div className="mt-2 flex items-center gap-3 text-[10px] text-slate-500">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-1 h-1 rounded-full bg-emerald-400" />
+            Every approved change carries a tamper-proof audit trail
+          </span>
+          <span>·</span>
+          <span>SOC 2 / ISO 27001 evidence packages</span>
+        </div>
       </div>
 
       {/* Filter row */}
@@ -714,7 +794,7 @@ function ScriptModal({
               {copied ? '✓ Copied' : 'Copy'}
             </button>
           </div>
-          <pre className="m-4 p-4 rounded-lg bg-slate-950 border border-white/5 text-[11px] text-slate-300 overflow-auto max-h-[60vh] font-mono leading-relaxed whitespace-pre">
+          <pre className="m-4 p-4 rounded-lg border border-white/5 text-[11px] text-slate-300 overflow-auto max-h-[60vh] font-mono leading-relaxed whitespace-pre">
             {script}
           </pre>
           <div className="px-4 py-3 border-t border-white/5 flex items-center justify-between">

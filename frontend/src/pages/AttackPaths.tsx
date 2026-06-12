@@ -41,7 +41,9 @@ const TYPE_LABELS: Record<string, string> = {
   privilege_accumulation: 'Privilege Accumulation',
 };
 
-export default function AttackPaths() {
+interface AttackPathsProps { forceSourceType?: string }
+
+export default function AttackPaths({ forceSourceType }: AttackPathsProps = {}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [paths, setPaths] = useState<AttackPath[]>([]);
@@ -53,7 +55,9 @@ export default function AttackPaths() {
   // (human/nhi/ai/cicd) and the backend filters ap.source_entity_type
   // accordingly. Issue #3 + #4: prior page ignored the param and rendered
   // every bucket's paths everywhere.
-  const sourceType = (searchParams.get('source_type') || '').toLowerCase();
+  // Lock-V2 (2026-06-11) — `forceSourceType` prop lets bucket pages embed
+  // this without depending on URL params (the parent owns ?tab= state).
+  const sourceType = (forceSourceType || searchParams.get('source_type') || '').toLowerCase();
   const [sortCol, setSortCol] = useState<string>('risk_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -73,12 +77,16 @@ export default function AttackPaths() {
   }, [sevFilter, typeFilter, sourceType]);
 
   useEffect(() => {
+    // Lock-V2 (2026-06-11) — when embedded inside a bucket page (forceSourceType
+    // set), the parent owns the ?tab= URL state. Do NOT clobber the URL here
+    // or we wipe ?tab=attack-paths and snap the parent back to Overview.
+    if (forceSourceType) return;
     const p = new URLSearchParams();
     if (sevFilter) p.set('severity', sevFilter);
     if (typeFilter) p.set('path_type', typeFilter);
     if (sourceType) p.set('source_type', sourceType);
     setSearchParams(p, { replace: true });
-  }, [sevFilter, typeFilter, sourceType, setSearchParams]);
+  }, [sevFilter, typeFilter, sourceType, setSearchParams, forceSourceType]);
 
   const scopeTitle = sourceType === 'human' ? 'Human Attack Paths'
                    : sourceType === 'nhi'   ? 'Non-Human Attack Paths'

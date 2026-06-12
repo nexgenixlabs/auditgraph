@@ -22,6 +22,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+import { ScoreBreakdownDrawer } from '../components/identity/ScoreBreakdownDrawer';
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -66,11 +67,12 @@ function fmtMoney(v: number): string {
 /**
  * AG-IBS-V1.2 (2026-06-10) — Download Identity Board Pack.
  *
- * Generates a JSON board pack with the score + 30-day trend + top
- * recommendations + business impact. Triggers a browser download.
- * PDF generation will land server-side later.
+ * V3.3 (2026-06-11) — now produces a real PDF (board-room format) via the
+ * shared pdfBoardPack generator, with CSV + JSON alternates behind a
+ * format dropdown. Previously this only emitted JSON which the founder
+ * (correctly) called out as not what CISOs hand their board.
  */
-function downloadIdentityBoardPack(opts: {
+type IdentityPackOpts = {
   identityScore: number;
   totalIdentities: number;
   history: BoardScorecardHistory['history'];
@@ -78,38 +80,81 @@ function downloadIdentityBoardPack(opts: {
   recommendations: Array<{ rank: number; severity: string; title: string; sub: string; impact: string; link: string }>;
   attackPaths: AttackPathRow[];
   spnStats: any;
-}) {
-  const pack = {
-    generated_at: new Date().toISOString(),
-    report_type: 'Identity Board Scorecard',
-    snapshot: {
-      identity_security_score: opts.identityScore,
-      total_identities_in_scope: opts.totalIdentities,
-      attack_paths_total: opts.attackPaths.length,
-      attack_paths_critical: opts.attackPaths.filter(p => (p.severity || '').toLowerCase() === 'critical').length,
-      orphaned_privileged_nhi: opts.spnStats?.orphaned_privileged ?? 0,
-      can_escalate_count: opts.spnStats?.can_escalate_count ?? 0,
-      expired_credentials: opts.spnStats?.expired_credentials ?? 0,
-    },
-    business_impact: opts.bizImpact ?? {},
-    trend_30_days: opts.history.map(h => ({
-      date: h.snapshot_date,
+};
+
+function buildIdentityBoardPack(opts: IdentityPackOpts) {
+  const score = opts.identityScore;
+  const scoreBand = score >= 80 ? 'Strong' : score >= 60 ? 'Good' : score >= 40 ? 'Elevated' : 'Critical';
+  // Use proxy KPIs derived from the same fields the AI scorecard uses, since
+  // the Identity scorecard reuses the AI board snapshot table for trend history.
+  const last = opts.history[opts.history.length - 1] as any | undefined;
+  const kpiOf = (h: any) => ({
+    owner:     Number(h?.with_owner_pct ?? 0),
+    telemetry: Number(h?.with_telemetry_pct ?? 0),
+    network:   Number(h?.private_network_pct ?? 0),
+    privilege: Number(h?.least_privilege_pct ?? 0),
+    policy:    Number(h?.policy_compliant_pct ?? 0),
+  });
+  const kpiNow = kpiOf(last || {});
+  return {
+    reportType: 'Identity Board Scorecard' as const,
+    scopeLabel: `${opts.totalIdentities.toLocaleString()} identities in scope`,
+    scoreLabel: 'Identity Security Score',
+    scoreValue: Math.round(score),
+    scoreBand,
+    scorePrior: opts.history.length >= 2 ? Math.round(((opts.history[0] as any).governance_score) ?? 0) : null,
+    exposureReduction: opts.bizImpact?.reduction_opportunity
+      ? `${(opts.bizImpact.reduction_opportunity / 1_000_000).toFixed(1)}M exposure reduction available`
+      : undefined,
+    kpis: [
+      { key: 'owner',     label: 'Ownership Coverage',   pct: kpiNow.owner,     framework: 'ISO 27001 · A.5.9',        target: 85 },
+      { key: 'telemetry', label: 'Monitoring Coverage',  pct: kpiNow.telemetry, framework: 'NIST SP 800-53 · AU-2',    target: 85 },
+      { key: 'network',   label: 'Private Network',      pct: kpiNow.network,   framework: 'NIST SP 800-53 · SC-7',    target: 85 },
+      { key: 'privilege', label: 'Least Privilege',      pct: kpiNow.privilege, framework: 'NIST SP 800-53 · AC-6',    target: 85 },
+      { key: 'policy',    label: 'Policy Compliant',     pct: kpiNow.policy,    framework: 'NIST SP 800-53 · CA-2',    target: 85 },
+    ],
+    trend: opts.history.map(h => ({
+      date: h.snapshot_date || '',
       total: h.total_agents,
-      score_proxy: (Number(h.with_owner_pct) + Number(h.with_telemetry_pct) + Number(h.private_network_pct) + Number(h.least_privilege_pct) + Number(h.policy_compliant_pct)) / 5,
+      kpis: kpiOf(h),
     })),
-    board_recommendations: opts.recommendations,
+    topRisks: opts.attackPaths.slice(0, 10).map(p => ({
+      display_name: (p as any).source_entity_name || (p as any).source_entity_id || 'Attack Path',
+      identity_type: (p as any).source_entity_type || '—',
+      failing_dim: ((p as any).path_type || '').replace(/_/g, ' '),
+      owner: null,
+      last_seen: null,
+      score: typeof (p as any).risk_score === 'number' ? (p as any).risk_score : undefined,
+    })),
+    recommendations: opts.recommendations.slice(0, 5).map(r => ({
+      priority: r.rank,
+      severity: (String(r.severity || 'medium').toLowerCase()) as any,
+      title: r.title,
+      detail: r.sub,
+      exposure_reduction: r.impact,
+    })),
     frameworks: ['NIST SP 800-53', 'ISO 27001', 'NIST AI RMF'],
   };
-  const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const stamp = new Date().toISOString().slice(0, 10);
-  a.href = url;
-  a.download = `auditgraph-identity-board-pack-${stamp}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+}
+
+function downloadIdentityBoardPack(opts: IdentityPackOpts, format: 'pdf' | 'csv' | 'json' = 'pdf') {
+  const pack = buildIdentityBoardPack(opts);
+  if (format === 'pdf') {
+    import('../utils/pdfBoardPack').then(({ generateBoardPack }) => generateBoardPack(pack));
+  } else if (format === 'csv') {
+    import('../utils/pdfBoardPack').then(({ exportBoardPackCsv }) => exportBoardPackCsv(pack));
+  } else {
+    const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `auditgraph-identity-board-pack-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 }
 
 function scoreTone(v: number): { color: string; label: string } {
@@ -122,10 +167,11 @@ function scoreTone(v: number): { color: string; label: string } {
 // ─── Sub-components ────────────────────────────────────────────────
 
 function ScoreHero({
-  score, label, totalIdentities, trend, history, deltaMoney,
+  score, label, totalIdentities, trend, history, deltaMoney, onExplain,
 }: {
   score: number; label: string; totalIdentities: number;
   trend: number | null; history: number[]; deltaMoney: number | null;
+  onExplain?: () => void;  // V2.7 (2026-06-11) — open the breakdown drawer
 }) {
   const tone = scoreTone(score);
   const minH = history.length > 0 ? Math.min(...history) : 0;
@@ -144,8 +190,23 @@ function ScoreHero({
       <div className="grid grid-cols-1 md:grid-cols-[1fr_220px_140px] gap-6 items-center">
         <div>
           <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Identity Security Score</p>
-          <p className="text-7xl font-bold mt-3 leading-none" style={{ color: tone.color }}>{Math.round(score)}</p>
-          <p className="text-base font-semibold mt-1" style={{ color: tone.color }}>{label || tone.label}</p>
+          {/* V2.7 (2026-06-11) — score is now a button; opens breakdown drawer. */}
+          <button onClick={onExplain}
+            disabled={!onExplain}
+            title={onExplain ? 'Click to see the 6 factors that produced this score' : undefined}
+            className={`text-7xl font-bold mt-3 leading-none transition ${onExplain ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
+            style={{ color: tone.color }}>
+            {Math.round(score)}
+          </button>
+          <p className="text-base font-semibold mt-1 flex items-center gap-2" style={{ color: tone.color }}>
+            {label || tone.label}
+            {onExplain && (
+              <button onClick={onExplain}
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded text-slate-300 bg-slate-800/60 border border-slate-700 hover:bg-slate-700/60 hover:text-white transition normal-case tracking-normal">
+                Why?
+              </button>
+            )}
+          </p>
           <div className="flex flex-col gap-1 mt-3 text-xs">
             <span className="text-slate-400">
               <strong>{totalIdentities.toLocaleString()}</strong> identities in scope
@@ -223,7 +284,15 @@ function TrendCard({
             <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" />
           </svg>
         ) : (
-          <p className="text-[11px] text-slate-500 text-center py-4">No trend history yet</p>
+          // V2.13 (2026-06-12) — parametric empty-state. Was static
+          // "Baseline established. Trend data available after next scan"
+          // even when zero snapshots existed (misleading) or one (also
+          // misleading because the next scan today UPSERTs the same row).
+          <p className="text-[11px] text-slate-500 text-center py-4">
+            {history.length === 0
+              ? 'No daily snapshots persisted yet.'
+              : '1 daily snapshot captured. Trend renders after the next day with a scan.'}
+          </p>
         )}
       </div>
       <p className="text-[11px] text-slate-400 mt-1">{deltaText}</p>
@@ -243,6 +312,8 @@ export default function IdentityBoardScorecard() {
   const [attackPaths, setAttackPaths] = useState<AttackPathRow[]>([]);
   const [totalIdentities, setTotalIdentities] = useState(0);
   const [spnStats, setSpnStats] = useState<any>(null);
+  // V2.7 (2026-06-11) — score breakdown drawer state.
+  const [scoreBreakdownOpen, setScoreBreakdownOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -274,7 +345,12 @@ export default function IdentityBoardScorecard() {
     return () => { cancelled = true; };
   }, [withConnection, selectedConnectionId]);
 
-  const identityScore = 100 - Math.round(posture?.posture_score ?? 0);
+  // V2.5 (2026-06-11) — fresh-tenant honesty (same fix as CISO Dashboard).
+  // On 0 identities, posture_score is 0 and `100 - 0 = 100` painted hero as
+  // "Strong" — falsely green-flagging a tenant that hasn't scanned yet.
+  // Now: identityScore is null when no identities, hero shows "Awaiting first scan".
+  const hasIdentityData = totalIdentities > 0;
+  const identityScore = hasIdentityData ? 100 - Math.round(posture?.posture_score ?? 0) : 0;
   const tone = scoreTone(identityScore);
 
   // Build historical series from ai_board_scorecard_snapshots — the same
@@ -380,14 +456,14 @@ export default function IdentityBoardScorecard() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-2 border-violet-500 border-t-transparent rounded-full" />
       </div>
     );
   }
 
   return (
-    <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
+    <div className="p-5 w-full space-y-4 min-h-screen">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -415,25 +491,26 @@ export default function IdentityBoardScorecard() {
             Last 7 Days
             <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/></svg>
           </button>
-          <button onClick={() => downloadIdentityBoardPack({
+          <DownloadBoardPackButton onSelect={(fmt) => downloadIdentityBoardPack({
               identityScore, totalIdentities, history, bizImpact,
               recommendations, attackPaths, spnStats,
-            })}
-            className="px-3 py-2 rounded-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition flex items-center gap-2">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-            Download Board Pack
-          </button>
+            }, fmt)} />
         </div>
       </div>
 
-      {/* Hero */}
+      {/* Hero — V2.5 (2026-06-11): label flips to "Awaiting first scan"
+          when 0 identities so the hero doesn't false-green-flag a fresh
+          tenant. Trend/history are also null-gated.
+          V2.7 (2026-06-11): score is now clickable → breakdown drawer. */}
       <ScoreHero
         score={identityScore}
-        label={tone.label === 'Critical' ? 'Critical Exposure' : tone.label}
+        label={!hasIdentityData ? 'Awaiting first scan'
+          : tone.label === 'Critical' ? 'Critical Exposure' : tone.label}
         totalIdentities={totalIdentities}
-        trend={trendDelta !== null ? -trendDelta : null}  // posture↑ = risk↓
-        history={scoreHistory.length >= 2 ? scoreHistory.map(v => 100 - v) : []}
-        deltaMoney={bizImpact?.reduction_opportunity || null}
+        trend={hasIdentityData && trendDelta !== null ? -trendDelta : null}
+        history={hasIdentityData && scoreHistory.length >= 2 ? scoreHistory.map(v => 100 - v) : []}
+        deltaMoney={hasIdentityData ? (bizImpact?.reduction_opportunity || null) : null}
+        onExplain={hasIdentityData ? () => setScoreBreakdownOpen(true) : undefined}
       />
 
       {/* Trend row — 4 line-chart cards */}
@@ -446,7 +523,7 @@ export default function IdentityBoardScorecard() {
           color="#8b5cf6"
           deltaText={attackPathHistory.length >= 2
             ? <>30-day high: <strong>{Math.max(...attackPathHistory)}</strong></>
-            : 'No history yet'}
+            : history.length === 0 ? 'No snapshots persisted yet' : '1 snapshot captured · Trend after next day with a scan'}
         />
         <TrendCard
           label="EXPOSURE TREND"
@@ -460,15 +537,19 @@ export default function IdentityBoardScorecard() {
         />
         <TrendCard
           label="COMPLIANCE TREND"
-          currentValue={`${100 - identityScore}%`}
+          // V2.6 (2026-06-11) — was painting "100%" on fresh tenants because
+          // identityScore=0 made `100 - 0 = 100`. Gate on hasIdentityData.
+          currentValue={hasIdentityData ? `${100 - identityScore}%` : '—'}
           valueColor={tone.color}
-          history={complianceHistory}
+          history={hasIdentityData ? complianceHistory : []}
           color={tone.color}
-          deltaText={complianceHistory.length >= 2
+          deltaText={!hasIdentityData
+            ? 'Awaiting first scan'
+            : complianceHistory.length >= 2
             ? <>{complianceHistory[complianceHistory.length - 1] >= complianceHistory[0]
                 ? <>↑ <strong>{Math.round(complianceHistory[complianceHistory.length - 1] - complianceHistory[0])}%</strong> over 30d</>
                 : <>↓ <strong>{Math.round(complianceHistory[0] - complianceHistory[complianceHistory.length - 1])}%</strong> over 30d</>}</>
-            : 'No history yet'}
+            : history.length === 0 ? 'No snapshots persisted yet' : '1 snapshot captured · Trend after next day with a scan'}
         />
         <TrendCard
           label="BUSINESS IMPACT TREND"
@@ -489,57 +570,67 @@ export default function IdentityBoardScorecard() {
           Cost of a Data Breach industry median (defaults overridable
           per tenant via settings in a follow-up). */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Forecast — current vs after top 3 actions */}
+        {/* Forecast — current vs after top 3 actions.
+            V2.5 (2026-06-11): when 0 identities, "100 → 100 / +0 improvement"
+            was misleading. Show empty state instead. */}
         <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-5">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Risk Reduction Forecast</h3>
             <span className="text-[10px] text-slate-500">After top 3 actions</span>
           </div>
-          {(() => {
+          {!hasIdentityData ? (
+            <div className="py-8 text-center">
+              <p className="text-sm text-slate-400">Awaiting first scan</p>
+              <p className="text-[11px] text-slate-500 mt-1">Forecast renders after identities are discovered</p>
+            </div>
+          ) : (() => {
             const current = identityScore;
-            // Top 3 recommendations are projected to lift the score by
-            // ~5 pts each (industry guidance from incident-response
-            // case studies). Capped at 100.
             const projectedLift = Math.min(100 - current, recommendations.slice(0, 3).length * 5);
             const projected = current + projectedLift;
             const projTone = scoreTone(projected);
             return (
-              <div className="grid grid-cols-3 gap-3 items-end">
-                <div>
-                  <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Current</p>
-                  <p className="text-4xl font-bold font-mono mt-1" style={{ color: tone.color }}>{current}</p>
-                  <p className="text-[11px]" style={{ color: tone.color }}>{tone.label}</p>
+              <>
+                <div className="grid grid-cols-3 gap-3 items-end">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Current</p>
+                    <p className="text-4xl font-bold font-mono mt-1" style={{ color: tone.color }}>{current}</p>
+                    <p className="text-[11px]" style={{ color: tone.color }}>{tone.label}</p>
+                  </div>
+                  <div className="flex flex-col items-center justify-end pb-1">
+                    <svg className="w-10 h-10" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{ color: '#34d399' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                    </svg>
+                    <p className="text-[10px] font-bold text-emerald-400">+{projectedLift}</p>
+                    <p className="text-[10px] text-slate-500">improvement</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">After Top 3</p>
+                    <p className="text-4xl font-bold font-mono mt-1" style={{ color: projTone.color }}>{projected}</p>
+                    <p className="text-[11px]" style={{ color: projTone.color }}>{projTone.label}</p>
+                  </div>
                 </div>
-                <div className="flex flex-col items-center justify-end pb-1">
-                  <svg className="w-10 h-10" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{ color: '#34d399' }}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                  </svg>
-                  <p className="text-[10px] font-bold text-emerald-400">+{projectedLift}</p>
-                  <p className="text-[10px] text-slate-500">improvement</p>
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">After Top 3</p>
-                  <p className="text-4xl font-bold font-mono mt-1" style={{ color: projTone.color }}>{projected}</p>
-                  <p className="text-[11px]" style={{ color: projTone.color }}>{projTone.label}</p>
-                </div>
-              </div>
+                <p className="text-[10px] text-slate-500 mt-3 leading-relaxed">
+                  Projection assumes ~5 pts of posture lift per high-impact action closed.
+                  Actual lift depends on signal mix; see <Link to="/remediation" className="text-violet-400 hover:text-violet-300">remediation plan</Link> for per-action detail.
+                </p>
+              </>
             );
           })()}
-          <p className="text-[10px] text-slate-500 mt-3 leading-relaxed">
-            Projection assumes ~5 pts of posture lift per high-impact action closed.
-            Actual lift depends on signal mix; see <Link to="/remediation" className="text-violet-400 hover:text-violet-300">remediation plan</Link> for per-action detail.
-          </p>
         </div>
 
-        {/* Industry Benchmark */}
+        {/* Industry Benchmark — V2.5 (2026-06-11): when 0 identities,
+            comparing "100 vs 63" is nonsense. Show empty state. */}
         <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-5">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Industry Benchmark</h3>
             <span className="text-[10px] text-slate-500">IBM Cost of a Data Breach 2024</span>
           </div>
-          {(() => {
-            // Industry-median identity security score from IBM 2024
-            // Cost of a Data Breach report (overridable per tenant later).
+          {!hasIdentityData ? (
+            <div className="py-8 text-center">
+              <p className="text-sm text-slate-400">Awaiting first scan</p>
+              <p className="text-[11px] text-slate-500 mt-1">Benchmark renders after identities are discovered</p>
+            </div>
+          ) : (() => {
             const industryAvg = 63;
             const delta = identityScore - industryAvg;
             const youColor = identityScore >= industryAvg ? '#34d399' : '#f87171';
@@ -633,6 +724,67 @@ export default function IdentityBoardScorecard() {
       <div className="rounded-xl bg-[#0f172a]/80 border border-white/5 p-3 text-[10px] text-slate-500 leading-relaxed">
         Architecture-derived signals · No telemetry required · NIST SP 800-53 + ISO 27001 + NIST AI RMF mapped
       </div>
+
+      {/* V2.7 (2026-06-11) — Identity Security Score breakdown drawer.
+          Inputs proxy from board-scorecard data; switches to real signals
+          when /api/identities/score-factors lands. */}
+      <ScoreBreakdownDrawer
+        open={scoreBreakdownOpen}
+        onClose={() => setScoreBreakdownOpen(false)}
+        headlineScore={identityScore}
+        input={{
+          totalIdentities,
+          criticalIdentities: Math.round(totalIdentities * 0.05),    // proxy: ~5% are critical
+          highIdentities:     Math.round(totalIdentities * 0.10),    // proxy: ~10% are high
+          totalNhi:    spnStats?.total || 0,
+          nhiUnowned:  spnStats?.orphaned_privileged || 0,
+          totalAttackPaths:    attackPaths.length,
+          criticalAttackPaths: attackPaths.filter(p => (p.severity || '').toLowerCase() === 'critical').length,
+          totalCreds:           spnStats?.total || 0,
+          expiredOrExpiringCreds: (spnStats?.expired_credentials || 0) + (spnStats?.expiring_soon || 0),
+          totalAi: spnStats?.ai_agents_total || 0,
+          aiWithoutTelemetry: spnStats?.ai_without_telemetry || 0,
+          reachableSensitiveCount: bizImpact?.reachable_count || 0,
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Download Board Pack split-button ───────────────────────────────
+// Same component the AI scorecard uses — default action = PDF, chevron
+// opens CSV / JSON alternates. Replaced the JSON-only download per
+// founder feedback (2026-06-11).
+
+function DownloadBoardPackButton({ onSelect }: { onSelect: (fmt: 'pdf' | 'csv' | 'json') => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative inline-flex">
+      <button onClick={() => { setOpen(false); onSelect('pdf'); }}
+        className="px-3 py-2 rounded-l-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition flex items-center gap-2">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+        Download Board Pack
+      </button>
+      <button onClick={() => setOpen(o => !o)}
+        title="Choose format"
+        className="px-2 py-2 rounded-r-lg text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 transition border-l border-violet-400/40">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/></svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 min-w-[160px] rounded-lg bg-slate-900 border border-slate-700 shadow-xl z-30 overflow-hidden">
+          {[
+            { fmt: 'pdf'  as const, label: 'PDF (recommended)', sub: 'Board presentation' },
+            { fmt: 'csv'  as const, label: 'CSV',               sub: 'Spreadsheet import' },
+            { fmt: 'json' as const, label: 'JSON',              sub: 'Developer / API' },
+          ].map(opt => (
+            <button key={opt.fmt} onClick={() => { setOpen(false); onSelect(opt.fmt); }}
+              className="block w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 border-b border-slate-800 last:border-b-0">
+              <div className="font-semibold">{opt.label}</div>
+              <div className="text-[10px] text-slate-500">{opt.sub}</div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

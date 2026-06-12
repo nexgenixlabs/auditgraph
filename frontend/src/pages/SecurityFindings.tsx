@@ -262,37 +262,73 @@ export default function SecurityFindings() {
     return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 6);
   }, [findings]);
 
-  // Trend series. We don't persist findings history yet — synthesize from
-  // current totals using a smoothed deterministic curve (same pattern as
-  // Risk Monitoring / IOC sparklines). 30 → trendDays daily points.
+  // Trend series.
+  // V2.13 (2026-06-12) — was synthesizing the chart from current totals
+  // with a sine wave + slope ("we don't persist findings history yet").
+  // Founder rule: no hardcoding. The findings list already carries
+  // `detected_at`; we bucket the real timestamps by day so the chart
+  // shows actual discovery cadence instead of a fabricated curve.
+  // When zero days have any findings, the chart falls back to the
+  // empty-state instead of inventing data.
   const trendDays = trendRange === '7d' ? 7 : trendRange === '90d' ? 90 : 30;
   const trendSeries = useMemo(() => {
-    const slope = (days: number, current: number, base = 0.75) =>
-      Array.from({ length: days }, (_, i) => {
-        const t = i / Math.max(1, days - 1);
-        const wave = Math.sin((i / days) * Math.PI * 3) * (current * 0.08);
-        return Math.max(0, Math.round(current * (base + t * (1 - base)) + wave));
-      });
+    const buckets: Record<string, { critical: number; high: number; medium: number; low: number }> = {};
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    for (let i = 0; i < trendDays; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - (trendDays - 1 - i));
+      buckets[d.toISOString().slice(0, 10)] = { critical: 0, high: 0, medium: 0, low: 0 };
+    }
+    for (const f of findings) {
+      if (!f.detected_at) continue;
+      const k = f.detected_at.slice(0, 10);
+      const b = buckets[k];
+      if (!b) continue;
+      const sev = (f.severity || '').toLowerCase();
+      if (sev === 'critical' || sev === 'high' || sev === 'medium' || sev === 'low') {
+        b[sev as 'critical' | 'high' | 'medium' | 'low']++;
+      }
+    }
+    const dates = Object.keys(buckets).sort();
     return {
-      critical: slope(trendDays, sevCounts.critical * 4),
-      high:     slope(trendDays, sevCounts.high     * 2),
-      medium:   slope(trendDays, sevCounts.medium   * 1.5),
-      low:      slope(trendDays, sevCounts.low      * 1),
+      critical: dates.map(d => buckets[d].critical),
+      high:     dates.map(d => buckets[d].high),
+      medium:   dates.map(d => buckets[d].medium),
+      low:      dates.map(d => buckets[d].low),
     };
-  }, [sevCounts, trendDays]);
+  }, [findings, trendDays]);
 
-  const sparkFor = (current: number, slope = 0.85): number[] =>
-    [Math.round(current * slope), Math.round(current * (slope + 0.04)),
-     Math.round(current * (slope + 0.07)), Math.round(current * (slope + 0.1)),
-     Math.round(current * (slope + 0.05)), Math.round(current * (slope + 0.12)), current];
+  // V2.13 (2026-06-12) — honest baselining (same fix as Dashboard.tsx).
+  // Previously synthesized a sparkline + "↑ N vs last 7 days" caption
+  // from the current value with a hardcoded slope; rule
+  // [[feedback_no_hardcoded_deltas]] forbids this. Returns empty until a
+  // real per-day findings snapshot endpoint lands.
+  const sparkFor = (_current: number, _slope = 0.85): number[] => [];
+  // V2.13 (2026-06-12) — always honest baseline. Prior fix only suppressed
+  // the fake delta when current=0; for non-zero values it still showed
+  // "↑ N vs last 7 days" synthesized from `current * pct`, which is the
+  // exact pattern [[feedback_no_hardcoded_deltas]] bans.
+  const deltaCaption = (_current: number, _pct: number, _color: string, _dir: '↑' | '↓' = '↑'): React.ReactNode =>
+    <span className="text-slate-500">No prior-period baseline yet</span>;
 
-  // Filtered table data
+  // Filtered table data.
+  // V2.9 (2026-06-12) — peer review fix: clicking a Top Category was
+  // setting `search` to the friendly label (e.g. "Unused Service Principal"),
+  // but the filter only matched on rule_name + identity_name. Only "Attack
+  // Path" worked because that string appears in the rule_name. Now: also
+  // match when categoryLabel(rule_type) equals the search verbatim, so any
+  // category click filters correctly.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return findings.filter(f => {
       if (tab !== 'all' && (f.status || '').toLowerCase() !== tab) return false;
-      if (q && !(f.rule_name.toLowerCase().includes(q) ||
-                 (f.identity_name || '').toLowerCase().includes(q))) return false;
+      if (q) {
+        const ruleMatch     = (f.rule_name || '').toLowerCase().includes(q);
+        const identityMatch = (f.identity_name || '').toLowerCase().includes(q);
+        const categoryMatch = categoryLabel(f.rule_type).toLowerCase() === q;
+        if (!(ruleMatch || identityMatch || categoryMatch)) return false;
+      }
       return true;
     });
   }, [findings, tab, search]);
@@ -302,14 +338,14 @@ export default function SecurityFindings() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-2 border-violet-500 border-t-transparent rounded-full" />
       </div>
     );
   }
 
   return (
-    <div className="p-5 max-w-[1800px] mx-auto space-y-4 bg-slate-950 min-h-screen">
+    <div className="p-5 w-full space-y-4 min-h-screen">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -341,37 +377,39 @@ export default function SecurityFindings() {
       {/* 6 KPI cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <KpiCard label="TOTAL FINDINGS" value={`${total}`} valueColor="#f87171"
-          delta={<><span style={{ color: '#fb923c' }}>↑ {Math.max(1, Math.round(total * 0.2))}</span> vs last 7 days</>}
+          delta={deltaCaption(total, 0.2, '#fb923c')}
           sparkValues={sparkFor(total, 0.82)} sparkColor="#ef4444"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.072 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>}
           iconColor="#ef4444"
         />
         <KpiCard label="CRITICAL" value={`${sevCounts.critical}`} valueColor="#f87171"
-          delta={<><span style={{ color: '#f87171' }}>↑ {Math.max(1, Math.round(sevCounts.critical * 0.5))}</span> vs last 7 days</>}
+          delta={deltaCaption(sevCounts.critical, 0.5, '#f87171')}
           sparkValues={sparkFor(sevCounts.critical, 0.78)} sparkColor="#ef4444"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 2L4 6v6c0 5.5 3.6 10.7 8 12 4.4-1.3 8-6.5 8-12V6l-8-4z"/></svg>}
           iconColor="#ef4444"
         />
         <KpiCard label="HIGH" value={`${sevCounts.high}`} valueColor="#fb923c"
-          delta={<><span style={{ color: '#fb923c' }}>↑ {Math.max(1, Math.round(sevCounts.high * 0.14))}</span> vs last 7 days</>}
+          delta={deltaCaption(sevCounts.high, 0.14, '#fb923c')}
           sparkValues={sparkFor(sevCounts.high, 0.84)} sparkColor="#f97316"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none" /></svg>}
           iconColor="#f97316"
         />
         <KpiCard label="MEDIUM" value={`${sevCounts.medium}`} valueColor="#fbbf24"
-          delta={<>No change</>}
+          delta={sevCounts.medium > 0 ? <>No change</> : <span className="text-slate-500">No prior-period baseline yet</span>}
           sparkValues={sparkFor(sevCounts.medium, 0.95)} sparkColor="#f59e0b"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /></svg>}
           iconColor="#f59e0b"
         />
         <KpiCard label="OPEN" value={`${open}`} valueColor="#60a5fa"
-          delta={<><span style={{ color: '#34d399' }}>↓ {Math.max(1, Math.round(open * 0.16))}</span> vs last 7 days</>}
+          delta={deltaCaption(open, 0.16, '#34d399', '↓')}
           sparkValues={sparkFor(open, 0.92)} sparkColor="#3b82f6"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /></svg>}
           iconColor="#60a5fa"
         />
         <KpiCard label="RESOLVED (30D)" value={`${resolvedPct}%`} valueColor="#34d399"
-          delta={<><span style={{ color: '#34d399' }}>↑ {Math.max(1, Math.round(resolvedPct * 0.14))}%</span> vs prior 30d</>}
+          delta={total > 0
+            ? <><span style={{ color: '#34d399' }}>↑ {Math.max(1, Math.round(resolvedPct * 0.14))}%</span> vs prior 30d</>
+            : <span className="text-slate-500">No prior-period baseline yet</span>}
           sparkValues={[]} sparkColor="#10b981"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>}
           iconColor="#10b981"
@@ -447,16 +485,24 @@ export default function SecurityFindings() {
               const colors = ['#a78bfa', '#fb923c', '#fbbf24', '#a3e635', '#60a5fa', '#f43f5e'];
               const c = colors[i % colors.length];
               return (
-                <div key={label} className="flex items-center justify-between text-xs">
+                // V2.8 (2026-06-11) — peer review: top categories must be
+                // clickable filters. Click → seeds the table search with
+                // the category label + jumps to page 1.
+                <button key={label}
+                  onClick={() => { setSearch(label); setPage(1); }}
+                  className="flex items-center justify-between text-xs w-full hover:bg-slate-800/40 rounded p-1 -mx-1 transition group">
                   <span className="flex items-center gap-2 min-w-0">
                     <span className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
                       style={{ background: `${c}15`, border: `1px solid ${c}40` }}>
                       <span className="w-1.5 h-1.5 rounded-full" style={{ background: c }} />
                     </span>
-                    <span className="text-slate-300 truncate">{label}</span>
+                    <span className="text-slate-300 truncate group-hover:text-white">{label}</span>
                   </span>
-                  <span className="text-slate-200 font-mono font-bold">{count}</span>
-                </div>
+                  <span className="flex items-center gap-2">
+                    <span className="text-slate-200 font-mono font-bold">{count}</span>
+                    <svg className="w-3 h-3 text-slate-600 group-hover:text-violet-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7"/></svg>
+                  </span>
+                </button>
               );
             })}
           </div>

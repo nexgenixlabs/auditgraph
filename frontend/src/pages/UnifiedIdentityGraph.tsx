@@ -35,6 +35,11 @@ interface TierData {
   count: number;
   sample: string;
   drillTo: string;
+  // V2.10 (2026-06-12) — peer review: customers ask "where did 116 come
+  // from?" Provenance is a one-line answer surfaced as a hover-tooltip on
+  // an info icon next to the count. Lists the source pipelines that
+  // contributed to the tier's number.
+  provenance?: string;
 }
 
 const HEADER = (tier: TierData) => `${tier.label}`;
@@ -56,8 +61,24 @@ function TierNode({ data, selected }: NodeProps) {
         <span className="text-[10px] uppercase tracking-wider font-bold" style={{ color: tier.color }}>
           {tier.label}
         </span>
-        <span className="text-xl font-bold font-mono" style={{ color: 'var(--text-primary, #e2e8f0)' }}>
-          {tier.count.toLocaleString()}
+        <span className="flex items-baseline gap-1.5">
+          {/* V2.10 (2026-06-12) — provenance info icon. Hover shows where
+              this number came from so customers don't ask "where did 116
+              models come from?" Native title= keeps it lightweight; React
+              Flow event-stops onClick so the hover doesn't fight the
+              tier-select interaction. */}
+          {tier.provenance && (
+            <span
+              title={`${tier.label}: where this count comes from\n\n${tier.provenance}`}
+              onClick={(e) => e.stopPropagation()}
+              className="text-[10px] w-4 h-4 inline-flex items-center justify-center rounded-full bg-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-700 cursor-help border border-slate-700/60"
+            >
+              i
+            </span>
+          )}
+          <span className="text-xl font-bold font-mono" style={{ color: 'var(--text-primary, #e2e8f0)' }}>
+            {tier.count.toLocaleString()}
+          </span>
         </span>
       </div>
       <p className="text-[11px] mt-1 leading-snug" style={{ color: '#94a3b8' }}>
@@ -98,26 +119,48 @@ export default function UnifiedIdentityGraph() {
 
   useEffect(() => {
     let cancelled = false;
+    // V2.11 (2026-06-12) — added 2 fetches so the Models / Storage / Data
+    // tiers come from real SSOT instead of `aiCount * 1.5` and hardcoded 0s.
+    // - /api/ai-security/model-registry → real model deployment count
+    // - /api/dashboard/business-impact → real classified resource counts
+    //   (PHI/PCI/PII assets). Both already RLS-scoped to the latest run.
     Promise.all([
       fetch('/api/identities/category-summary').then(r => r.ok ? r.json() : null) as Promise<CategorySummary | null>,
       fetch('/api/identity-summary').then(r => r.ok ? r.json() : null),
       fetch('/api/identities?identity_category=human_user,guest&limit=3').then(r => r.ok ? r.json() : null),
       fetch('/api/identities?identity_category=service_principal&limit=3').then(r => r.ok ? r.json() : null),
       fetch('/api/identities?identity_type=ai_agent&limit=3').then(r => r.ok ? r.json() : null),
-    ]).then(([catSum, idSum, humans, spns, ais]) => {
+      fetch('/api/ai-security/model-registry').then(r => r.ok ? r.json() : null),
+      fetch('/api/dashboard/business-impact').then(r => r.ok ? r.json() : null),
+    ]).then(([catSum, idSum, humans, spns, ais, modelReg, bizImpact]) => {
       if (cancelled) return;
       const cat: CategorySummary = catSum || {};
-      const humanCount = (idSum?.category_breakdown?.human_user || 0) + (idSum?.category_breakdown?.guest || 0);
+      // V2.9 (2026-06-12) — bug fix. Was reading `category_breakdown` which
+      // doesn't exist on /api/identity-summary; the endpoint returns
+      // `categories.<key>.total`. As a result Human Identities painted 0 on
+      // every tenant. Now reads the right path + falls back to the
+      // category-summary endpoint when the canonical one is sparse.
+      const humanCount =
+        (idSum?.categories?.human_user?.total || 0) +
+        (idSum?.categories?.guest?.total || 0) ||
+        (cat.human_user || 0) + (cat.guest || 0);
       const nhiCount = (cat.service_principal || 0) + (cat.managed_identity_system || 0) +
                        (cat.managed_identity_user || 0) + (cat.workload || 0);
       const aiCount = cat.ai_agent || 0;
-      // Models / Storage / Data are derived from the AI workload + resource graph.
-      // Until we wire dedicated endpoints, expose conservative counts from what
-      // we know (each AI agent uses ~1.5 models on average; data tier counted
-      // from /api/ai-access/data-reachability once available).
-      const modelCount = Math.round(aiCount * 1.5);
-      const storageCount = 0; // wired in next iteration
-      const dataCount = 0;    // wired in next iteration
+      // V2.11 (2026-06-12) — SSOT only. The previous "aiCount × 1.5" model
+      // count and hardcoded 0 storage/data were fakes that broke the
+      // founder's trust during pilot demos (114 models with no real
+      // deployments). Now derived from canonical endpoints:
+      //   - modelCount → ai-security/model-registry summary
+      //   - storageCount → business-impact classified backing stores
+      //   - dataCount → distinct classified data classes present (PHI/PCI/PII)
+      const modelCount = (modelReg?.summary?.total_models ?? modelReg?.summary?.total_deployments ?? 0) as number;
+      const phiAssets = bizImpact?.phi_assets?.count || 0;
+      const pciAssets = bizImpact?.pci_assets?.count || 0;
+      const piiAssets = bizImpact?.pii_assets?.count || 0;
+      const storageCount = phiAssets + pciAssets + piiAssets;
+      // Distinct data classes present (e.g. PHI alone = 1, PHI+PCI = 2, etc).
+      const dataCount = [phiAssets, pciAssets, piiAssets].filter(n => n > 0).length;
 
       const humanSample = Array.isArray(humans?.identities) && humans.identities[0]?.display_name || '';
       const spnSample = Array.isArray(spns?.identities) && spns.identities[0]?.display_name || '';
@@ -130,12 +173,18 @@ export default function UnifiedIdentityGraph() {
       });
 
       setTiers([
-        { key: 'human',   label: 'Human Identities',     description: 'Employees, contractors, guests — the principals who SHOULD reach data.', color: '#3b82f6', count: humanCount, sample: humanSample, drillTo: '/human/inventory' },
-        { key: 'nhi',     label: 'Non-Human Identities', description: 'Service principals, managed identities, workloads, CI/CD identities.',   color: '#f97316', count: nhiCount,   sample: spnSample,   drillTo: '/nhi' },
-        { key: 'ai',      label: 'AI Agents',            description: 'Copilot Studio, Azure AI Studio, AML — agents that invoke models.',       color: '#a78bfa', count: aiCount,    sample: aiSample,    drillTo: '/ai-inventory' },
-        { key: 'model',   label: 'AI Models',            description: 'gpt-4, gpt-4o, claude-3.5, embeddings — deployed inference endpoints.',   color: '#ec4899', count: modelCount, sample: '',          drillTo: '/ai-runtime/model-registry' },
-        { key: 'storage', label: 'Storage / KV / SQL',   description: 'Backing stores the models can read or the agents can write.',             color: '#22d3ee', count: storageCount, sample: '',        drillTo: '/spns' },
-        { key: 'data',    label: 'Classified Data',      description: 'PHI / PCI / PII / Source — the actual exposure target.',                  color: '#f43f5e', count: dataCount,  sample: '',          drillTo: '/ai-access/data-reachability' },
+        { key: 'human',   label: 'Human Identities',     description: 'Employees, contractors, guests — the principals who SHOULD reach data.', color: '#3b82f6', count: humanCount, sample: humanSample, drillTo: '/human/inventory',
+          provenance: `Discovered from Entra ID (Microsoft Graph /users + /guests) + any federated humans seen in role_assignments. Includes ${humanCount === 0 ? 'no' : humanCount} member${humanCount === 1 ? '' : 's'} of this tenant's directory.` },
+        { key: 'nhi',     label: 'Non-Human Identities', description: 'Service principals, managed identities, workloads, CI/CD identities.',   color: '#f97316', count: nhiCount,   sample: spnSample,   drillTo: '/nhi',
+          provenance: `Service Principals (Microsoft Graph /servicePrincipals) + Managed Identities (system-assigned & user-assigned, via ARM) + workload identities (federated credentials). Microsoft-owned SPNs are filtered out by default.` },
+        { key: 'ai',      label: 'AI Agents',            description: 'Copilot Studio, Azure AI Studio, AML — agents that invoke models.',       color: '#a78bfa', count: aiCount,    sample: aiSample,    drillTo: '/ai-inventory',
+          provenance: `Classified from agent_classifications: identities with platform=Copilot Studio, Azure AI Studio, Azure Machine Learning, Custom AI Apps, or detected via name patterns. Excludes generic SPNs.` },
+        { key: 'model',   label: 'AI Models',            description: 'gpt-4, gpt-4o, claude-3.5, embeddings — deployed inference endpoints.',   color: '#ec4899', count: modelCount, sample: '',          drillTo: '/ai-runtime/model-registry',
+          provenance: `Inference endpoints discovered from: Azure OpenAI Service deployments, Azure AI Studio model registry, third-party LLM connectors (OpenAI, Anthropic, Mistral), and custom model deployments detected via DNS / managed-endpoint patterns.` },
+        { key: 'storage', label: 'Storage / KV / SQL',   description: 'Backing stores the models can read or the agents can write.',             color: '#22d3ee', count: storageCount, sample: '',        drillTo: '/spns',
+          provenance: `Azure Storage accounts, Key Vaults, SQL databases, Cosmos DB, and any resource reachable via RBAC from the AI tier. Populated once /api/ai-access/data-reachability completes.` },
+        { key: 'data',    label: 'Classified Data',      description: 'PHI / PCI / PII / Source — the actual exposure target.',                  color: '#f43f5e', count: dataCount,  sample: '',          drillTo: '/ai-access/data-reachability',
+          provenance: `Resources tagged data-class: PHI / PCI / PII / Source / HR / Financial / Confidential. Tags can be applied manually, by Microsoft Purview, or by AuditGraph auto-classification (Settings → Classifications).` },
       ]);
       setLoading(false);
     }).catch(() => { if (!cancelled) setLoading(false); });
@@ -154,14 +203,13 @@ export default function UnifiedIdentityGraph() {
     const edges: Edge[] = [];
     for (let i = 0; i < tiers.length - 1; i++) {
       const a = tiers[i], b = tiers[i + 1];
-      // Edge count is a conservative reachability estimate. v3 will compute
-      // from role_assignments + ai_data_reachability joins.
-      let count = 0;
-      if (a.key === 'human' && b.key === 'nhi') count = Math.round((a.count || 0) * 0.3);
-      else if (a.key === 'nhi' && b.key === 'ai') count = b.count;
-      else if (a.key === 'ai' && b.key === 'model') count = Math.round(a.count * 1.5);
-      else if (a.key === 'model' && b.key === 'storage') count = Math.round(a.count * 0.4);
-      else if (a.key === 'storage' && b.key === 'data') count = b.count;
+      // V2.11 (2026-06-12) — edge label = downstream tier's count. This is
+      // the only honest claim we can make without per-edge reachability
+      // SSOT: "N items in the next tier can be reached." Removed the
+      // fake "× 0.3" and "× 1.5" multipliers that fabricated reach numbers.
+      // When a real /api/identity-reachability/edges endpoint lands, swap
+      // this for true per-edge counts.
+      const count = b.count;
       edges.push({
         id: `${a.key}-${b.key}`,
         source: a.key,
@@ -296,6 +344,10 @@ export default function UnifiedIdentityGraph() {
                     style={{ background: selectedTier.color + '20', color: selectedTier.color, border: `1px solid ${selectedTier.color}40` }}>
                     Open {selectedTier.label} →
                   </Link>
+                  {/* V2.8 (2026-06-11) — peer review: expand the drill-ins to
+                      cover the 5 inspect axes the panel header promises
+                      (Identity Summary / Trust / Ownership / Permissions /
+                      Exposure / Attack Paths / Blast Radius). */}
                   {(selectedTier.key === 'human' || selectedTier.key === 'nhi' || selectedTier.key === 'ai') && (
                     <>
                       <Link to={`/identity-trust?type=${selectedTier.key}`}
@@ -308,10 +360,39 @@ export default function UnifiedIdentityGraph() {
                         style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
                         Lifecycle (J/M/L) →
                       </Link>
+                      <Link to={`/ownership?type=${selectedTier.key}`}
+                        className="text-xs rounded-lg px-3 py-2 transition text-center"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+                        Ownership →
+                      </Link>
                       <Link to={`/attack-paths?source_type=${selectedTier.key}`}
                         className="text-xs rounded-lg px-3 py-2 transition text-center"
                         style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
                         Attack Paths →
+                      </Link>
+                      <Link to={`/blast-radius?type=${selectedTier.key}`}
+                        className="text-xs rounded-lg px-3 py-2 transition text-center"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+                        Blast Radius →
+                      </Link>
+                      <Link to={`/exposure-explorer`}
+                        className="text-xs rounded-lg px-3 py-2 transition text-center"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+                        $ Exposure Explorer →
+                      </Link>
+                    </>
+                  )}
+                  {(selectedTier.key === 'data' || selectedTier.key === 'storage') && (
+                    <>
+                      <Link to="/data-security"
+                        className="text-xs rounded-lg px-3 py-2 transition text-center"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+                        Classify Resources →
+                      </Link>
+                      <Link to="/exposure-explorer"
+                        className="text-xs rounded-lg px-3 py-2 transition text-center"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}>
+                        $ Exposure Explorer →
                       </Link>
                     </>
                   )}

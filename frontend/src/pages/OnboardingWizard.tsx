@@ -163,6 +163,65 @@ export default function OnboardingWizard() {
     }
   }
 
+  // V2.5 (2026-06-11) — "Skip first scan & explore" path.
+  // Same setup as handleComplete (save settings + activate subs) but does
+  // NOT call /api/runs/trigger. Used by the founder to verify every empty-
+  // state screen reads correctly before the first scan paints real numbers.
+  // Lands on the Executive Posture / Identity Security Command Center page
+  // where the fresh-tenant copy ("Awaiting first scan", "No prior-period
+  // baseline yet") now renders honestly per V2.4 data-honesty fixes.
+  async function handleSkipScan() {
+    setSaving(true);
+    setError(null);
+    setScanError(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          org_name: orgName.trim(),
+          azure_directory_id: azureTenantId.trim(),
+          azure_client_id: azureClientId.trim(),
+          azure_client_secret: azureClientSecret.trim(),
+          discovery_interval_hours: discoveryInterval,
+          email_enabled: String(emailEnabled),
+          email_to: emailEnabled ? emailTo.trim() : '',
+          onboarding_completed: 'true',
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to save settings');
+      }
+      if (orgId) {
+        sessionStorage.setItem(completeKey(orgId), 'true');
+        sessionStorage.removeItem(stepKey(orgId));
+      }
+      // Activate the chosen subscriptions so when the user does run their
+      // first scan later (manually from Settings → Connections), the subs
+      // are already wired. Non-fatal on error.
+      if (activatingSubIds.length > 0) {
+        try {
+          await fetch('/api/subscriptions/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_ids: activatingSubIds }),
+          });
+        } catch (subErr) {
+          console.warn('Failed to activate selected subscriptions', subErr);
+        }
+      }
+      // Land on the dashboard. No scan trigger, no scan modal.
+      // Use window.location.href to match the existing post-onboarding nav
+      // pattern (handleScanComplete uses the same approach on line 317).
+      window.location.href = '/';
+    } catch (e: any) {
+      setError(e?.message || 'Setup failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handleComplete() {
     setSaving(true);
     setError(null);
@@ -704,9 +763,32 @@ export default function OnboardingWizard() {
                   Completing setup...
                 </>
               ) : (
-                'Complete Setup'
+                'Complete Setup & Start First Scan'
               )}
             </button>
+
+            {/* V2.5 (2026-06-11) — Skip first scan. Founder-requested escape
+                hatch so they can verify every empty-state screen reads
+                correctly before live data paints. Same setup work as
+                Complete Setup minus the /api/runs/trigger call. */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-gray-700/60" />
+              <span className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">or</span>
+              <div className="flex-1 h-px bg-gray-700/60" />
+            </div>
+            <button
+              onClick={handleSkipScan}
+              disabled={saving}
+              className="w-full py-2.5 rounded-lg text-sm font-medium bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 hover:border-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
+            >
+              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+              </svg>
+              Skip first scan &amp; explore
+            </button>
+            <p className="text-[11px] text-gray-500 text-center -mt-1">
+              You can trigger the first scan later from <span className="text-gray-400">Settings → Connections</span>.
+            </p>
           </div>
         )}
 

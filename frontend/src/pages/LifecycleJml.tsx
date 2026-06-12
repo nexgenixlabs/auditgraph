@@ -91,7 +91,9 @@ const BUCKET_META: Record<Bucket, {
   },
 };
 
-export default function LifecycleJml() {
+interface LifecycleJmlProps { forceType?: string }
+
+export default function LifecycleJml({ forceType }: LifecycleJmlProps = {}) {
   const navigate = useNavigate();
   const [data, setData] = useState<JmlResp | null>(null);
   const [error, setError] = useState(false);
@@ -99,8 +101,9 @@ export default function LifecycleJml() {
 
   // AG-PHASE3 (2026-06-09): scope-aware. Same component powers
   // /lifecycle?type=human / nhi / ai. Backend takes the same param.
+  // Lock-V2 (2026-06-11) — accepts forceType prop for bucket-tab embedding.
   const params = new URLSearchParams(window.location.search);
-  const scope = (params.get('type') || params.get('scope') || 'all').toLowerCase();
+  const scope = (forceType || params.get('type') || params.get('scope') || 'all').toLowerCase();
   const scopeTitle = ({
     human: 'Human Lifecycle (JML)',
     nhi: 'Non-Human Identity Lifecycle (JML)',

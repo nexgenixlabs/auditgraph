@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { riskDisplay, CVSS_TOOLTIP } from '../../utils/riskDisplay';
+import RiskScoreWaterfall from './shared/RiskScoreWaterfall';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -1022,6 +1023,19 @@ export default function OverviewTab({
           )}
         </div>
       )}
+
+      {/* Sprint A.3 — Risk Score Breakdown (credit-score waterfall). Replaces
+          the implicit "trust me, it's 8.7" with explicit per-factor contribution.
+          Reads structured risk_factors from /api/identities/<id> when present,
+          falls back to parsed risk_reasons strings otherwise. */}
+      <RiskScoreWaterfall
+        riskFactors={(identity as any).risk_factors}
+        riskReasons={identity.risk_reasons}
+        totalCvss={(identity as any).risk_score_cvss}
+        riskLevel={identity.risk_level}
+        mode="full"
+      />
+
 
       {/* Progressive disclosure toggle */}
       <div className="flex justify-center">

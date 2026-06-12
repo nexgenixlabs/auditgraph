@@ -19,6 +19,7 @@ import { CredentialsTab } from '../components/identity-detail/CredentialsTab';
 import { OwnershipTab } from '../components/identity-detail/OwnershipTab';
 import { EffectiveAccessTab } from '../components/identity-detail/EffectiveAccessTab';
 import { AnomaliesTab } from '../components/identity-detail/AnomaliesTab';
+import ExposureTab from '../components/identity-detail/ExposureTab';
 import { PimTab } from '../components/identity-detail/PimTab';
 import { IdentityComplianceTab } from '../components/identity-detail/ComplianceTab';
 import { RemediationTab } from '../components/identity-detail/RemediationTab';
@@ -127,7 +128,7 @@ interface IdentityDetailsResponse {
   evidence?: EvidenceMetadata;
 }
 
-type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups' | 'attack_paths' | 'consents';
+type TabId = 'overview' | 'roles' | 'permissions' | 'credentials' | 'ownership' | 'effective_access' | 'access_graph' | 'anomalies' | 'exposure' | 'compliance' | 'pim' | 'remediation' | 'lifecycle' | 'simulate' | 'timeline' | 'sensitive_access' | 'entra_groups' | 'attack_paths' | 'consents';
 
 interface EffectiveAccessEntry {
   role_name: string;
@@ -364,6 +365,210 @@ function parseEffectiveAccessScope(roles: any[]): { subscriptions: string[]; res
   return { subscriptions: Array.from(subs), resourceGroups: Array.from(rgs), tenantWide, entraScopes: Array.from(entraScopes) };
 }
 
+// ─── Sprint A.2 — Executive Risk Summary Card ──────────────────────
+//
+// The peer-review gap: header was bare name+badges, then straight to tabs.
+// CISOs had to click into 3 separate tabs (Risk · Effective Access · Remediation)
+// to assemble the same picture every investigator builds in their head.
+// This card collapses that into one 5-column "why is this identity dangerous"
+// strip placed between the header and the tab strip.
+
+const IMPACT_LIB: { match: RegExp; label: string; color: string }[] = [
+  { match: /\bowner\b|global administrator|privileged role administrator/i, label: 'Tenant Takeover',     color: '#ef4444' },
+  { match: /user access administrator/i,                                     label: 'Privilege Escalation', color: '#f87171' },
+  { match: /key vault|secrets|certificate/i,                                 label: 'Credential Theft',    color: '#fb923c' },
+  { match: /contributor/i,                                                   label: 'Resource Destruction', color: '#f59e0b' },
+  { match: /storage|blob|sql|cosmos|data/i,                                  label: 'Data Exfiltration',   color: '#facc15' },
+  { match: /network|monitoring|reader/i,                                     label: 'Recon / Pivot',       color: '#60a5fa' },
+];
+
+function deriveImpactsFromRoles(roles: any[]): string[] {
+  const names = roles.map(r => String(r.role_name || r.role || '')).filter(Boolean);
+  if (names.length === 0) return [];
+  const hit: string[] = [];
+  for (const { match, label } of IMPACT_LIB) {
+    if (names.some(n => match.test(n)) && !hit.includes(label)) hit.push(label);
+    if (hit.length >= 3) break;
+  }
+  return hit;
+}
+
+function ExecRiskSummary({
+  identity,
+  data,
+  effectiveScope,
+  remediationData,
+  privilegeTier,
+  onJumpToTab,
+}: {
+  identity: any;
+  data: any;
+  effectiveScope: { subscriptions: string[]; resourceGroups: string[]; tenantWide: boolean; entraScopes: string[] };
+  remediationData: any;
+  privilegeTier: { tier: number };
+  onJumpToTab: (tab: TabId) => void;
+}) {
+  const score = typeof identity?.risk_score === 'number' ? Math.round(identity.risk_score * 10) / 10 : null;
+  const level = String(identity?.risk_level || 'unknown').toLowerCase();
+  const scoreColor = level === 'critical' ? '#ef4444' : level === 'high' ? '#f97316' : level === 'medium' ? '#f59e0b' : level === 'low' ? '#10b981' : '#94a3b8';
+
+  // Top risk reasons — raw strings off identity.risk_reasons.
+  const reasons: string[] = Array.isArray(identity?.risk_reasons) ? identity.risk_reasons.slice(0, 5)
+                          : typeof identity?.risk_reasons === 'string' && identity.risk_reasons
+                            ? identity.risk_reasons.split(/[,;]\s*/).slice(0, 5)
+                            : [];
+
+  // Impact derivation — read the roles, not the logs.
+  const impacts = deriveImpactsFromRoles(data?.roles || []);
+
+  // Remediation counts (real data when remediationData is loaded eagerly).
+  const remList: any[] = remediationData?.remediations || [];
+  const remCounts = remList.reduce((acc: Record<string, number>, r: any) => {
+    const p = String(r.priority || r.severity || '').toLowerCase();
+    if (p === 'critical') acc.critical += 1;
+    else if (p === 'high') acc.high += 1;
+    else if (p === 'medium') acc.medium += 1;
+    else acc.low += 1;
+    return acc;
+  }, { critical: 0, high: 0, medium: 0, low: 0 });
+  const remTotal = remList.length;
+
+  // Blast radius — sensitive count + scope rollup.
+  const br = data?.blast_radius || {};
+  const subsCount = effectiveScope.subscriptions.length;
+  const rgsCount = effectiveScope.resourceGroups.length;
+  const sensCount = br.total_sensitive || 0;
+  const kvCount = ((br.by_resource_type || {}) as any).key_vault || ((br.by_resource_type || {}) as any).keyvault || 0;
+
+  // Score gauge geometry.
+  const gaugeSize = 88;
+  const gaugeR = (gaugeSize - 10) / 2;
+  const gaugeC = 2 * Math.PI * gaugeR;
+  const gaugePct = Math.max(0, Math.min(100, (score || 0) * 10));
+  const gaugeDash = (gaugePct / 100) * gaugeC;
+
+  return (
+    <div className="bg-white border rounded-2xl p-5 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Executive Risk Summary</div>
+        <div className="text-[10px] text-gray-400">Derived from RBAC + Entra roles + classified-data reachability — no telemetry required.</div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+        {/* 1. Risk Score gauge */}
+        <div className="flex items-center gap-3">
+          <div className="relative" style={{ width: gaugeSize, height: gaugeSize }}>
+            <svg width={gaugeSize} height={gaugeSize} className="-rotate-90">
+              <circle cx={gaugeSize / 2} cy={gaugeSize / 2} r={gaugeR} fill="none" stroke="#e5e7eb" strokeWidth={6} />
+              <circle cx={gaugeSize / 2} cy={gaugeSize / 2} r={gaugeR} fill="none" stroke={scoreColor} strokeWidth={6}
+                strokeLinecap="round" strokeDasharray={`${gaugeDash} ${gaugeC - gaugeDash}`} />
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <div className="text-xl font-bold" style={{ color: scoreColor }}>{score ?? '—'}</div>
+              <div className="text-[8px] uppercase tracking-wider text-gray-400">/10</div>
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Risk Score</div>
+            <div className="text-sm font-bold uppercase mt-0.5" style={{ color: scoreColor }}>{level}</div>
+            <div className="text-[10px] text-gray-500 mt-0.5">Tier {privilegeTier.tier}</div>
+          </div>
+        </div>
+
+        {/* 2. Top Risk Reasons */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1.5">Top Risk Reasons</div>
+          {reasons.length === 0 ? (
+            <div className="text-xs text-gray-400 italic">No specific reasons flagged.</div>
+          ) : (
+            <ul className="space-y-1">
+              {reasons.map((r, i) => (
+                <li key={i} className="text-[11px] text-gray-700 flex items-start gap-1.5">
+                  <span className="text-red-400 mt-0.5">•</span>
+                  <span className="leading-tight">{r}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* 3. Potential Impact */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1.5">Potential Impact</div>
+          {impacts.length === 0 ? (
+            <div className="text-xs text-gray-400 italic">No high-impact roles detected.</div>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {impacts.map(label => {
+                const meta = IMPACT_LIB.find(m => m.label === label);
+                const color = meta?.color || '#94a3b8';
+                return (
+                  <span key={label} className="px-2 py-0.5 rounded-md text-[10px] font-semibold"
+                    style={{ background: `${color}1a`, color, border: `1px solid ${color}55` }}>
+                    {label}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* 4. Recommended Actions */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1.5">Recommended Actions</div>
+          {remTotal > 0 ? (
+            <>
+              <div className="flex items-baseline gap-2 mb-1">
+                <span className="text-xl font-bold text-gray-900">{remTotal}</span>
+                <span className="text-[10px] text-gray-500">actions</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px] mb-2">
+                {remCounts.critical > 0 && <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold">{remCounts.critical} Critical</span>}
+                {remCounts.high > 0 && <span className="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 font-semibold">{remCounts.high} High</span>}
+                {remCounts.medium > 0 && <span className="px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700 font-semibold">{remCounts.medium} Medium</span>}
+              </div>
+              <button onClick={() => onJumpToTab('remediation' as TabId)}
+                className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-0.5">
+                View Remediation →
+              </button>
+            </>
+          ) : (
+            <div className="text-xs text-gray-400 italic">Loading…</div>
+          )}
+        </div>
+
+        {/* 5. Blast Radius */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-1.5">Blast Radius</div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="rounded p-1.5" style={{ background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)' }}>
+              <div className="text-base font-bold text-purple-700 leading-none">{subsCount}</div>
+              <div className="text-[9px] text-gray-500 mt-0.5 uppercase tracking-wider">Subs</div>
+            </div>
+            <div className="rounded p-1.5" style={{ background: 'rgba(56,189,248,0.08)', border: '1px solid rgba(56,189,248,0.2)' }}>
+              <div className="text-base font-bold text-sky-600 leading-none">{rgsCount}</div>
+              <div className="text-[9px] text-gray-500 mt-0.5 uppercase tracking-wider">RGs</div>
+            </div>
+            <div className="rounded p-1.5" style={{ background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)' }}>
+              <div className="text-base font-bold text-violet-600 leading-none">{kvCount}</div>
+              <div className="text-[9px] text-gray-500 mt-0.5 uppercase tracking-wider">Key Vaults</div>
+            </div>
+            <div className="rounded p-1.5" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+              <div className="text-base font-bold text-red-600 leading-none">{sensCount}</div>
+              <div className="text-[9px] text-gray-500 mt-0.5 uppercase tracking-wider">Sensitive</div>
+            </div>
+          </div>
+          {(subsCount > 0 || sensCount > 0) && (
+            <button onClick={() => onJumpToTab('access_graph' as TabId)}
+              className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-0.5 mt-2">
+              View Graph →
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Tab component
 function TabBar({ activeTab, onTabChange, counts, labelOverrides, hideTabs }: {
   activeTab: TabId;
@@ -383,6 +588,7 @@ function TabBar({ activeTab, onTabChange, counts, labelOverrides, hideTabs }: {
     { id: 'effective_access' as TabId, label: 'Effective Access', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
     { id: 'access_graph' as TabId, label: 'Access Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
     { id: 'anomalies' as TabId, label: 'Anomalies', icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z' },
+    { id: 'exposure' as TabId, label: 'Exposure', icon: 'M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z' },
     { id: 'pim' as TabId, label: 'PIM', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8zM10 14a2 2 0 104 0 2 2 0 00-4 0z' },
     { id: 'compliance' as TabId, label: 'Compliance', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'remediation' as TabId, label: 'Remediation', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
@@ -569,6 +775,20 @@ export default function IdentityDetail() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, [id]);
+
+  // Sprint A.2 — eager remediation fetch so the Executive Risk Summary card
+  // can show real "3 Critical · 2 High · 1 Medium" counts without waiting for
+  // the user to click into the Remediation tab. Once cached, the tab's lazy
+  // loader sees remediationData truthy and skips its own fetch.
+  useEffect(() => {
+    if (!id || remediationData) return;
+    let cancelled = false;
+    fetch(withConnection(`/api/identities/${encodeURIComponent(id)}/remediations`))
+      .then(r => r.ok ? r.json() : null)
+      .then(json => { if (!cancelled && json) setRemediationData(json); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [id, remediationData]);
 
   // Lazy-load PIM data when tab is selected.
   // BUGFIX (2026-05-30): removed `pimLoading` from deps. Including it caused
@@ -802,6 +1022,22 @@ export default function IdentityDetail() {
     effective_access: effectiveAccessData?.summary?.total_roles ?? (data?.roles || []).length,
     access_graph: (data?.roles || []).length + (identity?.credential_count ?? 0),
     anomalies: anomalyData?.count ?? 0,
+    // Sprint B.5 — exposure tab badge counts only WARN+FAIL signals so the badge
+    // reads as "issues that need attention" rather than "every check we ran".
+    exposure: (() => {
+      let n = 0;
+      const ident: any = identity || {};
+      const mfa = String(ident.mfa_status || '').toLowerCase();
+      const isHuman = ident.identity_category === 'human_user' || ident.identity_category === 'guest';
+      if (isHuman && mfa === 'not_enrolled') n++;
+      if (isHuman && !ident.ca_mfa_enforced) n++;
+      if (!ident.owner_display_name && (ident.owner_count ?? 0) === 0) n++;
+      const isPriv = ident.privilege_level === 'Privileged' || ident.privilege_level === 'Highly Privileged';
+      if (isPriv && (ident.pim_eligible_count ?? 0) === 0) n++;
+      if (((data as any)?.blast_radius?.total_sensitive || 0) > 0) n++;
+      if (effectiveScope.tenantWide) n++;
+      return n;
+    })(),
     pim: (pimData?.eligible_assignments || []).length + (pimData?.activations || []).length,
     compliance: roleIntel.length,
     remediation: remediationData?.summary?.total ?? 0,
@@ -1137,6 +1373,17 @@ export default function IdentityDetail() {
             </div>
           )}
 
+          {/* Sprint A.2 — Executive Risk Summary card. Single strip the CISO can
+              read before deciding whether this identity warrants investigation. */}
+          <ExecRiskSummary
+            identity={identity}
+            data={data}
+            effectiveScope={effectiveScope}
+            remediationData={remediationData}
+            privilegeTier={privilegeTier}
+            onJumpToTab={(t) => setActiveTab(t)}
+          />
+
           {/* Groups */}
           {identityGroups.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
@@ -1266,6 +1513,16 @@ export default function IdentityDetail() {
                 />
               )}
 
+              {/* ═══ EXPOSURE TAB (Sprint B.5) ═══ */}
+              {activeTab === 'exposure' && (
+                <ExposureTab
+                  identity={identity}
+                  data={data}
+                  effectiveScope={effectiveScope}
+                  onJumpToTab={(t) => setActiveTab(t)}
+                />
+              )}
+
               {/* ═══ PIM TAB ═══ */}
               {activeTab === 'pim' && (
                 <PimTab
@@ -1362,6 +1619,11 @@ export default function IdentityDetail() {
 
 /* ═══ Phase 80: Timeline Tab Component ═══ */
 
+// Sprint C.9 — broaden Timeline coverage. Backend already aggregates 10
+// event sources; the FE label/color maps only covered 7, so role grants /
+// credential creations / federated-credential adds rendered as bare event
+// type strings. Adding them surfaces the architectural change history every
+// investigator expects (Jason Collins pilot — "Global Admin since when?").
 const EVENT_COLORS: Record<string, { dot: string; bg: string }> = {
   anomaly: { dot: 'bg-red-500', bg: 'bg-red-50 border-red-200' },
   drift: { dot: 'bg-blue-500', bg: 'bg-blue-50 border-blue-200' },
@@ -1370,6 +1632,9 @@ const EVENT_COLORS: Record<string, { dot: string; bg: string }> = {
   soar_action: { dot: 'bg-purple-500', bg: 'bg-purple-50 border-purple-200' },
   remediation: { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200' },
   security_finding: { dot: 'bg-cyan-500', bg: 'bg-cyan-50 border-cyan-200' },
+  role_granted: { dot: 'bg-indigo-500', bg: 'bg-indigo-50 border-indigo-200' },
+  credential_created: { dot: 'bg-fuchsia-500', bg: 'bg-fuchsia-50 border-fuchsia-200' },
+  federated_credential_added: { dot: 'bg-pink-500', bg: 'bg-pink-50 border-pink-200' },
 };
 
 const EVENT_LABELS: Record<string, string> = {
@@ -1380,7 +1645,20 @@ const EVENT_LABELS: Record<string, string> = {
   soar_action: 'SOAR Action',
   remediation: 'Remediation',
   security_finding: 'Security Finding',
+  role_granted: 'Role Granted',
+  credential_created: 'Credential Added',
+  federated_credential_added: 'Federated Credential',
 };
+
+// Group event types into investigator-meaningful categories. The summary strip
+// at the top of the Timeline tab uses this to show "what KIND of changes happened"
+// at a glance, instead of forcing the reader to count 50 rows.
+const EVENT_CATEGORIES: { key: string; label: string; types: string[]; color: string }[] = [
+  { key: 'risk',       label: 'Risk Events',     types: ['anomaly', 'risk_change', 'security_finding'], color: '#ef4444' },
+  { key: 'access',     label: 'Access Changes',  types: ['role_granted', 'pim_activation', 'remediation', 'soar_action'], color: '#a78bfa' },
+  { key: 'identity',   label: 'Identity Changes', types: ['credential_created', 'federated_credential_added'], color: '#f472b6' },
+  { key: 'drift',      label: 'Drift',           types: ['drift'], color: '#3b82f6' },
+];
 
 const SENS_CLASS_COLORS: Record<string, { bg: string; fg: string }> = {
   PHI: { bg: 'rgba(239,68,68,0.12)', fg: '#F87171' },
@@ -1818,18 +2096,44 @@ function TimelineTab({ identityId }: { identityId: string }) {
     return <div className="animate-pulse space-y-3">{[1,2,3,4].map(i => <div key={i} className="h-16 bg-gray-100 rounded-lg" />)}</div>;
   }
 
+  // Sprint C.9 — investigator-grade category rollup. Same data, surfaces what
+  // KIND of change happened (risk vs access vs identity vs drift) without
+  // forcing the reader to count rows.
+  const categoryCounts = EVENT_CATEGORIES.map(cat => ({
+    ...cat,
+    count: events.filter(e => cat.types.includes(e.event_type)).length,
+  }));
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-lg font-bold text-gray-900">Identity Timeline</h3>
-          <p className="text-xs text-gray-500">{total} events recorded</p>
+          <p className="text-xs text-gray-500">{total} events recorded across {categoryCounts.filter(c => c.count > 0).length || 0} categor{categoryCounts.filter(c => c.count > 0).length === 1 ? 'y' : 'ies'}</p>
         </div>
         <button onClick={exportCSV} disabled={events.length === 0}
           className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition disabled:opacity-50">
           Export CSV
         </button>
       </div>
+
+      {/* Sprint C.9 — Category rollup strip. Makes "8 events" interpretable. */}
+      {events.length > 0 && (
+        <div className="grid grid-cols-4 gap-2">
+          {categoryCounts.map(cat => (
+            <div key={cat.key} className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">{cat.label}</span>
+                <span className="w-2 h-2 rounded-full" style={{ background: cat.color }} />
+              </div>
+              <div className="flex items-baseline gap-1 mt-1">
+                <span className="text-xl font-bold" style={{ color: cat.count > 0 ? cat.color : '#94a3b8' }}>{cat.count}</span>
+                <span className="text-[10px] text-gray-400">{cat.count === 1 ? 'event' : 'events'}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-2">
@@ -1935,13 +2239,44 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
   const navigate = useNavigate();
   const [paths, setPaths] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  // Sprint C.10 — track WHICH source returned data so we can show "live
+  // computed" vs "cached from last scheduled run" honestly.
+  const [pathsSource, setPathsSource] = useState<'persisted' | 'live' | 'none'>('none');
+  const [recomputing, setRecomputing] = useState(false);
+
+  // Sprint C.10 — primary fetch first tries the persisted table (fast); if it
+  // returns zero, we fall back to the live MultiHopXGraph compute. Previously
+  // we only hit the persisted endpoint, which meant CRITICAL identities the
+  // scheduler hadn't analyzed yet rendered as "no paths" even when chains
+  // existed in the architecture.
+  const loadPaths = React.useCallback(async (forceLive = false) => {
+    setLoading(true);
+    try {
+      if (!forceLive) {
+        const r1 = await fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/persisted-attack-paths`));
+        const d1 = r1.ok ? await r1.json() : { paths: [] };
+        const persistedPaths = d1.paths || d1.attack_paths || [];
+        if (persistedPaths.length > 0) {
+          setPaths(persistedPaths);
+          setPathsSource('persisted');
+          return;
+        }
+      }
+      // Persisted empty (or forced) — try the live engine.
+      const r2 = await fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/attack-paths`));
+      const d2 = r2.ok ? await r2.json() : { paths: [] };
+      const livePaths = d2.paths || d2.attack_paths || [];
+      setPaths(livePaths);
+      setPathsSource(livePaths.length > 0 ? 'live' : 'none');
+    } finally {
+      setLoading(false);
+      setRecomputing(false);
+    }
+  }, [identityId, withConnection]);
 
   useEffect(() => {
-    fetch(`/api/identities/${identityId}/persisted-attack-paths?${withConnection('')}`)
-      .then(r => r.ok ? r.json() : { paths: [] })
-      .then(d => setPaths(d.paths || d.attack_paths || []))
-      .finally(() => setLoading(false));
-  }, [identityId, withConnection]);
+    loadPaths();
+  }, [loadPaths]);
 
   if (loading) {
     return (
@@ -1963,6 +2298,16 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
           privilege (e.g. Global Administrator on the tenant) without any chain or escalation step.
           To see what makes this identity critical, check the <strong>Risk</strong> and <strong>Access</strong> tabs.
         </p>
+        <div className="mt-4 flex items-center justify-center gap-2">
+          <button onClick={() => { setRecomputing(true); loadPaths(true); }} disabled={recomputing}
+            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition disabled:opacity-50">
+            {recomputing ? 'Re-computing…' : 'Re-compute paths now'}
+          </button>
+          <button onClick={() => navigate('/attack-paths')}
+            className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition">
+            View tenant-wide paths →
+          </button>
+        </div>
       </div>
     );
   }
@@ -1970,7 +2315,32 @@ function AttackPathsTab({ identityId }: { identityId: string }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-gray-900">{paths.length} Attack Path{paths.length !== 1 ? 's' : ''}</h3>
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900">{paths.length} Attack Path{paths.length !== 1 ? 's' : ''}</h3>
+          <div className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-2">
+            {pathsSource === 'persisted' && (
+              <span className="inline-flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                From last scheduled analysis
+              </span>
+            )}
+            {pathsSource === 'live' && (
+              <span className="inline-flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                Live MultiHopXGraph compute
+              </span>
+            )}
+            <button onClick={() => { setRecomputing(true); loadPaths(true); }} disabled={recomputing}
+              className="underline text-indigo-600 hover:text-indigo-700 disabled:opacity-50">
+              {recomputing ? 'Re-computing…' : 'Re-compute now'}
+            </button>
+            <span className="text-gray-300">·</span>
+            <button onClick={() => navigate('/attack-paths')}
+              className="underline text-indigo-600 hover:text-indigo-700">
+              View tenant-wide paths →
+            </button>
+          </div>
+        </div>
       </div>
       <table className="w-full text-sm">
         <thead>

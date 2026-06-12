@@ -460,23 +460,29 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
   const [attackPaths, setAttackPaths] = useState<any>(null);
   const [attackPathsLoading, setAttackPathsLoading] = useState(false);
   const [kvData, setKvData] = useState<KvAccessResponse | null>(null);
+  // Sprint C.8 — sensitive-access fetch for graph injection
+  const [sensitiveData, setSensitiveData] = useState<{ sensitive_resources?: any[] } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError('');
-    // Fetch graph data + KV access in parallel
+    // Fetch graph data + KV access + sensitive access in parallel
     Promise.all([
       fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/graph-data`))
         .then(res => { if (!res.ok) throw new Error(`API error: ${res.status}`); return res.json(); }),
       fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/keyvault-access`))
         .then(res => res.ok ? res.json() : { vaults: [] })
         .catch(() => ({ vaults: [] })),
+      fetch(withConnection(`/api/identities/${encodeURIComponent(identityId)}/sensitive-access`))
+        .then(res => res.ok ? res.json() : { sensitive_resources: [] })
+        .catch(() => ({ sensitive_resources: [] })),
     ])
-      .then(([graphJson, kvJson]) => {
+      .then(([graphJson, kvJson, sensJson]) => {
         if (!cancelled) {
           setData(graphJson);
           setKvData(kvJson);
+          setSensitiveData(sensJson);
         }
       })
       .catch(e => { if (!cancelled) setError(e?.message || 'Failed to load graph data'); })
@@ -544,49 +550,114 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
 
       yOffset += Math.max(vault.items.length * 55, 80) + 40;
     }
+
+    // Sprint C.8 — inject sensitive resource nodes (storage accounts / key
+    // vaults / AI models) so the executive can SEE the chain that ends at
+    // regulated data. Without this, the graph stops at the role chip and the
+    // CISO has to mentally bridge "Storage Account Contributor" → "actual PHI".
+    const sensitive = sensitiveData?.sensitive_resources || [];
+    if (viewMode === 'technical' && sensitive.length > 0) {
+      // Place sensitive assets below the KV column (or beside the role tiles
+      // if KV column wasn't injected).
+      const sensStartX = maxX + 600;
+      let sensY = 0;
+      // Dedup by resource_path so multiple roles touching the same resource
+      // produce one node, not N.
+      const seen = new Set<string>();
+      for (const s of sensitive) {
+        const key = s.resource_path || `${s.resource_type}_${s.resource_name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        base.push({
+          id: `sens_${key}`,
+          type: 'sensitive_asset',
+          position: { x: sensStartX, y: sensY },
+          data: {
+            label: s.resource_name,
+            resource_type: s.resource_type,
+            classification: s.classification,
+            access_level: s.access_level,
+            via: s.role_name,
+          },
+        });
+        sensY += 80;
+      }
+    }
+
     return base;
-  }, [data, viewMode, kvData]);
+  }, [data, viewMode, kvData, sensitiveData]);
 
   const edges = useMemo(() => {
     if (!data) return [];
     const base = viewMode === 'executive' ? data.graph.executive_edges : [...data.graph.technical_edges];
-    if (viewMode !== 'technical' || !kvData?.vaults?.length) return base;
+    if (viewMode !== 'technical') return base;
+    if (!kvData?.vaults?.length && !(sensitiveData?.sensitive_resources?.length)) return base;
 
     // Find identity node id (first node of type 'identity')
     const identityNodeId = data.graph.technical_nodes.find((n: any) => n.type === 'identity')?.id;
 
-    for (const vault of kvData.vaults) {
-      const vaultNodeId = `kv_${vault.vault_resource_id}`;
+    if (kvData?.vaults?.length) {
+      for (const vault of kvData.vaults) {
+        const vaultNodeId = `kv_${vault.vault_resource_id}`;
 
-      // Edge: identity → vault
-      if (identityNodeId) {
-        base.push({
-          id: `e_${identityNodeId}_${vaultNodeId}`,
-          source: identityNodeId,
-          target: vaultNodeId,
-          label: vault.roles.join(', '),
-          type: 'smoothstep',
-          style: { stroke: '#6b7280', strokeWidth: 1.5 },
-          labelStyle: { fontSize: 9, fill: '#6b7280' },
-        });
+        // Edge: identity → vault
+        if (identityNodeId) {
+          base.push({
+            id: `e_${identityNodeId}_${vaultNodeId}`,
+            source: identityNodeId,
+            target: vaultNodeId,
+            label: vault.roles.join(', '),
+            type: 'smoothstep',
+            style: { stroke: '#6b7280', strokeWidth: 1.5 },
+            labelStyle: { fontSize: 9, fill: '#6b7280' },
+          });
+        }
+
+        // Edges: vault → items
+        for (const item of vault.items) {
+          const itemNodeId = `kvi_${vault.vault_resource_id}_${item.item_type}_${item.item_name}`;
+          const edgeColor = item.expiry_risk_tier === 'CRITICAL' ? '#ef4444' :
+                            item.expiry_risk_tier === 'WARNING' ? '#f59e0b' : '#94a3b8';
+          base.push({
+            id: `e_${vaultNodeId}_${itemNodeId}`,
+            source: vaultNodeId,
+            target: itemNodeId,
+            type: 'smoothstep',
+            style: { stroke: edgeColor, strokeWidth: 1.5 },
+          });
+        }
       }
+    }
 
-      // Edges: vault → items
-      for (const item of vault.items) {
-        const itemNodeId = `kvi_${vault.vault_resource_id}_${item.item_type}_${item.item_name}`;
-        const edgeColor = item.expiry_risk_tier === 'CRITICAL' ? '#ef4444' :
-                          item.expiry_risk_tier === 'WARNING' ? '#f59e0b' : '#94a3b8';
+    // Sprint C.8 — sensitive asset edges. Identity → sensitive-resource node,
+    // tinted by classification so the chain reads at a glance: red = PHI,
+    // amber = PCI, blue = PII, violet = AI Model.
+    const sensitive = sensitiveData?.sensitive_resources || [];
+    if (sensitive.length > 0 && identityNodeId) {
+      const seen = new Set<string>();
+      for (const s of sensitive) {
+        const key = s.resource_path || `${s.resource_type}_${s.resource_name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const c = String(s.classification || '').toUpperCase();
+        const edgeColor = c === 'PHI' ? '#ef4444'
+                        : c === 'PCI' ? '#f59e0b'
+                        : c === 'PII' ? '#3b82f6'
+                        : c.includes('AI') ? '#8b5cf6' : '#9ca3af';
         base.push({
-          id: `e_${vaultNodeId}_${itemNodeId}`,
-          source: vaultNodeId,
-          target: itemNodeId,
+          id: `e_${identityNodeId}_sens_${key}`,
+          source: identityNodeId,
+          target: `sens_${key}`,
+          label: `${s.role_name} → ${c}`,
           type: 'smoothstep',
-          style: { stroke: edgeColor, strokeWidth: 1.5 },
+          style: { stroke: edgeColor, strokeWidth: 1.5, strokeDasharray: '4 3' },
+          labelStyle: { fontSize: 9, fill: edgeColor },
         });
       }
     }
+
     return base;
-  }, [data, viewMode, kvData]);
+  }, [data, viewMode, kvData, sensitiveData]);
 
   const trustCount = (data?.trust_relationships?.federated_trusts?.length ?? 0) +
                      (data?.trust_relationships?.ownership_edges?.length ?? 0);
@@ -645,6 +716,55 @@ export default function AccessGraphTab({ identityId }: { identityId: string }) {
            'Full hierarchy: Subscriptions, Resource Groups, Resources & Roles'}
         </span>
       </div>
+
+      {/* V2.9 (2026-06-12) — peer review: executive summary must render
+          for EVERY identity, not just ones with non-zero scope. Previously
+          the early-return on zero counts produced an inconsistent UI —
+          some identities had the banner, others didn't. Now always render;
+          when scope is empty (no RBAC assignments) say so explicitly. */}
+      {(() => {
+        const subs = data?.effective_scope?.subscription_count || 0;
+        const rgs  = data?.effective_scope?.resource_group_count || 0;
+        const res  = data?.effective_scope?.resource_count || 0;
+        const entraScopes = data?.effective_scope?.entra_scopes?.length || 0;
+        const parts: string[] = [];
+        if (subs > 0) parts.push(`${subs} subscription${subs === 1 ? '' : 's'}`);
+        if (rgs > 0)  parts.push(`${rgs} resource group${rgs === 1 ? '' : 's'}`);
+        if (res > 0)  parts.push(`${res} resource${res === 1 ? '' : 's'}`);
+        if (entraScopes > 0) parts.push(`${entraScopes} Entra role${entraScopes === 1 ? '' : 's'}`);
+        const isEmpty = parts.length === 0;
+        return (
+          <div className={`rounded-lg border p-3 text-sm ${
+            isEmpty
+              ? 'bg-slate-50 dark:bg-slate-900/40 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+              : 'bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-900 dark:text-blue-200'
+          }`}>
+            <span className="font-semibold">Executive summary:</span>{' '}
+            {isEmpty ? (
+              <>
+                This identity has <strong>no scoped access</strong> in this tenant
+                {(() => {
+                  // Graph API permissions are nodes in the rendered graph, not a
+                  // typed field on the response. Count nodes whose data.kind looks
+                  // like an api-permission entry; if any, surface that instead of
+                  // implying the identity is entirely toothless.
+                  const apiPermNodes = ((data as any)?.nodes || [])
+                    .filter((n: any) => String(n?.data?.kind || n?.type || '').toLowerCase().includes('permission'))
+                    .length as number;
+                  return apiPermNodes > 0
+                    ? <> — but it does hold <strong>{apiPermNodes} Graph API permission{apiPermNodes === 1 ? '' : 's'}</strong> (see graph above).</>
+                    : '. No Azure RBAC role assignments and no Entra directory role assignments are observed.';
+                })()}
+              </>
+            ) : (
+              <>
+                This identity can reach <strong>{parts.join(', ')}</strong>
+                {(res + rgs) > 50 ? ' — this is a broad blast radius. Scope-down candidates are listed in the Effective Scope panel below.' : '.'}
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Attack Paths View */}
       {viewMode === 'attack_paths' ? (
