@@ -351,9 +351,22 @@ def populate_board_scorecard_history(cur, _run_id):
     smooth-ish improvement curve from worse → better, with the most
     recent snapshot matching what the live engine would compute.
 
-    Idempotent: UPSERT on (organization_id, snapshot_date).
+    Idempotent: DELETEs prior demo-seeded history rows (discovery_run_id
+    IS NULL — i.e. NOT real run-attributed rows from the live persister)
+    then INSERTs the fresh 30-day series. Post-migration 220 the table
+    no longer has a (org, snapshot_date) unique key — uniqueness is
+    now (org, discovery_run_id) and only enforced when discovery_run_id
+    is not null. Seeded historical rows leave discovery_run_id NULL so
+    they never collide with live snapshots.
     """
     import json
+    # 2026-06-12 — wipe previously-seeded demo history (NULL discovery_run_id),
+    # leave any real per-run snapshots written by the live persister alone.
+    cur.execute(
+        "DELETE FROM ai_board_scorecard_snapshots "
+        "WHERE organization_id = %s AND discovery_run_id IS NULL",
+        (DEMO_ORG_ID,),
+    )
     # Target final state (matches live compute_board_scorecard for the demo)
     final = dict(total_agents=13, owner=62, telemetry=100, network=31, privilege=92, policy=92,
                  strong=2, good=7, elevated=3, critical=1)
@@ -391,20 +404,9 @@ def populate_board_scorecard_history(cur, _run_id):
              least_privilege_pct, policy_compliant_pct,
              distribution_strong, distribution_good,
              distribution_elevated, distribution_critical,
-             top_10_worst_json, exceptions_pending, computed_at)
-            VALUES (%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s::jsonb, 0, NOW())
-            ON CONFLICT (organization_id, snapshot_date) DO UPDATE SET
-              total_agents          = EXCLUDED.total_agents,
-              with_owner_pct        = EXCLUDED.with_owner_pct,
-              with_telemetry_pct    = EXCLUDED.with_telemetry_pct,
-              private_network_pct   = EXCLUDED.private_network_pct,
-              least_privilege_pct   = EXCLUDED.least_privilege_pct,
-              policy_compliant_pct  = EXCLUDED.policy_compliant_pct,
-              distribution_strong   = EXCLUDED.distribution_strong,
-              distribution_good     = EXCLUDED.distribution_good,
-              distribution_elevated = EXCLUDED.distribution_elevated,
-              distribution_critical = EXCLUDED.distribution_critical,
-              computed_at           = NOW()
+             top_10_worst_json, exceptions_pending, computed_at,
+             discovery_run_id)
+            VALUES (%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s::jsonb, 0, NOW(), NULL)
         """, (
             DEMO_ORG_ID, snapshot_date, total,
             max(0, min(100, owner)), max(0, min(100, telem)), max(0, min(100, network)),
@@ -610,6 +612,62 @@ def upsert_hero_identities(cur, run_id):
     return planted
 
 
+# 2026-06-12 — classify the 3 demo-ai-agent-* hero identities. The live
+# AI Board Scorecard rollup (compute_board_scorecard) joins identities to
+# agent_classifications and counts where agent_identity_type IN ('ai_agent',
+# 'possible_ai_agent'). Without rows here the rollup reads 0 agents and
+# the scorecard surfaces read empty even when the named hero identities
+# exist. We classify them deterministically (no real classifier run) so
+# demo state is stable across runs.
+DEMO_AI_AGENT_CLASSIFICATIONS = [
+    ("demo-ai-agent-copilot-overpriv-01", "azure_openai", "ai_agent",
+     "Demo classification — Microsoft Copilot-style agent surfaced via SP name pattern"),
+    ("demo-ai-agent-rag-indexer-01",      "azure_openai", "ai_agent",
+     "Demo classification — RAG indexer pattern: AI-themed name + Storage Blob Data Reader"),
+    ("demo-ai-agent-claude-connector-01", "anthropic",    "ai_agent",
+     "Demo classification — Anthropic connector surfaced via SP name + redirect URI"),
+]
+
+
+def classify_demo_ai_agents(cur):
+    classified = []
+    for name, platform, agent_type, reason in DEMO_AI_AGENT_CLASSIFICATIONS:
+        identity_id = f"demo-{name}-id"
+        cur.execute(
+            "SELECT id FROM identities WHERE identity_id=%s AND organization_id=%s",
+            (identity_id, DEMO_ORG_ID),
+        )
+        row = cur.fetchone()
+        if not row:
+            log.warning(f"  [skip] identity not found: {identity_id}")
+            continue
+        identity_db_id = row["id"]
+        # Idempotent: UPSERT by (identity_db_id) so re-runs refresh.
+        cur.execute(
+            "DELETE FROM agent_classifications WHERE identity_db_id = %s AND organization_id = %s",
+            (identity_db_id, DEMO_ORG_ID),
+        )
+        cur.execute(
+            """
+            INSERT INTO agent_classifications (
+              identity_db_id, identity_id, agent_identity_type,
+              classification_confidence, classification_reason,
+              detected_platform, pattern_version, classified_at,
+              organization_id, model_name
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s)
+            """,
+            (
+                identity_db_id, identity_id, agent_type,
+                0.95, reason,
+                platform, "demo_seeder_v1",
+                DEMO_ORG_ID,
+                "gpt-4o" if platform == "azure_openai" else ("claude-3-5-sonnet" if platform == "anthropic" else None),
+            ),
+        )
+        classified.append((name, platform))
+    return classified
+
+
 def main():
     log.info("AuditGraph feature-exerciser starting")
     log.info(f"Target: org_id={DEMO_ORG_ID}, DB={DB_HOST}:{DB_PORT}/{DB_NAME}")
@@ -637,6 +695,16 @@ def main():
             planted = upsert_hero_identities(cur, run_id)
             for name, action, feature in planted:
                 log.info(f"  [{action:>8}] {name:42s} → {feature}")
+
+            # 2026-06-12 — classify the 3 demo-ai-agent-* heroes so the
+            # AI Board Scorecard live rollup counts them (rollup queries
+            # agent_classifications, not just identity_category). Without
+            # this the scorecard reads "0 AI agents" even though the
+            # named demo agents exist.
+            log.info("\n--- Step 3: classify demo AI agents ---")
+            classified = classify_demo_ai_agents(cur)
+            for name, platform in classified:
+                log.info(f"  [classified] {name:42s} → {platform}")
 
         conn.commit()
 
