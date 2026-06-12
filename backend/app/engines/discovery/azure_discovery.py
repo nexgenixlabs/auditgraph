@@ -9292,7 +9292,24 @@ class AzureDiscoveryEngine:
                 )
                 _days_inactive = identity.get('days_inactive')
                 _recent_activity = _days_inactive is not None and _days_inactive < 30
-                _has_owner = (identity.get('owner_count') or 0) > 0
+                # V2.12 (2026-06-12) — broaden owner predicate to match the
+                # Ownership Center engine. Previously checked ONLY owner_count
+                # which is set by /servicePrincipals/{id}/owners. That missed:
+                # app-registration owners (Entra surfaces only the registered
+                # app's owner) and Microsoft Graph display_name fallbacks
+                # populated by the SP-resolution layer. Result: 141 NHIs in
+                # the pilot were tagged "no owner" by the classifier while
+                # Ownership Center correctly counted them as owned. The
+                # tenant's NHI Overview read "100% critical" while Ownership
+                # Center read "13% owned" — same identities, contradicting
+                # signals. The classifier now uses the same 4-signal OR
+                # predicate the Ownership Center uses.
+                _has_owner = (
+                    (identity.get('owner_count') or 0) > 0
+                    or bool(identity.get('owner_display_name'))
+                    or bool(identity.get('app_reg_owner_display_name'))
+                    or bool(identity.get('app_reg_owner_id'))
+                )
                 _auth_gated = (
                     bool(identity.get('has_federated_credentials'))
                     or (identity.get('identity_type') or '').startswith('managed_identity')

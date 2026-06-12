@@ -347,6 +347,38 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
         'severity': 'info',
     }, db_org_id=db_org_id)
 
+    # V2.13 (2026-06-12) — persist board scorecard snapshot per discovery run.
+    # Migration 220 switched ai_board_scorecard_snapshots from per-day
+    # UPSERT to per-run INSERT so multi-scan-per-day cadences (6h, 12h)
+    # actually accumulate trend points. A 6h-cadence tenant lights up
+    # trend on the 2nd scan; a 24h-cadence tenant on day 2. Without
+    # this hook the table stays empty and every trend chart reads
+    # "Baseline established. Trend data available after next scan"
+    # forever — the bug the founder reported on 2026-06-12.
+    try:
+        from app.engines.scoring.board_scorecard_engine import persist_board_scorecard_snapshot
+        snap_db = Database(organization_id=db_org_id)
+        try:
+            cur = snap_db.conn.cursor()
+            # Latest completed discovery_run for this tenant — used as
+            # the per-run identifier so re-firing the hook for the same
+            # run does NOT create duplicate snapshots (migration 220
+            # adds a partial unique index on (org, discovery_run_id)).
+            cur.execute("""
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (db_org_id,))
+            _row = cur.fetchone()
+            _latest_run_id = _row[0] if _row else None
+            persist_board_scorecard_snapshot(cur, db_org_id, discovery_run_id=_latest_run_id)
+            snap_db.conn.commit()
+            cur.close()
+        finally:
+            snap_db.close()
+    except Exception as e:
+        logger.warning("board_scorecard snapshot persistence failed tenant=%d: %s", db_org_id, e)
+
     # Background owned objects enrichment (deferred from main scan pipeline)
     for conn in connected:
         if conn.get('cloud', 'azure') == 'azure':

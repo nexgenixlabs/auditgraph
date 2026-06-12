@@ -324,4 +324,89 @@ def _empty_scorecard() -> dict[str, Any]:
     }
 
 
-__all__ = ["compute_board_scorecard"]
+def persist_board_scorecard_snapshot(
+    cursor: Any,
+    organization_id: int,
+    discovery_run_id: int | None = None,
+) -> bool:
+    """Persist a scorecard rollup to ai_board_scorecard_snapshots.
+
+    Called after each discovery run so the trend charts on /board-scorecard,
+    /identity-scorecard, /dashboard have data to render. Without this hook
+    the snapshot table stays empty and every trend widget shows "Baseline
+    established. Trend data available after next scan" forever.
+
+    Per-run snapshots (post-migration 220): every discovery run writes its
+    own row. A 6h-cadence tenant gets 4 rows/day → trend lights up after
+    the 2nd scan. A 24h-cadence tenant gets 1 row/day → trend lights up
+    after day 2. The (org, discovery_run_id) partial unique index in
+    migration 220 prevents a single run from accidentally writing twice
+    if the hook fires more than once for the same run_id.
+
+    Returns True on success, False on caught failure.
+    """
+    import json
+    if not organization_id:
+        return False
+    try:
+        result = compute_board_scorecard(cursor, organization_id)
+    except Exception as exc:
+        logger.warning("persist_board_scorecard_snapshot compute failed org=%s: %s", organization_id, exc)
+        return False
+
+    dist = result.get("distribution") or {}
+    try:
+        cursor.execute(
+            """
+            INSERT INTO ai_board_scorecard_snapshots
+              (organization_id, snapshot_date, total_agents,
+               with_owner_pct, with_telemetry_pct, private_network_pct,
+               least_privilege_pct, policy_compliant_pct,
+               distribution_strong, distribution_good,
+               distribution_elevated, distribution_critical,
+               top_10_worst_json, exceptions_pending, computed_at,
+               discovery_run_id)
+            VALUES (%s, CURRENT_DATE, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s::jsonb, %s, NOW(), %s)
+            ON CONFLICT (organization_id, discovery_run_id)
+            WHERE discovery_run_id IS NOT NULL
+            DO UPDATE SET
+              total_agents          = EXCLUDED.total_agents,
+              with_owner_pct        = EXCLUDED.with_owner_pct,
+              with_telemetry_pct    = EXCLUDED.with_telemetry_pct,
+              private_network_pct   = EXCLUDED.private_network_pct,
+              least_privilege_pct   = EXCLUDED.least_privilege_pct,
+              policy_compliant_pct  = EXCLUDED.policy_compliant_pct,
+              distribution_strong   = EXCLUDED.distribution_strong,
+              distribution_good     = EXCLUDED.distribution_good,
+              distribution_elevated = EXCLUDED.distribution_elevated,
+              distribution_critical = EXCLUDED.distribution_critical,
+              top_10_worst_json     = EXCLUDED.top_10_worst_json,
+              exceptions_pending    = EXCLUDED.exceptions_pending,
+              computed_at           = NOW()
+            """,
+            (
+                organization_id,
+                int(result.get("total_agents", 0) or 0),
+                float(result.get("with_owner_pct", 0) or 0),
+                float(result.get("with_telemetry_pct", 0) or 0),
+                float(result.get("private_network_pct", 0) or 0),
+                float(result.get("least_privilege_pct", 0) or 0),
+                float(result.get("policy_compliant_pct", 0) or 0),
+                int(dist.get("strong", 0) or 0),
+                int(dist.get("good", 0) or 0),
+                int(dist.get("elevated", 0) or 0),
+                int(dist.get("critical", 0) or 0),
+                json.dumps(result.get("top_10_worst", []) or []),
+                int(result.get("exceptions_pending", 0) or 0),
+                discovery_run_id,
+            ),
+        )
+        return True
+    except Exception as exc:
+        logger.warning("persist_board_scorecard_snapshot insert failed org=%s run=%s: %s",
+                       organization_id, discovery_run_id, exc)
+        return False
+
+
+__all__ = ["compute_board_scorecard", "persist_board_scorecard_snapshot"]

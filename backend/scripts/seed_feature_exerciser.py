@@ -277,13 +277,19 @@ def populate_activity_feed(cur, _run_id):
     """
     import json
     from datetime import timedelta
-    cur.execute("""
-        DELETE FROM activity_log
-        WHERE organization_id = %s
-          AND metadata::text LIKE '%%demo_seeded%%'
-    """, (DEMO_ORG_ID,))
-    deleted = cur.rowcount
+    # Lock-V1.6 (2026-06-11) — activity_log carries an audit-integrity trigger
+    # that prohibits DELETE (SOC 2 CC4.1 evidence requirement). The seeder
+    # used to DELETE-then-INSERT to stay idempotent; now we INSERT-only and
+    # tag each row with a `demo_batch` timestamp. The page queries already
+    # window by created_at, so older demo rows just age out of the view.
+    deleted = 0
+    # Lock-V1.6 (2026-06-11) — extended to 7 days so the Drift Analysis
+    # timeline + Exposure Explorer + Risk Monitoring change-velocity strip
+    # all light up. Last-24h events stay rich (Ops Center stays alive);
+    # earlier days carry the broader change story (privilege drift, AI
+    # onboarding, new attack paths, classification edits).
     events = [
+        # ── Last 24h (Ops Center primary window) ────────────────────────
         ("critical_attack_path_discovered", "New critical attack path discovered", "User → SPN → KeyVault → PHI Data", 1),
         ("ai_agent_onboarded",              "New AI agent onboarded",              "Agent: demo-ai-rag-indexer-01",    3),
         ("privileged_role_assigned",        "Privileged role granted",             "User: demo-human-no-mfa-priv-01",  4),
@@ -296,16 +302,46 @@ def populate_activity_feed(cur, _run_id):
         ("attack_path_resolved",            "Attack path resolved",                "kv-prod-01 reach-chain closed",    18),
         ("federated_credential_added",      "Federated credential added",          "SPN: demo-spn-github-actions-fic-01", 20),
         ("ownership_assigned",              "Ownership assigned to orphan NHI",    "SPN: demo-spn-orphan-critical-01", 22),
+        # ── Yesterday ──────────────────────────────────────────────────
+        ("privileged_role_assigned",        "Owner role granted on prod sub",      "SPN: demo-spn-databricks-prod-owner", 26),
+        ("new_identity_discovered",         "New human guest added",               "User: contractor@partner-corp.com", 30),
+        ("classification_changed",          "PCI tag applied to vault",            "KV: rg-fin-prod/kv-payments-01",   34),
+        ("ai_agent_onboarded",              "Copilot model registered",            "Agent: demo-ai-agent-copilot-prod", 38),
+        ("permission_escalation_detected",  "User Access Administrator escalation","User: demo-human-priv-escalated-01", 42),
+        # ── 2 days ago ─────────────────────────────────────────────────
+        ("privileged_role_assigned",        "Key Vault Administrator granted",     "SPN: demo-spn-vault-admin-01",      52),
+        ("critical_attack_path_discovered", "SPN → Subscription Owner chain",      "demo-spn-sub-owner-01 → /sub-prod", 58),
+        ("service_principal_created",       "Terraform automation SPN added",      "SPN: demo-spn-terraform-cicd",      66),
+        # ── 3 days ago ─────────────────────────────────────────────────
+        ("classification_changed",          "PII tag applied to storage",          "Storage: rg-data-prod/customer-dump", 76),
+        ("mfa_disabled",                    "MFA dropped from access policy",      "Policy: legacy-svc-account-policy", 80),
+        ("ai_agent_excessive_perm",         "Inference SPN grants Storage Owner",  "Agent: demo-ai-inference-overpriv-02", 84),
+        # ── 4 days ago ─────────────────────────────────────────────────
+        ("federated_credential_added",      "GitHub Actions OIDC trust added",     "SPN: demo-spn-github-actions-fic-02", 96),
+        ("privileged_role_assigned",        "Global Administrator granted",        "User: demo-human-global-admin-01", 104),
+        # ── 5 days ago ─────────────────────────────────────────────────
+        ("new_identity_discovered",         "New service principal discovered",    "SPN: demo-spn-pipeline-runner-01", 118),
+        ("classification_changed",          "PHI tag applied to data lake",        "Storage: rg-data-prod/ehr-export", 124),
+        # ── 6 days ago ─────────────────────────────────────────────────
+        ("ai_agent_onboarded",              "First AI agent of week onboarded",    "Agent: demo-ai-rag-indexer-prod", 138),
+        ("ownership_assigned",              "Orphan NHI claimed by SRE team",      "SPN: demo-spn-orphan-finance-01", 148),
+        # ── 7 days ago (window edge) ───────────────────────────────────
+        ("privileged_role_assigned",        "Contributor role granted on prod RG", "SPN: demo-spn-rg-contributor-prod", 162),
     ]
+    # Generate a batch tag so re-runs are traceable without violating audit-immutability.
+    import time
+    batch_tag = f"demo_batch_{int(time.time())}"
     inserted = 0
     for action, desc, target, hours_ago in events:
         cur.execute("""
             INSERT INTO activity_log
               (action_type, description, metadata, created_at, organization_id)
             VALUES (%s, %s, %s::jsonb, NOW() - (%s::int * INTERVAL '1 hour'), %s)
-        """, (action, desc, json.dumps({'target': target, 'demo_seeded': True}), hours_ago, DEMO_ORG_ID))
+        """, (action, desc,
+              json.dumps({'target': target, 'demo_seeded': True, 'demo_batch': batch_tag}),
+              hours_ago, DEMO_ORG_ID))
         inserted += 1
-    log.info(f"Activity feed: replaced {deleted} demo rows with {inserted} fresh (last 24h)")
+    log.info(f"Activity feed: inserted {inserted} fresh events (last 7 days, batch={batch_tag})")
 
 
 def populate_board_scorecard_history(cur, _run_id):

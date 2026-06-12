@@ -180,8 +180,12 @@ DELETE_ORDER = [
     ('identity_roles',               'organization_id'),
     ('credentials',                  'organization_id'),
     ('federated_credentials',        'organization_id'),
-    ('pim_activations',              '@fk:identity_db_id:identities'),
-    ('pim_eligible_assignments',     '@fk:identity_db_id:identities'),
+    # 2026-06-11 — both PIM tables actually carry organization_id natively.
+    # The prior @fk strategy joined through identities, which left orphan
+    # rows behind when the parent identity for the org no longer existed.
+    # Use the direct organization_id column for clean per-org deletes.
+    ('pim_activations',              'organization_id'),
+    ('pim_eligible_assignments',     'organization_id'),
     ('lineage_verdicts',             'organization_id'),
 
     # ── Phase 14: Group tables ──
@@ -211,6 +215,13 @@ DELETE_ORDER = [
     ('identities',                   'organization_id'),
 
     # ── Phase 19: Discovery / execution runs ──
+    # 2026-06-11 — added discovery_stage_log + ai_agent_lifecycle_events.
+    # Both have organization_id natively but were not previously listed,
+    # so every nuke left residue (3-8 stage_log rows + 77 lifecycle rows
+    # for the typical org). Listed before discovery_runs because that's
+    # their logical parent.
+    ('discovery_stage_log',          'organization_id'),
+    ('ai_agent_lifecycle_events',    'organization_id'),
     ('execution_runs',               'organization_id'),
     ('job_runs',                     'organization_id'),
     ('discovery_runs',               'organization_id'),
@@ -220,6 +231,10 @@ DELETE_ORDER = [
     ('cloud_connections',            'organization_id'),
 
     # ── Phase 21: Users ──
+    # 2026-06-11 — refresh_tokens added BEFORE users since it has no
+    # organization_id; clean by joining through users(id). Otherwise stale
+    # tokens accumulate after a nuke (16,875 found pre-cleanup on 2026-06-11).
+    ('refresh_tokens',               '@fk:user_id:users'),
     ('users',                        'organization_id'),
 
     # ── Phase 22: Organization itself (LAST) ──

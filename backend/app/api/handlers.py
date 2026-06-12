@@ -1111,6 +1111,61 @@ def get_identities():
             where_clauses += " AND COALESCE(i.cloud, 'azure') = %s"
             params.append(cloud_filter.lower())
 
+        # V2.13 (2026-06-12) — drift drilldown.
+        # Drift Analysis breakdown cards link here with ?drift_id=N&drift_change=new
+        # so the customer sees ONLY the identities that changed in that
+        # drift report — not the full inventory. The drift detector
+        # persists per-change identity arrays in drift_reports.changes
+        # JSONB (keys: new_identities, removed_identities, permission_changes,
+        # risk_changes, credential_changes, classification_changes). We
+        # extract db_id from each entry and constrain i.id.
+        drift_id_param = request.args.get("drift_id", type=int)
+        drift_change_param = (request.args.get("drift_change") or "").lower().strip()
+        _DRIFT_CHANGE_KEYS = {
+            "new": "new_identities",
+            "added": "new_identities",
+            "removed": "removed_identities",
+            "permission": "permission_changes",
+            "risk": "risk_changes",
+            "credential": "credential_changes",
+            "classification": "classification_changes",
+        }
+        if drift_id_param and drift_change_param in _DRIFT_CHANGE_KEYS:
+            jsonb_key = _DRIFT_CHANGE_KEYS[drift_change_param]
+            try:
+                cursor.execute(
+                    "SELECT changes -> %s FROM drift_reports WHERE id = %s AND organization_id = %s",
+                    (jsonb_key, drift_id_param, _org_id()),
+                )
+                row = cursor.fetchone()
+                arr = row[0] if row and row[0] is not None else []
+                drift_db_ids = [
+                    int(item['db_id']) for item in arr
+                    if isinstance(item, dict) and item.get('db_id') is not None
+                ]
+            except Exception:
+                drift_db_ids = []
+            # Removed identities are NOT in the current run, so the
+            # default discovery_run_id = ANY(latest_run_ids) filter would
+            # exclude them. Lift it for the removed view.
+            if drift_change_param == "removed":
+                where_clauses = where_clauses.replace(
+                    " WHERE i.discovery_run_id = ANY(%s)",
+                    " WHERE 1=1",
+                    1,
+                )
+                # The corresponding params[0] (run_ids) is now unused —
+                # drop it so positional ordering stays aligned.
+                if params and isinstance(params[0], list):
+                    params.pop(0)
+            if drift_db_ids:
+                where_clauses += " AND i.id = ANY(%s)"
+                params.append(drift_db_ids)
+            else:
+                # No matches — force an empty result rather than leak the
+                # full inventory.
+                where_clauses += " AND 1=0"
+
         if search:
             _s = search.strip()
             if _s:
@@ -1259,6 +1314,20 @@ def get_identities():
         rows = rows_as_dicts(cursor)
 
         identities = [_map_identity_row(row) for row in rows]
+
+        # Lock-V1.7 (2026-06-11) — Scope column (Option B per peer review).
+        # For each identity in the list, attach a scope_breakdown rollup:
+        #   {tenant, subscriptions, resource_groups, resources, total, has_tenant}
+        # Powers the "Scope" column on the Humans Inventory table (replaces the
+        # empty Department + Job Title columns). Bulk-computed in two queries
+        # (Azure RBAC + Entra directory roles) so the list endpoint stays O(1)
+        # in identity count rather than O(N) per-row subqueries.
+        identity_db_ids = [int(i['id']) for i in identities if i.get('id') is not None]
+        scope_breakdowns = _compute_scope_breakdowns(cursor, identity_db_ids)
+        for ident in identities:
+            ident['scope_breakdown'] = scope_breakdowns.get(int(ident['id']) if ident.get('id') is not None else -1,
+                                                            {'tenant': 0, 'subscriptions': 0, 'resource_groups': 0,
+                                                             'resources': 0, 'total': 0, 'has_tenant': False})
 
         # Compute governance summary counts from mapped identities
         gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0, 'data_plane': 0}
@@ -3431,7 +3500,16 @@ def get_drift_report(run_id: int):
 
 
 def get_latest_drift():
-    """Get the most recent drift report summary for the dashboard widget."""
+    """Get the most recent drift report summary for the dashboard widget.
+
+    V2.13 (2026-06-12) — DriftAnalysis page expects baseline_at, current_at,
+    and the new field aliases (added_identities, privilege_changes, ...).
+    Without baseline_at + current_at the hero card was stuck on
+    "Scan 1 of 2 complete" even after a second discovery run finished —
+    because hasSecondScan = !!drift?.current_at and current_at was never
+    sent. We now JOIN discovery_runs and emit both name styles so the new
+    page lights up and DashboardLegacy keeps working.
+    """
     db = _db()
     try:
         conn_id = _connection_id()
@@ -3439,8 +3517,50 @@ def get_latest_drift():
         if not report:
             return jsonify({"has_drift_data": False})
 
+        # Pull baseline / current timestamps from discovery_runs so the
+        # frontend can show "comparing baseline (X) to current scan (Y)".
+        baseline_at = None
+        current_at = None
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT completed_at FROM discovery_runs WHERE id = %s",
+                (report.get('current_run_id'),),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                current_at = row[0].isoformat()
+            if report.get('previous_run_id'):
+                cursor.execute(
+                    "SELECT completed_at FROM discovery_runs WHERE id = %s",
+                    (report.get('previous_run_id'),),
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    baseline_at = row[0].isoformat()
+            cursor.close()
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
         report['created_at'] = report['created_at'].isoformat() if report.get('created_at') else None
         report['has_drift_data'] = True
+        report['baseline_at'] = baseline_at
+        report['current_at'] = current_at
+
+        # Frontend-aligned aliases (DriftAnalysis V2 uses these names).
+        # Backend storage still uses *_count for backwards compat with
+        # DashboardLegacy.
+        report['added_identities'] = report.get('new_identities_count', 0)
+        report['removed_identities'] = report.get('removed_identities_count', 0)
+        report['privilege_changes'] = report.get('permission_changes_count', 0)
+        report['role_changes'] = report.get('risk_changes_count', 0)
+        # No dedicated access_changes column yet; surface 0 honestly until a
+        # column lands. Don't synthesize.
+        report['access_changes'] = 0
+
         return jsonify(report)
     finally:
         db.close()
@@ -5366,6 +5486,84 @@ def _derive_governance_state_from_row(row, privilege_tier):
     if privilege_tier <= 1 and activity == 'inactive':
         return 'Ungoverned'
     return 'Governed'
+
+
+def _compute_scope_breakdowns(cursor, identity_db_ids):
+    """Lock-V1.7 (2026-06-11) — bulk scope rollup for the identity list.
+
+    Returns a dict: identity_db_id -> {tenant, subscriptions, resource_groups,
+    resources, total, has_tenant}. Two SQL queries — Azure RBAC role_assignments
+    + Entra directory role_assignments. DISTINCT-counts the scope strings so
+    multiple roles at the same scope don't double-count.
+
+    Scope classification (Azure RBAC):
+      tenant         scope = '/' OR scope_type = 'tenant'
+      subscriptions  /subscriptions/<id>                          (no RG, no provider)
+      resource_groups /subscriptions/<id>/resourceGroups/<name>   (no provider)
+      resources      anything containing /providers/
+
+    Entra directory roles count as 1 tenant scope each (they are inherently
+    tenant-wide, no narrower scope exists in directory plane).
+    """
+    breakdowns = {db_id: {'tenant': 0, 'subscriptions': 0, 'resource_groups': 0,
+                          'resources': 0, 'total': 0, 'has_tenant': False}
+                  for db_id in identity_db_ids}
+    if not identity_db_ids:
+        return breakdowns
+
+    # Azure RBAC scope counts. SAVEPOINTs around each probe so a missing
+    # column / table failure on one source doesn't tank the whole list endpoint.
+    try:
+        cursor.execute("SAVEPOINT _scope_rbac_sp")
+        cursor.execute(r"""
+            SELECT
+              identity_db_id,
+              COUNT(DISTINCT CASE WHEN scope = '/' OR scope_type = 'tenant' THEN scope END) AS tenant_n,
+              COUNT(DISTINCT CASE WHEN scope ~ '^/subscriptions/[^/]+$' THEN scope END) AS sub_n,
+              COUNT(DISTINCT CASE WHEN scope ~ '^/subscriptions/[^/]+/resourceGroups/[^/]+$' THEN scope END) AS rg_n,
+              COUNT(DISTINCT CASE WHEN scope LIKE '%%/providers/%%' THEN scope END) AS res_n
+            FROM role_assignments
+            WHERE identity_db_id = ANY(%s)
+            GROUP BY identity_db_id
+        """, (identity_db_ids,))
+        for row in cursor.fetchall():
+            db_id, t, s, rg, r = row
+            if db_id in breakdowns:
+                breakdowns[db_id]['tenant'] += int(t or 0)
+                breakdowns[db_id]['subscriptions'] += int(s or 0)
+                breakdowns[db_id]['resource_groups'] += int(rg or 0)
+                breakdowns[db_id]['resources'] += int(r or 0)
+        cursor.execute("RELEASE SAVEPOINT _scope_rbac_sp")
+    except Exception:
+        try: cursor.execute("ROLLBACK TO SAVEPOINT _scope_rbac_sp")
+        except Exception: pass
+
+    # Entra directory roles — each distinct directory role is one tenant scope.
+    # Column name varies by schema vintage (role_definition_id is current,
+    # role_template_id was an earlier name); COALESCE on role_name handles both.
+    try:
+        cursor.execute("SAVEPOINT _scope_entra_sp")
+        cursor.execute("""
+            SELECT identity_db_id, COUNT(DISTINCT COALESCE(role_definition_id, role_name)) AS entra_n
+            FROM entra_role_assignments
+            WHERE identity_db_id = ANY(%s)
+            GROUP BY identity_db_id
+        """, (identity_db_ids,))
+        for row in cursor.fetchall():
+            db_id, c = row
+            if db_id in breakdowns and int(c or 0) > 0:
+                breakdowns[db_id]['tenant'] += int(c or 0)
+        cursor.execute("RELEASE SAVEPOINT _scope_entra_sp")
+    except Exception:
+        try: cursor.execute("ROLLBACK TO SAVEPOINT _scope_entra_sp")
+        except Exception: pass
+
+    # Finalize total + has_tenant flag.
+    for b in breakdowns.values():
+        b['total'] = b['tenant'] + b['subscriptions'] + b['resource_groups'] + b['resources']
+        b['has_tenant'] = b['tenant'] > 0
+
+    return breakdowns
 
 
 def _map_identity_row(row):
@@ -23960,7 +24158,12 @@ def get_spn_stats():
         """, params)
         by_activity = {r['act']: r['c'] for r in cursor.fetchall()}
 
-        # Blast radius — join role_assignments to compute (custom only)
+        # Blast radius — join role_assignments to compute (custom only).
+        # Pilot-readiness fix (2026-06-11): this query only uses the first 2
+        # placeholders (run_ids + cats). When mon_subs is truthy the outer
+        # `params` list has 5 entries; passing all 5 to a 2-placeholder query
+        # raised "not all arguments converted during string formatting" and
+        # 500'd the /api/spns/stats endpoint.
         cursor.execute(f"""
             SELECT i.id,
                    ARRAY_AGG(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL) as role_names,
@@ -23971,7 +24174,7 @@ def get_spn_stats():
             WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s
             {HIDE_MICROSOFT_SQL}
             GROUP BY i.id
-        """, params)
+        """, params[:2])
         blast_counts = {'high': 0, 'medium': 0, 'low': 0, 'none': 0}
         for row in cursor.fetchall():
             roles_list = []
@@ -44353,22 +44556,26 @@ def get_ai_board_scorecard_history_handler():
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        # V2.13 (2026-06-12) — order by computed_at so per-run snapshots
+        # (multiple per day under 6h/12h cadence) sequence correctly.
+        # Also expose computed_at to the frontend for finer x-axis labels.
         cursor.execute("""
-            SELECT snapshot_date, total_agents,
+            SELECT snapshot_date, computed_at, total_agents,
                    with_owner_pct, with_telemetry_pct, private_network_pct,
                    least_privilege_pct, policy_compliant_pct,
                    distribution_strong, distribution_good,
                    distribution_elevated, distribution_critical,
-                   exceptions_pending
+                   exceptions_pending, discovery_run_id
             FROM ai_board_scorecard_snapshots
             WHERE organization_id = %s
-              AND snapshot_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
-            ORDER BY snapshot_date ASC
+              AND computed_at >= NOW() - (%s::int * INTERVAL '1 day')
+            ORDER BY computed_at ASC
         """, (_org_id(), days))
         history = []
         for r in cursor.fetchall():
             row = dict(r)
-            row['snapshot_date'] = row['snapshot_date'].isoformat() if row['snapshot_date'] else None
+            row['snapshot_date'] = row['snapshot_date'].isoformat() if row.get('snapshot_date') else None
+            row['computed_at']   = row['computed_at'].isoformat() if row.get('computed_at') else None
             history.append(row)
         return jsonify({'history': history, 'days': days})
     except Exception as e:

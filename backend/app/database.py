@@ -5399,6 +5399,14 @@ class Database:
     # Phase 17: Activity Log & Audit Trail
     # ========================================================================
 
+    # Pilot-readiness fix (2026-06-11): class-level flag that prevents DDL
+    # from being re-run on every API call. When the connecting user is
+    # `auditgraph_app` (non-superuser, NOBYPASSRLS) it cannot own a table
+    # created by `auditgraph_admin`; CREATE INDEX IF NOT EXISTS raises
+    # "must be owner of table activity_log" and crashes /api/activity.
+    # We now ensure once per process and silently no-op on permission errors.
+    _activity_log_ensured = False
+
     def _ensure_activity_log_table(self):
         """Create activity_log table if it doesn't exist.
 
@@ -5410,61 +5418,73 @@ class Database:
             Only the automated retention job (which uses TRUNCATE-eligible
             partitioning or superuser override) can remove old entries.
         """
+        # Idempotent gate — DDL runs once per process. Subsequent calls
+        # short-circuit so the table-owner permission error can't recur.
+        if Database._activity_log_ensured:
+            return
         cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS activity_log (
-                id SERIAL PRIMARY KEY,
-                action_type VARCHAR(50) NOT NULL,
-                description TEXT NOT NULL,
-                metadata JSONB,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_created_at ON activity_log(created_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_action_type ON activity_log(action_type)")
-        # Phase 46: Add user_id and organization_id columns
-        cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS user_id INTEGER")
-        cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS organization_id INTEGER")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_organization_id ON activity_log(organization_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_user_id ON activity_log(user_id)")
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS activity_log (
+                    id SERIAL PRIMARY KEY,
+                    action_type VARCHAR(50) NOT NULL,
+                    description TEXT NOT NULL,
+                    metadata JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+        except Exception:
+            # Table already exists and we lack ownership — that's fine,
+            # the schema is correct, we just can't re-create it.
+            self._rollback()
+            Database._activity_log_ensured = True
+            cursor.close()
+            return
+        # Index/column/trigger DDL also fails for non-owner users. Wrap in
+        # try/except so each statement that we lack permission for is silently
+        # skipped — the schema has already been created by the admin user.
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_created_at ON activity_log(created_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_action_type ON activity_log(action_type)")
+            cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS user_id INTEGER")
+            cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS organization_id INTEGER")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_organization_id ON activity_log(organization_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_user_id ON activity_log(user_id)")
+            cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS integrity_hash VARCHAR(64)")
+            cursor.execute("""
+                CREATE OR REPLACE FUNCTION fn_activity_log_immutable()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF TG_OP = 'DELETE' THEN
+                        RAISE EXCEPTION 'AUDIT_INTEGRITY: DELETE on activity_log is prohibited (SOC 2 CC4.1)';
+                    END IF;
+                    IF TG_OP = 'UPDATE' THEN
+                        RAISE EXCEPTION 'AUDIT_INTEGRITY: UPDATE on activity_log is prohibited (SOC 2 CC4.1)';
+                    END IF;
+                    RETURN NULL;
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_trigger
+                        WHERE tgname = 'trg_activity_log_immutable'
+                        AND tgrelid = 'activity_log'::regclass
+                    ) THEN
+                        CREATE TRIGGER trg_activity_log_immutable
+                        BEFORE DELETE OR UPDATE ON activity_log
+                        FOR EACH ROW
+                        EXECUTE FUNCTION fn_activity_log_immutable();
+                    END IF;
+                END $$
+            """)
+            self._commit()
+        except Exception:
+            self._rollback()
 
-        # Compliance: Add integrity_hash column for tamper-evident chain
-        cursor.execute("ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS integrity_hash VARCHAR(64)")
-
-        # Compliance: Immutable audit log trigger — prevents DELETE and UPDATE
-        # This makes the activity_log append-only from the application layer.
-        # The retention job connects as admin and temporarily disables the trigger.
-        cursor.execute("""
-            CREATE OR REPLACE FUNCTION fn_activity_log_immutable()
-            RETURNS TRIGGER AS $$
-            BEGIN
-                IF TG_OP = 'DELETE' THEN
-                    RAISE EXCEPTION 'AUDIT_INTEGRITY: DELETE on activity_log is prohibited (SOC 2 CC4.1)';
-                END IF;
-                IF TG_OP = 'UPDATE' THEN
-                    RAISE EXCEPTION 'AUDIT_INTEGRITY: UPDATE on activity_log is prohibited (SOC 2 CC4.1)';
-                END IF;
-                RETURN NULL;
-            END;
-            $$ LANGUAGE plpgsql
-        """)
-        cursor.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_trigger
-                    WHERE tgname = 'trg_activity_log_immutable'
-                    AND tgrelid = 'activity_log'::regclass
-                ) THEN
-                    CREATE TRIGGER trg_activity_log_immutable
-                    BEFORE DELETE OR UPDATE ON activity_log
-                    FOR EACH ROW
-                    EXECUTE FUNCTION fn_activity_log_immutable();
-                END IF;
-            END $$
-        """)
-
-        self._commit()
+        Database._activity_log_ensured = True
         cursor.close()
 
     def log_activity(self, action_type: str, description: str, metadata: dict = None,
