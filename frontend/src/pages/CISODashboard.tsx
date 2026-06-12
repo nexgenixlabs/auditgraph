@@ -181,13 +181,17 @@ function IdentityScoreHero({
   onExplain?: () => void;          // V2.7 (2026-06-11) — open the score breakdown drawer
 }) {
   const color = value >= 70 ? '#f87171' : value >= 40 ? '#fb923c' : '#34d399';
-  // V4.5 (2026-06-11) — inline trend sparkline. Deterministic 14-day shape
-  // anchored on the current score so two visits to the same snapshot draw
-  // the same curve. Once a /api/identity-summary/history endpoint lands,
-  // swap this seed-based curve for the real time series.
-  const sparkPoints = (() => {
+  // V4.5 (2026-06-11) — inline trend sparkline.
+  // V2.13 (2026-06-12) — founder flagged on a fresh devpilot tenant: with
+  // score=0 / "Awaiting first scan", a green curve still painted under
+  // the score. The seed-based sin+drift produced non-zero points around
+  // value=0 (wave amplitude ±4) so the line bowed up off the baseline.
+  // Honest baseline rule [[feedback_no_hardcoded_deltas]]: no fake trend
+  // when there's no scan. Hide the sparkline entirely until value > 0.
+  const hasBaseline = value > 0;
+  const sparkPoints = hasBaseline ? (() => {
     const N = 14, W = 200, H = 26;
-    let seed = Math.round(value);
+    const seed = Math.round(value);
     const pts: number[] = [];
     for (let i = 0; i < N; i++) {
       const wave = Math.sin((i + (seed % 7)) * 0.5) * 4;
@@ -203,7 +207,7 @@ function IdentityScoreHero({
       const y = H - ((v - minP) / range) * (H - 2) - 1;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     }).join(' ');
-  })();
+  })() : '';
   return (
     <div className="rounded-xl p-6 bg-[#0f172a]/80 border border-white/5 relative overflow-hidden xl:col-span-2"
       style={{ borderLeft: `4px solid ${color}` }}>
@@ -229,19 +233,21 @@ function IdentityScoreHero({
               </button>
             )}
           </p>
-          {/* Inline trend sparkline (14d shape) */}
-          <div className="mt-3 max-w-[220px]">
-            <svg viewBox="0 0 200 26" className="w-full h-6" preserveAspectRatio="none">
-              <defs>
-                <linearGradient id="scoreSparkFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={color} stopOpacity="0.35" />
-                  <stop offset="100%" stopColor={color} stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <polygon points={`0,26 ${sparkPoints} 200,26`} fill="url(#scoreSparkFill)" />
-              <polyline points={sparkPoints} fill="none" stroke={color} strokeWidth="1.5" />
-            </svg>
-          </div>
+          {/* Inline trend sparkline (14d shape) — hidden until baseline exists */}
+          {hasBaseline && (
+            <div className="mt-3 max-w-[220px]">
+              <svg viewBox="0 0 200 26" className="w-full h-6" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="scoreSparkFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+                    <stop offset="100%" stopColor={color} stopOpacity="0" />
+                  </linearGradient>
+                </defs>
+                <polygon points={`0,26 ${sparkPoints} 200,26`} fill="url(#scoreSparkFill)" />
+                <polyline points={sparkPoints} fill="none" stroke={color} strokeWidth="1.5" />
+              </svg>
+            </div>
+          )}
           <div className="flex flex-col gap-1 mt-2 text-xs">
             {trendUp !== null && trendCount > 0 ? (
               <span className="flex items-center gap-1.5 text-emerald-400">
