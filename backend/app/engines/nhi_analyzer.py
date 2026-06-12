@@ -38,6 +38,16 @@ class NHIAnalyzer:
                     findings.extend(rule_findings)
                 except Exception as e:
                     logger.error(f"NHI analyzer '{rule['rule_key']}' failed: {e}")
+                    # 2026-06-12 — rollback the failed transaction so the
+                    # next rule starts clean. Without this, a single SQL
+                    # error (e.g. missing column) cascades and aborts
+                    # every subsequent rule with "current transaction is
+                    # aborted, commands ignored until end of transaction
+                    # block." Cloud devpilot was producing 0 NHI findings
+                    # because rule 12 hit a missing column and rules
+                    # 13–15 cascaded.
+                    try: self.db.conn.rollback()
+                    except Exception: pass
 
         if findings:
             self.db.save_risk_findings(connection_id, org_id, findings)

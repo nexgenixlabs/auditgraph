@@ -39,6 +39,12 @@ class EscalationDetector:
                     findings.extend(rule_findings)
                 except Exception as e:
                     logger.error(f"Escalation detector '{rule['rule_key']}' failed: {e}")
+                    # 2026-06-12 — rollback after each rule failure (see
+                    # matching note in nhi_analyzer). Without this the
+                    # 'permissions does not exist' error on rule 7
+                    # cascades through rules 8-10 with txn-aborted.
+                    try: self.db.conn.rollback()
+                    except Exception: pass
 
         if findings:
             self.db.save_risk_findings(connection_id, org_id, findings)
