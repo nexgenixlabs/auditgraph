@@ -135,6 +135,67 @@ def list_registry(db, org_id: int) -> list[dict[str, Any]]:
             ORDER BY dep.model_name
         """, (org_id, org_id, org_id))
         rows = cursor.fetchall()
+
+        # V2.13 (2026-06-12) — inferred models from agent_classifications.
+        # When discovery hasn't populated azure_ai_model_deployments (most
+        # orgs on day 1) but the agent classifier identified model_name
+        # on AI agents, surface those as registry entries too. Without
+        # this the Executive Posture "Models" tier reads 0 even when 77
+        # AI agents demonstrably use real models. Sourced exclusively
+        # from real classifier output — no fabrication.
+        # Excludes any (model_name, model_format, model_version) tuple
+        # that already appears in azure_ai_model_deployments so we don't
+        # double-count.
+        cursor.execute("""
+            SELECT
+                ac.model_name,
+                COALESCE(ac.detected_platform, '') AS model_format,
+                '' AS model_version,
+                COUNT(DISTINCT ac.identity_db_id) AS agent_count,
+                MIN(ac.classified_at) AS first_seen,
+                MAX(ac.classified_at) AS last_seen
+            FROM agent_classifications ac
+            WHERE ac.organization_id = %s
+              AND ac.model_name IS NOT NULL
+              AND ac.model_name <> ''
+              AND NOT EXISTS (
+                SELECT 1 FROM azure_ai_model_deployments aimd
+                WHERE aimd.organization_id = ac.organization_id
+                  AND aimd.model_name = ac.model_name
+              )
+            GROUP BY ac.model_name, COALESCE(ac.detected_platform, '')
+        """, (org_id,))
+        inferred_rows = cursor.fetchall()
+
+        # Platform-level inference: when model_name is null on every
+        # classification (common — classifier identifies platform but
+        # not the underlying model SKU), at least the DISTINCT platforms
+        # represent real model surfaces in use. Surface those so the
+        # Models tier isn't misleadingly 0 when the AI Identity Types
+        # card clearly shows real platform usage.
+        #
+        # Only fall back when the org has ZERO explicit deployments —
+        # otherwise trust the deployment scan as the source of truth
+        # (the platform-vs-vendor mapping is brittle: 'azure_openai'
+        # platform overlaps with 'OpenAI' model_format and we'd
+        # double-count). Once an org has deployment data, that's the
+        # canonical model list.
+        platform_rows = []
+        if not rows:
+            cursor.execute("""
+                SELECT
+                    ac.detected_platform AS platform,
+                    COUNT(DISTINCT ac.identity_db_id) AS agent_count,
+                    MIN(ac.classified_at) AS first_seen,
+                    MAX(ac.classified_at) AS last_seen
+                FROM agent_classifications ac
+                WHERE ac.organization_id = %s
+                  AND ac.detected_platform IS NOT NULL
+                  AND ac.detected_platform <> ''
+                  AND (ac.model_name IS NULL OR ac.model_name = '')
+                GROUP BY ac.detected_platform
+            """, (org_id,))
+            platform_rows = cursor.fetchall()
     finally:
         cursor.close()
 
@@ -167,6 +228,7 @@ def list_registry(db, org_id: int) -> list[dict[str, Any]]:
             'agent_count': agent_count,
             'first_seen': first_seen.isoformat() if first_seen else None,
             'last_seen':  last_seen.isoformat() if last_seen else None,
+            'source': 'deployment',
 
             'auto_classification': auto_risk,
             'approval': {
@@ -181,6 +243,80 @@ def list_registry(db, org_id: int) -> list[dict[str, Any]]:
                 'justification': justification,
                 'review_notes': notes,
                 'expires_at': expires_at.isoformat() if expires_at else None,
+            },
+        })
+
+    # Inferred-only models (no deployment row): surfaced from agent
+    # classifications so the Models tier reflects actual model usage.
+    for ir in inferred_rows:
+        (mname, mfmt, mver, agent_count, first_seen, last_seen) = ir
+        auto_risk = classify_model(mname, mfmt or None)
+        out.append({
+            'model_name': mname,
+            'model_format': mfmt or None,
+            'model_version': mver or None,
+            'deployment_count': 0,
+            'account_count': 0,
+            'max_capacity': None,
+            'agent_count': agent_count,
+            'first_seen': first_seen.isoformat() if first_seen else None,
+            'last_seen':  last_seen.isoformat() if last_seen else None,
+            'source': 'inferred',  # signals: came from classifier, not a deployment scan
+
+            'auto_classification': auto_risk,
+            'approval': {
+                'id': None,
+                'status': 'unverified',
+                'effective_status': 'unverified',
+                'risk_classification': auto_risk,
+                'requested_by': None, 'requested_at': None,
+                'reviewed_by': None,  'reviewed_at': None,
+                'justification': None, 'review_notes': None, 'expires_at': None,
+            },
+        })
+
+    # Platform-level rows — when the classifier didn't capture a model
+    # name but DID identify the hosting platform (the common path for
+    # Copilot Studio / Azure AI Studio / Anthropic etc. where the SP
+    # exposes the platform but not the underlying SKU). One entry per
+    # distinct platform, model_name set to the platform label so the
+    # registry list is self-explanatory ("Copilot Studio · 50 agents").
+    for pr in platform_rows:
+        (platform, agent_count, first_seen, last_seen) = pr
+        # Best-effort human-friendly model_name from platform key
+        label_map = {
+            'azure_openai':   'Azure OpenAI (model unspecified)',
+            'azure_ai_studio':'Azure AI Studio (model unspecified)',
+            'azure_ml':       'Azure ML (model unspecified)',
+            'copilot_studio': 'Copilot Studio',
+            'anthropic':      'Anthropic Claude',
+            'openai':         'OpenAI',
+            'mcp_client':     'MCP Client',
+            'power_automate': 'Power Automate AI',
+            'langchain':      'LangChain (vendor unspecified)',
+        }
+        label = label_map.get(platform, platform)
+        out.append({
+            'model_name': label,
+            'model_format': platform,
+            'model_version': None,
+            'deployment_count': 0,
+            'account_count': 0,
+            'max_capacity': None,
+            'agent_count': agent_count,
+            'first_seen': first_seen.isoformat() if first_seen else None,
+            'last_seen':  last_seen.isoformat() if last_seen else None,
+            'source': 'platform_inferred',
+
+            'auto_classification': 'high',  # platform-level entries skew unknown → review
+            'approval': {
+                'id': None,
+                'status': 'unverified',
+                'effective_status': 'unverified',
+                'risk_classification': 'high',
+                'requested_by': None, 'requested_at': None,
+                'reviewed_by': None,  'reviewed_at': None,
+                'justification': None, 'review_notes': None, 'expires_at': None,
             },
         })
     return out
