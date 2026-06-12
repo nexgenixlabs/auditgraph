@@ -89,13 +89,20 @@ def main():
         return
 
     try:
-        # Record the sweep for SOC2 evidence
+        # Record the sweep for SOC2 evidence.
+        # 2026-06-12 — admin_audit_log columns are: admin_user_id, action,
+        # target_user_id, target_organization_id, details, ip_address.
+        # There is no actor_username column; the actor goes into details JSON.
+        import json as _json
         cur.execute(
             """INSERT INTO admin_audit_log
-               (target_organization_id, actor_username, action, details, created_at)
-               VALUES (1, %s, 'activity_log_retention_sweep', %s, NOW())""",
-            (os.environ.get('USER', 'unknown'),
-             '{"reason":"orphan + id-recycled scrub","script":"scrub_activity_log_residue.py"}')
+               (target_organization_id, action, details, created_at)
+               VALUES (1, 'activity_log_retention_sweep', %s::jsonb, NOW())""",
+            (_json.dumps({
+                "reason": "orphan + id-recycled scrub",
+                "script": "scrub_activity_log_residue.py",
+                "actor_username": os.environ.get('USER', 'unknown'),
+            }),)
         )
 
         # Disable immutability triggers

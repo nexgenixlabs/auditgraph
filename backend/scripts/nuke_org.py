@@ -105,6 +105,14 @@ DELETE_ORDER = [
     ('optimization_recommendations', 'organization_id'),
 
     # ── Phase 8: Anomalies / findings / analysis ──
+    # 2026-06-12 — agent_behavior_baselines, ai_board_scorecard_snapshots,
+    # argus_reasoning_cache, consent_grants were missing from this list and
+    # leaked 70 rows on org=10 nuke (4 + 2 + 1 + 63 respectively). All four
+    # have organization_id natively.
+    ('agent_behavior_baselines',     'organization_id'),
+    ('ai_board_scorecard_snapshots', 'organization_id'),
+    ('argus_reasoning_cache',        'organization_id'),
+    ('consent_grants',               'organization_id'),
     ('anomalies',                    'organization_id'),
     ('snapshot_alerts',              'organization_id'),
     ('finding_comments',             'organization_id'),
