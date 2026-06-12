@@ -473,6 +473,12 @@ export default function CISODashboard() {
       fetch('/api/identity-summary').then(r => r.ok ? r.json() : null) as Promise<IdentitySummary | null>,
       // Attack paths
       fetch(withConnection('/api/attack-paths?limit=10')).then(r => r.ok ? r.json() : null),
+      // V2.13 (2026-06-12) — separate count call so the headline tile
+      // shows the REAL attack-path total (and by-severity counts), not
+      // the limit-capped page returned by the list endpoint above.
+      // Founder saw "Attack Paths: 10" on a tenant with 110 paths in the
+      // DB — that's just the limit echoed back, not honest data.
+      fetch(withConnection('/api/attack-paths/count')).then(r => r.ok ? r.json() : null),
       // SPN exposure stats (NHI unowned / can-escalate)
       fetch(withConnection('/api/spns/stats')).then(r => r.ok ? r.json() : null),
       // Posture rollup (drives Identity Risk Score + Compliance Posture)
@@ -483,7 +489,7 @@ export default function CISODashboard() {
       fetch('/api/activity?limit=10').then(r => r.ok ? r.json() : null),
       // Business Impact rollup ($ valuations for PHI / PCI / AI Models)
       fetch('/api/dashboard/business-impact').then(r => r.ok ? r.json() : null),
-    ]).then(([cat, idSum, attackResp, spnStats, posture, modelReg, activity, bizImpact]) => {
+    ]).then(([cat, idSum, attackResp, attackCount, spnStats, posture, modelReg, activity, bizImpact]) => {
       if (cancelled) return;
       const categorySummary: CategorySummary = cat || {};
       const cats = idSum?.categories || {};
@@ -505,12 +511,16 @@ export default function CISODashboard() {
         : null;
 
       // ── Attack paths ────────────────────────────────────────────
+      // V2.13 (2026-06-12) — split: list endpoint for the Top-N rendering,
+      // count endpoint for the headline tile. Was counting paths.length
+      // which equals the URL limit (10) regardless of actual DB total.
       const paths: AttackPathRow[] = Array.isArray(attackResp?.paths) ? attackResp.paths
                   : Array.isArray(attackResp?.attack_paths) ? attackResp.attack_paths
                   : Array.isArray(attackResp?.items) ? attackResp.items : [];
-      const critN = paths.filter(p => (p.severity || '').toLowerCase() === 'critical').length;
-      const highN = paths.filter(p => (p.severity || '').toLowerCase() === 'high').length;
-      const medN  = paths.filter(p => (p.severity || '').toLowerCase() === 'medium').length;
+      const pathsTotal = (attackCount?.total ?? attackResp?.total ?? paths.length) || 0;
+      const critN = attackCount?.critical ?? paths.filter(p => (p.severity || '').toLowerCase() === 'critical').length;
+      const highN = attackCount?.high     ?? paths.filter(p => (p.severity || '').toLowerCase() === 'high').length;
+      const medN  = attackCount?.medium   ?? paths.filter(p => (p.severity || '').toLowerCase() === 'medium').length;
 
       // ── Identity Risk Score + Compliance Posture (from posture rollup) ──
       // V2.4 (2026-06-11) — fresh-tenant honesty. When there are 0 identities,
@@ -590,7 +600,7 @@ export default function CISODashboard() {
         riskImprovementPct: null,                            // No previous-period rollup endpoint yet
         estimatedExposure: bizImpact?.total_exposure ?? null,
         reductionOpportunity: bizImpact?.reduction_opportunity ?? null,
-        attackPathsTotal: paths.length,
+        attackPathsTotal: pathsTotal,
         attackPathsCritical: critN,
         attackPathsHigh: highN,
         attackPathsMedium: medN,
