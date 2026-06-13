@@ -1292,6 +1292,9 @@ def _send_change_notification_if_needed(db_org_id: int = None):
             ('auto_remediation', _run_auto_remediation, db_org_id, db),
             # AG-193 — apply CISO-asserted Data Trust Zones after every scan
             ('data_trust_zones', _run_data_trust_zones_classification, db_org_id, db),
+            # AG-193 Sprint B — compute per-entity reachable classified exposure
+            # AFTER classification so reach numbers are fresh.
+            ('reach_attribution', _run_reach_attribution, db_org_id, db),
         ])
 
         # ── Tier 3: Depend on attack paths/blast radius/IAM graph from Tier 2 ──
@@ -6050,4 +6053,31 @@ def _run_data_trust_zones_classification(db_org_id, db):
         )
     except Exception as e:
         logger.error("Data Trust Zones classification failed org=%s: %s", db_org_id, e)
+        logger.exception(e)
+
+
+# AG-193 Sprint B — reach attribution post-discovery hook
+def _run_reach_attribution(db_org_id, db):
+    """Compute per-entity reachable classified exposure.
+
+    For each identity (and AI model deployment), walk RBAC scope to
+    classified resources and sum their dollar exposure. The result is
+    cached on identities.reachable_classified_exposure and
+    azure_ai_model_deployments.reachable_classified_exposure for fast
+    dashboard reads.
+
+    Depends on data_trust_zones having run first so the classifications
+    we attribute against are fresh.
+    """
+    try:
+        from app.engines.discovery.reach_attributor import compute_all_reach
+        result = compute_all_reach(db, db_org_id)
+        logger.info(
+            "REACH: org=%s identity=%s ai_model=%s",
+            db_org_id,
+            result.get('identity'),
+            result.get('ai_model'),
+        )
+    except Exception as e:
+        logger.error("Reach attribution failed org=%s: %s", db_org_id, e)
         logger.exception(e)

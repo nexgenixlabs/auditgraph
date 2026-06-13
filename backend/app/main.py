@@ -3168,6 +3168,17 @@ def create_app():
         from app.api.handlers import get_exposure_lineage
         return get_exposure_lineage(classification)
 
+    # AG-193 Sprint B (2026-06-13) — per-entity reach attribution
+    @app.get("/api/exposure/by-entity")
+    def exposure_by_entity():
+        from app.api.handlers import get_exposure_by_entity
+        return get_exposure_by_entity()
+
+    @app.get("/api/exposure/reach-summary")
+    def exposure_reach_summary():
+        from app.api.handlers import get_exposure_reach_summary
+        return get_exposure_reach_summary()
+
     @app.get("/api/data-trust-zones/audit")
     def data_trust_zones_audit():
         from app.api.handlers import get_data_trust_zones_audit

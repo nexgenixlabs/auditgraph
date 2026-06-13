@@ -17,14 +17,14 @@ const IBM_DEFAULTS = {
   exposure_phi_per_asset:  720_000,
   exposure_pci_per_asset: 1_200_000,
   exposure_pii_per_asset:  540_000,
-  exposure_ai_per_asset:  1_400_000,
+  exposure_ai_per_asset:           0,  // reach-derived now; flat multiplier deprecated
 };
 
 const ROWS: { key: keyof typeof IBM_DEFAULTS; label: string; color: string; hint: string }[] = [
   { key: 'exposure_phi_per_asset', label: 'PHI Assets',  color: '#dc2626', hint: 'IBM 2024 healthcare/PHI median breach cost per record set' },
   { key: 'exposure_pci_per_asset', label: 'PCI Assets',  color: '#ea580c', hint: 'IBM 2024 financial/PCI median' },
   { key: 'exposure_pii_per_asset', label: 'PII Assets',  color: '#d97706', hint: 'IBM 2024 generic PII median' },
-  { key: 'exposure_ai_per_asset',  label: 'AI Models',   color: '#a855f7', hint: 'AI deployment compromise estimate (proprietary)' },
+  { key: 'exposure_ai_per_asset',  label: 'AI Model Premium (deprecated)',  color: '#a855f7', hint: 'Reach-derived in Sprint B — a model now inherits attribution from the classified data it can actually reach. Set 0 to use reach-only (recommended).' },
 ];
 
 function fmtUsd(v: number): string {

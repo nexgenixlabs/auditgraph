@@ -82,6 +82,12 @@ interface DashboardData {
   riskImprovementPct: number | null;  // -ve = improving
   estimatedExposure: number | null;
   reductionOpportunity: number | null;
+  // AG-193 Sprint B — reach attribution decorator under the Potential
+  // Exposure Impact hero card. "682 reachable identities · 115 paths · …"
+  reachableIdentities: number | null;
+  reachableAiModels: number | null;
+  orphanNhiCount: number | null;
+  topExposureIdentity: { name: string; exposure: number; phi: number } | null;
   attackPathsTotal: number;
   attackPathsCritical: number;
   attackPathsHigh: number;
@@ -500,7 +506,10 @@ export default function CISODashboard() {
       fetch('/api/activity?limit=10').then(r => r.ok ? r.json() : null),
       // Business Impact rollup ($ valuations for PHI / PCI / AI Models)
       fetch('/api/dashboard/business-impact').then(r => r.ok ? r.json() : null),
-    ]).then(([cat, idSum, attackResp, attackCount, spnStats, posture, modelReg, activity, bizImpact]) => {
+      // AG-193 Sprint B (2026-06-13) — reach attribution summary for the
+      // Potential Exposure Impact decorator: who can reach the $$?
+      fetch('/api/exposure/reach-summary').then(r => r.ok ? r.json() : null),
+    ]).then(([cat, idSum, attackResp, attackCount, spnStats, posture, modelReg, activity, bizImpact, reachSummary]) => {
       if (cancelled) return;
       const categorySummary: CategorySummary = cat || {};
       const cats = idSum?.categories || {};
@@ -611,6 +620,10 @@ export default function CISODashboard() {
         riskImprovementPct: null,                            // No previous-period rollup endpoint yet
         estimatedExposure: bizImpact?.total_exposure ?? null,
         reductionOpportunity: bizImpact?.reduction_opportunity ?? null,
+        reachableIdentities: reachSummary?.reachable_identities ?? null,
+        reachableAiModels:   reachSummary?.reachable_ai_models   ?? null,
+        orphanNhiCount:      reachSummary?.orphan_nhi_count      ?? null,
+        topExposureIdentity: reachSummary?.top_identity          ?? null,
         attackPathsTotal: pathsTotal,
         attackPathsCritical: critN,
         attackPathsHigh: highN,
@@ -762,11 +775,40 @@ export default function CISODashboard() {
           label="POTENTIAL EXPOSURE IMPACT"
           value={data.estimatedExposure === null ? '—' : fmtMoney(data.estimatedExposure)}
           valueColor={data.estimatedExposure === null ? '#94a3b8' : '#f87171'}
-          sublabel={data.estimatedExposure === null ? 'Financial impact rollup not configured' : 'Potential financial impact'}
-          footer={data.reductionOpportunity === null
-            ? <span className="text-slate-500">Add asset valuations in Settings → Exposure</span>
-            : <span className="flex items-center gap-1 text-emerald-400">↓ {fmtMoney(data.reductionOpportunity)} risk reduction opportunity</span>}
-          footerColor="#34d399"
+          sublabel={data.estimatedExposure === null ? 'Financial impact rollup not configured' : 'Architecture-derived from classified data reach'}
+          footer={
+            data.estimatedExposure === null ? (
+              <span className="text-slate-500">Add asset valuations in Settings → Exposure</span>
+            ) : (
+              <div className="space-y-1">
+                {/* AG-193 Sprint B (2026-06-13) — reach chain decorator
+                    answers "who can reach this $$?" right under the headline. */}
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-400">
+                  {data.reachableIdentities !== null && (
+                    <span>👤 {data.reachableIdentities.toLocaleString()} reachable identities</span>
+                  )}
+                  {data.attackPathsTotal > 0 && (
+                    <span>⚔ {data.attackPathsTotal.toLocaleString()} attack paths</span>
+                  )}
+                  {data.orphanNhiCount !== null && data.orphanNhiCount > 0 && (
+                    <span>🕳 {data.orphanNhiCount.toLocaleString()} orphan NHIs</span>
+                  )}
+                  {data.reachableAiModels !== null && data.reachableAiModels > 0 && (
+                    <span>🤖 {data.reachableAiModels.toLocaleString()} AI models can reach data</span>
+                  )}
+                </div>
+                {data.topExposureIdentity && (
+                  <p className="text-[10px] text-amber-400/90 truncate">
+                    Top: <span className="font-mono">{data.topExposureIdentity.name}</span> can reach {fmtMoney(data.topExposureIdentity.exposure)} ({data.topExposureIdentity.phi} PHI)
+                  </p>
+                )}
+                {data.reductionOpportunity !== null && data.reductionOpportunity > 0 && (
+                  <p className="text-[10px] text-emerald-400">↓ {fmtMoney(data.reductionOpportunity)} reduction opportunity</p>
+                )}
+              </div>
+            )
+          }
+          footerColor="#94a3b8"
           icon={<svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}
           iconColor={data.estimatedExposure === null ? '#64748b' : '#ef4444'}
           onClick={data.estimatedExposure && data.estimatedExposure > 0 ? () => { setDerivClass('PHI'); setDerivOpen(true); } : undefined}

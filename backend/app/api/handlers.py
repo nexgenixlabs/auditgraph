@@ -8677,11 +8677,21 @@ def get_dashboard_business_impact():
     """
     # IBM 2024 averages — used as fallback when a tenant hasn't
     # overridden the per-asset cost in Settings → Exposure Defaults.
+    #
+    # AG-193 Sprint B (2026-06-13) — AI default dropped to 0.
+    # Peer correctly pointed out that a flat $1.4M-per-GPT line both
+    #   (a) can't survive "why is my dev GPT worth $1.4M?", and
+    #   (b) double-counts data exposure that already accrues to the
+    #       underlying PHI/PCI/PII resource the model can reach.
+    # The honest model: dollars attach to DATA. Models inherit
+    # attribution from the data they can reach (per-entity reach in
+    # the next Sprint B steps). Until that lands, AI contributes 0 to
+    # the headline total — and the per-asset default reflects it.
     DEFAULTS = {
         'PHI':      720_000,      # healthcare/PHI median
         'PCI':    1_200_000,      # financial/PCI median
         'PII':      540_000,
-        'AI':     1_400_000,      # AI deployment compromise est.
+        'AI':            0,       # reach-derived; flat multiplier deprecated
     }
 
     db = _db()
@@ -8788,29 +8798,16 @@ def get_dashboard_business_impact():
         phi_value = classified['PHI'] * PHI_PER_ASSET
         pci_value = classified['PCI'] * PCI_PER_ASSET
         pii_value = classified['PII'] * PII_PER_ASSET
-        ai_value = ai_count * AI_MODEL_PER_ASSET
 
-        # V2.13 (2026-06-12) — Unified Identity Graph chain is:
-        #   Human → SPN → MI → AI Agent → Model → Storage → Classified Data
-        # "Exposure" is the END of the chain — the dollar cost when
-        # classified data is breached. AI model breach cost is the cost
-        # of compromising the inference endpoint, NOT data exposure.
-        #
-        # Founder caught: localpilot/devpilot showed Data Sources = 0
-        # (no PHI/PCI/PII classified) but Exposure = $107.8M (= 77 AI
-        # models × $1.4M). A buyer asks: "how can exposure be $107.8M if
-        # no data sources exist?" — a real contradiction.
-        #
-        # Rule: classification = 0 → exposure = 0. AI model value only
-        # contributes when classified data exists to anchor it. The
-        # per-tile counts still show ai_models.count (the count is real
-        # discovery output); only the dollar value is gated.
+        # AG-193 Sprint B (2026-06-13) — AI value is reach-derived, not a
+        # flat multiplier. Until the reach attributor lands the headline
+        # AI contribution is 0; the count is still surfaced (it's a real
+        # discovery output) and the per-asset rate is 0 to make the
+        # deprecation visible on screen.
+        ai_value = ai_count * AI_MODEL_PER_ASSET   # = 0 unless tenant overrode
+
         classified_total = classified['PHI'] + classified['PCI'] + classified['PII']
-        if classified_total == 0:
-            ai_value = 0
-            total = 0
-        else:
-            total = phi_value + pci_value + pii_value + ai_value
+        total = phi_value + pci_value + pii_value + ai_value
 
         # Reduction opportunity heuristic: 25% of total can typically be
         # eliminated by closing the top remediation set (industry defaults).
@@ -48820,6 +48817,253 @@ def get_exposure_lineage(classification):
             'reachable_identities': reachable_identities,
             'attack_paths_terminating': attack_paths_terminating,
             'internet_reachable_resources': internet_reachable,
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_by_entity():
+    """GET /api/exposure/by-entity?type=identity|ai_model&limit=N
+
+    AG-193 Sprint B (2026-06-13) — top entities ranked by reachable
+    classified exposure. Reads the cache populated by reach_attributor.
+    Use this to answer "who can reach the most $$?" on the dashboard.
+
+    Query params:
+      type   — 'identity' or 'ai_model' (default 'identity')
+      limit  — 1..200 (default 10)
+
+    Response:
+      {
+        type: 'identity' | 'ai_model',
+        rows: [
+          {id, name, category, exposure, phi, pci, pii, computed_at}, ...
+        ],
+        totals: {
+          entities_with_reach: N,
+          top_exposure: $$,
+        },
+      }
+    """
+    entity_type = (request.args.get('type') or 'identity').strip().lower()
+    try:
+        limit = max(1, min(200, int(request.args.get('limit') or 10)))
+    except (TypeError, ValueError):
+        limit = 10
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        if entity_type == 'ai_model':
+            cursor.execute(
+                """SELECT id,
+                          COALESCE(account_name, deployment_name) AS name,
+                          'ai_model' AS category,
+                          COALESCE(reachable_classified_exposure, 0) AS exposure,
+                          COALESCE(reachable_phi_count, 0) AS phi,
+                          COALESCE(reachable_pci_count, 0) AS pci,
+                          COALESCE(reachable_pii_count, 0) AS pii,
+                          reach_computed_at
+                     FROM azure_ai_model_deployments
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0
+                    ORDER BY reachable_classified_exposure DESC NULLS LAST
+                    LIMIT %s""",
+                (org_id, limit),
+            )
+        else:
+            cursor.execute(
+                """SELECT id,
+                          display_name AS name,
+                          identity_category AS category,
+                          COALESCE(reachable_classified_exposure, 0) AS exposure,
+                          COALESCE(reachable_phi_count, 0) AS phi,
+                          COALESCE(reachable_pci_count, 0) AS pci,
+                          COALESCE(reachable_pii_count, 0) AS pii,
+                          reach_computed_at
+                     FROM identities
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0
+                    ORDER BY reachable_classified_exposure DESC NULLS LAST
+                    LIMIT %s""",
+                (org_id, limit),
+            )
+
+        rows = [
+            {
+                'id': r[0], 'name': r[1], 'category': r[2],
+                'exposure': int(r[3] or 0),
+                'phi': int(r[4] or 0), 'pci': int(r[5] or 0), 'pii': int(r[6] or 0),
+                'computed_at': r[7].isoformat() if r[7] else None,
+            }
+            for r in cursor.fetchall()
+        ]
+
+        # Totals across the cohort
+        if entity_type == 'ai_model':
+            cursor.execute(
+                """SELECT COUNT(*), COALESCE(MAX(reachable_classified_exposure), 0)
+                     FROM azure_ai_model_deployments
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0""",
+                (org_id,),
+            )
+        else:
+            cursor.execute(
+                """SELECT COUNT(*), COALESCE(MAX(reachable_classified_exposure), 0)
+                     FROM identities
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0""",
+                (org_id,),
+            )
+        n, top = cursor.fetchone() or (0, 0)
+        cursor.close()
+        return jsonify({
+            'type': entity_type,
+            'rows': rows,
+            'totals': {
+                'entities_with_reach': int(n or 0),
+                'top_exposure': int(top or 0),
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_reach_summary():
+    """GET /api/exposure/reach-summary — single-call hero-decorator payload.
+
+    Returns the four numbers the CISO Dashboard hero card needs:
+      reachable_identities       count of identities that can touch any classified
+      reachable_ai_models        count of AI models that can touch any classified
+      attack_paths_total         total attack paths org-wide
+      orphan_nhi_count           NHIs with no owner (already shown elsewhere)
+      top_identity               {name, exposure, phi}
+      top_ai_model               {name, exposure, phi}  (null when none reachable)
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        def _scalar_count(sql, params):
+            try:
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+                return int((row or [0])[0])
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                return 0
+
+        reachable_identities = _scalar_count(
+            "SELECT COUNT(*) FROM identities "
+            "WHERE organization_id = %s "
+            "  AND COALESCE(reachable_classified_exposure, 0) > 0",
+            (org_id,),
+        )
+        reachable_ai_models = _scalar_count(
+            "SELECT COUNT(*) FROM azure_ai_model_deployments "
+            "WHERE organization_id = %s "
+            "  AND COALESCE(reachable_classified_exposure, 0) > 0",
+            (org_id,),
+        )
+        attack_paths_total = _scalar_count(
+            "SELECT COUNT(*) FROM attack_paths WHERE organization_id = %s",
+            (org_id,),
+        )
+        # Orphan NHIs — match the canonical "unowned NHI" definition in
+        # ownership_center.list_unowned_nhis: scoped to LATEST run only,
+        # excludes Microsoft-system NHIs, considers nhi_ownership_assignments
+        # / owner_display_name / app_reg_owner_display_name as ownership.
+        # Cross-run identities used to inflate this 4x.
+        orphan_nhi_count = 0
+        try:
+            cursor.execute(
+                "SELECT MAX(id) FROM discovery_runs "
+                "WHERE organization_id = %s AND status IN ('completed','partial')",
+                (org_id,),
+            )
+            row = cursor.fetchone()
+            latest_run = (row[0] if row else None)
+            if latest_run:
+                cursor.execute(
+                    """SELECT COUNT(*) FROM identities i
+                        WHERE i.organization_id = %s
+                          AND i.discovery_run_id = %s
+                          AND i.deleted_at IS NULL
+                          AND i.identity_category IN ('service_principal','managed_identity_system','managed_identity_user')
+                          AND NOT COALESCE(i.is_microsoft_system, false)
+                          AND NOT (
+                              EXISTS (SELECT 1 FROM nhi_ownership_assignments oa
+                                       WHERE oa.identity_db_id = i.id
+                                         AND oa.organization_id = i.organization_id
+                                         AND oa.status = 'active')
+                              OR COALESCE(i.owner_display_name, '') != ''
+                              OR COALESCE(i.app_reg_owner_display_name, '') != ''
+                          )""",
+                    (org_id, latest_run),
+                )
+                orphan_nhi_count = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            orphan_nhi_count = 0
+
+        def _top_identity():
+            try:
+                cursor.execute(
+                    """SELECT display_name,
+                              COALESCE(reachable_classified_exposure, 0),
+                              COALESCE(reachable_phi_count, 0)
+                         FROM identities
+                        WHERE organization_id = %s
+                          AND COALESCE(reachable_classified_exposure, 0) > 0
+                        ORDER BY reachable_classified_exposure DESC NULLS LAST
+                        LIMIT 1""",
+                    (org_id,),
+                )
+                r = cursor.fetchone()
+                return ({'name': r[0], 'exposure': int(r[1]), 'phi': int(r[2])}
+                        if r else None)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                return None
+
+        def _top_ai_model():
+            try:
+                cursor.execute(
+                    """SELECT COALESCE(account_name, deployment_name),
+                              COALESCE(reachable_classified_exposure, 0),
+                              COALESCE(reachable_phi_count, 0)
+                         FROM azure_ai_model_deployments
+                        WHERE organization_id = %s
+                          AND COALESCE(reachable_classified_exposure, 0) > 0
+                        ORDER BY reachable_classified_exposure DESC NULLS LAST
+                        LIMIT 1""",
+                    (org_id,),
+                )
+                r = cursor.fetchone()
+                return ({'name': r[0], 'exposure': int(r[1]), 'phi': int(r[2])}
+                        if r else None)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                return None
+
+        top_identity = _top_identity()
+        top_ai_model = _top_ai_model()
+        cursor.close()
+        return jsonify({
+            'reachable_identities': reachable_identities,
+            'reachable_ai_models':  reachable_ai_models,
+            'attack_paths_total':   attack_paths_total,
+            'orphan_nhi_count':     orphan_nhi_count,
+            'top_identity':         top_identity,
+            'top_ai_model':         top_ai_model,
         })
     finally:
         db.close()
