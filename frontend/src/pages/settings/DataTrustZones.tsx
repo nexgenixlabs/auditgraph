@@ -160,7 +160,7 @@ export default function DataTrustZones() {
   [coverage]);
 
   async function revoke(id: number) {
-    if (!confirm('Revoke this zone? Resources will be re-classified on the next scan.')) return;
+    if (!window.confirm('Revoke this zone? Resources will be re-classified on the next scan.')) return;
     try {
       const r = await fetch(`/api/data-trust-zones/${id}`, { method: 'DELETE' });
       if (!r.ok) throw new Error(`delete failed: ${r.status}`);
