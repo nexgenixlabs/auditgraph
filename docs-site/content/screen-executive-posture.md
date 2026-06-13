@@ -6,84 +6,92 @@
 
 > *"What is my identity security posture right now, in business-impact terms a board would understand?"*
 
-This is the landing page. The audience is executive, not architect. Every number on this screen is paired with a sentence explaining what it means in business terms.
+This is the landing page. The audience is executive, not architect. Every number is paired with a sentence explaining what it means in business terms — and a one-click drill-down so the analyst can audit it.
 
-## What you see on screen
+## Hero row — four cards across the top
 
-### Posture Hero (top section)
+| Card | What it shows |
+|---|---|
+| **Identity Security Score** | 0-100 posture score with verdict (Secure / Elevated / Critical) and a "Why?" drawer. |
+| **Potential Exposure Impact** | The dollar headline — derived from classified data the org has on its tenant. Click to open the [methodology drawer](breach-cost-methodology). |
+| **Attack Paths** | Total multi-hop paths identified with critical/high/medium split. |
+| **Compliance Posture** | Overall posture % across the wired frameworks. |
 
-A narrative card stating your current posture in plain English:
+### Potential Exposure Impact — the card every CISO clicks first
 
-> *"Your identity environment has exploitable gaps. 12 dormant privileged accounts still retain admin access. Removing them eliminates most misuse risk."*
+This card was renamed from "Estimated Exposure" in 2026. The new name is honest about what we compute: a benchmark estimate, not an actuarial loss model.
 
-The verdict comes from a 4-tier system: **secure / has exploitable gaps / actively exposed / faces imminent breach risk**. The verdict drives the color (green/amber/orange/red).
+Under the dollar value the card carries a **decorator row** answering "who can reach this?":
 
-Below the verdict: the top 2 risk drivers with action hints (*"Assigning owners restores accountability"*).
+```
+👤 682 reachable identities · ⚔ 115 attack paths · 🕳 951 orphan NHIs · 🤖 N AI models can reach data
+Top: SVC_Forensit can reach $113.8M (143 PHI)
+↓ $56.9M reduction opportunity
+```
 
-### Business Impact section
+The decorators are the moat. Asset count anyone can compute; **who can reach what** is what AuditGraph's identity graph adds.
 
-This is where the CISO question lands. Three nested cards:
+Click the dollar value to open the drawer. The drawer renders:
 
-1. **Headline** — total estimated breach exposure org-wide. e.g., `$81.6M mid-band ($48.96M – $100.4M)`.
-2. **AI-reachable** — subset reachable by AI agents specifically. The AI-ISPM blast radius.
-3. **NHI-reachable** — subset reachable by any non-human identity (SPNs + MIs + AI).
+1. **PHI / PCI / PII subtotal**
+2. **Total Exposure Formula** — `count × per_asset = subtotal` for each class summing to the total. A CFO re-derives the headline from this table in 30 seconds.
+3. **AI Workloads — Attribution (non-additive)** — `Discovered N · Reach Classified M · Attributable $X`. AI is attribution, not contribution. When *Reach Classified = 0* a green callout says *"AI workloads are correctly segregated — none have RBAC reach to classified data."*
+4. **What This Is — And Isn't** — two-column honest-claim block.
+5. **Active Data Trust Zones** — the rules in force on this tenant.
+6. **By Classification Source** — tier breakdown (zone / tag / name pattern / Purview).
+7. **Confidence Bands** — High / Medium / Low resource counts.
+8. **Exposure Chain** — reachable identities, attack paths terminating here, internet-reachable resources.
 
-Next to each headline: a small **ⓘ Methodology** button. Click it to see exactly how the dollar amount was derived (record count × IBM 2023 cost factor). The CISO question — *"how did you arrive at the number?"* — is answered in one click.
+See [Potential Exposure Impact methodology](breach-cost-methodology) for the full formula.
 
-See [Breach Cost Methodology](#breach-cost-methodology) for the full derivation.
+## Top Improvement Opportunities
 
-### Identity Composition
+Three actionable rows ranked by points gained. Each row maps to one of the 6 score factors with the lift visible:
 
-Shows the breakdown of identities by category:
+- `+20 pts` Close critical multi-hop attack paths
+- `+10 pts` Enable telemetry / activity monitoring on AI agents
+- `+1.5 pts` Assign accountable owners to unowned non-human identities
 
-- Human users (typically smallest count)
-- Service principals
-- Managed identities (system + user-assigned)
-- AI agents (subset of SPNs/MIs that are AI-classified)
+The headroom box on the right shows the projected score if all three were closed.
 
-This signals identity sprawl. Boards intuitively understand "we have 40× more NHIs than humans" as a control problem.
+## Unified Identity Graph (Row 2)
 
-### Blast Radius section
+Five tier circles — **Human → Non-Human → AI Agents → Models → Data Sources** — with dots animating to convey flow. Clicks open the tier-specific inventory:
 
-Top risk drivers expanded with counts and one-click drilldown:
+- **Human** → All Identities (humans filter)
+- **Non-Human** → Non-Human Identity Inventory
+- **AI Agents** → AI Identities
+- **Models** → AI Model Registry
+- **Data Sources** → [Classified Resources](screen-classified-resources)
 
-- N unowned NHIs (click → Ownership Center)
-- N dormant privileged accounts (click → Risk Monitoring filtered)
-- N ghost identities (disabled accounts still holding live access)
-- N AI agents with no human owner (click → AI Inventory filtered)
+The three small badges below the row — *Active Attack Paths*, *Orphaned Identities*, *Critical Data Assets* — surface the cross-cutting signals.
 
-Each driver has a one-sentence business-impact framing.
+## Tier Risk Cards (Row 3)
 
-### AI Identity Risk Card
+Human / Non-Human / AI side-by-side, each with its own risk gauge and 3 sub-counts. Quick scan of where the heat is concentrated.
 
-AI-specific subsection:
+## Top Reach panels (Row 3.5) — NEW
 
-- N AI agents with no human owner
-- N AI agents at critical/high risk
-- N AI-privileged humans (humans who configure AI systems)
+Two side-by-side panels added in Sprint B (2026-06-13):
 
-Click any to drill into AI Inventory with the appropriate filter.
+- **Top Reach by Identity** — top 5 identities by `reachable_classified_exposure`. Click any row to open the identity drawer.
+- **Top Reach by AI Model** — top 5 AI deployments by reach. Each row carries a provenance chip showing the linkage method (`name-matched MI` / `RBAC upper bound` / `unresolved`).
 
-### Active Threats section
+On a healthy tenant, the AI panel shows an empty state: *"No AI deployments with resolvable reach."* That's the architecture-derived answer that AI is properly segregated.
 
-If any partner-detection signals (Lakera, Bedrock, Azure Content Filter) are active in last 24h, they appear here. Otherwise: *"No active threats detected (or no threat connectors wired)."*
+When this panel surfaces the same dollar number against 5+ identities, that's the audit finding: an over-privileged role (typically subscription-level Reader / Contributor) is concentrating exposure. Revoke it from 4 of 5 and the top reach drops sharply.
 
-### Activity & Drift section
+## Workshop row (Row 4)
 
-Recent changes that affect posture:
+Three columns:
 
-- Drift events (e.g., a previously-owned identity became unowned)
-- Anomalies (e.g., a normally-quiet agent had a surge in activity)
+| Top Attack Paths | Immediate Risks | Top Remediation Actions |
+|---|---|---|
+| Top 5 paths by severity | Counts by severity grouped by finding type | Top 3 remediation playbooks ranked by affected count |
 
-Click to open the relevant detail.
+## What Changed (sidebar)
 
-### Connected App Risk
-
-For tenants using third-party SaaS via Microsoft Entra Enterprise Apps — shows apps with risky scopes (full directory access, mail-send, etc.).
-
-### Data Integrity Footer
-
-Quiet line at the bottom: *"Data as of <timestamp>. Snapshot #<id>."* Boards trust numbers more when freshness is shown.
+Last 24h: recomputed-tables events, discovery scans, schedule completions. Live-updating.
 
 ## How this differs from Risk Monitoring
 
@@ -91,31 +99,31 @@ Executive Posture is *what posture is* (high-level, board-ready, business-impact
 
 Risk Monitoring is *what happened* (operational, SOC/IAM-ops audience, change-event framing).
 
-The same underlying data, different summarization and audience.
+Same data, different summarisation and audience.
 
 ## Common questions
 
-**Q: The headline says $81.6M. How was that calculated?**
-Click the ⓘ Methodology button. Full derivation: 173,432 classified records × industry cost factors from IBM Cost of a Data Breach 2023. See [Breach Cost Methodology](#breach-cost-methodology).
+**Q: The headline went down. Why?**
+The math changed. In Sprint B (2026-06-13) we removed the flat per-AI-deployment multiplier because it double-counted: a GPT's value was being added on top of the PHI bucket it could reach. The headline now reflects only PHI / PCI / PII data. AI inherits attribution; it doesn't add dollars.
 
-**Q: Why don't I see compliance scoring on this page?**
-Compliance is a separate audience (auditors), and lives in Governance & Assurance. Mixing compliance with risk on the same page diluted both for early customers. Now they're separate.
+**Q: Same identity shows up 5 times at $113.8M in Top Reach. Why?**
+That's the over-privileged-role pattern: a subscription-level Reader / Contributor gives 5+ principals the same access. The reach is real; the finding is *one role assignment* (not five). Removing it from 4 of them collapses the duplication.
 
-**Q: Can I customize this page?**
-Yes — the layout supports widget reordering and selective enable/disable per tenant. Most customers keep the default order.
+**Q: Why can a junior contractor reach $113.8M of PHI?**
+Because their group inherits a sub-level role that spans the PHI resource group. The drawer's *Exposure Chain* section shows the path; the [Role Optimization](#screen-role-optimisation) screen recommends a tighter scope.
 
-**Q: Is this the page I show my board?**
-Yes — designed for it. Take a screenshot directly. The Business Impact section is the "money slide."
+**Q: My AI deployments show "unresolved" attribution method. Fix?**
+Discovery hasn't captured the parent Azure OpenAI account's managed-identity principal_id. As a fallback we use name-match (account_name = MI display_name) and, failing that, an RBAC upper bound (max reach of any identity with a role on the account). Adding the account's MI principal_id at discovery — tracked for the next iteration — promotes the linkage to `mi_principal_id`.
 
 ## What to do next
 
-1. Read the posture verdict. If it's *exploitable gaps* or worse, look at the top drivers.
-2. Click the top driver to drill into the specific remediation queue.
-3. Take a screenshot for the next board pack.
-4. After remediation (next sprint), re-check — the verdict should improve.
+1. Read the verdict and the top-3 improvement bar.
+2. Click the **Potential Exposure Impact** card to audit how the headline is derived.
+3. Scan **Top Reach by Identity** for over-priv concentrations.
+4. Open **Settings → Data Trust Zones** to tighten broad RG zones into narrow name-pattern zones.
 
 ## Related screens
 
-- [Board Scorecard](#screen-board-scorecard) — even more compressed for CEO/CFO/audit committee
-- [Breach Cost Methodology](#breach-cost-methodology) — where the $ comes from
-- Risk Monitoring — operational view of what happened
+- [Potential Exposure Impact Methodology](breach-cost-methodology)
+- [Data Trust Zones](screen-data-trust-zones)
+- [Classified Resources](screen-classified-resources)

@@ -74,6 +74,8 @@
         { slug: 'screen-entra-role-activity', title: 'Entra Role Activity' },
         { slug: 'screen-multi-hop-xgraph',    title: 'Multi-Hop XGRAPH' },
         { slug: 'screen-data-reachability',   title: 'Data Reachability' },
+        { slug: 'screen-data-trust-zones',    title: 'Data Trust Zones' },
+        { slug: 'screen-classified-resources', title: 'Classified Resources' },
         { slug: 'screen-ai-abuse-scenarios',  title: 'AI Abuse Scenarios' },
         { slug: 'screen-ai-model-registry',   title: 'AI Model Registry' },
         { slug: 'screen-ai-supply-chain',     title: 'AI Supply Chain' },
