@@ -100,6 +100,17 @@ AuditGraph discovers all credentials during identity scanning and classifies eac
 
 ---
 
+## Data Trust Zone
+
+A CISO-asserted scope rule that assigns a data classification (PHI / PCI / PII / SOURCE / HR / FINANCIAL / CONFIDENTIAL) to every resource under a named scope. Replaces the read-data approach that would have broken AuditGraph's no-data-plane guarantee.
+
+**Scope types:** `resource_name_pattern` (e.g. `*phi*`, `*claims*`) · `resource_group` · `resource_group_pattern` · `subscription` · `subscription_pattern`. Narrow patterns earn confidence 100; broad scopes earn 100 only when the resource name corroborates the class, otherwise 60 (Medium).
+
+**AuditGraph Implementation:**
+Backed by the `data_trust_zones` table with soft-delete (`revoked_at`). The post-discovery scheduler step `_run_data_trust_zones_classification` applies the [6-tier classification engine](breach-cost-methodology). Customer-facing name is "Data Trust Zones"; internal table is `data_trust_zones`. See [Data Trust Zones screen](screen-data-trust-zones).
+
+---
+
 ## Discovery Run
 
 A single execution of the identity discovery pipeline against a cloud connector. Each run produces a point-in-time snapshot of all identity and access data.
@@ -252,6 +263,40 @@ A CI/CD pipeline uses a service principal with Contributor access to deploy appl
 
 **AuditGraph Implementation:**
 AuditGraph tracks all NHI types and evaluates them via the NHIRI scoring component. The SPN Dashboard provides a dedicated view for non-human identity management including blast radius, credential risk, and ownership status.
+
+---
+
+## Potential Exposure Impact
+
+The dollar figure shown on the Executive Posture hero card. Previously called "Estimated Exposure" — renamed in 2026 to better describe what the number is (a benchmark, not an actuarial loss model).
+
+**Formula:**
+```
+total = (count_PHI × per_asset_PHI)
+      + (count_PCI × per_asset_PCI)
+      + (count_PII × per_asset_PII)
+```
+
+Defaults from IBM Cost of a Data Breach 2024: PHI $720K, PCI $1.2M, PII $540K. Overridable per tenant in Settings → Exposure Defaults.
+
+**Why AI doesn't add a line:**
+A GPT deployment is not inherently worth a fixed dollar; its value is bounded by the data it can reach. AI workloads inherit *attribution* from the data they can reach but don't contribute to the headline. See [Reach Attribution](#reach-attribution).
+
+See [methodology page](breach-cost-methodology) for the full derivation.
+
+---
+
+## Reach Attribution
+
+The cached classified-data exposure each identity (or AI model deployment) can reach via RBAC. Stored on `identities.reachable_classified_exposure` and `azure_ai_model_deployments.reachable_classified_exposure`, refreshed by the `_run_reach_attribution` scheduler step after every discovery.
+
+**Example:**
+> `SVC_Forensit` holds Reader at subscription scope. Of the 286 PHI buckets in that subscription, all 286 fall under its scope. Its reach is `286 × $720K = $205.9M` (less the rounding shown on screen).
+
+**Why it matters:**
+Identifies over-privileged identities by *what they could blow up*, not by their role name alone. When 5+ identities show the same reach number, that's the audit finding: one over-broad role assignment is concentrating the risk. Surfaces on the Executive Posture "Top Reach by Identity" panel.
+
+For AI models the attribution method (`mi_principal_id` / `name_match` / `rbac_upper_bound` / `unresolved`) is recorded so the UI can show provenance honestly.
 
 ---
 

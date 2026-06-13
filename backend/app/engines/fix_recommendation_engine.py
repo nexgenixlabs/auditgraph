@@ -374,7 +374,7 @@ RECOMMENDATION_RULES = [
         ],
         'azure_cli': (
             '# List guest role assignments\n'
-            'az ad user show --id "{entity_id}" --query "{displayName:displayName, userType:userType}"\n\n'
+            'az ad user show --id "{entity_id}" --query "{{displayName:displayName, userType:userType}}"\n\n'
             '# Remove directory role\n'
             'az rest --method DELETE --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments/<assignment-id>"'
         ),
@@ -550,7 +550,7 @@ RECOMMENDATION_RULES = [
         ],
         'azure_cli': (
             '# Check account status\n'
-            'az ad user show --id "{entity_id}" --query "{displayName:displayName, accountEnabled:accountEnabled}"\n\n'
+            'az ad user show --id "{entity_id}" --query "{{displayName:displayName, accountEnabled:accountEnabled}}"\n\n'
             '# Remove all role assignments\n'
             'az role assignment delete --assignee "{entity_id}" --yes\n\n'
             '# Delete user (if approved)\n'

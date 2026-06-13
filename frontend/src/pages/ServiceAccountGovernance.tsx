@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+// AG-POLISH-D (2026-06-10): reusable loading state
+import { LoadingState } from '../components/LoadingState';
 import { useConnection } from '../contexts/ConnectionContext';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 
@@ -446,8 +448,9 @@ export default function ServiceAccountGovernance() {
           flex: selectedId ? '1 1 0' : '1 1 100%',
           transition: 'flex 0.3s ease',
         }} className="rounded-xl overflow-hidden">
+          {/* AG-POLISH-D (2026-06-10) */}
           {loading ? (
-            <div style={{ color: G.textMuted }} className="p-12 text-center text-sm">Loading...</div>
+            <LoadingState message="Loading service account governance…" />
           ) : items.length === 0 ? (
             <div style={{ color: G.textMuted }} className="p-12 text-center text-sm">
               No identities found{activeBand !== 'All' ? ` in ${activeBand} risk band` : ''}
@@ -616,8 +619,9 @@ export default function ServiceAccountGovernance() {
             borderRadius: '0 12px 12px 0',
             marginLeft: '-1px',
           }} className="overflow-y-auto max-h-[calc(100vh-200px)]">
+            {/* AG-POLISH-D (2026-06-10) */}
             {detailLoading ? (
-              <div style={{ color: G.textMuted }} className="p-8 text-center text-sm">Loading...</div>
+              <LoadingState message="Loading identity detail…" size="sm" />
             ) : !detail ? (
               <div style={{ color: G.textMuted }} className="p-8 text-center text-sm">Not found</div>
             ) : (

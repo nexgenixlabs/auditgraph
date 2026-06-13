@@ -83,3 +83,4 @@ deploy/migration/sandbox_dump.json
 deploy/migration/local_cols.json
 deploy/migration/local_schema.json
 deploy/migration/local_schema.sql
+.claude/

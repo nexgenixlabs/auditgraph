@@ -1,10 +1,25 @@
 # AuditGraph
 
-**Cloud Identity Security Posture Management (CISPM)** - Discover, analyze, and govern human and non-human identities across cloud environments.
+**Identity Security Graph for Human, Non-Human, and AI Identities.**
+
+Agentless · read-only · architecture-derived.
 
 ## Overview
 
-AuditGraph is an enterprise-grade security platform that provides comprehensive visibility into cloud identity posture. It discovers and analyzes identities across Azure/Entra ID, calculates risk levels, maps trust relationships and blast radius, performs credential exposure analysis, and provides GRC compliance scoring with actionable insights for security teams.
+AuditGraph is the Identity Security Graph platform: the only product that maps the full lineage from **Human → Non-Human → AI Agent → Model → Classified Data** in a single graph, derived from your tenant's architecture without write access, agents, or runtime telemetry.
+
+Most identity products see `User → Role → Resource`. AuditGraph sees `Human → SPN → MI → AI Agent → Model → PHI`, all connected, all from architecture. No competitor surfaces the full chain end-to-end today.
+
+### What we replace
+- **SailPoint / Saviynt** for human identity governance
+- **Microsoft Entra ID Governance** for cross-cloud identity hygiene
+- **Astrix / Entro / Oasis** for NHI security (we cover more identity types with less access)
+- **AI security tools** for the AI-as-NHI subset
+
+### Key Features
+
+- **Identity Discovery**: Automatically discover all identity types in your Azure tenant
+  - Service Principals (customer-owned applications)
 
 ### Key Features
 

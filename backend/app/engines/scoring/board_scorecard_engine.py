@@ -81,10 +81,12 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
     try:
         cursor.execute(
             """
-            SELECT i.id, i.identity_id, i.display_name
+            SELECT i.id, i.identity_id, i.display_name,
+                   i.owner_display_name, i.last_seen_auth
               FROM (
                 SELECT DISTINCT ON (i.identity_id)
-                       i.id, i.identity_id, i.display_name
+                       i.id, i.identity_id, i.display_name,
+                       i.owner_display_name, i.last_seen_auth
                   FROM identities i
                   JOIN agent_classifications ac ON ac.identity_db_id = i.id
                  WHERE ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
@@ -101,7 +103,7 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
         logger.warning("compute_board_scorecard cohort query failed: %s", exc)
         return _empty_scorecard()
 
-    cohort = [_row(r, ["id", "identity_id", "display_name"]) for r in rows]
+    cohort = [_row(r, ["id", "identity_id", "display_name", "owner_display_name", "last_seen_auth"]) for r in rows]
     cohort = [c for c in cohort if c.get("id") is not None]
     total = len(cohort)
 
@@ -129,8 +131,8 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
 
     distribution = {"strong": 0, "good": 0, "elevated": 0, "critical": 0}
 
-    # (trust_score, identity_id, display_name, top_dim_fail) tuples for sorting
-    sortable: list[tuple[int, str, str, str | None]] = []
+    # (trust_score, identity_id, display_name, top_dim_fail, owner, last_seen)
+    sortable: list[tuple[int, str, str, str | None, str | None, str | None]] = []
 
     for entry in cohort:
         iid = int(entry["id"])
@@ -155,11 +157,19 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
         elif score >= _BAND_ELEV_MIN:   distribution["elevated"] += 1
         else:                           distribution["critical"] += 1
 
+        last_seen_iso = None
+        if entry.get("last_seen_auth"):
+            try:
+                last_seen_iso = entry["last_seen_auth"].isoformat()
+            except Exception:
+                last_seen_iso = str(entry["last_seen_auth"])
         sortable.append((
             score,
             entry.get("identity_id") or "",
             entry.get("display_name") or "",
             _top_dimension_fail(t),
+            entry.get("owner_display_name"),
+            last_seen_iso,
         ))
 
     # 4) Top-10 worst (lowest trust first; deterministic tiebreak on identity_id).
@@ -170,20 +180,55 @@ def compute_board_scorecard(cursor: Any, organization_id: int) -> dict[str, Any]
             "display_name":       dname,
             "trust_score":        sc,
             "top_dimension_fail": dim,
+            "owner":              owner,
+            "last_seen":          last_seen,
         }
-        for (sc, sid, dname, dim) in sortable[:_TOP_WORST_LIMIT]
+        for (sc, sid, dname, dim, owner, last_seen) in sortable[:_TOP_WORST_LIMIT]
     ]
 
+    # AG-BOARD-V3 (2026-06-10): board-room metrics for the executive view.
+    # Governance score = mean of the 5 KPIs (an honest summary that moves
+    # the moment any pillar slips). Critical AI Risks = the 3 risk classes
+    # the board actually asks about: ownerless agents, internet-accessible
+    # agents (egress fail), agents reaching sensitive data (data_access fail).
+    kpis = [
+        _pct(with_owner, total), _pct(with_telemetry, total),
+        _pct(private_network, total), _pct(least_privilege, total),
+        _pct(policy_compliant, total),
+    ]
+    governance_score = round(sum(kpis) / len(kpis), 1) if kpis else 0.0
+
+    ownerless = 0
+    internet_accessible = 0
+    sensitive_data_reachable = 0
+    for entry in cohort:
+        iid = int(entry["id"])
+        t = trust.get(iid)
+        if not t:
+            continue
+        if t["ownership"]["grade"] != "PASS":
+            ownerless += 1
+        if t["egress"]["grade"] != "PASS":
+            internet_accessible += 1
+        if t.get("data_access", {}).get("grade") in ("FAIL", "HIGH", "CRITICAL"):
+            sensitive_data_reachable += 1
+
     return {
-        "total_agents":         total,
-        "with_owner_pct":       _pct(with_owner, total),
-        "with_telemetry_pct":   _pct(with_telemetry, total),
-        "private_network_pct":  _pct(private_network, total),
-        "least_privilege_pct":  _pct(least_privilege, total),
-        "policy_compliant_pct": _pct(policy_compliant, total),
-        "distribution":         distribution,
-        "top_10_worst":         top_10_worst,
-        "exceptions_pending":   exceptions_pending,
+        "total_agents":             total,
+        "governance_score":         governance_score,
+        "with_owner_pct":           _pct(with_owner, total),
+        "with_telemetry_pct":       _pct(with_telemetry, total),
+        "private_network_pct":      _pct(private_network, total),
+        "least_privilege_pct":      _pct(least_privilege, total),
+        "policy_compliant_pct":     _pct(policy_compliant, total),
+        "distribution":             distribution,
+        "top_10_worst":             top_10_worst,
+        "exceptions_pending":       exceptions_pending,
+        "critical_risks": {
+            "ownerless":                ownerless,
+            "internet_accessible":      internet_accessible,
+            "sensitive_data_reachable": sensitive_data_reachable,
+        },
     }
 
 
@@ -279,4 +324,89 @@ def _empty_scorecard() -> dict[str, Any]:
     }
 
 
-__all__ = ["compute_board_scorecard"]
+def persist_board_scorecard_snapshot(
+    cursor: Any,
+    organization_id: int,
+    discovery_run_id: int | None = None,
+) -> bool:
+    """Persist a scorecard rollup to ai_board_scorecard_snapshots.
+
+    Called after each discovery run so the trend charts on /board-scorecard,
+    /identity-scorecard, /dashboard have data to render. Without this hook
+    the snapshot table stays empty and every trend widget shows "Baseline
+    established. Trend data available after next scan" forever.
+
+    Per-run snapshots (post-migration 220): every discovery run writes its
+    own row. A 6h-cadence tenant gets 4 rows/day → trend lights up after
+    the 2nd scan. A 24h-cadence tenant gets 1 row/day → trend lights up
+    after day 2. The (org, discovery_run_id) partial unique index in
+    migration 220 prevents a single run from accidentally writing twice
+    if the hook fires more than once for the same run_id.
+
+    Returns True on success, False on caught failure.
+    """
+    import json
+    if not organization_id:
+        return False
+    try:
+        result = compute_board_scorecard(cursor, organization_id)
+    except Exception as exc:
+        logger.warning("persist_board_scorecard_snapshot compute failed org=%s: %s", organization_id, exc)
+        return False
+
+    dist = result.get("distribution") or {}
+    try:
+        cursor.execute(
+            """
+            INSERT INTO ai_board_scorecard_snapshots
+              (organization_id, snapshot_date, total_agents,
+               with_owner_pct, with_telemetry_pct, private_network_pct,
+               least_privilege_pct, policy_compliant_pct,
+               distribution_strong, distribution_good,
+               distribution_elevated, distribution_critical,
+               top_10_worst_json, exceptions_pending, computed_at,
+               discovery_run_id)
+            VALUES (%s, CURRENT_DATE, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s::jsonb, %s, NOW(), %s)
+            ON CONFLICT (organization_id, discovery_run_id)
+            WHERE discovery_run_id IS NOT NULL
+            DO UPDATE SET
+              total_agents          = EXCLUDED.total_agents,
+              with_owner_pct        = EXCLUDED.with_owner_pct,
+              with_telemetry_pct    = EXCLUDED.with_telemetry_pct,
+              private_network_pct   = EXCLUDED.private_network_pct,
+              least_privilege_pct   = EXCLUDED.least_privilege_pct,
+              policy_compliant_pct  = EXCLUDED.policy_compliant_pct,
+              distribution_strong   = EXCLUDED.distribution_strong,
+              distribution_good     = EXCLUDED.distribution_good,
+              distribution_elevated = EXCLUDED.distribution_elevated,
+              distribution_critical = EXCLUDED.distribution_critical,
+              top_10_worst_json     = EXCLUDED.top_10_worst_json,
+              exceptions_pending    = EXCLUDED.exceptions_pending,
+              computed_at           = NOW()
+            """,
+            (
+                organization_id,
+                int(result.get("total_agents", 0) or 0),
+                float(result.get("with_owner_pct", 0) or 0),
+                float(result.get("with_telemetry_pct", 0) or 0),
+                float(result.get("private_network_pct", 0) or 0),
+                float(result.get("least_privilege_pct", 0) or 0),
+                float(result.get("policy_compliant_pct", 0) or 0),
+                int(dist.get("strong", 0) or 0),
+                int(dist.get("good", 0) or 0),
+                int(dist.get("elevated", 0) or 0),
+                int(dist.get("critical", 0) or 0),
+                json.dumps(result.get("top_10_worst", []) or []),
+                int(result.get("exceptions_pending", 0) or 0),
+                discovery_run_id,
+            ),
+        )
+        return True
+    except Exception as exc:
+        logger.warning("persist_board_scorecard_snapshot insert failed org=%s run=%s: %s",
+                       organization_id, discovery_run_id, exc)
+        return False
+
+
+__all__ = ["compute_board_scorecard", "persist_board_scorecard_snapshot"]

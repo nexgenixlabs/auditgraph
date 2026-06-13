@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 /* ───────── Types ───────── */
 
@@ -149,11 +151,8 @@ export default function Compliance() {
   if (loading) {
     return (
       <div style={{ minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.bg }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ width: 32, height: 32, borderRadius: '50%', border: `3px solid ${C.border}`, borderTopColor: C.accentBlue, animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
-          <div style={{ fontSize: 12, color: C.textMuted }}>Loading compliance data...</div>
-        </div>
-        <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+        {/* AG-POLISH-D (2026-06-10) */}
+        <LoadingState message="Loading compliance data…" detail="Cross-referencing controls against NIST / CIS / ISO mappings" />
       </div>
     );
   }

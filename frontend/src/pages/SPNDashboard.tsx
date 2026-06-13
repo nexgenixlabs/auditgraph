@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
+// AG-POLISH-D (2026-06-10)
+import { TableSkeletonRow } from '../components/LoadingState';
 import {
   RISK_BADGE, safeLower,
   SPN_EXPOSURE_COMPONENTS, EXPOSURE_THRESHOLDS,
@@ -973,10 +975,19 @@ export default function SPNDashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
+              {/* AG-POLISH-D (2026-06-10) */}
               {loading ? (
-                <tr><td colSpan={9} className="px-3 py-8 text-center text-gray-400">Loading workload identities...</td></tr>
+                <TableSkeletonRow columns={9} count={5} />
               ) : sorted.length === 0 ? (
-                <tr><td colSpan={9} className="px-3 py-8 text-center text-gray-400">No workload identities found. Capture a snapshot to populate.</td></tr>
+                <tr><td colSpan={9} className="py-12">
+                  <div className="text-center max-w-md mx-auto">
+                    <svg className="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2" />
+                    </svg>
+                    <div className="text-sm font-semibold text-gray-300">No workload identities found</div>
+                    <p className="text-xs text-gray-500 mt-1">Capture a snapshot to populate — AuditGraph enumerates every service principal, managed identity, and federated workload via the Graph API.</p>
+                  </div>
+                </td></tr>
               ) : sorted.map(spn => {
                 const lcCfg = LIFECYCLE_STATE_CONFIG[spn.lifecycle_state] || LIFECYCLE_STATE_CONFIG.blind;
                 const owCfg = OWNER_STATUS_CONFIG[spn.owner_status] || OWNER_STATUS_CONFIG.unknown;

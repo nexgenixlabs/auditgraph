@@ -540,6 +540,249 @@ Authorization: Bearer eyJ...
 
 ---
 
+## Data Trust Zones (AG-193)
+
+### List Zones
+
+```http
+GET /api/data-trust-zones
+```
+
+Returns active zones for the calling tenant. Revoked zones (`revoked_at IS NOT NULL`) are excluded by default.
+
+**Response (200):**
+
+```json
+{
+  "zones": [
+    {
+      "id": 1,
+      "classification": "PHI",
+      "scope_type": "resource_group",
+      "scope_value": "carehub-centus-prd-rg",
+      "asserted_by": "admin@example.com",
+      "asserted_at": "2026-06-12T18:20:00Z",
+      "revoked_at": null,
+      "notes": null
+    }
+  ]
+}
+```
+
+### Create Zone
+
+```http
+POST /api/data-trust-zones
+Content-Type: application/json
+
+{
+  "classification": "PHI",
+  "scope_type": "resource_name_pattern",
+  "scope_value": "*claims*",
+  "notes": "Claims pipeline storage"
+}
+```
+
+`scope_type` ∈ `subscription` | `resource_group` | `subscription_pattern` | `resource_group_pattern` | `resource_name_pattern`.
+
+### Update Zone
+
+```http
+PATCH /api/data-trust-zones/<id>
+```
+
+### Revoke Zone
+
+```http
+DELETE /api/data-trust-zones/<id>
+```
+
+Soft-delete — sets `revoked_at`. The row stays for audit; re-creating the same scope creates a new row.
+
+### Zone Coverage
+
+```http
+GET /api/data-trust-zones/<id>/coverage
+```
+
+Per-table count of resources currently classified by this zone.
+
+### Recompute
+
+```http
+POST /api/data-trust-zones/recompute
+```
+
+Re-runs the classification engine + reach attribution against the current discovery snapshot. Returns updated row counts.
+
+### Audit Log
+
+```http
+GET /api/data-trust-zones/audit
+```
+
+Every create / edit / revoke event for this org from `activity_log`.
+
+---
+
+## Classified Resources
+
+### List Classified Resources
+
+```http
+GET /api/resources/classified
+   ?classification=PHI         (optional filter)
+   &source=scope_rule          (optional filter)
+   &confidence_min=85          (optional filter)
+   &limit=500                  (default 500)
+```
+
+Unions five resource tables (`azure_storage_accounts`, `azure_key_vaults`, `azure_sql_databases`, `azure_cosmos_databases`, `discovered_resources`) filtered to `data_classification IS NOT NULL`.
+
+**Response (200):**
+
+```json
+{
+  "resources": [
+    {
+      "resource_id": "/subscriptions/…/storageAccounts/…",
+      "name": "process-claims-outbound",
+      "kind": "Storage",
+      "classification": "PHI",
+      "source": "scope_rule",
+      "confidence": 100,
+      "rule_id": 1,
+      "asserted_by": "admin@example.com",
+      "subscription_id": "…",
+      "resource_group": "carehub-centus-prd-rg"
+    }
+  ],
+  "count": 286,
+  "by_classification": { "PHI": 286, "PII": 40 },
+  "by_source": { "scope_rule": 326 }
+}
+```
+
+---
+
+## Exposure (AG-193 Sprint B)
+
+### Exposure Derivation (per class)
+
+```http
+GET /api/exposure/derivation/<classification>
+```
+
+`classification` ∈ `PHI` | `PCI` | `PII` | `SOURCE` | `HR` | `FINANCIAL` | `CONFIDENTIAL`.
+
+Returns zones in force, resource count, by-source and by-confidence-band breakdowns, per-asset rate, dollar value.
+
+### Exposure Lineage
+
+```http
+GET /api/exposure/derivation/<classification>/lineage
+```
+
+Returns reachable identity count, attack paths terminating, internet-reachable resources — the chain that ends at this classification.
+
+### Exposure By Entity
+
+```http
+GET /api/exposure/by-entity
+   ?type=identity|ai_model     (default identity)
+   &limit=10                   (1..200)
+```
+
+Top entities ranked by `reachable_classified_exposure`.
+
+**Response (200):**
+
+```json
+{
+  "type": "identity",
+  "rows": [
+    {
+      "id": 619409,
+      "name": "Diego Jimenez",
+      "category": "human_user",
+      "exposure": 113760000,
+      "phi": 143,
+      "pci": 0,
+      "pii": 20,
+      "computed_at": "2026-06-13T05:23:53Z"
+    }
+  ],
+  "totals": {
+    "entities_with_reach": 682,
+    "top_exposure": 113760000
+  }
+}
+```
+
+AI model rows additionally carry `attribution_method` ∈ `mi_principal_id` | `name_match` | `rbac_upper_bound` | `unresolved`.
+
+### Reach Summary
+
+```http
+GET /api/exposure/reach-summary
+```
+
+Single-call payload for the Executive Posture hero decorator.
+
+**Response (200):**
+
+```json
+{
+  "reachable_identities": 682,
+  "reachable_ai_models": 0,
+  "attack_paths_total": 115,
+  "orphan_nhi_count": 951,
+  "top_identity":  { "name": "SVC_Forensit", "exposure": 113760000, "phi": 143 },
+  "top_ai_model": null
+}
+```
+
+### Business Impact (rollup with AI attribution)
+
+```http
+GET /api/dashboard/business-impact
+```
+
+Includes the additive PHI / PCI / PII contribution to `total_exposure`, the non-additive `ai_attribution` block (and `ai_models.with_reach_count` / `ai_models.attributable_exposure` for back-compat consumers), and a string `source` indicating whether tenant overrides are active.
+
+### Argus Classification Suggestions
+
+```http
+GET /api/argus/classification-suggestions
+```
+
+Proposes Data Trust Zone candidates from RG name keyword matches in the current discovery. Used by the Argus card on the Data Trust Zones settings page.
+
+### Purview Integration Status
+
+```http
+GET /api/purview/status
+```
+
+Returns the feature-flag state + Purview classifier cache stats.
+
+---
+
+## Settings — Exposure Defaults
+
+Backed by the generic `/api/settings` endpoint. Four exposure-related keys are accepted:
+
+| Key | Default (USD) |
+|---|---:|
+| `exposure_phi_per_asset` | 720000 |
+| `exposure_pci_per_asset` | 1200000 |
+| `exposure_pii_per_asset` | 540000 |
+| `exposure_ai_per_asset`  | 0 *(deprecated — AI is reach-derived)* |
+
+Set a value to override; clear (empty string) to revert to the IBM default. Changes take effect on the next dashboard load.
+
+---
+
 ## Health
 
 ### Health Check

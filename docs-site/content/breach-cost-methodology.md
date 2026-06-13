@@ -1,115 +1,126 @@
-# Breach Cost Methodology
+# Potential Exposure Impact — Methodology
 
 **The question every CISO asks**: *"How did you arrive at that dollar amount?"*
 
-This page is the answer. Every dollar figure AuditGraph displays — on the Executive Posture, in AI Abuse Scenarios, on Multi-Hop XGRAPH chains, anywhere — is computed deterministically from the same publicly cited industry cost factors. No model, no fabrication, no opaque heuristic.
+This page is the answer. AuditGraph's dollar number is a **benchmark estimate**, not an actuarial loss model. Every figure is re-derivable from a single table the user can audit in 30 seconds.
+
+> What changed in 2026: AuditGraph moved from "records × per-record cost" to "classified resources × per-asset cost" and reorganised so that **dollars attach to data, not to entities**. AI workloads and identities don't add dollars to the headline; they inherit *attribution* from the data they can reach. See [Architectural change](#architectural-change-2026) below.
+
+## What it is — and what it isn't
+
+| What it is | What it isn't |
+|---|---|
+| A benchmark estimate using public breach-cost data | An actuarial loss model |
+| A way to compare assets and prioritise remediation | A probability-weighted breach prediction |
+| Re-derivable from the table on screen | Insurance-grade quantification |
+
+The Potential Exposure Impact figure exists to drive a board conversation, not to back an insurance claim. AuditGraph never claims to forecast breach likelihood.
 
 ## The formula
 
 ```
-exposure_low  = records × factor.low_usd
-exposure_mid  = records × factor.mid_usd      ← shown as the headline
-exposure_high = records × factor.high_usd
+total_potential_exposure
+    = (count_PHI × per_asset_PHI)
+    + (count_PCI × per_asset_PCI)
+    + (count_PII × per_asset_PII)
 ```
 
-Two inputs:
+That's the whole equation. There are no hidden multipliers. The "Total Exposure Formula" panel in the [Potential Exposure Impact drawer](#the-drawer) renders exactly these four lines summing to the headline.
 
-1. **records** — the count of classified records each identity can reach via RBAC + Entra directory roles. Computed from cloud resource inspection (Cosmos collections, SQL tables, Blob containers, Key Vault secrets, etc.) cross-joined with the identity's effective permissions.
+### Why this beats the old per-record model
 
-2. **factor** — industry cost-per-record from the citations below. Stored as a row in the `breach_cost_factors` database table. Each row carries its source, source year, and effective date.
+The 2025 model used `records × $/record`. It required AuditGraph to count rows inside a Cosmos collection or SQL table, which crossed the read-only line (we never inspect data plane). Per-asset cost keeps the moat intact: we count **resources** (storage accounts, key vaults, SQL DBs, generic ARM resources) carrying a data classification — every signal architecture-derived.
 
-Multiply them and you get a low/mid/high band expressing realistic uncertainty.
+### Per-asset defaults (IBM Cost of a Data Breach 2024)
 
-## Cost factor table
+| Class | Default per-asset (USD) | Source |
+|---|---:|---|
+| **PHI** | **$720,000** | IBM CoDB 2024 — Healthcare median |
+| **PCI** | **$1,200,000** | IBM CoDB 2024 — Financial median |
+| **PII** | **$540,000** | IBM CoDB 2024 — global average |
+| AI Models | **$0** *(reach-derived; see below)* | — |
 
-| Class | Low (USD/rec) | **Mid (USD/rec)** | High (USD/rec) | Source |
-|---|---:|---:|---:|---|
-| **PHI** | $408 | **$471** | $535 | IBM Cost of a Data Breach 2023 — Healthcare · Ponemon Healthcare 2023 |
-| **PCI** | $180 | **$303** | $429 | IBM Cost of a Data Breach 2023 — Financial Services · Verizon DBIR 2023 |
-| **PII** | $148 | **$165** | $183 | IBM Cost of a Data Breach 2023 — global average |
-| **FINANCIAL** | $180 | **$303** | $429 | IBM CoDB 2023 Financial Services |
-| **HR** | $148 | **$165** | $183 | IBM CoDB 2023 — PII baseline |
-| **SOURCE** | $120 | **$200** | $350 | Verizon DBIR 2023 IP-theft incidents (estimated) |
-| **CONFIDENTIAL** | $80 | **$150** | $250 | IBM CoDB 2023 corporate-data average |
+Every tenant can override these in **Settings → Exposure Defaults**. Leaving a field blank reverts to the IBM default. Overrides are stored in the `settings` table under keys `exposure_phi_per_asset` / `exposure_pci_per_asset` / `exposure_pii_per_asset` / `exposure_ai_per_asset`.
 
-Mid is the headline figure shown on dashboards. Low and high define the credible range.
+## How a resource gets classified
 
-Factors are versioned by year (`source_year`) and refreshed annually as new editions of the source reports are published. Regional adjustments (US / EU / APAC) are supported by adding region-specific rows.
+A resource becomes PHI / PCI / PII through one of six tiers; the first that matches wins. Confidence band travels with the answer so a reviewer can see the provenance.
 
-## Worked example
+| # | Tier | Confidence | What it looks at |
+|---|---|---:|---|
+| 1 | **Manual override** | 100 | A per-resource override an admin typed |
+| 2 | **Regex override** | 95 | A tenant regex pattern matching the resource name |
+| 3a | **Data Trust Zone — resource-name pattern** | 100 | Glob on resource name (e.g. `*phi*`, `*claims*`, `*patient*`) |
+| 3b | **Data Trust Zone — broad scope + name corroborates** | 100 | RG / subscription scope **and** the resource name carries a class keyword |
+| 3c | **Data Trust Zone — broad scope only** | 60 *(Medium)* | RG / subscription scope; resource name is silent on the class |
+| 4 | **Microsoft Purview** | 95 | Purview classification label (read via Graph API, never data) |
+| 5 | **Azure tag** | 80 *(60 if key not in allow-list)* | Tag value like `classification=PHI` or `phi=true` |
+| 6 | **Name pattern** | 45 *(Low)* | Built-in heuristic over the resource name |
 
-The single most-shown example in the demo:
+A broad Data Trust Zone (e.g. *PHI = whole resource group `carehub-centus-prd-rg`*) used to rubber-stamp every resource at confidence 100. As of 2026-06-13 it only earns 100 confidence when the resource name corroborates the class; otherwise it lands at 60 (Medium). The UI labels these rows **"zone-asserted, name-unverified"** in amber so a SOC analyst sees the provenance honestly.
 
-> `demo-ai-copilot-prod` can write to a Cosmos collection containing **120,000 PHI records**.
+See [Data Trust Zones](screen-data-trust-zones) for the customer-facing screen and [Classified Resources](screen-classified-resources) for the row-level view.
 
-```
-exposure_low  = 120,000 × $408 = $48.96M
-exposure_mid  = 120,000 × $471 = $56.52M   ← displayed
-exposure_high = 120,000 × $535 = $64.20M
-```
+## AI attribution (non-additive)
 
-Source: IBM Cost of a Data Breach 2023 — Healthcare vertical, U.S. region, all-cause average across confirmed breaches.
+AI workloads are surfaced separately from the additive formula because **they don't add a dollar line — they inherit attribution from the classified data they can reach**.
 
-When the same agent shows up on the Executive Posture as `$56.52M`, on Multi-Hop XGRAPH as a $56.52M chain, and on AI Abuse Scenarios under `prompt_injection` as $56.52M — they're all referencing this same calculation. Numbers are reproducible and the citation is one click away from every screen via the **ⓘ Methodology** button.
-
-## What AuditGraph deliberately does NOT do
-
-These omissions are intentional, not gaps:
-
-- **No probability of breach.** AuditGraph quantifies *consequence given compromise*. Likelihood is a separate discipline (threat intelligence, vendor exposure analysis) that requires its own data and methodology. Mixing the two produces numbers that are hard to defend in a regulator's office.
-- **No ML-derived multipliers.** Numbers are deterministic. The same inputs always produce the same outputs. An auditor can replay any calculation from raw source.
-- **No summing across overlapping chains.** When the same data class is reached by multiple chains (e.g., five agents all reaching the same 120,000 PHI records), we use the MAX record count, not the sum. Five paths to the same data is still 120,000 records.
-- **No hidden factors.** Every dollar on every screen traces back to a row in `breach_cost_factors` with a citation. No "proprietary cost model."
-
-## Primary references
-
-- **IBM Security** — *Cost of a Data Breach Report 2023* (annual, public).
-  Authoritative source for per-record costs across industry verticals.
-- **Ponemon Institute** — *Cost of Healthcare Data Breach Report 2023*.
-  Healthcare-specific factors, used for PHI calibration.
-- **Verizon** — *Data Breach Investigations Report (DBIR) 2023*.
-  Cross-industry incident data, used for source code and IP factors.
-- **GDPR Enforcement Tracker** (gdprhub.eu).
-  Used for EU regulatory-fine reference points and high-band calibration.
-- **HHS Office for Civil Rights** — HIPAA breach reporting database.
-  Used for PHI breach incident frequency and severity calibration.
-
-## Where the table lives
-
-The cost factor table is defined by the SQL migration `backend/migrations/204_breach_cost_factors.sql`. Each row carries:
-
-- `classification` (PHI, PCI, PII, etc.)
-- `region` (US, EU, APAC, GLOBAL)
-- `factor_low_usd`, `factor_mid_usd`, `factor_high_usd`
-- `source` (citation string)
-- `source_year` (integer — for trend analysis)
-- `notes` (free text — caveats)
-- `effective_date` (when this row becomes the active factor)
-
-Operators can override factors on a per-tenant basis to reflect specific contractual terms (e.g., a SaaS vendor with a per-record contractual penalty might use the contractual figure as the low band).
-
-## How this number lands at a board meeting
+For every AI agent identity (managed identity classified by `agent_classifications.agent_identity_type IN ('ai_agent','possible_ai_agent')`) we walk its `role_assignments`. We take the union (deduplicated) of classified resources reachable across all AI workloads and value it at the per-asset rates above.
 
 ```
-"Our worst-case breach exposure across AI-reachable data
- is $81.6 million mid-band ($48.96M to $100.4M low-to-high).
- This is computed from 187,432 classified records reachable
- by our AI agents at current role assignments, multiplied by
- IBM 2023 industry cost factors for PHI, PCI, and PII.
- The single agent contributing the most exposure is
- demo-ai-copilot-prod ($56.52M)."
+attributable_AI_exposure
+    = Σ classified_resource.exposure
+      for resource in distinct_set(
+        every classified resource any AI workload has RBAC reach to
+      )
 ```
 
-That sentence — defensible, sourced, reproducible — is what AuditGraph generates. The same number renders on the Multi-Hop XGRAPH chain to demo-ai-copilot-prod, on the AI Abuse Scenarios card under `prompt_injection`, and on the Business Impact section of the Executive Posture page. All consistent, all traceable.
+The drawer's **AI Workloads — Attribution (non-additive)** panel reports:
 
-## Audit trail
+- **Discovered** — count of AI identities in the tenant
+- **Reach Classified** — how many of them can reach any classified data
+- **Attributable $$** — the dollar figure above
 
-Every breach exposure calculation is logged with:
+When *Reach Classified = 0* the drawer says explicitly *"AI workloads are correctly segregated — none have RBAC reach to classified data."* That's the architecture-derived answer, not a configuration gap.
 
-- Timestamp
-- User who triggered (if interactive) or system (if scheduled)
-- Inputs (record count, classification)
-- Factor row used (with source_year)
-- Output values
+For AI deployments tracked in `azure_ai_model_deployments` (e.g. Azure OpenAI), we attribute reach via a two-pass linkage to the parent account's managed identity. The recorded `reach_attribution_method` is one of:
 
-This produces an audit trail suitable for SOC 2, HIPAA, and PCI evidence requirements where a regulator might ask "where did you get $56 million?".
+| Method | When | Confidence |
+|---|---|---|
+| `mi_principal_id` | Discovery captured the parent account's identity.principalId | Highest |
+| `name_match` | Account name matches a `managed_identity_system` display_name | High |
+| `rbac_upper_bound` | Falls back to max reach across any identity with a role on the account | Soft upper bound — over-estimates when humans hold roles |
+| `unresolved` | No linkage found | Reach left null; drawer flags it |
+
+## The drawer
+
+Click the **Potential Exposure Impact** card on the Executive Posture page. The drawer renders the full chain in one scroll:
+
+1. **PHI / PCI / PII subtotal** — the headline matching the card.
+2. **Total Exposure Formula** — the additive table summing to total.
+3. **AI Workloads — Attribution (non-additive)** — the AI panel above.
+4. **What This Is — And Isn't** — the two-column caveat.
+5. **Active Data Trust Zones** — the rules in force.
+6. **By Classification Source** — count of resources by tier.
+7. **Confidence Bands** — High / Medium / Low resource counts.
+8. **Exposure Chain** — reachable identities, attack paths terminating here, internet-reachable resources.
+
+A CFO can re-derive the number from screen #2 in 30 seconds. That's the whole point.
+
+## Architectural change (2026)
+
+We moved off the per-record model after peer review highlighted three issues:
+
+1. **It crossed the read-only line.** Counting Cosmos rows or SQL records required data-plane access that conflicts with AuditGraph's "we never read your data" guarantee.
+2. **It double-counted AI.** A GPT deployment was independently valued at $1.4M *on top of* the PHI bucket it could reach. The same business value showed up twice in the headline.
+3. **It couldn't survive a CFO question.** "Why is my dev GPT worth $1.4M?" had no answer when the model could reach nothing.
+
+The per-asset / data-as-source model resolves all three. The headline is the union of classified data dollars; entities inherit attribution. The reach engine writes a single cached `reachable_classified_exposure` column per identity and per AI deployment, computed in the tier-2 post-discovery hook.
+
+## Sources
+
+- IBM Security · *Cost of a Data Breach Report 2024* — per-asset medians by industry. The default values shipped with AuditGraph.
+- Ponemon Institute · *Healthcare Data Breach 2024* — used to validate PHI default.
+- Verizon DBIR 2024 — cross-check on PCI median.
+
+Update annually as new reports publish. Defaults are versioned in the codebase (`backend/app/api/handlers.py:get_dashboard_business_impact:DEFAULTS`).

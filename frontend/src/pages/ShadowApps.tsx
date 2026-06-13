@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 /**
  * AG-86: Shadow Apps page.
@@ -113,8 +115,9 @@ export default function ShadowApps() {
         </button>
       </div>
 
+      {/* AG-POLISH-D (2026-06-10) */}
       {loading && (
-        <div className="bg-white rounded-xl p-6 text-sm text-gray-500">Loading…</div>
+        <div className="bg-white rounded-xl p-6"><LoadingState message="Loading shadow apps…" detail="Cross-referencing OAuth consents against approved registry" /></div>
       )}
 
       {!loading && tab === 'shadow' && shadow && (

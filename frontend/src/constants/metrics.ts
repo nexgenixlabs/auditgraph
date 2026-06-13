@@ -290,16 +290,21 @@ export const LIFECYCLE_STATE_DISPLAY: Record<LifecycleState, { label: string; co
   blind:           { label: 'No telemetry',     color: 'text-gray-500',  tooltip: 'No sign-in logs available (log-independent mode). Lifecycle inferred from architecture only.' },
   likely_dormant:  { label: 'Likely dormant',   color: 'text-amber-500', tooltip: 'Inferred dormant from architecture signals (stale credentials, no recent role changes) when sign-in logs are unavailable' },
   possibly_active: { label: 'Possibly active',  color: 'text-green-500', tooltip: 'Inferred recently-active from architecture signals (fresh credential, recent role grant) when sign-in logs are unavailable' },
-  Unknown:         { label: 'Unknown',          color: 'text-gray-400',  tooltip: 'Lifecycle could not be determined' },
+  // AG-PILOT-FIX (2026-06-08): real-pilot CISO asked "what does Unknown mean?"
+  // Label is now self-explanatory + tooltip explains the cause.
+  Unknown:         { label: 'No telemetry',     color: 'text-gray-400',  tooltip: 'Lifecycle stage could not be determined — no joiner/mover/leaver signals available. This usually means: (1) the tenant lacks Entra P2 audit logs, (2) the identity is a service account with no human lifecycle, or (3) the customer\'s HRIS isn\'t integrated. Architecture-only view of this identity is still in the other columns.' },
 };
 
 export type GovernanceState = 'Governed' | 'Ungoverned' | 'Orphaned' | 'Policy Violation';
 
+// AG-PILOT-FIX (2026-06-08): "Ungoverned" was confusing to real-pilot CISO.
+// Clearer label: "Needs Review" + tooltip lists what specifically is missing.
+// Keeps the underlying state key the same so backend doesn't change.
 export const GOVERNANCE_STATE_DISPLAY: Record<GovernanceState, { label: string; badgeClass: string; tooltip: string }> = {
-  Governed:             { label: 'Governed',         badgeClass: 'badge-governance-governed',         tooltip: 'Identity has an owner and is in a healthy governance state' },
-  Ungoverned:           { label: 'Ungoverned',       badgeClass: 'badge-governance-ungoverned',       tooltip: 'Identity has governance gaps — stale, unreviewed, or missing policy coverage' },
-  Orphaned:             { label: 'Orphaned',         badgeClass: 'badge-governance-orphaned',         tooltip: 'Identity has no owner in the directory' },
-  'Policy Violation':   { label: 'Policy Violation', badgeClass: 'badge-governance-ungoverned',       tooltip: 'Identity has an active policy breach' },
+  Governed:             { label: 'Governed',         badgeClass: 'badge-governance-governed',         tooltip: 'Identity has an owner assigned, policy coverage, and recent access review — healthy governance state' },
+  Ungoverned:           { label: 'Needs Review',     badgeClass: 'badge-governance-ungoverned',       tooltip: 'Identity is missing one or more governance signals: no recent access review, no policy coverage, or stale ownership. Action: assign owner via Ownership Center and schedule a re-cert.' },
+  Orphaned:             { label: 'No Owner',         badgeClass: 'badge-governance-orphaned',         tooltip: 'No human owner assigned in AuditGraph or in the directory. High-priority cleanup target — when this identity is misused, no one is accountable. Fix via Ownership Center.' },
+  'Policy Violation':   { label: 'Policy Violation', badgeClass: 'badge-governance-ungoverned',       tooltip: 'Identity has an active policy breach (e.g. permanent privileged grant where PIM-eligible is required). Triage in the Findings page.' },
 };
 
 export type PrivilegeLevel = 'Highly Privileged' | 'Privileged' | 'Standard';

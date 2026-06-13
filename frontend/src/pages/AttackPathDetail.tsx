@@ -291,24 +291,53 @@ export default function AttackPathDetailPage() {
           </div>
 
           {/* Path Chain Visualization */}
+          {/* AG-PILOT-ATTACK-PATH-ANIMATION (2026-06-09): customer reported
+              the attack-path animation regression. Reintroduced a CSS-only
+              cinematic \u2014 each node fades in + each arrow slides in,
+              staggered 220ms per hop. No JS state, no ReactFlow. Plays
+              once on mount; subsequent navigations replay because the
+              component re-mounts with new path id. */}
           {nodes.length > 0 && (
             <div className="rounded-xl border p-5" style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-primary)' }}>
               <h3 className="text-xs font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-tertiary)' }}>
                 Escalation Chain
               </h3>
+              <style>{`
+                @keyframes ag-chain-node-in {
+                  0%   { opacity: 0; transform: translateY(6px) scale(0.94); }
+                  100% { opacity: 1; transform: translateY(0) scale(1); }
+                }
+                @keyframes ag-chain-arrow-in {
+                  0%   { opacity: 0; transform: translateX(-8px); }
+                  100% { opacity: 1; transform: translateX(0); }
+                }
+                .ag-chain-node {
+                  opacity: 0;
+                  animation: ag-chain-node-in 320ms ease-out forwards;
+                }
+                .ag-chain-arrow {
+                  opacity: 0;
+                  animation: ag-chain-arrow-in 220ms ease-out forwards;
+                }
+              `}</style>
               <div className="flex items-center gap-0 overflow-x-auto pb-2">
                 {nodes.map((node, i) => (
                   <React.Fragment key={i}>
                     {i > 0 && (
-                      <div className="flex-shrink-0 w-8 flex items-center justify-center">
+                      <div className="flex-shrink-0 w-8 flex items-center justify-center ag-chain-arrow"
+                           style={{ animationDelay: `${i * 220 - 100}ms` }}>
                         <svg width="32" height="16" viewBox="0 0 32 16">
                           <line x1="0" y1="8" x2="24" y2="8" stroke="var(--text-tertiary)" strokeWidth="1.5" strokeDasharray={i === nodes.length - 1 ? '4 2' : 'none'} />
                           <polygon points="24,4 32,8 24,12" fill="var(--text-tertiary)" />
                         </svg>
                       </div>
                     )}
-                    <div className="flex-shrink-0 rounded-lg px-4 py-3 border min-w-[120px] text-center"
-                      style={{ backgroundColor: `${NODE_COLORS[node.type] || '#64748b'}12`, borderColor: `${NODE_COLORS[node.type] || '#64748b'}40` }}>
+                    <div className="flex-shrink-0 rounded-lg px-4 py-3 border min-w-[120px] text-center ag-chain-node"
+                      style={{
+                        backgroundColor: `${NODE_COLORS[node.type] || '#64748b'}12`,
+                        borderColor: `${NODE_COLORS[node.type] || '#64748b'}40`,
+                        animationDelay: `${i * 220}ms`,
+                      }}>
                       <div className="text-base mb-1">{NODE_ICONS[node.type] || '\u2022'}</div>
                       <div className="text-xs font-semibold truncate max-w-[140px]" style={{ color: NODE_COLORS[node.type] || 'var(--text-primary)' }}>
                         {node.label}

@@ -22,6 +22,8 @@
  */
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 interface JmlSample {
   identity_id: string;
@@ -73,8 +75,8 @@ const BUCKET_META: Record<Bucket, {
     pillBg: 'bg-orange-50',
     pillText: 'text-orange-700',
     story: 'Changed role or department in HR — but kept their old privileged access.',
-    what: 'Open mover_stale_access anomalies — identities whose department or job_title changed since the prior snapshot while their prior critical/high privileged roles remain attached.',
-    signal: 'anomalies.anomaly_type = mover_stale_access AND resolved = false',
+    what: 'Identities whose department or job title changed since the prior snapshot, but the prior critical/high privileged roles are still attached.',
+    signal: 'role-set unchanged across an HR attribute change',
     why: '"Permission creep" is the #1 driver of standing-privilege risk. The mover scenario is exactly how engineers end up with Contributor on every subscription they ever touched — IGA tools assign roles, almost none of them clean up.',
   },
   leavers: {
@@ -83,24 +85,38 @@ const BUCKET_META: Record<Bucket, {
     pillBg: 'bg-red-50',
     pillText: 'text-red-700',
     story: 'Disabled in the directory — but the role assignments are still live.',
-    what: 'Open ghost_identity anomalies — identities that are disabled (enabled=false) yet still have one or more active role assignments. SailPoint-style deprovisioning often disables the user object without unwinding the roles.',
-    signal: 'anomalies.anomaly_type = ghost_identity AND resolved = false',
+    what: 'Disabled in the directory, but the role assignments are still live. SailPoint-style deprovisioning often disables the account object without unwinding the roles attached to it.',
+    signal: 'disabled identities with one or more active role assignments',
     why: 'Disabled-but-privileged is the canonical breach precursor — a disabled account whose credentials leaked still resolves into a session if the role assignments outlive the directory state. This is the bucket auditors look at first.',
   },
 };
 
-export default function LifecycleJml() {
+interface LifecycleJmlProps { forceType?: string }
+
+export default function LifecycleJml({ forceType }: LifecycleJmlProps = {}) {
   const navigate = useNavigate();
   const [data, setData] = useState<JmlResp | null>(null);
   const [error, setError] = useState(false);
   const [active, setActive] = useState<Bucket>('leavers');
 
+  // AG-PHASE3 (2026-06-09): scope-aware. Same component powers
+  // /lifecycle?type=human / nhi / ai. Backend takes the same param.
+  // Lock-V2 (2026-06-11) — accepts forceType prop for bucket-tab embedding.
+  const params = new URLSearchParams(window.location.search);
+  const scope = (forceType || params.get('type') || params.get('scope') || 'all').toLowerCase();
+  const scopeTitle = ({
+    human: 'Human Lifecycle (JML)',
+    nhi: 'Non-Human Identity Lifecycle (JML)',
+    ai: 'AI Identity Lifecycle (JML)',
+    all: 'Identity Lifecycle (JML)',
+  } as Record<string, string>)[scope] || 'Identity Lifecycle (JML)';
+
   useEffect(() => {
-    fetch('/api/dashboard/jml-snapshot')
+    fetch(`/api/dashboard/jml-snapshot?type=${encodeURIComponent(scope)}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error('fetch_failed')))
       .then((d: JmlResp) => setData(d))
       .catch(() => setError(true));
-  }, []);
+  }, [scope]);
 
   const totals = useMemo(() => {
     if (!data) return { j: 0, m: 0, l: 0, total: 0 };
@@ -155,15 +171,26 @@ export default function LifecycleJml() {
       {/* Header */}
       <div>
         <div className="flex items-center gap-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
-          CIEM Observability
+          {/* AG-PHASE3 (2026-06-09): scope-aware breadcrumb */}
+          <span style={{ color: scope === 'human' ? '#3b82f6' : scope === 'ai' ? '#a78bfa' : scope === 'nhi' ? '#f97316' : '#64748b' }}>
+            Identity
+          </span>
+          <span className="text-gray-300">·</span>
+          <span>{scope === 'human' ? 'Human' : scope === 'ai' ? 'AI Identity' : scope === 'nhi' ? 'Non-Human' : 'All Types'}</span>
           <span className="text-gray-300">·</span>
           <span>Lifecycle</span>
         </div>
-        <h1 className="text-2xl font-semibold text-gray-900 mt-1">Joiners · Movers · Leavers</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 mt-1">{scopeTitle}</h1>
         <p className="text-sm text-gray-600 mt-2 max-w-3xl">
-          AuditGraph flags the three lifecycle patterns auditors care about most — without touching your
-          IGA. We <span className="font-medium">observe</span> what your directory + role assignments + HR
-          fields say, then surface the identities where the lifecycle state has drifted from policy.
+          {scope === 'nhi' ? (
+            <><TermTooltip term="JML">Joiners, movers, and leavers</TermTooltip> across every non-human identity — <TermTooltip term="SPN">service principals</TermTooltip>, <TermTooltip term="MI">managed identities</TermTooltip>, workloads, <TermTooltip term="FIC">CI/CD identities</TermTooltip>, and AI agents. Each pattern is architecture-derived: new credential creation = Joiner; role escalation or owner change = Mover; credential expiry or decommission = Leaver. Read-only inference; no IGA write.</>
+          ) : scope === 'human' ? (
+            <><TermTooltip term="JML">Joiners, movers, and leavers</TermTooltip> for the human directory — employees, contractors, and guests. We observe Entra ID + role assignments + HR signals and surface lifecycle drift.</>
+          ) : scope === 'ai' ? (
+            <>AI agent lifecycle events — new agents detected, model/permission/owner changes, decommissions in the window.</>
+          ) : (
+            <>AuditGraph flags the three lifecycle patterns auditors care about most across all identity types — humans, <TermTooltip term="NHI">NHIs</TermTooltip>, and AI agents. We observe what your directory + role assignments + HR fields say, then surface identities where the lifecycle state has drifted from policy.</>
+          )}
         </p>
       </div>
 

@@ -36,6 +36,7 @@ from app.api.handlers import (
     get_risks,
     get_identity_summary,
     get_dashboard_posture,
+    get_dashboard_business_impact,
     get_dashboard_compliance,
     get_overview_insights,
     get_attack_surface_score,
@@ -125,6 +126,8 @@ from app.api.handlers import (
     get_identity_groups_handler,
     query_identities,
     get_query_fields,
+    # AG-PHASE1+4 (2026-06-09): NHI Inventory category counts
+    get_identity_category_summary,
     get_anomalies_list,
     get_anomaly_stats_handler,
     get_anomaly_detail,
@@ -3024,6 +3027,11 @@ def create_app():
     def dashboard_posture():
         return get_dashboard_posture()
 
+    # AG-CISO-V4.2 (2026-06-10): Business Impact rollup for Command Center
+    @app.get("/api/dashboard/business-impact")
+    def dashboard_business_impact():
+        return get_dashboard_business_impact()
+
     @app.get("/api/dashboard/credential-intelligence")
     def dashboard_credential_intelligence():
         return get_credential_intelligence()
@@ -3112,6 +3120,88 @@ def create_app():
         return get_attack_path_count()
 
     # -----------------------
+    # AG-193 — Data Trust Zones (CISO-asserted classification)
+    # -----------------------
+    @app.get("/api/data-trust-zones")
+    def data_trust_zones_list():
+        from app.api.handlers import get_data_trust_zones
+        return get_data_trust_zones()
+
+    @app.post("/api/data-trust-zones")
+    @require_role('admin')
+    def data_trust_zones_create():
+        from app.api.handlers import create_data_trust_zone
+        return create_data_trust_zone()
+
+    @app.patch("/api/data-trust-zones/<int:zone_id>")
+    @require_role('admin')
+    def data_trust_zones_update(zone_id):
+        from app.api.handlers import update_data_trust_zone
+        return update_data_trust_zone(zone_id)
+
+    @app.delete("/api/data-trust-zones/<int:zone_id>")
+    @require_role('admin')
+    def data_trust_zones_delete(zone_id):
+        from app.api.handlers import delete_data_trust_zone
+        return delete_data_trust_zone(zone_id)
+
+    @app.get("/api/data-trust-zones/<int:zone_id>/coverage")
+    def data_trust_zone_coverage(zone_id):
+        from app.api.handlers import get_data_trust_zone_coverage
+        return get_data_trust_zone_coverage(zone_id)
+
+    @app.post("/api/data-trust-zones/recompute")
+    @require_role('admin')
+    def data_trust_zones_recompute():
+        from app.api.handlers import recompute_data_trust_zones
+        return recompute_data_trust_zones()
+
+    # AG-193 Sprint 1 — exposure derivation drill-down
+    @app.get("/api/exposure/derivation/<classification>")
+    def exposure_derivation(classification):
+        from app.api.handlers import get_exposure_derivation
+        return get_exposure_derivation(classification)
+
+    # AG-193 Sprint 2 — full lineage chain + audit log + Argus suggestions
+    @app.get("/api/exposure/derivation/<classification>/lineage")
+    def exposure_lineage(classification):
+        from app.api.handlers import get_exposure_lineage
+        return get_exposure_lineage(classification)
+
+    # AG-193 Sprint B (2026-06-13) — per-entity reach attribution
+    @app.get("/api/exposure/by-entity")
+    def exposure_by_entity():
+        from app.api.handlers import get_exposure_by_entity
+        return get_exposure_by_entity()
+
+    @app.get("/api/exposure/reach-summary")
+    def exposure_reach_summary():
+        from app.api.handlers import get_exposure_reach_summary
+        return get_exposure_reach_summary()
+
+    @app.get("/api/data-trust-zones/audit")
+    def data_trust_zones_audit():
+        from app.api.handlers import get_data_trust_zones_audit
+        return get_data_trust_zones_audit()
+
+    @app.get("/api/argus/classification-suggestions")
+    def argus_classification_suggestions():
+        from app.api.handlers import get_argus_classification_suggestions
+        return get_argus_classification_suggestions()
+
+    # AG-198 Sprint 3 — Purview integration status
+    @app.get("/api/purview/status")
+    def purview_status():
+        from app.api.handlers import get_purview_status
+        return get_purview_status()
+
+    # AG-193 follow-up — Classified Resources list
+    @app.get("/api/resources/classified")
+    def resources_classified():
+        from app.api.handlers import get_classified_resources
+        return get_classified_resources()
+
+    # -----------------------
     # Risks (Dashboard needs it)
     # -----------------------
     @app.get("/api/risks")
@@ -3140,6 +3230,11 @@ def create_app():
     @app.get("/api/identities/query/fields")
     def identities_query_fields():
         return get_query_fields()
+
+    # AG-PHASE1+4 (2026-06-09): NHI Inventory hero page consumes this.
+    @app.get("/api/identities/category-summary")
+    def identities_category_summary():
+        return get_identity_category_summary()
 
     @app.post("/api/identities/risk-history/batch")
     def batch_risk_hist():

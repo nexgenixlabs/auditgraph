@@ -20,9 +20,14 @@
 :root[data-theme="sentinel"] {
   color-scheme: dark;
 
-  /* Surfaces — 6-level elevation (deepest → active) */
+  /* Surfaces — 6-level elevation (deepest → active)
+     V4.5.2 (2026-06-11) — bg-surface re-keyed to near-pure black per founder
+     feedback. The previous #080f1c had too much blue and competed with card
+     surfaces (#0f172a). New surface is #08080d — reads as black at a glance,
+     ~4-6% blue lift so it's softer than pure #000 in light rooms. Cards now
+     visibly "lift" off the canvas instead of fighting it. */
   --bg-deep:      #03060d;       /* deepest — sidebar */
-  --bg-surface:   #080f1c;       /* base — page background */
+  --bg-surface:   #08080d;       /* base — page background (near-black, slight blue tint) */
   --bg-raised:    #0d1627;       /* raised — cards, panels */
   --bg-elevated:  #101d33;       /* elevated — hover states, dropdowns */
   --bg-hover:     #152440;       /* hover — interactive hover */

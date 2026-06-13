@@ -27,15 +27,32 @@ from __future__ import annotations
 from typing import Optional
 
 
-# Roles that authorize EVERY operation at their scope (wildcards in their
-# Azure RBAC role definition Actions array, e.g. "*", "*/read", etc.)
+# AG-PILOT-RBAC-MOAT (2026-06-09): tighten wildcard set so daily-grant
+# workflows can be attributed to UAA / RBAC Admin only, not to every
+# privileged role. Customer-reported moat failure: a user who only ever
+# grants access (User Access Admin work) had Contributor showing as
+# "used" identically. Owner stays in wildcards because Owner truly
+# authorizes any operation; UAA / RBAC Admin handled separately below.
 _WILDCARD_ROLES = {
     'owner',
     'contributor',
+}
+
+# Roles that ONLY authorize role-assignment / authorization operations.
+# Attributing daily Microsoft.Authorization/roleAssignments/write events
+# to these (and NOT to Owner / Contributor) is the moat differentiator.
+_AUTHORIZATION_ROLES = {
     'user access administrator',
     'role based access control administrator',
     'access review operator service role',
 }
+_AUTHORIZATION_OP_PREFIXES = (
+    'microsoft.authorization/roleassignments/',
+    'microsoft.authorization/roledefinitions/',
+    'microsoft.authorization/roleeligibilityschedules/',
+    'microsoft.authorization/roleassignmentschedules/',
+    'microsoft.authorization/denyassignments/',
+)
 
 # Roles that authorize anything matching a specific service namespace.
 # Key = lowercased substring that should appear in the role name.
@@ -95,36 +112,51 @@ def _is_read_operation(operation: str) -> bool:
 def role_matches_operation(role_name: Optional[str], operation: Optional[str]) -> bool:
     """Heuristic: does this role plausibly authorize this ARM operation?
 
-    Returns True if the role likely grants the operation, False if we can
-    confidently say it doesn't. Unknown role names default to True (we
-    fall back to scope-only semantics rather than risk under-attribution).
+    AG-PILOT-RBAC-MOAT (2026-06-09): tightened to default-False for
+    unknown roles. Customer reported every role on a user showed the
+    same last_used timestamp because one ARM event was stamping all
+    of them. New semantics:
+
+      - Owner / Contributor: match everything (true wildcards)
+      - UAA / RBAC Admin: match ONLY Microsoft.Authorization/*
+      - Reader (+ <service> Reader): match only read ops
+      - Service-scoped roles: match only their service prefix
+      - Unknown roles: don't gate — return False so we don't over-attribute
+
+    The previous default-True meant a single Storage write event would
+    stamp Owner + Contributor + Reader + 6 unrelated roles. Now each
+    event attributes to the smallest matching set.
     """
     if not role_name or not operation:
-        return True  # no info → don't gate
+        return False
     rn = role_name.lower()
     op = operation.lower()
 
-    # 1. Wildcard roles always match
+    # 1. True wildcard roles (Owner / Contributor) match everything
     if rn in _WILDCARD_ROLES:
         return True
 
-    # 2. Read-only roles ("Reader" by itself or "<X> Reader") only match read ops
+    # 2. Authorization-scoped roles: only Microsoft.Authorization/* operations
+    if rn in _AUTHORIZATION_ROLES:
+        return any(op.startswith(p) for p in _AUTHORIZATION_OP_PREFIXES)
+
+    # 3. Read-only roles ("Reader" by itself or "<X> Reader") only match read ops
     if rn == 'reader' or rn.endswith(' reader'):
         if _is_read_operation(op):
-            # Still gate by service prefix if the reader name implies one
             for keyword, prefixes in _SERVICE_PREFIX_ROLES.items():
                 if keyword in rn:
                     return any(op.startswith(p) for p in prefixes)
             return True
         return False
 
-    # 3. Service-scoped roles — match by service prefix
+    # 4. Service-scoped roles — match by service prefix
     for keyword, prefixes in _SERVICE_PREFIX_ROLES.items():
         if keyword in rn:
             return any(op.startswith(p) for p in prefixes)
 
-    # 4. Unknown role pattern → don't gate; fall back to scope-only behavior
-    return True
+    # 5. Unknown role pattern → don't over-attribute. Better to show
+    #    "no telemetry" honestly than stamp every role with the same date.
+    return False
 
 
 # ─── Entra (Azure AD) directory role → audit-log category mapping ──────────

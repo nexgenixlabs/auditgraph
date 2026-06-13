@@ -347,6 +347,38 @@ def _run_org_discovery(db_org_id: int, org_name: str, scan_mode: str = 'deep',
         'severity': 'info',
     }, db_org_id=db_org_id)
 
+    # V2.13 (2026-06-12) — persist board scorecard snapshot per discovery run.
+    # Migration 220 switched ai_board_scorecard_snapshots from per-day
+    # UPSERT to per-run INSERT so multi-scan-per-day cadences (6h, 12h)
+    # actually accumulate trend points. A 6h-cadence tenant lights up
+    # trend on the 2nd scan; a 24h-cadence tenant on day 2. Without
+    # this hook the table stays empty and every trend chart reads
+    # "Baseline established. Trend data available after next scan"
+    # forever — the bug the founder reported on 2026-06-12.
+    try:
+        from app.engines.scoring.board_scorecard_engine import persist_board_scorecard_snapshot
+        snap_db = Database(organization_id=db_org_id)
+        try:
+            cur = snap_db.conn.cursor()
+            # Latest completed discovery_run for this tenant — used as
+            # the per-run identifier so re-firing the hook for the same
+            # run does NOT create duplicate snapshots (migration 220
+            # adds a partial unique index on (org, discovery_run_id)).
+            cur.execute("""
+                SELECT id FROM discovery_runs
+                WHERE organization_id = %s AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+            """, (db_org_id,))
+            _row = cur.fetchone()
+            _latest_run_id = _row[0] if _row else None
+            persist_board_scorecard_snapshot(cur, db_org_id, discovery_run_id=_latest_run_id)
+            snap_db.conn.commit()
+            cur.close()
+        finally:
+            snap_db.close()
+    except Exception as e:
+        logger.warning("board_scorecard snapshot persistence failed tenant=%d: %s", db_org_id, e)
+
     # Background owned objects enrichment (deferred from main scan pipeline)
     for conn in connected:
         if conn.get('cloud', 'azure') == 'azure':
@@ -1258,6 +1290,11 @@ def _send_change_notification_if_needed(db_org_id: int = None):
             ('agent_orphan_detection', _run_agent_orphan_detection, current_run_id, db_org_id, db),
             ('policy_recommendations', _run_policy_recommendations, db_org_id, db),
             ('auto_remediation', _run_auto_remediation, db_org_id, db),
+            # AG-193 — apply CISO-asserted Data Trust Zones after every scan
+            ('data_trust_zones', _run_data_trust_zones_classification, db_org_id, db),
+            # AG-193 Sprint B — compute per-entity reachable classified exposure
+            # AFTER classification so reach numbers are fresh.
+            ('reach_attribution', _run_reach_attribution, db_org_id, db),
         ])
 
         # ── Tier 3: Depend on attack paths/blast radius/IAM graph from Tier 2 ──
@@ -5994,3 +6031,53 @@ if __name__ == "__main__":
         print("\nStopping scheduler...")
         stop_scheduler()
         print("Done!")
+
+# AG-193 — Data Trust Zones post-discovery hook
+def _run_data_trust_zones_classification(db_org_id, db):
+    """Apply CISO-asserted Data Trust Zones to all resources after discovery.
+
+    Idempotent: re-runs leave classifications untouched when nothing
+    changed. Higher-precedence tiers (manual, regex_override, purview)
+    are preserved.
+    """
+    try:
+        from app.engines.discovery.scope_classifier import apply_scope_classification
+        result = apply_scope_classification(db, db_org_id)
+        if result.get('rules_active', 0) == 0:
+            logger.info("DTZ: org=%s no active zones; skip", db_org_id)
+            return
+        logger.info(
+            "DTZ: org=%s rules=%d tables=%d rows_updated=%d by_class=%s",
+            db_org_id, result['rules_active'], len(result['tables_walked']),
+            result['rows_updated'], result.get('by_classification'),
+        )
+    except Exception as e:
+        logger.error("Data Trust Zones classification failed org=%s: %s", db_org_id, e)
+        logger.exception(e)
+
+
+# AG-193 Sprint B — reach attribution post-discovery hook
+def _run_reach_attribution(db_org_id, db):
+    """Compute per-entity reachable classified exposure.
+
+    For each identity (and AI model deployment), walk RBAC scope to
+    classified resources and sum their dollar exposure. The result is
+    cached on identities.reachable_classified_exposure and
+    azure_ai_model_deployments.reachable_classified_exposure for fast
+    dashboard reads.
+
+    Depends on data_trust_zones having run first so the classifications
+    we attribute against are fresh.
+    """
+    try:
+        from app.engines.discovery.reach_attributor import compute_all_reach
+        result = compute_all_reach(db, db_org_id)
+        logger.info(
+            "REACH: org=%s identity=%s ai_model=%s",
+            db_org_id,
+            result.get('identity'),
+            result.get('ai_model'),
+        )
+    except Exception as e:
+        logger.error("Reach attribution failed org=%s: %s", db_org_id, e)
+        logger.exception(e)

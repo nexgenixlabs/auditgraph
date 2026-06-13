@@ -83,15 +83,24 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
     estimated_exposure?: {
       low_display: string; mid_display: string; high_display: string;
       classified_resource_count?: number; total_records: number;
-    };
+      is_baseline?: boolean;
+      scope_label?: string;
+    } | null;
     exposure_by_scope?: {
       total?:         { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
       ai_reachable?:  { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
       nhi_reachable?: { low_display: string; mid_display: string; high_display: string; total_records: number } | null;
-    };
+    } | null;
+    exposure_status?: 'baseline_estimate' | 'classification_pending' | 'no_classified_resources' | string;
+    exposure_message?: string;
   };
   const headline = bi2.estimated_exposure;
   const scopes = bi2.exposure_by_scope;
+  // AG-PILOT-FIX-V2 (2026-06-08): show baseline estimate when no precise
+  // classification yet — CISO wants a number, not a "pending" message
+  const isBaseline = !!headline?.is_baseline || bi2.exposure_status === 'baseline_estimate';
+  const exposurePending = bi2.exposure_status === 'classification_pending'
+                       || bi2.exposure_status === 'no_classified_resources';
 
   return (
     <div className="bg-[#111827] border border-white/5 rounded-lg p-3 overflow-hidden hover:border-white/10 hover:scale-[1.01] transition flex-shrink-0"
@@ -111,21 +120,28 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
       {headline ? (
         <DN navigateTo="/ai-access/data-reachability">
           <div className="mt-2 pt-2 border-t border-white/5 cursor-pointer hover:opacity-90 transition"
-               title={`Total classified-data breach exposure across the tenant (${(headline.total_records || 0).toLocaleString()} records). Range = IBM 2023 industry low/high; mid is the headline. Each scope shows how much of this is reachable by AI agents specifically and by any non-human identity (SPN / MI / AI).`}>
+               title={isBaseline
+                 ? `Baseline estimate using IBM 2023 PII per-record cost. Tag your sensitive resources with PHI/PCI/Financial classifications for a precise tenant-specific figure.`
+                 : `Total classified-data breach exposure across the tenant (${(headline.total_records || 0).toLocaleString()} records). Range = IBM 2023 industry low/high; mid is the headline.`}>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
-                Estimated breach exposure · org-wide
+                {isBaseline ? 'Potential exposure impact · baseline' : 'Potential exposure impact · org-wide'}
               </p>
               {/* AG-CISO-Q (2026-06-06): the CISO's first question is "where
                   does the $ come from?" — this surfaces the methodology one click away */}
               <BreachCostMethodologyButton compact />
             </div>
-            <p className="text-base font-bold font-mono text-rose-400 mt-0.5">
+            <p className={`text-base font-bold font-mono mt-0.5 ${isBaseline ? 'text-amber-400' : 'text-rose-400'}`}>
               {headline.mid_display}
             </p>
             <p className="text-[10px] font-mono text-gray-500">
               {headline.low_display} – {headline.high_display}
             </p>
+            {isBaseline && bi2.exposure_message ? (
+              <p className="text-[10px] text-amber-300/80 mt-1 leading-relaxed">
+                {bi2.exposure_message}
+              </p>
+            ) : null}
             {scopes && (scopes.ai_reachable || scopes.nhi_reachable) ? (
               <div className="mt-2 pt-1.5 border-t border-white/5 space-y-1">
                 {scopes.ai_reachable ? (
@@ -150,6 +166,21 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
             ) : null}
           </div>
         </DN>
+      ) : exposurePending ? (
+        /* AG-PILOT-FIX (2026-06-08): Explicit "classification pending"
+           card so the CISO sees what's coming + why no $ figure yet,
+           instead of the card silently hiding. */
+        <div className="mt-2 pt-2 border-t border-white/5">
+          <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
+            Estimated breach exposure
+          </p>
+          <p className="text-xs text-amber-400 mt-1">
+            Classification pending
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-relaxed">
+            {bi2.exposure_message || 'Run a resource scan to populate breach-cost exposure.'}
+          </p>
+        </div>
       ) : null}
     </div>
   );

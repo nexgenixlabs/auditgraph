@@ -10,6 +10,8 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useToast } from '../components/ToastProvider';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low';
 type Status = 'open' | 'acknowledged' | 'suppressed' | 'resolved';
@@ -105,8 +107,9 @@ export default function AIFindings() {
       .sort((a, b) => SEV_STYLE[a.severity].rank - SEV_STYLE[b.severity].rank);
   }, [data, filterSev, filterStatus]);
 
+  {/* AG-POLISH-D (2026-06-10) */}
   if (loading && !data) {
-    return <div className="p-6 text-sm text-slate-400">Loading AI findings…</div>;
+    return <div className="p-6"><LoadingState message="Loading AI findings…" detail="Aggregating detectors across all AI workload signals" /></div>;
   }
   if (error) return <div className="p-6 text-sm text-rose-400">{error}</div>;
   if (!data) return null;

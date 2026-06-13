@@ -12,6 +12,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/ToastProvider';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 type EffectiveStatus = 'approved' | 'pending_review' | 'rejected' | 'revoked' | 'unverified' | 'expired';
 
@@ -137,8 +139,9 @@ export default function AIModelRegistry() {
     load();
   };
 
+  {/* AG-POLISH-D (2026-06-10) */}
   if (loading && !data) {
-    return <div className="p-6 text-sm text-slate-400">Loading model registry…</div>;
+    return <div className="p-6"><LoadingState message="Loading model registry…" detail="Enumerating Cognitive Services + AI Foundry deployments" /></div>;
   }
   if (error) {
     return <div className="p-6 text-sm text-rose-400">{error}</div>;
@@ -235,8 +238,18 @@ export default function AIModelRegistry() {
             })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-8 text-center text-slate-500 text-sm">
-                  No models match this filter.
+                <td colSpan={9} className="px-3 py-12 text-center">
+                  <div className="max-w-md mx-auto">
+                    <svg className="w-10 h-10 mx-auto mb-3 text-slate-600" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    <div className="text-sm font-semibold text-slate-300">No models match this filter</div>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      Try clearing the filter, or re-run discovery — the
+                      Cognitive Services producer needs a fresh scan to
+                      populate <code className="font-mono">azure_ai_model_deployments</code>.
+                    </p>
+                  </div>
                 </td>
               </tr>
             )}

@@ -10,6 +10,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { useAuth } from '../contexts/AuthContext';
 import {
   COLORS, getTierColor, getTier, getGrade,
@@ -308,15 +310,8 @@ export default function ComplianceDashboard() {
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           borderRadius: '12px 0 0 0',
         }}>
-          <div style={{ textAlign: 'center' as const }}>
-            <div style={{
-              width: 40, height: 40, borderRadius: '50%',
-              border: `3px solid ${COLORS.border}`, borderTopColor: COLORS.accent,
-              animation: 'spin 1s linear infinite', margin: '0 auto 12px',
-            }} />
-            <div style={{ fontSize: 12, color: COLORS.textSecondary, fontFamily: FONT.ui }}>Loading Compliance Data...</div>
-          </div>
-          <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+          {/* AG-POLISH-D (2026-06-10): drop the hand-rolled spinner */}
+          <LoadingState message="Loading compliance data…" detail="Mapping controls to NIST 800-53 / CIS Azure / ISO 27001" />
         </div>
         <IdentityContextDrawer />
       </IdentityDrawerProvider>

@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/apiClient';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { formatCentsExact, TIER_LIMITS } from '../constants/pricing';
 import { generateInvoicePdf, type Invoice } from '../utils/invoicePdfGenerator';
 
@@ -147,7 +149,8 @@ const ClientBilling: React.FC = () => {
   if (loading) {
     return (
       <div className="p-6 max-w-6xl mx-auto">
-        <p className="text-sm text-gray-500 dark:text-gray-400">Loading billing...</p>
+        {/* AG-POLISH-D (2026-06-10) */}
+        <LoadingState message="Loading billing…" detail="Tallying monitored subscriptions" />
       </div>
     );
   }

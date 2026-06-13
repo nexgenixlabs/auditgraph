@@ -26,6 +26,24 @@ interface RemediationTabProps {
 
 // ─── Constants ──────────────────────────────────────────────────────
 
+// Sprint A.4 — heuristic risk-reduction estimator. The structured CVSS-fix
+// percentages live on /api/identities/<id>/fixes (CvssFix.risk_reduction_pct)
+// and can supersede this table later; meanwhile this gives the executive a
+// defensible per-action "what does this buy me" without claiming false precision.
+const RISK_REDUCTION_TABLE: Record<string, Record<string, number>> = {
+  critical: { low: 25, medium: 22, high: 18 },
+  high:     { low: 15, medium: 12, high: 10 },
+  medium:   { low: 8,  medium: 6,  high: 4 },
+  low:      { low: 3,  medium: 2,  high: 1 },
+};
+
+function estimateRiskReduction(impact?: string, effort?: string): number {
+  const i = String(impact || 'medium').toLowerCase();
+  const e = String(effort || 'medium').toLowerCase();
+  const row = RISK_REDUCTION_TABLE[i] || RISK_REDUCTION_TABLE.medium;
+  return row[e] ?? 5;
+}
+
 const STATUS_COLORS: Record<RemediationStatus, string> = {
   open: 'bg-gray-100 text-gray-600',
   acknowledged: 'bg-blue-100 text-blue-700',
@@ -190,6 +208,21 @@ function RemediationCard({
     high: 'bg-red-100 text-red-700',
   };
 
+  // Sprint A.4 — estimated risk reduction surfaced per row.
+  //
+  // RemediationItem doesn't carry a `risk_reduction` field (the structured value
+  // lives on the parallel /fixes endpoint via CvssFix.risk_reduction_pct). For
+  // the per-row hint, we derive a defensible estimate from impact x effort —
+  // the relationship the scoring engine uses internally anyway: high-impact
+  // / low-effort actions remove proportionally more CVSS than low-impact /
+  // high-effort cleanup. Shown as "Est. -X%" so executives don't read it as
+  // an exact promise; honest framing.
+  const riskReductionPct = estimateRiskReduction(remediation.impact, remediation.effort);
+  const reductionColor =
+    riskReductionPct >= 18 ? '#ef4444' :
+    riskReductionPct >= 10 ? '#f97316' :
+    riskReductionPct >= 5  ? '#f59e0b' : '#10b981';
+
   const categoryLabels: Record<string, string> = {
     access_control: 'Access Control',
     credential_hygiene: 'Credential Hygiene',
@@ -236,6 +269,14 @@ function RemediationCard({
             </span>
             <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${effortColors[remediation.effort] || 'bg-gray-100 text-gray-600'}`}>
               {remediation.effort} effort
+            </span>
+            {/* Sprint A.4 — per-row risk reduction. "Est." prefix flags it as
+                derived, not a promise. Real CVSS deltas live on /fixes. */}
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold"
+              style={{ background: `${reductionColor}15`, color: reductionColor, border: `1px solid ${reductionColor}55` }}
+              title={`Estimated CVSS reduction based on impact × effort. Run the What-If simulator for an exact delta.`}>
+              <span aria-hidden>▼</span>
+              <span>Est. −{riskReductionPct}% risk</span>
             </span>
             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700">
               {categoryLabels[remediation.category] || remediation.category}

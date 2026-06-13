@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { riskDisplay } from '../utils/riskDisplay';
 import { useConnection } from '../contexts/ConnectionContext';
 import { RISK_BADGE, CLOUD_BADGE, safeLower } from '../constants/metrics';
@@ -219,8 +221,9 @@ export default function IdentityExposures() {
       </div>
 
       {/* Exposure Table */}
+      {/* AG-POLISH-D (2026-06-10) */}
       {loading ? (
-        <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-12 text-center text-slate-400">Loading exposures...</div>
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg"><LoadingState message="Loading exposures…" detail="Composing identity risk + access reach + data classification" /></div>
       ) : exposures.length === 0 ? (
         <div className="bg-slate-800/50 border border-emerald-500/20 rounded-lg p-10 text-center">
           <svg className="w-12 h-12 text-emerald-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">

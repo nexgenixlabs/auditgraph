@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { maskCredential } from '../utils/maskCredential';
+// AG-POLISH-D (2026-06-10): skeleton loading row
+import { TableSkeletonRow } from '../components/LoadingState';
 import { formatCents, SUB_RATES_CENTS } from '../constants/pricing';
 
 interface CloudSubscription {
@@ -262,10 +264,19 @@ export default function Subscriptions() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
+              {/* AG-POLISH-D (2026-06-10): table skeleton + better empty state */}
               {loading ? (
-                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+                <TableSkeletonRow columns={canSeePricing ? 7 : 6} count={4} />
               ) : subs.length === 0 ? (
-                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-8 text-center text-gray-500">No subscriptions discovered yet. Capture a snapshot to detect cloud accounts.</td></tr>
+                <tr><td colSpan={canSeePricing ? 7 : 6} className="px-4 py-12 text-center">
+                  <div className="max-w-md mx-auto">
+                    <svg className="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
+                    </svg>
+                    <div className="text-sm font-semibold text-gray-700">No subscriptions discovered yet</div>
+                    <p className="text-xs text-gray-500 mt-1">Capture a snapshot to detect cloud accounts. AuditGraph discovers every subscription via the tenant-level Graph API call — no manual entry required.</p>
+                  </div>
+                </td></tr>
               ) : sortedSubs.map(sub => {
                 const badge = CLOUD_BADGE[sub.cloud] || CLOUD_BADGE.azure;
                 const rateCents = sub.rate_cents ?? SUB_RATES_CENTS[sub.cloud] ?? SUB_RATES_CENTS.azure;

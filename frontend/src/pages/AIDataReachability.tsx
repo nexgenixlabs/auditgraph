@@ -471,9 +471,14 @@ export default function AIDataReachability() {
           className="rounded-xl border p-8 text-center"
           style={{ borderColor: 'var(--border-default)', backgroundColor: 'var(--bg-raised)' }}
         >
+          {/* V2.8 (2026-06-11) — peer review: "No classified data detected"
+              read as "product not working". Reframed as an action prompt. */}
           <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-            No classified data detected yet. Either no PHI/PCI/PII/Source/HR resources exist in this tenant, or
-            auto-classification has not run.
+            No classified resources discovered yet. Run auto-classification, or tag your storage
+            accounts / key vaults / SQL with <code className="text-[10px] px-1 py-0.5 rounded bg-slate-800 text-slate-300">data-class: PHI</code>
+            {' '}/{' '}<code className="text-[10px] px-1 py-0.5 rounded bg-slate-800 text-slate-300">PCI</code>
+            {' '}/{' '}<code className="text-[10px] px-1 py-0.5 rounded bg-slate-800 text-slate-300">PII</code>
+            {' '}so AuditGraph can map AI agent reachability to regulated data.
           </p>
           {isAdmin ? (
             <button

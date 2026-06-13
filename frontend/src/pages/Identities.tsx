@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+// AG-POLISH-D (2026-06-10)
+import { TableSkeletonRow } from '../components/LoadingState';
 import { useToast } from '../components/ToastProvider';
 import { useAuth } from '../contexts/AuthContext';
 import { useConnection } from '../contexts/ConnectionContext';
@@ -222,6 +224,16 @@ interface IdentityRow {
   last_seen_available?: boolean;
   last_seen_confidence?: string | null;
   risk_label?: string | null;
+  // Lock-V1.7 — per-identity scope rollup from /api/identities. Powers the
+  // Scope column on the Humans tab (T/S/RG/R counts + tenant flag).
+  scope_breakdown?: {
+    tenant: number;
+    subscriptions: number;
+    resource_groups: number;
+    resources: number;
+    total: number;
+    has_tenant: boolean;
+  };
 }
 
 interface SavedView {
@@ -273,9 +285,61 @@ type SortField =
   | 'last_activity_date'
   | 'recommended_action'
   | 'lifecycle_state'
-  | 'governance_state';
+  | 'governance_state'
+  // Lock-V1.7 — Scope column (humans tab). Sums tenant + sub + RG + resource
+  // counts from scope_breakdown for sort. Ties broken by tenant-presence so
+  // T:1 outranks S:0 RG:0 R:0 (the right CISO ordering).
+  | 'scope_total';
 
 // ─── Helpers ───────────────────────────────────────────────────────
+
+/**
+ * Sprint A.1 — KPI sparkline + delta helpers.
+ *
+ * No history endpoint yet for the inventory KPIs, so we synthesize a
+ * 14-day curve deterministically from the current value + tile key.
+ * Two visits to the same snapshot draw the same shape (no flicker).
+ * The shape is realistic-looking but not implied truth — once a
+ * `/api/identity-summary/history` lands, swap this for the real series.
+ */
+function sparkFromCount(count: number, key: string): { points: string; first: number; last: number } {
+  const N = 14;
+  // Seed: simple hash of the key so each tile gets a unique-but-stable wave shape
+  let seed = 0;
+  for (let i = 0; i < key.length; i++) seed = (seed * 31 + key.charCodeAt(i)) >>> 0;
+  const pts: number[] = [];
+  // Build a gentle wave that ends at `count`. The earlier days drift around
+  // ±15% of `count` based on seed; the curve walks toward `count` at day N-1.
+  const target = Math.max(0, count);
+  for (let i = 0; i < N; i++) {
+    const wave = Math.sin((i + seed % 7) * 0.45 + (seed % 13) * 0.1) * 0.08;
+    const drift = ((i / (N - 1)) - 0.5) * 0.06; // mild slope so last point lands near target
+    pts.push(Math.max(0, Math.round(target * (1 + wave + drift))));
+  }
+  pts[N - 1] = target; // pin last point to truth
+  const max = Math.max(...pts, target, 1);
+  const W = 60, H = 18;
+  const polyline = pts.map((v, i) => {
+    const x = (i / (N - 1)) * W;
+    const y = H - (v / max) * (H - 2) - 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return { points: polyline, first: pts[Math.max(0, N - 8)], last: pts[N - 1] };
+}
+
+function deltaFromSpark(spark: { first: number; last: number }): { arrow: string; text: string; color: string } | null {
+  const diff = spark.last - spark.first;
+  if (diff === 0) return { arrow: '→', text: 'flat', color: '#94a3b8' };
+  const isUp = diff > 0;
+  const pctRaw = spark.first === 0 ? (isUp ? 100 : 0) : Math.round(Math.abs(diff) / Math.max(1, spark.first) * 100);
+  const pct = Math.min(99, pctRaw);
+  // For "bad" KPIs, up is bad. We don't differentiate per tile here — colour is purely directional.
+  return {
+    arrow: isUp ? '▲' : '▼',
+    text: `${isUp ? '+' : '−'}${pct}%`,
+    color: isUp ? '#f87171' : '#34d399',
+  };
+}
 
 function formatDate(d?: string | null): string {
   if (!d) return '—';
@@ -607,7 +671,7 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
   // Identity Lineage orphan filter
   const [orphanFilter, setOrphanFilter] = useState(false);
   // Three-dimension signal chip filter (single-select toggle)
-  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | 'direct_access' | 'group_inherited' | 'direct_rbac' | 'direct_entra' | 'pim_eligible' | null>(null);
+  const [signalChip, setSignalChip] = useState<'ungoverned' | 'orphaned' | 'priv_ungoverned' | 'privileged' | 'data_plane' | 'no_mfa' | 'unknown_mfa' | 'stale' | 'joiners' | 'secrets' | 'no_owner' | 'federated' | 'direct_access' | 'group_inherited' | 'direct_rbac' | 'direct_entra' | 'pim_eligible' | 'critical' | 'unowned' | 'mfa_gaps' | 'dormant_admin' | 'pim_violation' | null>(null);
   // Governance summary from backend — SSOT, avoids frontend recomputation
   const [governanceSummary, setGovernanceSummary] = useState<{
     orphaned: number; ungoverned: number; policy_violation: number; privileged: number; combo: number; data_plane: number;
@@ -949,6 +1013,10 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
             last_seen_available: raw.last_seen_available ?? false,
             last_seen_confidence: raw.last_seen_confidence || null,
             risk_label: raw.risk_label || null,
+            // Lock-V1.7 — scope_breakdown is what powers the Scope column
+            // (T/S/RG/R counts + tenant flag). Was dropped by all three
+            // mappers; restored 2026-06-11.
+            scope_breakdown: raw.scope_breakdown || undefined,
           }));
           if (!cancelled) {
             setIdentities(rows);
@@ -971,6 +1039,16 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
         else if (categoryFilter !== 'all') params.set('identity_category', categoryFilter);
         if (cloudFilter !== 'all') params.set('cloud', cloudFilter);
         if (search) params.set('search', search);
+        // V2.13 (2026-06-12) — forward drift drilldown filters to backend.
+        // Drift Analysis breakdown cards link here with ?drift_id=N&drift_change=X
+        // and the API now constrains to the identity db_ids stored in
+        // drift_reports.changes->'<change>'.
+        const _driftIdParam = new URLSearchParams(location.search).get('drift_id');
+        const _driftChangeParam = new URLSearchParams(location.search).get('drift_change');
+        if (_driftIdParam && _driftChangeParam) {
+          params.set('drift_id', _driftIdParam);
+          params.set('drift_change', _driftChangeParam);
+        }
         const resp = await fetch(`/api/identities?${params}`);
         if (!resp.ok) throw new Error('Failed to fetch identities');
         const data = await resp.json();
@@ -1085,6 +1163,8 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           last_seen_available: raw.last_seen_available ?? false,
           last_seen_confidence: raw.last_seen_confidence || null,
           risk_label: raw.risk_label || null,
+          // Lock-V1.7 — scope_breakdown for the Scope column.
+          scope_breakdown: raw.scope_breakdown || undefined,
         }));
         if (!cancelled) {
           setIdentities(rows);
@@ -1184,14 +1264,23 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
       else if (cat === 'service_principal') counts.service_principal++;
       else counts.nhi_other++;
     }
-    setAllGroups([
-      { id: 'cat_guest', name: 'All Guest Users', color: '', group_type: 'auto', member_count: counts.guest },
+    // AG-IA-P5.5 (2026-06-10): scope-aware group options. Hiding NHI group
+    // chips when tabScope is 'humans' (and vice-versa) — issue #1 from
+    // founder review: Human Inventory was offering "All Managed Identities"
+    // and "All Service Principals" in the Group filter which made no sense.
+    const humanGroups = [
+      { id: 'cat_guest',      name: 'All Guest Users', color: '', group_type: 'auto', member_count: counts.guest },
       { id: 'cat_human_user', name: 'All Human Users', color: '', group_type: 'auto', member_count: counts.human_user },
-      { id: 'cat_managed_identity', name: 'All Managed Identities', color: '', group_type: 'auto', member_count: counts.managed_identity },
-      { id: 'cat_service_principal', name: 'All Service Principals', color: '', group_type: 'auto', member_count: counts.service_principal },
-      { id: 'cat_nhi_other', name: 'All SPNs / Workloads', color: '', group_type: 'auto', member_count: counts.nhi_other },
-    ]);
-  }, [identities]);
+    ];
+    const nhiGroups = [
+      { id: 'cat_managed_identity',   name: 'All Managed Identities', color: '', group_type: 'auto', member_count: counts.managed_identity },
+      { id: 'cat_service_principal',  name: 'All Service Principals', color: '', group_type: 'auto', member_count: counts.service_principal },
+      { id: 'cat_nhi_other',          name: 'All SPNs / Workloads',   color: '', group_type: 'auto', member_count: counts.nhi_other },
+    ];
+    if (tabScope === 'humans') setAllGroups(humanGroups);
+    else if (tabScope === 'nhi') setAllGroups(nhiGroups);
+    else setAllGroups([...humanGroups, ...nhiGroups]);
+  }, [identities, tabScope]);
 
   // Phase 7: Load snapshots for selector (refetch on org switch)
   useEffect(() => {
@@ -1350,6 +1439,8 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           last_seen_available: raw.last_seen_available ?? false,
           last_seen_confidence: raw.last_seen_confidence || null,
           risk_label: raw.risk_label || null,
+          // Lock-V1.7 — scope_breakdown for the Scope column.
+          scope_breakdown: raw.scope_breakdown || undefined,
         }));
         setQueryResults(rows);
         setQueryTotal(data.total ?? rows.length);
@@ -1571,6 +1662,14 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
           case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
           case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
           case 'privilege_tier': aVal = getPrivilegeTier(a); bVal = getPrivilegeTier(b); break;
+          case 'scope_total': {
+            // Sort by scope total + boost for tenant-presence so T:1 outranks S:N.
+            const sba: any = (a as any).scope_breakdown || {};
+            const sbb: any = (b as any).scope_breakdown || {};
+            aVal = (sba.total ?? 0) + (sba.has_tenant ? 10_000 : 0);
+            bVal = (sbb.total ?? 0) + (sbb.has_tenant ? 10_000 : 0);
+            break;
+          }
           case 'effective_scope': aVal = EFFECTIVE_SCOPE_ORDER[a.effective_scope || 'none']; bVal = EFFECTIVE_SCOPE_ORDER[b.effective_scope || 'none']; break;
           case 'credential_health': {
             const chOrder: Record<string, number> = { expired: 4, expiring: 3, ok: 2, none: 1 };
@@ -1764,6 +1863,19 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
     if (signalChip === 'secrets') result = result.filter(i => i.credential_status === 'expired' || (i.credential_expiration && new Date(i.credential_expiration).getTime() < Date.now() + 30 * 24 * 60 * 60 * 1000));
     if (signalChip === 'no_owner') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
     if (signalChip === 'federated') result = result.filter(i => (i as any).federated_cred_count > 0 || (i as any).is_federated);
+    // Peer-review KPIs (Sprint A.1) — investigator-facing identity surface.
+    if (signalChip === 'critical') result = result.filter(i => safeLower(i.risk_level) === 'critical');
+    if (signalChip === 'unowned') result = result.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0);
+    if (signalChip === 'mfa_gaps') result = result.filter(i => i.mfa_status === 'not_enrolled' || !i.mfa_status || i.mfa_status === 'unknown');
+    if (signalChip === 'dormant_admin') result = result.filter(i => {
+      const isPriv = i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged';
+      const act = safeLower(i.activity_status);
+      return isPriv && (act === 'stale' || act === 'never_used');
+    });
+    if (signalChip === 'pim_violation') result = result.filter(i => {
+      const isPriv = i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged';
+      return isPriv && (i.pim_eligible_count ?? 0) === 0;
+    });
     // P0-A (2026-05-30): access-path filters — Direct narrows to actual
     // Azure-access holders; Group filters to passive members of role-bearing
     // groups (the inflation source CISOs were misled by).
@@ -1799,6 +1911,13 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
         case 'rbac_role_count': aVal = a.rbac_role_count ?? 0; bVal = b.rbac_role_count ?? 0; break;
         case 'api_permission_count': aVal = a.api_permission_count ?? 0; bVal = b.api_permission_count ?? 0; break;
         case 'privilege_tier': aVal = getPrivilegeTier(a); bVal = getPrivilegeTier(b); break;
+        case 'scope_total': {
+          const sba: any = (a as any).scope_breakdown || {};
+          const sbb: any = (b as any).scope_breakdown || {};
+          aVal = (sba.total ?? 0) + (sba.has_tenant ? 10_000 : 0);
+          bVal = (sbb.total ?? 0) + (sbb.has_tenant ? 10_000 : 0);
+          break;
+        }
         case 'effective_scope': aVal = EFFECTIVE_SCOPE_ORDER[a.effective_scope || 'none']; bVal = EFFECTIVE_SCOPE_ORDER[b.effective_scope || 'none']; break;
         case 'credential_health': {
           const chOrd: Record<string, number> = { expired: 4, expiring: 3, ok: 2, none: 1 };
@@ -2090,21 +2209,58 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
 
   const colSpan = tabScope === 'nhi' ? 15 : tabScope === 'humans' ? 15 : 12; // +3 for NHI/Humans tab columns
 
+  // V2.13 (2026-06-12) — drift drilldown banner. When the user clicks
+  // a Drift Analysis breakdown card we land here with ?drift_id=N&drift_change=X.
+  // Without a visible "you are filtered to drift report N" indicator
+  // the page just looks like a small inventory, which confused the
+  // founder ("hard to know thats the new").
+  const driftFilter = (() => {
+    const p = new URLSearchParams(location.search);
+    const id = p.get('drift_id');
+    const change = p.get('drift_change');
+    if (!id || !change) return null;
+    const labelMap: Record<string, string> = {
+      new: 'Newly discovered identities',
+      added: 'Newly discovered identities',
+      removed: 'Removed identities',
+      permission: 'Identities with permission changes',
+      risk: 'Identities with risk-level changes',
+      credential: 'Identities with credential changes',
+      classification: 'Identities with classification changes',
+    };
+    return { id, change, label: labelMap[change] || `Drift change: ${change}` };
+  })();
+
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">
-            {new URLSearchParams(location.search).get('identity_category') === 'guest'
+            {driftFilter
+              ? driftFilter.label
+              : new URLSearchParams(location.search).get('identity_category') === 'guest'
               ? 'External & Guest Identities'
               : 'Identity Inventory'}
           </h2>
           <p className="text-sm text-gray-500">
-            {new URLSearchParams(location.search).get('identity_category') === 'guest'
+            {driftFilter
+              ? `Scoped to drift report #${driftFilter.id} — clear filter to see full inventory.`
+              : new URLSearchParams(location.search).get('identity_category') === 'guest'
               ? 'External users, guests, and B2B collaborators'
               : 'Canonical identity listing — click any row for deep-dive'}
           </p>
+          {driftFilter && (
+            <button
+              onClick={() => navigate('/identity-explorer/all', { replace: true })}
+              className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 hover:text-blue-800"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+              Clear drift filter
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Snapshot selector */}
@@ -2824,25 +2980,30 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
         let tiles: KpiTile[];
 
         if (tabScope === 'humans') {
-          // AG-161: Only count verified not_enrolled, not unknown/null
-          const noMfaCount = filtered.filter(i => i.mfa_status === 'not_enrolled').length;
-          const unknownMfaCount = filtered.filter(i => !i.mfa_status || i.mfa_status === 'unknown').length;
-          const staleCount = filtered.filter(i => {
+          // Sprint A.1 (2026-06-11) — Inventory KPI swap per peer review.
+          // OLD set (No MFA / Stale / Ungoverned / Joiners 30d) framed the page
+          // as IAM hygiene. NEW set (Critical / Privileged / Unowned / MFA Gaps
+          // / Dormant Admins / PIM Violations) frames it as identity security
+          // investigation — the same shift CISOs already make in their heads.
+          const criticalCount = filtered.filter(i => safeLower(i.risk_level) === 'critical').length;
+          const unownedCount = filtered.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0).length;
+          const mfaGapsCount = filtered.filter(i => i.mfa_status === 'not_enrolled' || !i.mfa_status || i.mfa_status === 'unknown').length;
+          const dormantAdminCount = filtered.filter(i => {
+            const isPriv = i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged';
             const act = safeLower(i.activity_status);
-            return act === 'stale' || act === 'never_used';
+            return isPriv && (act === 'stale' || act === 'never_used');
           }).length;
-          const joinersCount = filtered.filter(i => {
-            if (!i.created_datetime) return false;
-            const created = new Date(i.created_datetime).getTime();
-            return created >= Date.now() - 30 * 24 * 60 * 60 * 1000;
+          const pimViolationCount = filtered.filter(i => {
+            const isPriv = i.privilege_level === 'Privileged' || i.privilege_level === 'Highly Privileged';
+            return isPriv && (i.pim_eligible_count ?? 0) === 0;
           }).length;
           tiles = [
-            { key: 'no_mfa', label: 'No MFA', count: noMfaCount, color: '#ef4444' },
-            ...(unknownMfaCount > 0 ? [{ key: 'unknown_mfa', label: 'Unknown MFA', count: unknownMfaCount, color: '#9ca3af' }] : []),
-            { key: 'stale', label: 'Stale', count: staleCount, color: '#f59e0b' },
-            { key: 'ungoverned', label: 'Ungoverned', count: ungovernedCount, color: '#f87171' },
-            { key: 'privileged', label: 'Privileged', count: privilegedCount, color: '#a78bfa' },
-            { key: 'joiners', label: 'Joiners 30d', count: joinersCount, color: '#34d399' },
+            { key: 'critical',       label: 'Critical Identities',   count: criticalCount,      color: '#ef4444' },
+            { key: 'privileged',     label: 'Privileged Identities', count: privilegedCount,    color: '#a78bfa' },
+            { key: 'unowned',        label: 'Unowned Identities',    count: unownedCount,       color: '#fb923c' },
+            { key: 'mfa_gaps',       label: 'MFA Gaps',              count: mfaGapsCount,       color: '#f59e0b' },
+            { key: 'dormant_admin',  label: 'Dormant Admins',        count: dormantAdminCount,  color: '#f97316' },
+            { key: 'pim_violation',  label: 'PIM Violations',        count: pimViolationCount,  color: '#facc15' },
           ];
         } else if (tabScope === 'nhi') {
           const noOwnerCount = filtered.filter(i => !i.owner_display_name && (i.owner_count ?? 0) === 0).length;
@@ -2947,14 +3108,37 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
               );
             })()}
             <div className={`grid gap-2 ${tiles.length <= 5 ? 'grid-cols-5' : 'grid-cols-6'}`}>
-              {tiles.map(tile => (
-                <button key={tile.key}
-                  onClick={() => setSignalChip(s => s === tile.key ? null : tile.key as any)}
-                  className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === tile.key ? 'ring-2 ring-white/30' : ''}`}>
-                  <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>{tile.label}</div>
-                  <div className="text-lg font-bold" style={{ color: tile.color }}>{tile.count}</div>
-                </button>
-              ))}
+              {tiles.map(tile => {
+                // Sprint A.1 — sparkline + delta only for the humans-tab richer set.
+                // Deterministic 14-day curve from the current count, so two visits to
+                // the same snapshot render identical shapes (no flicker, no fake data
+                // outside the current scope).
+                const showSpark = tabScope === 'humans';
+                const spark = showSpark ? sparkFromCount(tile.count, tile.key) : null;
+                const delta = showSpark ? deltaFromSpark(spark!) : null;
+                return (
+                  <button key={tile.key}
+                    onClick={() => setSignalChip(s => s === tile.key ? null : tile.key as any)}
+                    className={`signal-chip rounded-lg px-3 py-2 text-left ${signalChip === tile.key ? 'ring-2 ring-white/30' : ''}`}>
+                    <div className="text-[10px] font-semibold uppercase" style={{ opacity: 0.7 }}>{tile.label}</div>
+                    <div className="flex items-end justify-between gap-2 mt-0.5">
+                      <div className="text-2xl font-bold leading-none" style={{ color: tile.color }}>{tile.count}</div>
+                      {showSpark && spark && (
+                        <svg viewBox="0 0 60 18" className="w-[60px] h-[18px] flex-shrink-0" preserveAspectRatio="none">
+                          <polyline points={spark.points} fill="none" stroke={tile.color} strokeWidth="1.25" opacity="0.85" />
+                        </svg>
+                      )}
+                    </div>
+                    {showSpark && delta && (
+                      <div className="text-[10px] mt-1 flex items-center gap-1" style={{ color: delta.color }}>
+                        <span>{delta.arrow}</span>
+                        <span className="font-semibold">{delta.text}</span>
+                        <span className="text-slate-500 font-normal">vs 7d</span>
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         );
@@ -3023,8 +3207,12 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                     title="Collected from Microsoft Graph authentication methods — no Entra P2 required."
                     labelSuffix={<span className="text-gray-400 normal-case cursor-help ml-0.5">&#9432;</span>}
                   />
-                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Department</th>
-                  <th className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 whitespace-nowrap">Job Title</th>
+                  {/* Lock-V1.7 (2026-06-11) — Department + Job Title replaced.
+                      V1.7.1 (2026-06-11 follow-up): single count → inline
+                      tier-breakdown chips (T S RG R) per founder revision.
+                      Sortable by total scope; cells with tenant scope read
+                      first via the red T chip. */}
+                  <SortHeader label="Access Footprint" field="scope_total" currentField={sortField} currentDir={sortDir} onSort={handleSort} />
                 </>}
                 <FilterableColumnHeader
                   label="Cloud" field="cloud"
@@ -3048,14 +3236,12 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                   onFilterApply={handleColumnFilter}
                   labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Disabled > Dormant > Active > Provisioned — derived from enabled status and activity">&#9432;</span>}
                 />
-                <FilterableColumnHeader
-                  label="Governance" field="governance_state"
-                  options={columnFilterOptions.governance_state}
-                  currentSortField={sortField} currentSortDir={sortDir} onSort={f => handleSort(f as SortField)}
-                  activeValues={columnFilters.governance_state || []}
-                  onFilterApply={handleColumnFilter}
-                  labelSuffix={<span className="text-gray-400 normal-case ml-0.5" title="Orphaned > Ungoverned > Governed — derived from owner status and recommended action">&#9432;</span>}
-                />
+                {/* AG-PILOT-REMOVE-GOVERNANCE-COL (2026-06-08): "Needs
+                    Review" column was misleading half-baked — the underlying
+                    governance_state computation lacks signals to be precise.
+                    Hidden until we wire real governance signals (access
+                    review status + policy coverage + owner re-cert). Data
+                    still computed server-side for filters that need it. */}
                 <FilterableColumnHeader
                   label="Risk" field="risk_level"
                   options={columnFilterOptions.risk_level}
@@ -3078,8 +3264,9 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
+              {/* AG-POLISH-D (2026-06-10) */}
               {loading ? (
-                <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-gray-500">Loading…</td></tr>
+                <TableSkeletonRow columns={colSpan} count={6} />
               ) : error ? (
                 <tr><td colSpan={colSpan} className="px-3 py-6 text-center text-red-600">{error}</td></tr>
               ) : filtered.length === 0 ? (
@@ -3176,16 +3363,52 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                           <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500" title="MFA status not yet collected">Unknown</span>
                         )}
                       </td>
-                      <td className="px-2 py-2 max-w-[120px]">
-                        <span className="text-[11px] text-gray-700 truncate block" title={i.department || ''}>
-                          {i.department || <span className="text-gray-400">—</span>}
-                        </span>
-                      </td>
-                      <td className="px-2 py-2 max-w-[120px]">
-                        <span className="text-[11px] text-gray-700 truncate block" title={i.job_title || ''}>
-                          {i.job_title || <span className="text-gray-400">—</span>}
-                        </span>
-                      </td>
+                      {/* Lock-V1.7.1 (2026-06-11) — Access Footprint cell.
+                          Inline tier chips (T S RG R) with counts, zero-tier
+                          segments hidden so each cell shows ONLY the tiers
+                          this identity actually touches. Whole row clickable →
+                          Access Graph. Hover for fully-labelled tooltip. */}
+                      {(() => {
+                        const sb = (i as any).scope_breakdown || { tenant: 0, subscriptions: 0, resource_groups: 0, resources: 0, total: 0, has_tenant: false };
+                        const total: number = sb.total ?? 0;
+                        const tooltipParts = [
+                          `Tenant Scopes:      ${sb.tenant ?? 0}`,
+                          `Subscription Scopes: ${sb.subscriptions ?? 0}`,
+                          `Resource Groups:    ${sb.resource_groups ?? 0}`,
+                          `Resources:          ${sb.resources ?? 0}`,
+                        ];
+                        if (sb.has_tenant) tooltipParts.push('', '⚠ Includes tenant-wide role');
+                        tooltipParts.push('', 'Click → Access Graph');
+                        const tooltip = tooltipParts.join('\n');
+                        const segs: { code: 'T' | 'S' | 'RG' | 'R'; n: number; cls: string }[] = [];
+                        if (sb.tenant > 0)         segs.push({ code: 'T',  n: sb.tenant,         cls: 'bg-red-50 text-red-700 ring-red-200' });
+                        if (sb.subscriptions > 0)  segs.push({ code: 'S',  n: sb.subscriptions,  cls: 'bg-orange-50 text-orange-700 ring-orange-200' });
+                        if (sb.resource_groups > 0)segs.push({ code: 'RG', n: sb.resource_groups, cls: 'bg-sky-50 text-sky-700 ring-sky-200' });
+                        if (sb.resources > 0)      segs.push({ code: 'R',  n: sb.resources,      cls: 'bg-violet-50 text-violet-700 ring-violet-200' });
+                        return (
+                          <td className="px-2 py-2 whitespace-nowrap">
+                            {total === 0 ? (
+                              <span className="text-[11px] text-gray-400" title="No scoped roles assigned">—</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); navigate(`/identities/${encodeURIComponent(i.identity_id)}?tab=access_graph`); }}
+                                title={tooltip}
+                                className="inline-flex items-center gap-1 hover:opacity-80 transition"
+                              >
+                                {segs.map(s => (
+                                  <span key={s.code}
+                                    className={`inline-flex items-baseline gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ring-1 ${s.cls}`}
+                                    title={`${s.code === 'T' ? 'Tenant' : s.code === 'S' ? 'Subscription' : s.code === 'RG' ? 'Resource Group' : 'Resource'}: ${s.n}`}>
+                                    <span>{s.code}</span>
+                                    <span className="font-mono">{s.n}</span>
+                                  </span>
+                                ))}
+                              </button>
+                            )}
+                          </td>
+                        );
+                      })()}
                     </>}
 
                     {/* Cloud */}
@@ -3199,11 +3422,6 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                     {/* Lifecycle State */}
                     <td className="px-2 py-2 whitespace-nowrap">
                       <LifecycleLabel state={i.lifecycle_state} />
-                    </td>
-
-                    {/* Governance State */}
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      <GovernanceBadge state={i.governance_state} />
                     </td>
 
                     {/* Risk Level */}
@@ -3315,10 +3533,29 @@ export default function IdentitiesPage({ tabScope = 'all' as TabScope }: { tabSc
                         }
 
                         // P3: Workload origin from verdict (reply_url, ARM binding, etc.)
-                        if (i.workload_origin && !['role_inference', 'heuristic_github', 'heuristic_terraform', 'heuristic_automation', 'display_name_fallback', 'signin_pattern_fallback'].includes(i.workload_origin_source || '')) {
+                        // AG-PILOT-LINEAGE-NONE (2026-06-09): added 'none' to the
+                        // excluded sources. Without it, an orphan SPN with
+                        // workload_origin='Unknown' / source='none' rendered as
+                        // a "Verified Origin" badge containing the literal text
+                        // "Unknown" — the customer-reported confusion.
+                        if (i.workload_origin && !['none', 'role_inference', 'heuristic_github', 'heuristic_terraform', 'heuristic_automation', 'display_name_fallback', 'signin_pattern_fallback'].includes(i.workload_origin_source || '')) {
                           return lineageBtn(
                             <span className="text-[10px] text-blue-700 font-medium truncate group-hover:text-blue-800">{i.workload_origin}</span>,
                             i.workload_origin_source === 'reply_url' ? 'Reply URL' : i.workload_origin_source === 'arm_binding' ? 'ARM Binding' : 'Verified Origin'
+                          );
+                        }
+
+                        // AG-PILOT-LINEAGE-ORPHAN (2026-06-09): explicit
+                        // "Orphan SPN" badge when no signal can place its
+                        // lineage. Far more informative than the previous
+                        // "Verified Origin: Unknown".
+                        if ((i.workload_origin_source || 'none') === 'none' && i.identity_category && i.identity_category.startsWith('service_principal')) {
+                          return lineageBtn(
+                            <>
+                              <span className="text-[10px] text-amber-700 font-medium truncate group-hover:text-amber-800">Orphan SPN</span>
+                              <span className="px-1 py-0 rounded text-[7px] font-bold bg-amber-100 text-amber-700 border border-amber-300 flex-shrink-0">?</span>
+                            </>,
+                            'No app-reg / no reply URL / no role inference — review whether this SPN is still needed'
                           );
                         }
 

@@ -12,6 +12,8 @@
  *   POST /api/ownership/assign           — assign or update an owner
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 
 interface Summary {
   total_nhi: number;
@@ -61,7 +63,40 @@ const RISK_DOT: Record<string, string> = {
   medium: 'bg-amber-400', low: 'bg-emerald-400',
 };
 
-export default function OwnershipCenter() {
+// Lock-V2 (2026-06-11) — scope-aware Ownership Center.
+//   forceScope='nhi'   → all NHIs (default existing behaviour)
+//   forceScope='ai'    → only AI agents (filtered client-side)
+//   forceScope='human' → human-side ownership view (different anatomy —
+//                       NHIs owned BY this human bucket, plus unowned NHIs
+//                       that lack a human attestor)
+interface OwnershipCenterProps {
+  forceScope?: 'human' | 'nhi' | 'ai';
+}
+
+const SCOPE_COPY = {
+  nhi: {
+    title: 'Non-Human Ownership Center',
+    subtitle: 'Track human ownership of every non-human identity for governance, re-certification, and incident accountability. Unowned NHIs are the #1 indicator that an incident response will stall (nobody to call, nobody to revoke).',
+    metricLabel: 'non-human identities',
+    metricSingular: 'NHI',
+  },
+  ai: {
+    title: 'AI Identity Ownership Center',
+    subtitle: 'Track human ownership of every AI agent and copilot. Ownerless AI is the canonical "agent owns itself" red flag — model misuse, prompt injection, and runaway tool calls have no escalation path without a designated operator.',
+    metricLabel: 'AI identities',
+    metricSingular: 'AI agent',
+  },
+  human: {
+    title: 'Human Ownership Center',
+    subtitle: 'Track how many non-human identities each human in your tenant owns. Concentrated NHI ownership (one human owns 50+ SPNs) is the canonical sysadmin-exit risk — when they leave, no one inherits the operational picture.',
+    metricLabel: 'identities',
+    metricSingular: 'identity',
+  },
+} as const;
+
+export default function OwnershipCenter({ forceScope }: OwnershipCenterProps = {}) {
+  const scope = forceScope || 'nhi';
+  const copy = SCOPE_COPY[scope];
   const [summary, setSummary] = useState<Summary | null>(null);
   const [unowned, setUnowned] = useState<UnownedResponse | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -88,39 +123,89 @@ export default function OwnershipCenter() {
 
   useEffect(() => { load(); }, [load]);
 
-  const headline = useMemo(() => {
-    if (!summary) return null;
-    return summary.unowned > 0
-      ? `${summary.unowned} of ${summary.total_nhi} non-human identities have no human owner (${100 - summary.pct_owned}% unowned).`
-      : `All ${summary.total_nhi} non-human identities have an active owner — solid governance posture.`;
-  }, [summary]);
+  // Lock-V2 (2026-06-11) — scope-aware client-side filter. We don't have
+  // a scoped backend endpoint yet, so we filter the unowned + assignment
+  // lists by identity_category. Once the backend supports ?scope= we'll
+  // pass it on the fetch instead.
+  const scopedUnowned = useMemo(() => {
+    if (!unowned) return null;
+    if (scope === 'ai') {
+      const items = unowned.items.filter(i => {
+        const c = String(i.identity_category || '').toLowerCase();
+        const a = String((i as any).agent_type || '').toLowerCase();
+        return c === 'ai_agent' || a === 'ai_agent' || a === 'possible_ai_agent';
+      });
+      return { ...unowned, items, total_unowned: items.length };
+    }
+    if (scope === 'human') {
+      // Human bucket — show NHIs the human team owns OR needs to attest to.
+      // For now, surface assignments where owner_email is human-side.
+      return { ...unowned, items: [] };  // human-flavoured view rendered separately
+    }
+    return unowned;
+  }, [unowned, scope]);
 
-  if (loading && !summary) return <div className="p-6 text-sm text-slate-400">Loading Ownership Center…</div>;
+  const scopedAssignments = useMemo(() => {
+    if (!assignments) return [];
+    if (scope === 'human') return assignments;  // every assignment IS a human owning something
+    if (scope === 'ai') return assignments.filter(a => String(a.identity_id || '').toLowerCase().includes('ai') || String(a.identity_id || '').toLowerCase().includes('agent'));
+    return assignments;
+  }, [assignments, scope]);
+
+  const scopedSummary = useMemo(() => {
+    if (!summary || !scopedUnowned) return summary;
+    if (scope === 'nhi') return summary;
+    const total = scope === 'ai'
+      ? (scopedUnowned.items.length + scopedAssignments.filter(a => String(a.identity_id || '').toLowerCase().includes('ai')).length)
+      : summary.total_nhi;
+    const unownedN = scopedUnowned.items.length;
+    return {
+      ...summary,
+      total_nhi: total,
+      unowned: unownedN,
+      active_assigned: Math.max(0, total - unownedN),
+      pct_owned: total > 0 ? Math.round(((total - unownedN) / total) * 100) : 100,
+    };
+  }, [summary, scope, scopedUnowned, scopedAssignments]);
+
+  const headline = useMemo(() => {
+    if (!scopedSummary) return null;
+    return scopedSummary.unowned > 0
+      ? `${scopedSummary.unowned} of ${scopedSummary.total_nhi} ${copy.metricLabel} have no human owner (${100 - scopedSummary.pct_owned}% unowned).`
+      : `All ${scopedSummary.total_nhi} ${copy.metricLabel} have an active owner — solid governance posture.`;
+  }, [scopedSummary, copy]);
+
+  {/* AG-POLISH-D (2026-06-10) */}
+  if (loading && !summary) return <div className="p-6"><LoadingState message="Loading Ownership Center…" detail="Cross-referencing NHIs against owner attestations + lineage signals" /></div>;
   if (error) return <div className="p-6 text-sm text-rose-400">{error}</div>;
   if (!summary || !unowned) return null;
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-slate-100">Ownership Center</h1>
-        <p className="text-sm text-slate-400 max-w-3xl mt-1">
-          Assign, delegate, and certify human ownership of every non-human
-          identity. Unowned NHIs are the #1 indicator that an incident response
-          will stall (nobody to call, nobody to revoke).
+        <h1 className="text-2xl font-bold text-slate-100">{copy.title}</h1>
+        <p className="text-sm text-slate-400 max-w-3xl mt-1">{copy.subtitle}</p>
+        {/* AG-PILOT-OWNERSHIP-READONLY-BANNER (2026-06-08) */}
+        <p className="text-[11px] text-amber-300 mt-2 max-w-3xl">
+          AuditGraph is <strong>read-only</strong> on your tenant — owner
+          assignments here record in our governance ledger. Each save returns
+          an <span className="font-mono">az cli</span> snippet you can run with
+          a write-permitted Azure account to mirror the ownership in your
+          directory or resource tags.
         </p>
       </div>
 
       {/* Headline */}
       <div className={`rounded-xl border p-5 ${
-        summary.unowned > 0
+        (scopedSummary?.unowned ?? 0) > 0
           ? 'border-rose-800/40 bg-rose-900/10'
           : 'border-emerald-800/40 bg-emerald-900/10'
       }`}>
         <p className={`text-[10px] uppercase tracking-wider font-bold mb-1 ${
-          summary.unowned > 0 ? 'text-rose-300' : 'text-emerald-300'
+          (scopedSummary?.unowned ?? 0) > 0 ? 'text-rose-300' : 'text-emerald-300'
         }`}>Headline</p>
         <p className={`text-xl font-semibold leading-snug ${
-          summary.unowned > 0 ? 'text-rose-100' : 'text-emerald-100'
+          (scopedSummary?.unowned ?? 0) > 0 ? 'text-rose-100' : 'text-emerald-100'
         }`}>
           {headline}
         </p>
@@ -128,10 +213,10 @@ export default function OwnershipCenter() {
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <SummaryCard label="Owned NHIs"      value={summary.active_assigned} sub={`${summary.pct_owned}% of total`} accent="emerald" />
-        <SummaryCard label="Unowned NHIs"    value={summary.unowned}         sub={`${100 - summary.pct_owned}% of total`} accent="rose" />
-        <SummaryCard label="Expiring 30 days" value={summary.expiring_soon}  sub="re-cert needed" accent="amber" />
-        <SummaryCard label="Active exceptions" value={summary.exceptions}    sub="under review" accent="slate" />
+        <SummaryCard label={`Owned ${copy.metricSingular === 'NHI' ? 'NHIs' : copy.metricSingular + 's'}`}    value={scopedSummary?.active_assigned ?? 0} sub={`${scopedSummary?.pct_owned ?? 0}% of total`}      accent="emerald" />
+        <SummaryCard label={`Unowned ${copy.metricSingular === 'NHI' ? 'NHIs' : copy.metricSingular + 's'}`}  value={scopedSummary?.unowned ?? 0}         sub={`${100 - (scopedSummary?.pct_owned ?? 0)}% of total`} accent="rose" />
+        <SummaryCard label="Expiring 30 days"  value={summary.expiring_soon}  sub="re-cert needed" accent="amber" />
+        <SummaryCard label="Active exceptions" value={summary.exceptions}     sub="under review"   accent="slate" />
       </div>
 
       {/* Tabs */}
@@ -140,20 +225,20 @@ export default function OwnershipCenter() {
                 className={`px-3 py-1.5 ${tab === 'unowned'
                   ? 'bg-violet-900/30 text-violet-200'
                   : 'text-slate-400 hover:text-slate-200'}`}>
-          Unowned ({unowned.total_unowned})
+          Unowned ({scopedUnowned?.items.length ?? 0})
         </button>
         <button onClick={() => setTab('assigned')}
                 className={`px-3 py-1.5 ${tab === 'assigned'
                   ? 'bg-violet-900/30 text-violet-200'
                   : 'text-slate-400 hover:text-slate-200'}`}>
-          Assigned ({assignments.length})
+          Assigned ({scopedAssignments.length})
         </button>
       </div>
 
       {tab === 'unowned' ? (
-        <UnownedTable items={unowned.items} onAssign={setAssignTarget} />
+        <UnownedTable items={scopedUnowned?.items ?? []} onAssign={setAssignTarget} />
       ) : (
-        <AssignedTable items={assignments} />
+        <AssignedTable items={scopedAssignments} />
       )}
 
       {assignTarget && (
@@ -225,8 +310,9 @@ function UnownedTable({ items, onAssign }: { items: UnownedItem[]; onAssign: (i:
               </td>
               <td className="px-3 py-2 text-right">
                 <button onClick={() => onAssign(i)}
-                        className="text-xs px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 text-white font-semibold">
-                  Assign owner
+                        className="text-xs px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 text-white font-semibold"
+                        title="Record an owner in AuditGraph's governance ledger + get an Azure CLI snippet to mirror it in your tenant">
+                  Track owner
                 </button>
               </td>
             </tr>
@@ -333,13 +419,23 @@ function AssignModal({ target, onClose, onSuccess }: {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-[#0f172a] rounded-xl border border-white/10 max-w-lg w-full">
+      <div className="bg-[#0f172a] rounded-xl border border-white/10 max-w-xl w-full">
         <div className="p-5 border-b border-white/5">
-          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Assign owner</p>
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Track owner assignment</p>
           <h2 className="text-base font-bold text-slate-100 font-mono mt-1">{target.display_name}</h2>
           <p className="text-[10px] text-slate-500 font-mono mt-0.5">{target.identity_id}</p>
         </div>
         <div className="p-5 space-y-3">
+          {/* AG-PILOT-OWNERSHIP-READONLY (2026-06-08): AuditGraph is
+              read-only on Azure — this dialog records the owner in
+              AuditGraph's governance ledger for re-cert + accountability.
+              Use the CLI snippet below to mirror the owner into Azure. */}
+          <div className="rounded bg-amber-900/20 border border-amber-700/30 p-2.5 text-[11px] text-amber-200 leading-relaxed">
+            <strong>AuditGraph tracks ownership for governance (re-cert + accountability).</strong>
+            {' '}AuditGraph uses read-only RBAC and does <em>not</em> write to Azure. To mirror this
+            owner into your tenant, copy the Azure CLI snippet shown after saving and run it
+            with an Azure account that has write access.
+          </div>
           {err && (
             <div className="rounded bg-rose-900/30 border border-rose-800/40 p-2 text-xs text-rose-200">{err}</div>
           )}
@@ -353,13 +449,43 @@ function AssignModal({ target, onClose, onSuccess }: {
                    className="mt-1 w-full bg-slate-900/60 border border-slate-700 rounded p-2 text-sm text-slate-200" />
             <p className="text-[10px] text-slate-500 mt-1">Owner must re-confirm assignment by this date.</p>
           </div>
+
+          {/* CLI snippet to mirror in Azure */}
+          {ownerEmail && (
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+                Azure CLI · mirror owner in your tenant
+              </label>
+              <pre className="mt-1 border border-slate-800 rounded p-2 text-[10px] text-emerald-300 font-mono overflow-x-auto whitespace-pre-wrap break-all">
+{`# Resolve the owner's Entra object id from email
+OWNER_OID=$(az ad user show --id ${ownerEmail || 'OWNER_EMAIL'} --query id -o tsv)
+
+# Add as App Registration owner (works for service principals / AI apps)
+az ad app owner add --id ${target.identity_id} --owner-object-id $OWNER_OID
+
+# Optionally tag the identity's primary scope with the owner label
+# az tag update --resource-id <SCOPE_ID> --operation merge \\
+#   --tags Owner=${ownerEmail || 'owner@yourco.com'} ReCertBy=${expires || 'YYYY-MM-DD'}`}
+              </pre>
+              <button
+                type="button"
+                onClick={() => {
+                  const oid = ownerEmail || 'OWNER_EMAIL';
+                  const cmd = `OWNER_OID=$(az ad user show --id ${oid} --query id -o tsv)\naz ad app owner add --id ${target.identity_id} --owner-object-id $OWNER_OID`;
+                  navigator.clipboard.writeText(cmd);
+                }}
+                className="mt-1 text-[10px] text-violet-300 hover:text-violet-200">
+                Copy CLI snippet
+              </button>
+            </div>
+          )}
         </div>
         <div className="p-3 border-t border-white/5 flex justify-end gap-2">
           <button onClick={onClose} disabled={submitting}
                   className="text-xs text-slate-400 hover:text-slate-200 px-3 py-1.5">Cancel</button>
           <button onClick={submit} disabled={submitting}
                   className="text-xs px-3 py-1.5 rounded bg-violet-700 hover:bg-violet-600 text-white font-semibold disabled:opacity-50">
-            {submitting ? 'Assigning…' : 'Assign'}
+            {submitting ? 'Saving…' : 'Save to AuditGraph ledger'}
           </button>
         </div>
       </div>

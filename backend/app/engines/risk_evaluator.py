@@ -50,6 +50,10 @@ class RiskEvaluator:
                     findings.extend(rule_findings)
                 except Exception as e:
                     logger.error(f"Rule evaluator '{rule['rule_key']}' failed: {e}")
+                    # 2026-06-12 — rollback after each rule failure (see
+                    # matching note in nhi_analyzer).
+                    try: self.db.conn.rollback()
+                    except Exception: pass
 
         if findings:
             self.db.save_risk_findings(connection_id, org_id, findings)

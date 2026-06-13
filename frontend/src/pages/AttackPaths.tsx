@@ -41,7 +41,9 @@ const TYPE_LABELS: Record<string, string> = {
   privilege_accumulation: 'Privilege Accumulation',
 };
 
-export default function AttackPaths() {
+interface AttackPathsProps { forceSourceType?: string }
+
+export default function AttackPaths({ forceSourceType }: AttackPathsProps = {}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [paths, setPaths] = useState<AttackPath[]>([]);
@@ -49,6 +51,13 @@ export default function AttackPaths() {
 
   const [sevFilter, setSevFilter] = useState(searchParams.get('severity') || '');
   const [typeFilter, setTypeFilter] = useState(searchParams.get('path_type') || '');
+  // AG-IA-P5 (2026-06-10): scope-aware. Sidebar buckets pass ?source_type=
+  // (human/nhi/ai/cicd) and the backend filters ap.source_entity_type
+  // accordingly. Issue #3 + #4: prior page ignored the param and rendered
+  // every bucket's paths everywhere.
+  // Lock-V2 (2026-06-11) — `forceSourceType` prop lets bucket pages embed
+  // this without depending on URL params (the parent owns ?tab= state).
+  const sourceType = (forceSourceType || searchParams.get('source_type') || '').toLowerCase();
   const [sortCol, setSortCol] = useState<string>('risk_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -57,6 +66,7 @@ export default function AttackPaths() {
     const params = new URLSearchParams();
     if (sevFilter) params.set('severity', sevFilter);
     if (typeFilter) params.set('path_type', typeFilter);
+    if (sourceType) params.set('source_type', sourceType);
     params.set('limit', '100');
 
     // Attack paths are org-scoped (not connection-scoped) — do not filter by connection_id
@@ -64,14 +74,30 @@ export default function AttackPaths() {
       .then(listData => {
         setPaths(listData.paths || listData.items || listData.attack_paths || []);
       }).finally(() => setLoading(false));
-  }, [sevFilter, typeFilter]);
+  }, [sevFilter, typeFilter, sourceType]);
 
   useEffect(() => {
+    // Lock-V2 (2026-06-11) — when embedded inside a bucket page (forceSourceType
+    // set), the parent owns the ?tab= URL state. Do NOT clobber the URL here
+    // or we wipe ?tab=attack-paths and snap the parent back to Overview.
+    if (forceSourceType) return;
     const p = new URLSearchParams();
     if (sevFilter) p.set('severity', sevFilter);
     if (typeFilter) p.set('path_type', typeFilter);
+    if (sourceType) p.set('source_type', sourceType);
     setSearchParams(p, { replace: true });
-  }, [sevFilter, typeFilter, setSearchParams]);
+  }, [sevFilter, typeFilter, sourceType, setSearchParams, forceSourceType]);
+
+  const scopeTitle = sourceType === 'human' ? 'Human Attack Paths'
+                   : sourceType === 'nhi'   ? 'Non-Human Attack Paths'
+                   : sourceType === 'ai'    ? 'AI Attack Paths'
+                   : sourceType === 'cicd'  ? 'CI/CD Attack Paths'
+                   : 'Attack Paths';
+  const scopeIntro = sourceType === 'human' ? 'Privilege escalation and lateral movement paths originating from human identities (employees, contractors, guests).'
+                   : sourceType === 'nhi'   ? 'Privilege escalation and lateral movement paths originating from non-human identities (SPNs, managed identities, workloads, AI agents).'
+                   : sourceType === 'ai'    ? 'Privilege escalation and lateral movement paths originating from AI agent identities.'
+                   : sourceType === 'cicd'  ? 'Privilege escalation paths originating from CI/CD federated identities (GitHub Actions, Terraform Cloud, Azure DevOps).'
+                   : 'Privilege escalation and lateral movement paths discovered via BFS graph analysis.';
 
   const summary = useMemo(() => ({
     total_paths: paths.length,
@@ -110,9 +136,22 @@ export default function AttackPaths() {
   return (
     <div className="p-6 max-w-[1400px] mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>Attack Paths</h1>
+        <div className="flex items-center gap-2 mb-1">
+          <h1 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>{scopeTitle}</h1>
+          {sourceType && (
+            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded"
+              style={{
+                backgroundColor: sourceType === 'human' ? 'rgba(59,130,246,0.15)' : sourceType === 'nhi' ? 'rgba(249,115,22,0.15)' : sourceType === 'ai' ? 'rgba(167,139,250,0.15)' : 'rgba(16,185,129,0.15)',
+                color: sourceType === 'human' ? '#60a5fa' : sourceType === 'nhi' ? '#fb923c' : sourceType === 'ai' ? '#a78bfa' : '#10b981',
+                border: `1px solid ${sourceType === 'human' ? 'rgba(59,130,246,0.4)' : sourceType === 'nhi' ? 'rgba(249,115,22,0.4)' : sourceType === 'ai' ? 'rgba(167,139,250,0.4)' : 'rgba(16,185,129,0.4)'}`,
+              }}
+            >
+              scoped · {sourceType}
+            </span>
+          )}
+        </div>
         <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
-          Privilege escalation and lateral movement paths discovered via BFS graph analysis.
+          {scopeIntro}
         </p>
       </div>
 

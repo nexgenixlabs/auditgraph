@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+// AG-POLISH-D (2026-06-10): reusable loading state
+import { LoadingState } from '../components/LoadingState';
 
 interface UserRow {
   id: number;
@@ -239,8 +241,9 @@ export default function OrganizationUsers() {
       </div>
 
       {/* Users Table */}
+      {/* AG-POLISH-D (2026-06-10) */}
       {loading ? (
-        <div className="text-center py-12 text-gray-400">Loading...</div>
+        <LoadingState message="Loading team members…" />
       ) : (
         <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
           <table className="w-full text-sm">

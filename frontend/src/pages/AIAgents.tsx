@@ -43,6 +43,10 @@ interface AgentRow {
   risk_dimensions: Record<string, RiskDimension>;
   role_count: number;
   role_names?: string[];   // AG-162: exposed for URL ?role= filtering
+  models?: string[];       // AG-PILOT-AI-AGENTS-MODELS: AI models this identity reaches via RBAC
+  // AG-PILOT-AI-AGENTS-MODELS-V2: how confident we are about model_access
+  //   'verified' | 'no_match' | 'pending' | 'n/a'
+  model_access_verification?: string;
 }
 
 const NHI_CATEGORIES = new Set(['service_principal', 'managed_identity_system', 'managed_identity_user', 'app', 'workload']);
@@ -268,7 +272,57 @@ export default function AIAgents() {
           <span className="text-[10px] text-slate-600">—</span>
         )}
       </td>
-      <td className="text-center px-2 py-2"><AccessBadge level={row.model_access} /></td>
+      {/* AG-PILOT-AI-AGENTS-MODELS-V2 (2026-06-09): badge changes per
+          verification state so we never claim "Owner on models" when
+          we haven't actually observed any deployments. */}
+      <td className="text-center px-2 py-2">
+        <div className="inline-flex items-center gap-0.5">
+          <AccessBadge level={row.model_access} />
+          {row.model_access_verification === 'no_match' && row.model_access && row.model_access !== 'none' && (
+            <span className="text-[9px] font-bold text-amber-400"
+                  title="Role NAME implies model access but NO deployments were found under this identity's role scopes. Possible false positive — verify in the role's Cognitive Services / AI Foundry resources.">
+              ?
+            </span>
+          )}
+          {row.model_access_verification === 'pending' && row.model_access && row.model_access !== 'none' && (
+            <span className="text-[9px] font-bold text-slate-500"
+                  title="Discovery has not yet enumerated AI model deployments for this tenant. Re-run scan to verify which models are actually reachable.">
+              ⋯
+            </span>
+          )}
+        </div>
+      </td>
+      {/* AG-PILOT-AI-AGENTS-MODELS (2026-06-09): actual model names this
+          identity reaches (e.g. gpt-4o, claude-3.5). Up to 2 visible
+          + "+N more" tooltip. Status message when no deployments
+          observed instead of an opaque hyphen. */}
+      <td className="text-left px-2 py-2">
+        {row.models && row.models.length > 0 ? (
+          <div className="flex flex-wrap gap-1 max-w-[180px]">
+            {row.models.slice(0, 2).map((m, i) => (
+              <span key={i} className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-900/40 text-violet-200 border border-violet-700/40 truncate max-w-[110px]"
+                    title={m}>
+                {m}
+              </span>
+            ))}
+            {row.models.length > 2 && (
+              <span className="text-[10px] text-slate-400 self-center" title={row.models.slice(2).join(', ')}>
+                +{row.models.length - 2}
+              </span>
+            )}
+          </div>
+        ) : row.model_access_verification === 'pending' ? (
+          <span className="text-[10px] text-slate-500 italic" title="Discovery has not yet enumerated AI model deployments for this tenant. Re-run discovery to populate.">
+            scan pending
+          </span>
+        ) : row.model_access_verification === 'no_match' ? (
+          <span className="text-[10px] text-amber-400" title="Identity has a role whose name implies model access, but no actual deployments were found under any of its role scopes.">
+            none in scope
+          </span>
+        ) : (
+          <span className="text-[10px] text-slate-600">—</span>
+        )}
+      </td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.key_vault_access} /></td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.data_access} /></td>
       <td className="text-center px-2 py-2"><AccessBadge level={row.telemetry} /></td>
@@ -322,15 +376,39 @@ export default function AIAgents() {
         </th>
         <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-28">AI Service</th>
         <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-40">RBAC Roles</th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-20" onClick={() => handleSort('model_access')}>
-          Model <SortIcon col="model_access" />
+        {/* AG-PILOT-AI-AGENTS-COLS (2026-06-09): customer interpreted
+            "Model" header as "which model is this identity using" but
+            the column shows RBAC access level (Owner / Contributor /
+            Reader / etc.) into the model deployment. Renamed to be
+            unambiguous + added tooltips on every access-level column. */}
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-24"
+            title="Access LEVEL to model deployments (Owner / Contributor / Reader). Not the model name."
+            onClick={() => handleSort('model_access')}>
+          Model Access <SortIcon col="model_access" />
         </th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-20" onClick={() => handleSort('key_vault_access')}>
-          Key Vault <SortIcon col="key_vault_access" />
+        {/* AG-PILOT-AI-AGENTS-MODELS (2026-06-09): the actual deployed
+            models reachable through this identity's RBAC. */}
+        <th className="text-left px-2 py-2 text-xs font-medium text-slate-400 w-44"
+            title="The actual AI models this identity can reach via RBAC (e.g. gpt-4o, claude-3.5-sonnet). Derived from discovered model deployments under each role scope.">
+          Models
         </th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-20">Data</th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-20">Telemetry</th>
-        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-20">Egress</th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-24"
+            title="Access LEVEL to Key Vault (secrets / certificates / keys)."
+            onClick={() => handleSort('key_vault_access')}>
+          KV Access <SortIcon col="key_vault_access" />
+        </th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-24"
+            title="Access LEVEL to data plane (Storage / SQL / Cosmos).">
+          Data Access
+        </th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-24"
+            title="Telemetry coverage: whether this agent is being observed (App Insights, diagnostic settings).">
+          Telemetry
+        </th>
+        <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 w-24"
+            title="Network egress posture: whether this agent's outbound traffic is restricted or unrestricted.">
+          Egress
+        </th>
         <th className="text-center px-2 py-2 text-xs font-medium text-slate-400 cursor-pointer w-16" onClick={() => handleSort('risk_score')}>
           Risk <SortIcon col="risk_score" />
         </th>

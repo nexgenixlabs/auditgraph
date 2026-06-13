@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../services/apiClient';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from './LoadingState';
 
 interface ScanSchedule {
   id: number;
@@ -56,7 +58,8 @@ export default function ScanScheduleManager() {
       .catch(() => {});
   };
 
-  if (loading) return <div className="text-gray-500 text-sm py-4">Loading snapshot schedules...</div>;
+  {/* AG-POLISH-D (2026-06-10) */}
+  if (loading) return <LoadingState size="sm" message="Loading snapshot schedules…" />;
 
   return (
     <div className="space-y-4">

@@ -11,6 +11,8 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { SnapshotContextHeader } from '../components/ui/SnapshotContextHeader';
 import { normalizeScore } from '../utils/identityRiskScore';
 
@@ -112,11 +114,8 @@ export default function SensitiveDataAccess() {
   if (loading) {
     return (
       <div style={{ minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center', background: G.bg }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ width: 32, height: 32, borderRadius: '50%', border: `3px solid ${G.surfaceBorder}`, borderTopColor: G.accent, animation: 'spin 1s linear infinite', margin: '0 auto 12px' }} />
-          <div style={{ fontSize: 12, color: G.textSecondary }}>Loading sensitive data access...</div>
-        </div>
-        <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+        {/* AG-POLISH-D (2026-06-10): drop hand-rolled spinner */}
+        <LoadingState message="Loading sensitive data access…" detail="Walking RBAC × classified resource matrix" />
       </div>
     );
   }

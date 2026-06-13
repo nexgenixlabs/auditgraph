@@ -11,6 +11,8 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+// AG-POLISH-C (2026-06-10): jargon tooltips
+import { TermTooltip } from '../components/TermTooltip';
 
 interface WorstIdentity {
   identity_db_id: number;
@@ -45,20 +47,35 @@ const DIM_LABEL: Record<string, string> = {
   model_exposure: 'Model Exposure', supply_chain: 'Supply Chain',
 };
 
-export default function IdentityTrust() {
+interface IdentityTrustProps { forceType?: string }
+
+export default function IdentityTrust({ forceType }: IdentityTrustProps = {}) {
   const [data, setData] = useState<TrustRollup | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [threshold, setThreshold] = useState<number>(50);
 
+  // AG-PHASE2 (2026-06-09): scope-aware Trust page. Reads ?type=
+  // so Human / NHI / AI tabs all use the same component.
+  // Lock-V2 (2026-06-11) — `forceType` prop lets bucket pages embed this
+  // without depending on URL query params (the parent owns ?tab= state).
+  const params = new URLSearchParams(window.location.search);
+  const scope = (forceType || params.get('type') || params.get('scope') || 'nhi').toLowerCase();
+  const scopeLabel = ({
+    human: 'Human Trust',
+    nhi: 'Non-Human Identity Trust',
+    ai: 'AI Identity Trust',
+    all: 'Identity Trust',
+  } as Record<string, string>)[scope] || 'Identity Trust';
+
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/identity-trust/rollup?threshold=${threshold}`)
+    fetch(`/api/identity-trust/rollup?threshold=${threshold}&type=${encodeURIComponent(scope)}`)
       .then(r => r.json())
       .then((d: TrustRollup) => { setData(d); setLoading(false); })
       .catch((e: Error) => { setError(e.message); setLoading(false); });
-  }, [threshold]);
+  }, [threshold, scope]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -80,12 +97,25 @@ export default function IdentityTrust() {
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-slate-100">Identity Trust</h1>
+        {/* AG-PHASE2 (2026-06-09): scope-aware title + copy */}
+        <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider font-bold text-gray-500">
+          <span style={{ color: scope === 'human' ? '#3b82f6' : scope === 'ai' ? '#a78bfa' : '#f97316' }}>Identity</span>
+          <span>·</span>
+          <span>{scope === 'human' ? 'Human' : scope === 'ai' ? 'AI Identity' : scope === 'all' ? 'All Types' : 'Non-Human'}</span>
+          <span>·</span>
+          <span>Trust</span>
+        </div>
+        <h1 className="text-2xl font-bold text-slate-100 mt-1">{scopeLabel}</h1>
         <p className="text-sm text-slate-400 max-w-3xl mt-1">
-          Trust Score (0-100) across every non-human identity in your tenant —
-          SPNs, managed identities, and AI agents. Each identity is graded across
-          9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight ·
-          Data Access · Network · Model Exposure · Supply Chain.
+          {scope === 'human' ? (
+            <>Trust Score (0-100) across every human identity in your tenant — employees, contractors, and guests. 9 dimensions: Ownership · Secrets (MFA + credential rotation) · Egress · Telemetry · Oversight · Data Access · Network · <TermTooltip term="Blast Radius">Privileged Reach</TermTooltip> · Origin.</>
+          ) : scope === 'ai' ? (
+            <>Trust Score (0-100) across every AI agent identity in your tenant. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · Model Exposure · Supply Chain.</>
+          ) : scope === 'all' ? (
+            <>Trust Score (0-100) across every identity in your tenant — humans, <TermTooltip term="NHI">NHIs</TermTooltip>, and AI. 9 dimensions universal across types.</>
+          ) : (
+            <>Trust Score (0-100) across every non-human identity in your tenant — <TermTooltip term="SPN">service principals</TermTooltip>, <TermTooltip term="MI">managed identities</TermTooltip>, workloads, CI/CD identities, and AI agents. 9 dimensions: Ownership · Secrets · Egress · Telemetry · Oversight · Data Access · Network · <TermTooltip term="Blast Radius">Privileged Reach</TermTooltip> · Supply Chain.</>
+          )}
         </p>
       </div>
 
@@ -94,7 +124,8 @@ export default function IdentityTrust() {
         <p className="text-[10px] uppercase tracking-wider text-rose-300 font-bold mb-1">Headline</p>
         <p className="text-xl font-semibold text-rose-100 leading-snug">
           <span className="font-mono">{data.below_threshold_count}</span> of{' '}
-          <span className="font-mono">{summary.total}</span> non-human identities
+          <span className="font-mono">{summary.total}</span>{' '}
+          {scope === 'human' ? 'human identities' : scope === 'ai' ? 'AI agent identities' : scope === 'all' ? 'identities' : 'non-human identities'}
           {' '}have Trust below {threshold} ({summary.failPct}%) — review the worst
           {' '}to remediate first.
         </p>
@@ -115,7 +146,9 @@ export default function IdentityTrust() {
                 </p>
               </div>
               <p className={`text-3xl font-bold font-mono mt-1 ${st.text}`}>{count}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">{pct}% of NHIs</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {pct}% of {scope === 'human' ? 'humans' : scope === 'ai' ? 'AI agents' : scope === 'all' ? 'identities' : 'NHIs'}
+              </p>
             </div>
           );
         })}
@@ -205,7 +238,10 @@ export default function IdentityTrust() {
                     </div>
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <Link to={`/ai-inventory?focus=${encodeURIComponent(w.identity_id)}`}
+                    {/* AG-PILOT-TRUST-ROUTE (2026-06-08): was routing every
+                        click to /ai-inventory even for non-AI identities.
+                        Route to the canonical identity detail page instead. */}
+                    <Link to={`/identities/${encodeURIComponent(w.identity_id)}`}
                           className="text-xs text-violet-300 hover:text-violet-200">
                       Inspect →
                     </Link>
@@ -216,7 +252,7 @@ export default function IdentityTrust() {
             {data.worst_identities.length === 0 && (
               <tr>
                 <td colSpan={4} className="px-3 py-8 text-center text-sm text-slate-500">
-                  No NHIs evaluated yet — run a discovery scan.
+                  No {scope === 'human' ? 'humans' : scope === 'ai' ? 'AI agents' : scope === 'all' ? 'identities' : 'NHIs'} evaluated yet — run a discovery scan.
                 </td>
               </tr>
             )}

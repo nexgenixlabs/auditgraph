@@ -1040,7 +1040,20 @@ def get_identities():
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
 
         if not run_ids:
-            return jsonify({"error": "No completed discovery runs found"}), 404
+            # AG-PILOT-DRYRUN (2026-06-08): fresh orgs with no scan yet
+            # should get an empty list, not a 404. Customer's first 5
+            # minutes will hit this before discovery completes.
+            return jsonify({
+                'identities': [],
+                'count': 0,
+                'total': 0,
+                'governance_summary': {
+                    'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0,
+                    'privileged': 0, 'combo': 0, 'data_plane': 0,
+                },
+                'requires_setup': True,
+                'message': 'No discovery scan completed yet. Add a cloud connection to populate this view.',
+            })
 
         # Build WHERE clause on a lightweight base (no correlated subqueries)
         base_from = """FROM identities i
@@ -1097,6 +1110,61 @@ def get_identities():
         if cloud_filter:
             where_clauses += " AND COALESCE(i.cloud, 'azure') = %s"
             params.append(cloud_filter.lower())
+
+        # V2.13 (2026-06-12) — drift drilldown.
+        # Drift Analysis breakdown cards link here with ?drift_id=N&drift_change=new
+        # so the customer sees ONLY the identities that changed in that
+        # drift report — not the full inventory. The drift detector
+        # persists per-change identity arrays in drift_reports.changes
+        # JSONB (keys: new_identities, removed_identities, permission_changes,
+        # risk_changes, credential_changes, classification_changes). We
+        # extract db_id from each entry and constrain i.id.
+        drift_id_param = request.args.get("drift_id", type=int)
+        drift_change_param = (request.args.get("drift_change") or "").lower().strip()
+        _DRIFT_CHANGE_KEYS = {
+            "new": "new_identities",
+            "added": "new_identities",
+            "removed": "removed_identities",
+            "permission": "permission_changes",
+            "risk": "risk_changes",
+            "credential": "credential_changes",
+            "classification": "classification_changes",
+        }
+        if drift_id_param and drift_change_param in _DRIFT_CHANGE_KEYS:
+            jsonb_key = _DRIFT_CHANGE_KEYS[drift_change_param]
+            try:
+                cursor.execute(
+                    "SELECT changes -> %s FROM drift_reports WHERE id = %s AND organization_id = %s",
+                    (jsonb_key, drift_id_param, _org_id()),
+                )
+                row = cursor.fetchone()
+                arr = row[0] if row and row[0] is not None else []
+                drift_db_ids = [
+                    int(item['db_id']) for item in arr
+                    if isinstance(item, dict) and item.get('db_id') is not None
+                ]
+            except Exception:
+                drift_db_ids = []
+            # Removed identities are NOT in the current run, so the
+            # default discovery_run_id = ANY(latest_run_ids) filter would
+            # exclude them. Lift it for the removed view.
+            if drift_change_param == "removed":
+                where_clauses = where_clauses.replace(
+                    " WHERE i.discovery_run_id = ANY(%s)",
+                    " WHERE 1=1",
+                    1,
+                )
+                # The corresponding params[0] (run_ids) is now unused —
+                # drop it so positional ordering stays aligned.
+                if params and isinstance(params[0], list):
+                    params.pop(0)
+            if drift_db_ids:
+                where_clauses += " AND i.id = ANY(%s)"
+                params.append(drift_db_ids)
+            else:
+                # No matches — force an empty result rather than leak the
+                # full inventory.
+                where_clauses += " AND 1=0"
 
         if search:
             _s = search.strip()
@@ -1246,6 +1314,20 @@ def get_identities():
         rows = rows_as_dicts(cursor)
 
         identities = [_map_identity_row(row) for row in rows]
+
+        # Lock-V1.7 (2026-06-11) — Scope column (Option B per peer review).
+        # For each identity in the list, attach a scope_breakdown rollup:
+        #   {tenant, subscriptions, resource_groups, resources, total, has_tenant}
+        # Powers the "Scope" column on the Humans Inventory table (replaces the
+        # empty Department + Job Title columns). Bulk-computed in two queries
+        # (Azure RBAC + Entra directory roles) so the list endpoint stays O(1)
+        # in identity count rather than O(N) per-row subqueries.
+        identity_db_ids = [int(i['id']) for i in identities if i.get('id') is not None]
+        scope_breakdowns = _compute_scope_breakdowns(cursor, identity_db_ids)
+        for ident in identities:
+            ident['scope_breakdown'] = scope_breakdowns.get(int(ident['id']) if ident.get('id') is not None else -1,
+                                                            {'tenant': 0, 'subscriptions': 0, 'resource_groups': 0,
+                                                             'resources': 0, 'total': 0, 'has_tenant': False})
 
         # Compute governance summary counts from mapped identities
         gov_counts = {'orphaned': 0, 'ungoverned': 0, 'policy_violation': 0, 'privileged': 0, 'combo': 0, 'data_plane': 0}
@@ -1698,9 +1780,14 @@ def get_identity_details(identity_id: str):
                    i.organization_id
             FROM identities i
             LEFT JOIN discovery_runs dr ON dr.id = i.discovery_run_id
-            WHERE i.identity_id = %s AND i.discovery_run_id = ANY(%s)
+            -- AG-PILOT-IDENTITY-LOOKUP (2026-06-08): match by identity_id OR
+            -- object_id. Attack Paths "View Identity" passes object_id (UUID);
+            -- IdentityTrust Inspect passes identity_id. Without OR the
+            -- majority of identities where identity_id differs from
+            -- object_id return 404.
+            WHERE (i.identity_id = %s OR i.object_id = %s) AND i.discovery_run_id = ANY(%s)
         """
-        detail_params = [identity_id, run_ids]
+        detail_params = [identity_id, identity_id, run_ids]
         mon_subs = _monitored_sub_ids(cursor, _org_id(), _connection_id())
         if mon_subs:
             detail_sql += ACTIVATED_SUB_FILTER_SQL
@@ -2841,7 +2928,12 @@ def get_risks():
     try:
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
-            return jsonify({"error": "No completed discovery runs found"}), 404
+            # AG-PILOT-DRYRUN (2026-06-08): empty state for fresh orgs
+            return jsonify({
+                'risks': [], 'count': 0,
+                'requires_setup': True,
+                'message': 'No discovery scan completed yet. Add a cloud connection to populate this view.',
+            })
 
         risk_sql = f"""
             SELECT i.identity_id, i.display_name, i.identity_type, i.identity_category, i.risk_level, i.risk_reasons
@@ -3408,7 +3500,16 @@ def get_drift_report(run_id: int):
 
 
 def get_latest_drift():
-    """Get the most recent drift report summary for the dashboard widget."""
+    """Get the most recent drift report summary for the dashboard widget.
+
+    V2.13 (2026-06-12) — DriftAnalysis page expects baseline_at, current_at,
+    and the new field aliases (added_identities, privilege_changes, ...).
+    Without baseline_at + current_at the hero card was stuck on
+    "Scan 1 of 2 complete" even after a second discovery run finished —
+    because hasSecondScan = !!drift?.current_at and current_at was never
+    sent. We now JOIN discovery_runs and emit both name styles so the new
+    page lights up and DashboardLegacy keeps working.
+    """
     db = _db()
     try:
         conn_id = _connection_id()
@@ -3416,8 +3517,50 @@ def get_latest_drift():
         if not report:
             return jsonify({"has_drift_data": False})
 
+        # Pull baseline / current timestamps from discovery_runs so the
+        # frontend can show "comparing baseline (X) to current scan (Y)".
+        baseline_at = None
+        current_at = None
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT completed_at FROM discovery_runs WHERE id = %s",
+                (report.get('current_run_id'),),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                current_at = row[0].isoformat()
+            if report.get('previous_run_id'):
+                cursor.execute(
+                    "SELECT completed_at FROM discovery_runs WHERE id = %s",
+                    (report.get('previous_run_id'),),
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    baseline_at = row[0].isoformat()
+            cursor.close()
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+
         report['created_at'] = report['created_at'].isoformat() if report.get('created_at') else None
         report['has_drift_data'] = True
+        report['baseline_at'] = baseline_at
+        report['current_at'] = current_at
+
+        # Frontend-aligned aliases (DriftAnalysis V2 uses these names).
+        # Backend storage still uses *_count for backwards compat with
+        # DashboardLegacy.
+        report['added_identities'] = report.get('new_identities_count', 0)
+        report['removed_identities'] = report.get('removed_identities_count', 0)
+        report['privilege_changes'] = report.get('permission_changes_count', 0)
+        report['role_changes'] = report.get('risk_changes_count', 0)
+        # No dedicated access_changes column yet; surface 0 honestly until a
+        # column lands. Don't synthesize.
+        report['access_changes'] = 0
+
         return jsonify(report)
     finally:
         db.close()
@@ -3905,6 +4048,13 @@ def save_app_settings():
         'p2_telemetry_enabled',
         'retention_signin_events_days', 'retention_workload_anomalies_days',
         'posture_target',
+        # AG-193 follow-up (2026-06-12): per-asset exposure defaults.
+        # Stored as plain integer dollar amounts. Fallback to IBM 2024
+        # baselines when unset; see get_dashboard_business_impact().
+        'exposure_phi_per_asset',
+        'exposure_pci_per_asset',
+        'exposure_pii_per_asset',
+        'exposure_ai_per_asset',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
@@ -4093,26 +4243,49 @@ def trigger_discovery():
         finally:
             admin_db.close()
 
+    # AG-PILOT-FIX-TRIGGER-500 (2026-06-08): real-pilot bug found —
+    #   1. `db` was referenced in _run's except branch BEFORE its line 4126
+    #      assignment ran. If the thread errored before main reached that
+    #      line, NameError → silent cleanup failure
+    #   2. _log() ran on the main thread AFTER thread.start() but could
+    #      raise an uncaught exception (no completed discovery_runs row
+    #      yet → _log activity insert may FK-error in some configs), and
+    #      that becomes the customer-visible 500
+    # Fix: log inside a try/except (best-effort), open db BEFORE thread
+    # (so _run closure captures a valid reference), and never let _log
+    # take down the response.
+    logger_local = logging.getLogger(__name__)
+
     def _run():
         try:
             trigger_manual_discovery(db_org_id=tid, org_name=tname,
                                      connection_id=conn_id)
         except Exception as e:
-            try: db.conn.rollback()
-            except Exception: pass
-            logging.getLogger(__name__).error(f"Manual discovery failed: {e}")
+            logger_local.error("Manual discovery thread failed: %s", str(e)[:200], exc_info=True)
 
+    try:
+        db = _db()
+        try:
+            msg = 'Manual discovery run triggered'
+            if conn_id:
+                msg += f' for connection {conn_id}'
+            try:
+                _log(db, 'discovery_triggered', msg)
+            except Exception as log_e:
+                logger_local.warning(
+                    "discovery_triggered activity log write failed (non-fatal): %s",
+                    str(log_e)[:120],
+                )
+        finally:
+            db.close()
+    except Exception as outer_e:
+        # Log endpoint failures shouldn't block the actual scan trigger
+        logger_local.error("trigger_discovery prelude failed: %s", str(outer_e)[:200])
+
+    # Spawn the actual scan AFTER the pre-log so the closure references
+    # an already-closed db won't matter (we don't touch db inside _run)
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-
-    db = _db()
-    try:
-        msg = 'Manual discovery run triggered'
-        if conn_id:
-            msg += f' for connection {conn_id}'
-        _log(db, 'discovery_triggered', msg)
-    finally:
-        db.close()
 
     msg = "Discovery run triggered."
     if conn_id:
@@ -5320,6 +5493,84 @@ def _derive_governance_state_from_row(row, privilege_tier):
     if privilege_tier <= 1 and activity == 'inactive':
         return 'Ungoverned'
     return 'Governed'
+
+
+def _compute_scope_breakdowns(cursor, identity_db_ids):
+    """Lock-V1.7 (2026-06-11) — bulk scope rollup for the identity list.
+
+    Returns a dict: identity_db_id -> {tenant, subscriptions, resource_groups,
+    resources, total, has_tenant}. Two SQL queries — Azure RBAC role_assignments
+    + Entra directory role_assignments. DISTINCT-counts the scope strings so
+    multiple roles at the same scope don't double-count.
+
+    Scope classification (Azure RBAC):
+      tenant         scope = '/' OR scope_type = 'tenant'
+      subscriptions  /subscriptions/<id>                          (no RG, no provider)
+      resource_groups /subscriptions/<id>/resourceGroups/<name>   (no provider)
+      resources      anything containing /providers/
+
+    Entra directory roles count as 1 tenant scope each (they are inherently
+    tenant-wide, no narrower scope exists in directory plane).
+    """
+    breakdowns = {db_id: {'tenant': 0, 'subscriptions': 0, 'resource_groups': 0,
+                          'resources': 0, 'total': 0, 'has_tenant': False}
+                  for db_id in identity_db_ids}
+    if not identity_db_ids:
+        return breakdowns
+
+    # Azure RBAC scope counts. SAVEPOINTs around each probe so a missing
+    # column / table failure on one source doesn't tank the whole list endpoint.
+    try:
+        cursor.execute("SAVEPOINT _scope_rbac_sp")
+        cursor.execute(r"""
+            SELECT
+              identity_db_id,
+              COUNT(DISTINCT CASE WHEN scope = '/' OR scope_type = 'tenant' THEN scope END) AS tenant_n,
+              COUNT(DISTINCT CASE WHEN scope ~ '^/subscriptions/[^/]+$' THEN scope END) AS sub_n,
+              COUNT(DISTINCT CASE WHEN scope ~ '^/subscriptions/[^/]+/resourceGroups/[^/]+$' THEN scope END) AS rg_n,
+              COUNT(DISTINCT CASE WHEN scope LIKE '%%/providers/%%' THEN scope END) AS res_n
+            FROM role_assignments
+            WHERE identity_db_id = ANY(%s)
+            GROUP BY identity_db_id
+        """, (identity_db_ids,))
+        for row in cursor.fetchall():
+            db_id, t, s, rg, r = row
+            if db_id in breakdowns:
+                breakdowns[db_id]['tenant'] += int(t or 0)
+                breakdowns[db_id]['subscriptions'] += int(s or 0)
+                breakdowns[db_id]['resource_groups'] += int(rg or 0)
+                breakdowns[db_id]['resources'] += int(r or 0)
+        cursor.execute("RELEASE SAVEPOINT _scope_rbac_sp")
+    except Exception:
+        try: cursor.execute("ROLLBACK TO SAVEPOINT _scope_rbac_sp")
+        except Exception: pass
+
+    # Entra directory roles — each distinct directory role is one tenant scope.
+    # Column name varies by schema vintage (role_definition_id is current,
+    # role_template_id was an earlier name); COALESCE on role_name handles both.
+    try:
+        cursor.execute("SAVEPOINT _scope_entra_sp")
+        cursor.execute("""
+            SELECT identity_db_id, COUNT(DISTINCT COALESCE(role_definition_id, role_name)) AS entra_n
+            FROM entra_role_assignments
+            WHERE identity_db_id = ANY(%s)
+            GROUP BY identity_db_id
+        """, (identity_db_ids,))
+        for row in cursor.fetchall():
+            db_id, c = row
+            if db_id in breakdowns and int(c or 0) > 0:
+                breakdowns[db_id]['tenant'] += int(c or 0)
+        cursor.execute("RELEASE SAVEPOINT _scope_entra_sp")
+    except Exception:
+        try: cursor.execute("ROLLBACK TO SAVEPOINT _scope_entra_sp")
+        except Exception: pass
+
+    # Finalize total + has_tenant flag.
+    for b in breakdowns.values():
+        b['total'] = b['tenant'] + b['subscriptions'] + b['resource_groups'] + b['resources']
+        b['has_tenant'] = b['tenant'] > 0
+
+    return breakdowns
 
 
 def _map_identity_row(row):
@@ -8412,6 +8663,199 @@ def get_compliance_intelligence():
         db.close()
 
 
+def get_dashboard_business_impact():
+    """
+    GET /api/dashboard/business-impact — Estimated Exposure breakdown for
+    the CISO Command Center.
+
+    Counts classified resources (PHI / PCI / PII) across the canonical
+    Azure resource tables, multiplies by industry-standard per-asset breach
+    cost defaults (IBM Cost of a Data Breach Report 2024), and returns the
+    rollup the dashboard renders as $ values.
+
+    AG-CISO-V4.2 (2026-06-10).
+    """
+    # IBM 2024 averages — used as fallback when a tenant hasn't
+    # overridden the per-asset cost in Settings → Exposure Defaults.
+    #
+    # AG-193 Sprint B (2026-06-13) — AI default dropped to 0.
+    # Peer correctly pointed out that a flat $1.4M-per-GPT line both
+    #   (a) can't survive "why is my dev GPT worth $1.4M?", and
+    #   (b) double-counts data exposure that already accrues to the
+    #       underlying PHI/PCI/PII resource the model can reach.
+    # The honest model: dollars attach to DATA. Models inherit
+    # attribution from the data they can reach (per-entity reach in
+    # the next Sprint B steps). Until that lands, AI contributes 0 to
+    # the headline total — and the per-asset default reflects it.
+    DEFAULTS = {
+        'PHI':      720_000,      # healthcare/PHI median
+        'PCI':    1_200_000,      # financial/PCI median
+        'PII':      540_000,
+        'AI':            0,       # reach-derived; flat multiplier deprecated
+    }
+
+    db = _db()
+    cursor = db.conn.cursor()
+
+    # AG-193 follow-up (2026-06-12) — read per-tenant overrides; fall
+    # back to IBM defaults when absent or non-numeric.
+    def _pos_int(raw, fallback):
+        try:
+            v = int(str(raw).strip())
+            return v if v > 0 else fallback
+        except (TypeError, ValueError):
+            return fallback
+    try:
+        org_settings = db.get_settings(organization_id=_org_id())
+    except Exception:
+        org_settings = {}
+    PHI_PER_ASSET       = _pos_int(org_settings.get('exposure_phi_per_asset'), DEFAULTS['PHI'])
+    PCI_PER_ASSET       = _pos_int(org_settings.get('exposure_pci_per_asset'), DEFAULTS['PCI'])
+    PII_PER_ASSET       = _pos_int(org_settings.get('exposure_pii_per_asset'), DEFAULTS['PII'])
+    AI_MODEL_PER_ASSET  = _pos_int(org_settings.get('exposure_ai_per_asset'),  DEFAULTS['AI'])
+    try:
+        run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
+        if not run_ids:
+            return jsonify({
+                'phi_assets': {'count': 0, 'value': 0},
+                'pci_assets': {'count': 0, 'value': 0},
+                'pii_assets': {'count': 0, 'value': 0},
+                'ai_models': {'count': 0, 'value': 0},
+                'total_exposure': 0,
+                'reduction_opportunity': 0,
+                'requires_setup': True,
+            })
+
+        # Aggregate classified resources.
+        # V2.13 (2026-06-12) — AG-193: include discovered_resources as a
+        # canonical source so Data Trust Zone classifications surface in
+        # the rollup. discovered_resources holds the generic ARM catch-all
+        # which is where scope_classifier writes most rows on tenants
+        # without storage/KV-specific tables populated.
+        classified = {'PHI': 0, 'PCI': 0, 'PII': 0}
+        for table in ('azure_storage_accounts', 'azure_key_vaults'):
+            try:
+                cursor.execute(f"""
+                    SELECT COALESCE(data_classification, 'NONE'), COUNT(*) FROM {table}
+                    WHERE discovery_run_id = ANY(%s)
+                    GROUP BY data_classification
+                """, (run_ids,))
+                for cls, cnt in cursor.fetchall():
+                    if cls in classified:
+                        classified[cls] += int(cnt or 0)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+        # discovered_resources is org-scoped (persists across runs; the
+        # scope_classifier writes rule_id provenance per row).
+        try:
+            cursor.execute("""
+                SELECT COALESCE(data_classification, 'NONE'), COUNT(*)
+                FROM discovered_resources
+                WHERE organization_id = %s
+                  AND data_classification IS NOT NULL
+                GROUP BY data_classification
+            """, (_org_id(),))
+            for cls, cnt in cursor.fetchall():
+                if cls in classified:
+                    classified[cls] += int(cnt or 0)
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+
+        # AI model count — canonical source is azure_ai_model_deployments
+        # (deployed inference endpoints). Falls back to agent_classifications
+        # count if the deployments table is missing or empty. SAVEPOINTs so
+        # one failed probe doesn't abort the outer transaction.
+        ai_count = 0
+        try:
+            cursor.execute("SAVEPOINT _ai_count_sp")
+            cursor.execute("""
+                SELECT COUNT(*) FROM azure_ai_model_deployments
+                WHERE discovery_run_id = ANY(%s)
+            """, (run_ids,))
+            ai_count = int(_scalar(cursor, 0) or 0)
+            cursor.execute("RELEASE SAVEPOINT _ai_count_sp")
+        except Exception:
+            try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_count_sp")
+            except Exception: pass
+
+        if ai_count == 0:
+            try:
+                cursor.execute("SAVEPOINT _ai_agents_fallback")
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT i.id) FROM identities i
+                    JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                    WHERE i.discovery_run_id = ANY(%s)
+                      AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+                """, (run_ids,))
+                ai_count = int(_scalar(cursor, 0) or 0)
+                cursor.execute("RELEASE SAVEPOINT _ai_agents_fallback")
+            except Exception:
+                try: cursor.execute("ROLLBACK TO SAVEPOINT _ai_agents_fallback")
+                except Exception: pass
+
+        phi_value = classified['PHI'] * PHI_PER_ASSET
+        pci_value = classified['PCI'] * PCI_PER_ASSET
+        pii_value = classified['PII'] * PII_PER_ASSET
+
+        # AG-193 Sprint B tightening (2026-06-13) — AI is ATTRIBUTION,
+        # not an additive dollar line. ai_value stays for back-compat
+        # but reads 0 unless the tenant has overridden the deprecated
+        # flat multiplier. The honest AI signal lives in ai_attribution.
+        ai_value = ai_count * AI_MODEL_PER_ASSET
+
+        ai_attribution = None
+        try:
+            from app.engines.discovery.reach_attributor import compute_ai_attribution_summary
+            ai_attribution = compute_ai_attribution_summary(db, _org_id())
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+
+        classified_total = classified['PHI'] + classified['PCI'] + classified['PII']
+        total = phi_value + pci_value + pii_value + ai_value
+
+        # Reduction opportunity heuristic: 25% of total can typically be
+        # eliminated by closing the top remediation set (industry defaults).
+        reduction = int(total * 0.25)
+
+        return jsonify({
+            'phi_assets': {'count': classified['PHI'], 'value': phi_value, 'per_asset': PHI_PER_ASSET},
+            'pci_assets': {'count': classified['PCI'], 'value': pci_value, 'per_asset': PCI_PER_ASSET},
+            'pii_assets': {'count': classified['PII'], 'value': pii_value, 'per_asset': PII_PER_ASSET},
+            # ai_models stays for back-compat. The drawer/UI should prefer
+            # ai_attribution (below) which is reach-derived and non-additive.
+            'ai_models':  {
+                'count': ai_count, 'value': ai_value, 'per_asset': AI_MODEL_PER_ASSET,
+                'with_reach_count':       (ai_attribution or {}).get('ai_with_reach_count', 0),
+                'attributable_exposure':  (ai_attribution or {}).get('attributable_exposure', 0),
+                'attributable_phi':       (ai_attribution or {}).get('attributable_phi', 0),
+                'attributable_pci':       (ai_attribution or {}).get('attributable_pci', 0),
+                'attributable_pii':       (ai_attribution or {}).get('attributable_pii', 0),
+            },
+            'ai_attribution': ai_attribution,
+            'total_exposure': total,
+            'reduction_opportunity': reduction,
+            'classified_data_count': classified_total,
+            'source': (
+                'Per-tenant overrides applied'
+                if any(org_settings.get(k) for k in (
+                    'exposure_phi_per_asset','exposure_pci_per_asset',
+                    'exposure_pii_per_asset','exposure_ai_per_asset'))
+                else 'IBM Cost of a Data Breach 2024 (defaults; overridable per tenant)'
+            ),
+            'overrides_active': bool(any(org_settings.get(k) for k in (
+                'exposure_phi_per_asset','exposure_pci_per_asset',
+                'exposure_pii_per_asset','exposure_ai_per_asset'))),
+        })
+    finally:
+        try: cursor.close()
+        except Exception: pass
+        try: db.close()
+        except Exception: pass
+
+
 def get_dashboard_posture():
     """
     Dashboard posture data: credential health, dormant counts, posture score,
@@ -8423,7 +8867,16 @@ def get_dashboard_posture():
     try:
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
-            return jsonify({"error": "No completed discovery runs found"}), 404
+            # AG-PILOT-DRYRUN (2026-06-08): empty state for fresh orgs
+            return jsonify({
+                'posture_score': 0, 'posture_label': 'No Data',
+                'identity_count': 0, 'credential_health': {},
+                'dormant_count': 0, 'previous_run': None,
+                'completed_at': None,
+                'band_breakdown': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0},
+                'requires_setup': True,
+                'message': 'No discovery scan completed yet. Add a cloud connection to populate this view.',
+            })
 
         # Live filtered count across all connection runs (excluding Microsoft SPNs)
         cursor.execute(f"""
@@ -9476,6 +9929,120 @@ def get_dashboard_posture():
                     'ai_reachable':  ai_band,
                     'nhi_reachable': nhi_band,
                 }
+            else:
+                # AG-PILOT-FIX-V2 (2026-06-08): real-pilot CISO wants a
+                # number, not a "classification pending" message. Compute
+                # a BASELINE estimate using:
+                #   - all discovered classified-eligible resources (storage/sql/cosmos)
+                #   - assume PII (lowest IBM 2023 tier — $165/record midpoint)
+                #   - baseline record count of 10,000 per resource when unknown
+                # Labeled explicitly as "baseline — refine by tagging" so
+                # the CISO knows it's not a precise figure but has a number
+                # to anchor the board conversation.
+                try:
+                    cursor.execute("""
+                        SELECT (
+                          SELECT COUNT(*) FROM azure_storage_accounts WHERE organization_id = %s
+                        ) + (
+                          SELECT COUNT(*) FROM azure_sql_databases WHERE organization_id = %s
+                        ) + (
+                          SELECT COUNT(*) FROM azure_cosmos_databases WHERE organization_id = %s
+                        ) AS total_resources
+                    """, (org_id, org_id, org_id))
+                    res_row = cursor.fetchone()
+                    total_resources = (res_row[0] if res_row else 0) or 0
+                except Exception:
+                    total_resources = 0
+
+                if total_resources > 0:
+                    # Baseline: 10K records/resource × IBM 2023 PII tier
+                    # ($148 low, $165 mid, $183 high per record)
+                    baseline_records = total_resources * 10_000
+                    baseline_low  = baseline_records * 148
+                    baseline_mid  = baseline_records * 165
+                    baseline_high = baseline_records * 183
+                    from app.engines.scoring.breach_cost import format_dollar_short
+                    business_impact['estimated_exposure'] = {
+                        'low':  baseline_low,
+                        'mid':  baseline_mid,
+                        'high': baseline_high,
+                        'low_display':  format_dollar_short(baseline_low),
+                        'mid_display':  format_dollar_short(baseline_mid),
+                        'high_display': format_dollar_short(baseline_high),
+                        'total_records': baseline_records,
+                        'scope': 'baseline',
+                        'scope_label': f'Baseline estimate — {total_resources} resources (assumes PII tier)',
+                        'classified_resource_count': total_resources,
+                        'is_baseline': True,
+                    }
+                    business_impact['exposure_by_scope'] = None
+                    business_impact['exposure_status'] = 'baseline_estimate'
+                    business_impact['exposure_message'] = (
+                        f'Baseline estimate using IBM 2023 PII per-record cost ($165 mid). '
+                        f'Tag your {total_resources} classified-eligible resources '
+                        f'(PHI / PCI / Financial) for a precise tenant-specific figure.'
+                    )
+                else:
+                    # AG-PILOT-FIX-V3 (2026-06-08): customer tenant had 0
+                    # classified-eligible resources discovered, but CISO
+                    # still wants a number for the board. Fall back to an
+                    # IBM 2023 industry-baseline scaled by identity count.
+                    # Defensible methodology: IBM Cost of a Data Breach
+                    # Report 2023 — US average $9.48M, global average $4.45M.
+                    # Scale to tenant size using a per-1000-identities ratio
+                    # so larger tenants show proportionally larger exposure.
+                    try:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM identities
+                            WHERE organization_id = %s AND deleted_at IS NULL
+                              AND discovery_run_id = ANY(%s)
+                              AND NOT COALESCE(is_microsoft_system, false)
+                        """, (org_id, run_ids))
+                        identity_row = cursor.fetchone()
+                        identity_count = (identity_row[0] if identity_row else 0) or 0
+                    except Exception:
+                        identity_count = 0
+
+                    if identity_count > 0:
+                        # IBM 2023 baseline scaled by identity count
+                        # ($4.45M global average for ~1000-identity org)
+                        IBM_2023_BASELINE_USD = 4_450_000
+                        scale = max(1.0, identity_count / 1000.0)
+                        baseline_mid  = int(IBM_2023_BASELINE_USD * scale)
+                        baseline_low  = int(baseline_mid * 0.75)
+                        baseline_high = int(baseline_mid * 1.50)
+
+                        from app.engines.scoring.breach_cost import format_dollar_short
+                        business_impact['estimated_exposure'] = {
+                            'low':  baseline_low,
+                            'mid':  baseline_mid,
+                            'high': baseline_high,
+                            'low_display':  format_dollar_short(baseline_low),
+                            'mid_display':  format_dollar_short(baseline_mid),
+                            'high_display': format_dollar_short(baseline_high),
+                            'total_records': 0,
+                            'scope': 'identity_baseline',
+                            'scope_label': f'Industry baseline · {identity_count:,} identities',
+                            'classified_resource_count': 0,
+                            'is_baseline': True,
+                        }
+                        business_impact['exposure_by_scope'] = None
+                        business_impact['exposure_status'] = 'identity_baseline'
+                        business_impact['exposure_message'] = (
+                            f'Industry baseline — IBM 2023 Cost of a Data Breach Report '
+                            f'($4.45M global avg) scaled to your {identity_count:,} identities. '
+                            f'Tag sensitive resources (PHI / PCI / Financial) for a precise '
+                            f'tenant-specific figure based on actual classified data.'
+                        )
+                    else:
+                        # Truly empty tenant — no identities + no resources
+                        business_impact['estimated_exposure'] = None
+                        business_impact['exposure_by_scope'] = None
+                        business_impact['exposure_status'] = 'no_data_yet'
+                        business_impact['exposure_message'] = (
+                            'No identities or classified-eligible resources discovered yet. '
+                            'Breach exposure shows here once your first scan completes.'
+                        )
         except Exception as _exp_err:
             logger.debug("business_impact exposure enrichment skipped: %s", _exp_err)
 
@@ -16229,6 +16796,170 @@ def query_identities():
         db.close()
 
 
+def get_identity_category_summary():
+    """GET /api/identities/category-summary — NHI Inventory hero counts.
+
+    AG-PHASE1+4 (2026-06-09): per-category identity counts the
+    SailPoint-killer numbers page renders. One round-trip computes
+    everything via grouping + per-bucket aggregates.
+
+    Returns:
+      {
+        service_principal: N,
+        managed_identity_system: N,
+        managed_identity_user: N,
+        workload: N,
+        ai_agent: N,
+        ci_cd: N,
+        unowned_nhi: N,
+        dormant_nhi: N,
+        critical_nhi: N,
+        expired_secrets_nhi: N,
+        federated_only_nhi: N,
+      }
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+        run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+        if not run_ids:
+            cursor.close()
+            return jsonify({
+                'service_principal': 0, 'managed_identity_system': 0,
+                'managed_identity_user': 0, 'workload': 0, 'ai_agent': 0,
+                'ci_cd': 0, 'unowned_nhi': 0, 'dormant_nhi': 0,
+                'critical_nhi': 0, 'expired_secrets_nhi': 0,
+                'federated_only_nhi': 0,
+            })
+
+        NHI_CATEGORIES = (
+            'service_principal',
+            'managed_identity_system',
+            'managed_identity_user',
+            'workload',
+        )
+
+        # ── Category counts ──
+        cursor.execute("""
+            SELECT identity_category, COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL
+              AND NOT COALESCE(is_microsoft_system, false)
+            GROUP BY identity_category
+        """, (org_id, run_ids))
+        by_cat = {r[0]: int(r[1] or 0) for r in cursor.fetchall()}
+
+        # ── AI agent count via agent_classifications join ──
+        ai_count = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.id) FROM identities i
+                JOIN agent_classifications ac ON ac.identity_db_id = i.id
+                WHERE i.organization_id = %s AND i.discovery_run_id = ANY(%s)
+                  AND i.deleted_at IS NULL
+                  AND NOT COALESCE(i.is_microsoft_system, false)
+                  AND ac.agent_identity_type IN ('ai_agent', 'possible_ai_agent')
+            """, (org_id, run_ids))
+            row = cursor.fetchone()
+            ai_count = int((row[0] if row else 0) or 0)
+        except Exception:
+            pass
+
+        # ── CI/CD identities — detect via federated_issuer_types ──
+        ci_cd = 0
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) FROM identities
+                WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+                  AND deleted_at IS NULL
+                  AND federated_issuer_types::text ILIKE ANY (ARRAY[
+                    '%%github_actions%%', '%%azure_devops%%',
+                    '%%terraform_cloud%%', '%%gitlab%%', '%%jenkins%%'
+                  ])
+            """, (org_id, run_ids))
+            row = cursor.fetchone()
+            ci_cd = int((row[0] if row else 0) or 0)
+        except Exception:
+            pass
+
+        # ── NHI hygiene aggregates ──
+        nhi_cats_arr = list(NHI_CATEGORIES)
+
+        # unowned: SPN with no owner records
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND (COALESCE(owner_count, 0) = 0
+                   OR owner_display_name IS NULL OR owner_display_name = '')
+        """, (org_id, run_ids, nhi_cats_arr))
+        unowned_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # dormant: no activity in 90d
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND (last_activity_date IS NULL OR last_activity_date < NOW() - INTERVAL '90 days')
+        """, (org_id, run_ids, nhi_cats_arr))
+        dormant_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # critical risk level
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND risk_level = 'critical'
+        """, (org_id, run_ids, nhi_cats_arr))
+        critical_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # expired secrets
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND credential_expiration IS NOT NULL
+              AND credential_expiration < NOW()
+        """, (org_id, run_ids, nhi_cats_arr))
+        expired_secrets_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        # federated only: has federated creds + no password secrets
+        cursor.execute("""
+            SELECT COUNT(*) FROM identities
+            WHERE organization_id = %s AND discovery_run_id = ANY(%s)
+              AND deleted_at IS NULL AND NOT COALESCE(is_microsoft_system, false)
+              AND identity_category = ANY(%s)
+              AND COALESCE(has_federated_credentials, false) = true
+              AND COALESCE(credential_count, 0) = 0
+        """, (org_id, run_ids, nhi_cats_arr))
+        federated_only_nhi = int(((cursor.fetchone() or (0,))[0]) or 0)
+
+        cursor.close()
+        return jsonify({
+            'service_principal':        by_cat.get('service_principal', 0),
+            'managed_identity_system':  by_cat.get('managed_identity_system', 0),
+            'managed_identity_user':    by_cat.get('managed_identity_user', 0),
+            'workload':                 by_cat.get('workload', 0),
+            'ai_agent':                 ai_count,
+            'ci_cd':                    ci_cd,
+            'unowned_nhi':              unowned_nhi,
+            'dormant_nhi':              dormant_nhi,
+            'critical_nhi':             critical_nhi,
+            'expired_secrets_nhi':      expired_secrets_nhi,
+            'federated_only_nhi':       federated_only_nhi,
+        })
+    except Exception as e:
+        logger.error("get_identity_category_summary failed: %s", e, exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
 def get_query_fields():
     """GET /api/identities/query/fields — Return queryable field definitions."""
     all_fields = {}
@@ -16408,24 +17139,34 @@ def get_dashboard_jml_snapshot():
     AG-JML (2026-06-01): CIEM-style observability of the JML lifecycle
     WITHOUT becoming an IGA tool. Composes existing signals (no new
     detection beyond mover_stale_access) into the joiner/mover/leaver
-    framing every auditor recognizes:
+    framing every auditor recognizes.
 
-      - Joiners: identities created in the last 30 days with privileged
-        role assignments (the "joiner-with-Owner" risk pattern).
-      - Movers: open mover_stale_access anomalies (department/title
-        changed AND prior privileged roles still attached).
-      - Leavers: ghost_identity anomalies (disabled in cloud, role
-        assignments retained) — pure leaver tail.
-
-    Returns counts + top-N samples per bucket so a dashboard tile can
-    render "12 joiners · 3 movers · 5 leavers" with deep-links into
-    /identities filtered views.
+    AG-PHASE3 (2026-06-09): scope-aware via ?type= (human|nhi|ai|all).
+    Same engine, three first-class views — same pattern as Identity Trust.
     """
     db = _db()
     try:
         cursor = db.conn.cursor()
         org_id = _org_id()
         run_ids = _latest_run_ids(cursor, org_id, _connection_id())
+
+        # AG-PHASE3: identity scope filter
+        scope = (request.args.get('type') or request.args.get('scope') or 'all').lower().strip()
+        if scope not in ('human', 'nhi', 'ai', 'all'):
+            scope = 'all'
+        if scope == 'human':
+            cat_clause = "identity_category IN ('human_user', 'guest')"
+        elif scope == 'nhi':
+            cat_clause = ("identity_category IN ('service_principal',"
+                          "'managed_identity_system','managed_identity_user','workload')")
+        elif scope == 'ai':
+            # Approximate AI cohort using identity_type_normalized; richer
+            # mapping (via agent_classifications) handled by /api/dashboard/ai-jml-snapshot
+            cat_clause = ("(identity_type_normalized = 'ai_agent' "
+                          "OR identity_category = 'ai_agent')")
+        else:
+            cat_clause = "identity_category IS NOT NULL"
+
         if not run_ids:
             cursor.close()
             return jsonify({
@@ -16433,11 +17174,12 @@ def get_dashboard_jml_snapshot():
                 'movers':  {'count': 0, 'top': []},
                 'leavers': {'count': 0, 'top': []},
                 'reason': 'no_completed_run',
+                'identity_scope': scope,
             })
 
         # Joiners: created in last 30 days with critical/high risk
         # (i.e. they came in with elevated access — joiner-risk pattern).
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT identity_id, display_name, risk_level, created_datetime
               FROM identities
              WHERE discovery_run_id = ANY(%s)
@@ -16445,6 +17187,7 @@ def get_dashboard_jml_snapshot():
                AND created_datetime >= NOW() - INTERVAL '30 days'
                AND risk_level IN ('critical', 'high')
                AND COALESCE(is_microsoft_system, false) = false
+               AND {cat_clause}
              ORDER BY created_datetime DESC NULLS LAST
              LIMIT 5
         """, (run_ids, org_id))
@@ -16463,7 +17206,8 @@ def get_dashboard_jml_snapshot():
                AND created_datetime >= NOW() - INTERVAL '30 days'
                AND risk_level IN ('critical', 'high')
                AND COALESCE(is_microsoft_system, false) = false
-        """, (run_ids, org_id))
+               AND {cat_clause}
+        """.replace("{cat_clause}", cat_clause), (run_ids, org_id))
         joiner_count = int(cursor.fetchone()[0] or 0)
 
         # Movers: open mover_stale_access anomalies — DISTINCT identities,
@@ -16507,7 +17251,7 @@ def get_dashboard_jml_snapshot():
         # the CISO dashboard tile + this drill-down to agree, count UNIQUE
         # disabled-but-privileged identities in the latest snapshot — the
         # same definition the CISO "ghost accounts" metric uses.
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT i.identity_id, i.display_name, 'critical' AS severity,
                    CONCAT('Ghost identity: ', i.display_name, ' (disabled) retains role(s)') AS title,
                    i.created_datetime AS created_at
@@ -16519,6 +17263,7 @@ def get_dashboard_jml_snapshot():
                     EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                     OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
                )
+               AND {cat_clause}
              ORDER BY i.created_datetime DESC NULLS LAST
              LIMIT 5
         """, (run_ids, org_id))
@@ -16532,7 +17277,7 @@ def get_dashboard_jml_snapshot():
             }
             for r in cursor.fetchall()
         ]
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT count(DISTINCT i.identity_id) FROM identities i
              WHERE i.discovery_run_id = ANY(%s)
                AND i.organization_id = %s
@@ -16541,6 +17286,7 @@ def get_dashboard_jml_snapshot():
                     EXISTS (SELECT 1 FROM role_assignments ra WHERE ra.identity_db_id = i.id)
                     OR EXISTS (SELECT 1 FROM entra_role_assignments era WHERE era.identity_db_id = i.id)
                )
+               AND {cat_clause}
         """, (run_ids, org_id))
         leaver_count = int(cursor.fetchone()[0] or 0)
 
@@ -16549,6 +17295,7 @@ def get_dashboard_jml_snapshot():
             'joiners': {'count': joiner_count, 'top': joiner_top},
             'movers':  {'count': mover_count,  'top': mover_top},
             'leavers': {'count': leaver_count, 'top': leaver_top},
+            'identity_scope': scope,
         })
     except Exception as e:
         logger.warning("get_dashboard_jml_snapshot error: %s", e)
@@ -20316,7 +21063,11 @@ def test_client_connection():
                                                last_test_status='success',
                                                status='connected')
 
-                    # Insert discovered subscriptions into cloud_subscriptions
+                    # AG-PILOT-DO-NOT-AUTO-ACTIVATE (2026-06-08):
+                    # Reverted auto-activate per founder direction.
+                    # Customer activates subs explicitly via the wizard
+                    # Subscriptions step or via the Subscriptions page —
+                    # they pay per monitored sub and the choice is theirs.
                     cursor = db.conn.cursor()
                     for s in subs:
                         cursor.execute("""
@@ -20331,7 +21082,10 @@ def test_client_connection():
                         """, (tid, s['id'], s['name'], connection_id))
                     cursor.close()
                     db._commit()
-                    logger.info("Inserted %d Azure subscription(s) into cloud_subscriptions for org %s", len(subs), tid)
+                    logger.info(
+                        "Inserted %d Azure subscription(s) for org %s (status=discovered — customer chooses)",
+                        len(subs), tid,
+                    )
                 finally:
                     db.close()
 
@@ -23497,7 +24251,12 @@ def get_spn_stats():
         """, params)
         by_activity = {r['act']: r['c'] for r in cursor.fetchall()}
 
-        # Blast radius — join role_assignments to compute (custom only)
+        # Blast radius — join role_assignments to compute (custom only).
+        # Pilot-readiness fix (2026-06-11): this query only uses the first 2
+        # placeholders (run_ids + cats). When mon_subs is truthy the outer
+        # `params` list has 5 entries; passing all 5 to a 2-placeholder query
+        # raised "not all arguments converted during string formatting" and
+        # 500'd the /api/spns/stats endpoint.
         cursor.execute(f"""
             SELECT i.id,
                    ARRAY_AGG(DISTINCT ra.role_name) FILTER (WHERE ra.role_name IS NOT NULL) as role_names,
@@ -23508,7 +24267,7 @@ def get_spn_stats():
             WHERE i.discovery_run_id = ANY(%s) AND i.identity_category IN %s
             {HIDE_MICROSOFT_SQL}
             GROUP BY i.id
-        """, params)
+        """, params[:2])
         blast_counts = {'high': 0, 'medium': 0, 'low': 0, 'none': 0}
         for row in cursor.fetchall():
             roles_list = []
@@ -24882,10 +25641,14 @@ def get_identity_federated_credentials(identity_id: str):
     federated section without paying for the full lineage payload.
     Returns the credentials list + per-credential risk posture +
     a top-level summary suitable for a CISO-facing card.
+
+    AG-PILOT-FIX (2026-06-08): real-pilot 500 — code used db.cursor()
+    but Database has no top-level cursor() method. Replaced with
+    db.conn.cursor() to match the actual API.
     """
     db = Database(_tenant_id())
     try:
-        cursor = db.cursor()
+        cursor = db.conn.cursor(cursor_factory=RealDictCursor)
         run_ids = _latest_run_ids(cursor, _org_id())
         if not run_ids:
             return jsonify({
@@ -24923,7 +25686,10 @@ def get_identity_federated_credentials(identity_id: str):
                 WHERE fc.identity_db_id = %s
                 ORDER BY fc.name
             """, (db_id,))
-            for r in cursor.fetchall():
+            rows_fetched = cursor.fetchall()
+            logger.info("[federated-credentials] db_id=%s rows_fetched=%d flag=%s count=%s",
+                        db_id, len(rows_fetched), flag, count)
+            for r in rows_fetched:
                 aud = r['audiences'] if isinstance(r['audiences'], list) else []
                 risk = _classify_federated_risk(r['issuer'], r['subject'], aud)
                 creds.append({
@@ -24941,7 +25707,12 @@ def get_identity_federated_credentials(identity_id: str):
                 col = r.get('collected_at')
                 if col and (last_collected is None or col > last_collected):
                     last_collected = col
-        except Exception:
+        except Exception as _fed_err:
+            # AG-PILOT-FED-CREDS-LOGGING (2026-06-09): the silent rollback
+            # was hiding the real cause of "credentials: []" even when DB
+            # has rows. Log it so we can see why.
+            logger.warning("[federated-credentials] query failed for db_id=%s: %s",
+                           db_id, _fed_err, exc_info=True)
             cursor.connection.rollback()
 
         # Fallback: legacy credentials table.
@@ -26469,6 +27240,104 @@ def get_identity_timeline(identity_id):
             except Exception:
                 db._rollback()
 
+        # AG-PILOT-TIMELINE-GRANT-HISTORY (2026-06-09): timeline was missing
+        # the architectural events that define an identity's history.
+        # Customer (Jason Collins) has had Global Admin "forever" — but
+        # timeline only showed recent findings. Add:
+        #   - Azure RBAC role grants (role_assignments.created_on)
+        #   - Entra directory role grants (entra_role_assignments.assigned_at)
+        #   - Credential creation (credentials.start_datetime)
+        #   - Federated credential add (federated_credentials.created_datetime)
+        # These come straight from the architecture — no logs needed.
+
+        # 7. Azure RBAC role grants
+        if not event_types or 'role_granted' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT created_on, role_name, scope
+                    FROM role_assignments
+                    WHERE identity_db_id = %s AND created_on IS NOT NULL
+                    ORDER BY created_on DESC LIMIT 50
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    role_name = r[1] or 'role'
+                    scope = (r[2] or '').rsplit('/', 1)[-1] or '/'
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'role_granted',
+                        'severity': 'info',
+                        'title': f"Granted {role_name}",
+                        'description': f"Role assignment created at scope {r[2]}" if r[2] else "Role assignment created",
+                        'metadata': {'role_name': r[1], 'scope': r[2], 'scope_label': scope},
+                    })
+            except Exception:
+                db._rollback()
+
+        # 8. Entra directory role grants
+        if not event_types or 'role_granted' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT assigned_at, role_name, role_template_id
+                    FROM entra_role_assignments
+                    WHERE identity_db_id = %s AND assigned_at IS NOT NULL
+                    ORDER BY assigned_at DESC LIMIT 50
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'role_granted',
+                        'severity': 'high' if r[1] and 'admin' in (r[1] or '').lower() else 'info',
+                        'title': f"Granted Entra role: {r[1] or 'directory role'}",
+                        'description': "Directory role assignment created in Entra ID",
+                        'metadata': {'role_name': r[1], 'role_template_id': r[2], 'source': 'entra'},
+                    })
+            except Exception:
+                db._rollback()
+
+        # 9. Credential creation
+        if not event_types or 'credential_created' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT start_datetime, display_name, credential_type, end_datetime
+                    FROM credentials
+                    WHERE identity_db_id = %s AND start_datetime IS NOT NULL
+                    ORDER BY start_datetime DESC LIMIT 25
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    label = r[1] or (r[2] or 'credential')
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'credential_created',
+                        'severity': 'info',
+                        'title': f"Credential added: {label}",
+                        'description': (f"Credential type: {r[2] or 'unknown'}"
+                                        + (f". Expires {r[3].isoformat()}" if r[3] else "")),
+                        'metadata': {'display_name': r[1], 'credential_type': r[2]},
+                    })
+            except Exception:
+                db._rollback()
+
+        # 10. Federated credential added
+        if not event_types or 'federated_credential_added' in event_types:
+            try:
+                cursor.execute("""
+                    SELECT collected_at, name, issuer, subject
+                    FROM federated_credentials
+                    WHERE identity_db_id = %s
+                    ORDER BY collected_at DESC LIMIT 25
+                """, (db_id,))
+                for r in cursor.fetchall():
+                    events.append({
+                        'timestamp': r[0].isoformat() if r[0] else None,
+                        'event_type': 'federated_credential_added',
+                        'severity': 'high',
+                        'title': f"Federated credential: {r[1] or 'unnamed'}",
+                        'description': f"Issuer: {r[2] or 'unknown'} · Subject: {r[3] or 'unknown'}",
+                        'metadata': {'name': r[1], 'issuer': r[2], 'subject': r[3]},
+                    })
+            except Exception:
+                db._rollback()
+
         cursor.close()
 
         # Apply date filters
@@ -27344,13 +28213,59 @@ def get_subscriptions_stats():
 
 
 def activate_subscription():
-    """POST /api/subscriptions/activate — activate a subscription for monitoring."""
+    """POST /api/subscriptions/activate — activate one or more subscriptions for monitoring.
+
+    Accepts either:
+      - {'id': <db_row_id>}  (legacy single-sub mode)
+      - {'account_ids': ['<azure_sub_uuid>', ...]}  (AG-PILOT-WIZARD-SUBS:
+        bulk mode used by the onboarding wizard's Subscriptions step)
+    """
     db = _db()
     try:
         data = request.get_json(silent=True) or {}
         sub_id = data.get('id')
+        account_ids = data.get('account_ids')
+
+        # AG-PILOT-WIZARD-SUBS: bulk activation by account_id (Azure sub UUIDs)
+        if account_ids and isinstance(account_ids, list):
+            tid = _org_id()
+            user = getattr(g, 'current_user', None)
+            user_id = user.get('id') if user else None
+            activated = 0
+            failed_ids = []
+            cursor = db.conn.cursor()
+            try:
+                # Resolve account_ids → DB row ids for the current org
+                cursor.execute("""
+                    SELECT id, account_id FROM cloud_subscriptions
+                    WHERE organization_id = %s AND account_id = ANY(%s)
+                      AND COALESCE(deleted, FALSE) = FALSE
+                """, (tid, account_ids))
+                rows = cursor.fetchall()
+                for row in rows:
+                    row_id, acc_id = row[0], row[1]
+                    try:
+                        result = db.activate_cloud_subscription(row_id, user_id, organization_id=tid)
+                        if result:
+                            activated += 1
+                        else:
+                            failed_ids.append(acc_id)
+                    except Exception as e:
+                        logger.warning("Failed to activate sub %s: %s", acc_id, str(e)[:80])
+                        failed_ids.append(acc_id)
+            finally:
+                cursor.close()
+            _log(db, 'subscription_activated',
+                 f'Wizard bulk-activated {activated} subscription(s)',
+                 {'account_ids': account_ids, 'activated': activated, 'failed': failed_ids})
+            return jsonify({
+                'activated': activated,
+                'failed': failed_ids,
+                'total_requested': len(account_ids),
+            })
+
         if not sub_id:
-            return jsonify({'error': 'Subscription id is required'}), 400
+            return jsonify({'error': 'Subscription id or account_ids list is required'}), 400
 
         tid = _org_id()
 
@@ -30612,7 +31527,7 @@ def get_correlation_accounts():
                 'is_zombie': (not l['enabled'] or l['deleted_at'] is not None) and is_zombie,
                 'risk_score': l['risk_score'],
                 'risk_level': l['risk_level'],
-                'privilege_tier': f"T{l['tier']}" if l['tier'] is not None else 'T3',
+                'privilege_tier': f"T{l['privilege_tier']}" if l['privilege_tier'] is not None else 'T3',
                 'link_method': l['link_method'],
                 'link_confidence': l['link_confidence'],
                 'verified': l['verified'],
@@ -34312,6 +35227,33 @@ def get_attack_paths_list():
             conditions.append("ap.source_entity_type = %s")
             params.append(source_entity_type)
 
+        # AG-PHASE5 (2026-06-09): source_type groups multiple
+        # source_entity_type values for the per-identity-type pages.
+        # nhi = service_principal + managed_identity_system/user + workload
+        # human = human_user + guest
+        # ai = ai_agent + possible_ai_agent
+        # cicd = federated workload identities (GitHub Actions, Terraform Cloud, ADO)
+        source_type = (request.args.get('source_type') or '').strip().lower()
+        if source_type == 'nhi':
+            conditions.append("ap.source_entity_type IN ('service_principal','managed_identity_system','managed_identity_user','workload','ai_agent')")
+        elif source_type == 'human':
+            conditions.append("ap.source_entity_type IN ('human_user','guest')")
+        elif source_type == 'ai':
+            conditions.append("ap.source_entity_type IN ('ai_agent','possible_ai_agent')")
+        elif source_type == 'cicd':
+            # Match identities flagged as CI/CD via federated_issuer_types
+            conditions.append("""
+                ap.source_entity_id IN (
+                  SELECT identity_id FROM identities
+                   WHERE organization_id = %s
+                     AND federated_issuer_types::text ILIKE ANY (ARRAY[
+                       '%%github_actions%%', '%%azure_devops%%',
+                       '%%terraform_cloud%%', '%%gitlab%%', '%%jenkins%%'
+                     ])
+                )
+            """)
+            params.append(org_id)
+
         where = "WHERE " + " AND ".join(conditions)
 
         cursor.execute(f"""
@@ -34405,8 +35347,14 @@ def get_identity_persisted_attack_paths(identity_id):
             cursor.close()
             return jsonify({'paths': [], 'count': 0, 'identity_id': identity_id})
 
+        # AG-PILOT-ATTACK-PATHS-DRAWER (2026-06-08): 70% of real-pilot
+        # identities have identity_id ≠ object_id. attack_paths.source_entity_id
+        # is populated with object_id, never identity_id. So we must look up
+        # the row's object_id and pass that to the match query — otherwise
+        # the per-identity drawer is empty even though /attack-paths shows
+        # paths for the same identity.
         cursor.execute("""
-            SELECT id FROM identities
+            SELECT id, object_id FROM identities
             WHERE identity_id = %s AND discovery_run_id = ANY(%s)
             ORDER BY id DESC LIMIT 1
         """, (identity_id, run_ids))
@@ -34416,7 +35364,9 @@ def get_identity_persisted_attack_paths(identity_id):
             return jsonify({'paths': [], 'count': 0, 'identity_id': identity_id})
 
         db_id = row['id']
-        paths = db.get_attack_paths_for_identity(db_id, identity_id_str=identity_id)
+        object_id = row.get('object_id') or identity_id
+        # Pass object_id as the source_entity_id match key (NOT identity_id)
+        paths = db.get_attack_paths_for_identity(db_id, identity_id_str=object_id)
         cursor.close()
         return jsonify({'paths': paths, 'count': len(paths), 'identity_id': identity_id})
     finally:
@@ -41580,6 +42530,14 @@ def get_ai_agents_enriched():
             params.append(platform)
 
         cursor = db.conn.cursor()
+        # AG-PILOT-AI-INVENTORY-XORG (2026-06-08): real-pilot regression —
+        # the AI Inventory list query had no org filter, so it returned
+        # identities across all tenants (demo org 9 included). When the
+        # customer clicked one of those identities the per-identity
+        # investigate endpoint correctly scoped to THEIR org and 404'd.
+        org_id = _org_id()
+        org_filter_sql = " AND i.organization_id = %s "
+        org_params = [org_id]
 
         # Count
         cursor.execute(f"""
@@ -41588,11 +42546,12 @@ def get_ai_agents_enriched():
                 FROM identities i
                 JOIN agent_classifications ac ON ac.identity_db_id = i.id
                 WHERE {type_filter}{platform_filter}
+                  {org_filter_sql}
                   AND NOT COALESCE(i.is_microsoft_system, false)
                   AND i.deleted_at IS NULL
                 ORDER BY i.identity_id, i.discovery_run_id DESC
             ) deduped
-        """, params)
+        """, params + org_params)
         total = _scalar(cursor, 0)
 
         offset = (page - 1) * per_page
@@ -41622,13 +42581,14 @@ def get_ai_agents_enriched():
                 FROM identities i
                 JOIN agent_classifications ac ON ac.identity_db_id = i.id
                 WHERE {type_filter}{platform_filter}
+                  {org_filter_sql}
                   AND NOT COALESCE(i.is_microsoft_system, false)
                   AND i.deleted_at IS NULL
                 ORDER BY i.identity_id, i.discovery_run_id DESC
             ) deduped
             ORDER BY risk_score DESC NULLS LAST
             LIMIT %s OFFSET %s
-        """, params + [per_page, offset])
+        """, params + org_params + [per_page, offset])
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
@@ -41668,6 +42628,62 @@ def get_ai_agents_enriched():
                 except Exception:
                     pass
 
+        # AG-PILOT-AI-AGENTS-MODELS (2026-06-09): customer asked to see
+        # WHICH model each identity has access to (gpt-4, gpt-4o-mini,
+        # claude, etc.) — not just the access level. Join identity role
+        # scopes to azure_ai_model_deployments via the Cognitive Services
+        # account resource_id. An identity reaches a deployment when its
+        # role scope is the deployment's account_resource_id OR an
+        # ancestor (subscription / RG / MG). Best-effort.
+        # AG-PILOT-AI-AGENTS-MODELS-V2 (2026-06-09): track verification
+        # state so the UI can distinguish (a) "no deployments discovered
+        # in this tenant yet" (model_access is unverified) from (b)
+        # "deployments exist but none match this identity's scope" (the
+        # role-name-pattern model_access may be a false positive).
+        models_by_id = {}
+        org_has_deployments = False
+        try:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM azure_ai_model_deployments
+                     WHERE organization_id = %s LIMIT 1
+                )
+            """, (org_id,))
+            r = cursor.fetchone()
+            org_has_deployments = bool(r[0]) if r else False
+        except Exception:
+            org_has_deployments = False
+        if db_ids:
+            try:
+                cursor.execute("SAVEPOINT _enriched_models")
+                cursor.execute("""
+                    WITH agent_scopes AS (
+                      SELECT DISTINCT ra.identity_db_id, LOWER(ra.scope) AS scope
+                        FROM role_assignments ra
+                       WHERE ra.identity_db_id = ANY(%s)
+                         AND ra.scope IS NOT NULL
+                    )
+                    SELECT s.identity_db_id, d.model_name, d.model_format
+                      FROM agent_scopes s
+                      JOIN azure_ai_model_deployments d
+                        ON  LOWER(d.account_resource_id) = s.scope
+                         OR LOWER(d.account_resource_id) LIKE s.scope || '/%%'
+                """, (db_ids,))
+                for r in cursor.fetchall():
+                    iid = id_map.get(r[0], str(r[0]))
+                    if iid not in models_by_id:
+                        models_by_id[iid] = []
+                    label = r[1] or 'unknown'
+                    if r[2] and r[2].lower() != 'openai':
+                        label = f"{label} ({r[2]})"
+                    if label not in models_by_id[iid]:
+                        models_by_id[iid].append(label)
+                cursor.execute("RELEASE SAVEPOINT _enriched_models")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT _enriched_models")
+                except Exception:
+                    pass
         cursor.close()
 
         items = []
@@ -41722,6 +42738,27 @@ def get_ai_agents_enriched():
             # AG-162: expose role names so frontend can filter by role
             # (e.g., click "Contributor" in AI Access → filter to agents holding Contributor).
             item['role_names'] = sorted({r['role_name'] for r in roles if r.get('role_name')})
+
+            # AG-PILOT-AI-AGENTS-MODELS (2026-06-09): which actual AI models
+            # this identity reaches via RBAC. Sorted so display is stable.
+            item['models'] = sorted(models_by_id.get(identity_id, []))
+
+            # AG-PILOT-AI-AGENTS-MODELS-V2 (2026-06-09): verification state.
+            # 'verified'   → models found that match identity's scopes
+            # 'no_match'   → deployments exist org-wide but none under
+            #                this identity's scopes (model_access from
+            #                role NAME is suspect — likely false positive)
+            # 'pending'    → discovery hasn't populated deployments yet;
+            #                model_access cannot be verified
+            # 'n/a'        → identity claims no model access either way
+            if access_levels['model_access'] in ('none', None, ''):
+                item['model_access_verification'] = 'n/a'
+            elif item['models']:
+                item['model_access_verification'] = 'verified'
+            elif org_has_deployments:
+                item['model_access_verification'] = 'no_match'
+            else:
+                item['model_access_verification'] = 'pending'
 
             # Remove internal db_id from response
             item.pop('db_id', None)
@@ -43531,12 +44568,14 @@ def post_ownership_assign_handler():
 def get_identity_trust_rollup_handler():
     """GET /api/identity-trust/rollup
 
-    Org-wide Identity Trust rollup across all NHIs (SPNs + MIs + AI).
-    Drives the new Identity Trust page (Week 2 of the brand/IA pivot).
+    Org-wide Identity Trust rollup. Scope-aware per AG-PHASE2 (2026-06-09):
+    one endpoint powers Human / NHI / AI Trust pages by passing ?type=.
 
     Query params:
       threshold — Trust score below which an identity counts as "low trust"
                   (default 50)
+      type      — 'human' / 'nhi' / 'ai' / 'all'  (default 'nhi')
+                  Also accepts 'scope=' for symmetry.
     """
     db = _db()
     try:
@@ -43549,8 +44588,31 @@ def get_identity_trust_rollup_handler():
             threshold = max(0, min(int(request.args.get('threshold', 50)), 100))
         except (TypeError, ValueError):
             threshold = 50
+        scope = (request.args.get('type')
+                 or request.args.get('scope')
+                 or 'nhi').lower().strip()
+        if scope not in ('human', 'nhi', 'ai', 'all'):
+            scope = 'nhi'
         from app.engines.scoring.agent_trust_scorer import compute_org_trust_rollup
-        return jsonify(compute_org_trust_rollup(cursor, org_id, threshold))
+        result = compute_org_trust_rollup(cursor, org_id, threshold, identity_scope=scope)
+        # Tag the response with the scope so the frontend can show "NHI Trust" vs "Human Trust"
+        result['identity_scope'] = scope
+        # Convenience fields for the NHI Inventory hero card
+        bands = result.get('by_band', {}) or {}
+        total = result.get('total_evaluated', 0) or 0
+        avg = None
+        if total > 0 and 'avg_trust_score' not in result:
+            # If the engine didn't include avg, compute a defensible one
+            try:
+                worst = result.get('worst_identities', []) or []
+                if worst:
+                    avg = sum(w.get('trust_score', 0) for w in worst) / max(1, len(worst))
+            except Exception:
+                avg = None
+        result.setdefault('avg_trust', result.get('avg_trust_score') or avg or 50)
+        result.setdefault('critical', bands.get('critical', 0))
+        result.setdefault('good', bands.get('good', 0) + bands.get('strong', 0))
+        return jsonify(result)
     except Exception as e:
         logger.error(f"identity-trust rollup failed: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
@@ -43587,22 +44649,26 @@ def get_ai_board_scorecard_history_handler():
     try:
         from psycopg2.extras import RealDictCursor
         cursor = db.conn.cursor(cursor_factory=RealDictCursor)
+        # V2.13 (2026-06-12) — order by computed_at so per-run snapshots
+        # (multiple per day under 6h/12h cadence) sequence correctly.
+        # Also expose computed_at to the frontend for finer x-axis labels.
         cursor.execute("""
-            SELECT snapshot_date, total_agents,
+            SELECT snapshot_date, computed_at, total_agents,
                    with_owner_pct, with_telemetry_pct, private_network_pct,
                    least_privilege_pct, policy_compliant_pct,
                    distribution_strong, distribution_good,
                    distribution_elevated, distribution_critical,
-                   exceptions_pending
+                   exceptions_pending, discovery_run_id
             FROM ai_board_scorecard_snapshots
             WHERE organization_id = %s
-              AND snapshot_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
-            ORDER BY snapshot_date ASC
+              AND computed_at >= NOW() - (%s::int * INTERVAL '1 day')
+            ORDER BY computed_at ASC
         """, (_org_id(), days))
         history = []
         for r in cursor.fetchall():
             row = dict(r)
-            row['snapshot_date'] = row['snapshot_date'].isoformat() if row['snapshot_date'] else None
+            row['snapshot_date'] = row['snapshot_date'].isoformat() if row.get('snapshot_date') else None
+            row['computed_at']   = row['computed_at'].isoformat() if row.get('computed_at') else None
             history.append(row)
         return jsonify({'history': history, 'days': days})
     except Exception as e:
@@ -45500,13 +46566,16 @@ def get_ai_runtime_fleet():
         org_id = _org_id()
 
         # ── Platform distribution (where AI runs) ──
+        # AG-PILOT-XORG-LEAK (2026-06-08): added org_id filter — query was
+        # returning identities across all orgs. Visible cross-tenant data.
         cursor.execute("""
             SELECT DISTINCT ON (i.identity_id) ac.detected_platform
             FROM identities i JOIN agent_classifications ac ON ac.identity_db_id = i.id
             WHERE ac.agent_identity_type IN ('ai_agent','possible_ai_agent','ai_privileged_human')
+              AND i.organization_id = %s
               AND NOT COALESCE(i.is_microsoft_system, false) AND i.deleted_at IS NULL
             ORDER BY i.identity_id, i.discovery_run_id DESC
-        """)
+        """, (org_id,))
         plat_counts = {}
         total_agents = 0
         for (plat,) in cursor.fetchall():
@@ -47241,3 +48310,1046 @@ def get_drift_baseline():
         cursor.close()
         db.close()
 
+
+
+# ════════════════════════════════════════════════════════════════════
+# AG-193 / AG-195 — Data Trust Zones (classification scope rules)
+# Customer-facing: "Data Trust Zones"
+# Internal: classification_scope_rules / data_trust_zones table
+# ════════════════════════════════════════════════════════════════════
+
+_DTZ_VALID_CLASSES = ('PHI', 'PCI', 'PII', 'SOURCE', 'HR', 'FINANCIAL', 'CONFIDENTIAL')
+_DTZ_VALID_SCOPE_TYPES = (
+    'subscription', 'resource_group',
+    'subscription_pattern', 'resource_group_pattern',
+)
+
+
+def _dtz_validate_scope_exists(cursor, org_id, scope_type, scope_value):
+    """Confirm the scope_value matches a real discovered sub / RG.
+
+    Patterns ('*_pattern') skip this check — they're glob-based by design
+    and may legitimately match future-discovered resources.
+    """
+    if scope_type.endswith('_pattern'):
+        return True, None
+    if scope_type == 'subscription':
+        cursor.execute(
+            "SELECT 1 FROM cloud_subscriptions "
+            "WHERE organization_id = %s AND account_id = %s LIMIT 1",
+            (org_id, scope_value),
+        )
+        if cursor.fetchone():
+            return True, None
+        return False, (f"Subscription '{scope_value}' not found in your monitored "
+                       f"subs. Add the connection first.")
+    if scope_type == 'resource_group':
+        # RGs are tracked in discovered_resources via the ARM path. Check if any
+        # row matches.
+        cursor.execute(
+            "SELECT 1 FROM discovered_resources "
+            "WHERE organization_id = %s AND resource_id ILIKE %s LIMIT 1",
+            (org_id, f"%/resourceGroups/{scope_value}/%"),
+        )
+        if cursor.fetchone():
+            return True, None
+        return False, (f"Resource group '{scope_value}' not yet discovered. "
+                       f"Add the rule anyway? (Use scope_type=resource_group_pattern "
+                       f"with the same value to bypass this check.)")
+    return False, f"Unknown scope_type '{scope_type}'"
+
+
+def get_data_trust_zones():
+    """GET /api/data-trust-zones — list active zones for current org."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, classification, scope_type, scope_value,
+                   asserted_by, asserted_at, notes, created_at, updated_at
+              FROM data_trust_zones
+             WHERE organization_id = %s AND revoked_at IS NULL
+             ORDER BY classification, created_at DESC
+            """,
+            (_org_id(),),
+        )
+        rows = cursor.fetchall()
+        zones = [
+            {
+                'id': r[0],
+                'classification': r[1],
+                'scope_type': r[2],
+                'scope_value': r[3],
+                'asserted_by': r[4],
+                'asserted_at': r[5].isoformat() if r[5] else None,
+                'notes': r[6],
+                'created_at': r[7].isoformat() if r[7] else None,
+                'updated_at': r[8].isoformat() if r[8] else None,
+            }
+            for r in rows
+        ]
+        cursor.close()
+        return jsonify({'zones': zones, 'count': len(zones)})
+    finally:
+        db.close()
+
+
+def create_data_trust_zone():
+    """POST /api/data-trust-zones — admin creates a new zone."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    classification = (payload.get('classification') or '').strip().upper()
+    scope_type = (payload.get('scope_type') or '').strip().lower()
+    scope_value = (payload.get('scope_value') or '').strip()
+    notes = payload.get('notes')
+
+    if classification not in _DTZ_VALID_CLASSES:
+        return jsonify({'error': f"classification must be one of {_DTZ_VALID_CLASSES}"}), 400
+    if scope_type not in _DTZ_VALID_SCOPE_TYPES:
+        return jsonify({'error': f"scope_type must be one of {_DTZ_VALID_SCOPE_TYPES}"}), 400
+    if not scope_value:
+        return jsonify({'error': "scope_value is required"}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        ok, err_msg = _dtz_validate_scope_exists(cursor, _org_id(), scope_type, scope_value)
+        if not ok:
+            return jsonify({'error': err_msg}), 400
+
+        asserted_by = (getattr(g, 'current_user', None) or {}).get('email') or \
+                      (getattr(g, 'current_user', None) or {}).get('username') or 'unknown'
+
+        cursor.execute(
+            """
+            INSERT INTO data_trust_zones
+              (organization_id, classification, scope_type, scope_value,
+               asserted_by, notes)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, asserted_at
+            """,
+            (_org_id(), classification, scope_type, scope_value, asserted_by, notes),
+        )
+        zid, asserted_at = cursor.fetchone()
+        db.conn.commit()
+
+        _log(db, 'data_trust_zone_created',
+             f"{classification} zone added for {scope_type}: {scope_value}",
+             {'zone_id': zid, 'classification': classification,
+              'scope_type': scope_type, 'scope_value': scope_value})
+
+        cursor.close()
+        return jsonify({
+            'id': zid,
+            'classification': classification,
+            'scope_type': scope_type,
+            'scope_value': scope_value,
+            'asserted_by': asserted_by,
+            'asserted_at': asserted_at.isoformat() if asserted_at else None,
+        }), 201
+    except Exception as e:
+        logger.error(f"create_data_trust_zone failed: {e}", exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def update_data_trust_zone(zone_id):
+    """PATCH /api/data-trust-zones/<id> — edit notes / asserted_by overrides."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        sets = []
+        params = []
+        if 'notes' in payload:
+            sets.append("notes = %s")
+            params.append(payload.get('notes'))
+        if 'classification' in payload:
+            cls_u = (payload['classification'] or '').strip().upper()
+            if cls_u not in _DTZ_VALID_CLASSES:
+                return jsonify({'error': f"classification must be one of {_DTZ_VALID_CLASSES}"}), 400
+            sets.append("classification = %s")
+            params.append(cls_u)
+        if not sets:
+            return jsonify({'error': "Nothing to update"}), 400
+        params.extend([_org_id(), int(zone_id)])
+        cursor.execute(
+            f"""UPDATE data_trust_zones SET {', '.join(sets)}, updated_at = NOW()
+                 WHERE organization_id = %s AND id = %s AND revoked_at IS NULL
+                 RETURNING id""",
+            tuple(params),
+        )
+        row = cursor.fetchone()
+        db.conn.commit()
+        if not row:
+            return jsonify({'error': 'Zone not found or revoked'}), 404
+        _log(db, 'data_trust_zone_updated',
+             f"Zone {zone_id} updated",
+             {'zone_id': int(zone_id), 'changes': list(payload.keys())})
+        cursor.close()
+        return jsonify({'ok': True, 'id': int(zone_id)})
+    finally:
+        db.close()
+
+
+def delete_data_trust_zone(zone_id):
+    """DELETE /api/data-trust-zones/<id> — soft-delete (sets revoked_at)."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        revoked_by = (getattr(g, 'current_user', None) or {}).get('email') or \
+                     (getattr(g, 'current_user', None) or {}).get('username') or 'unknown'
+        cursor.execute(
+            """UPDATE data_trust_zones
+                  SET revoked_at = NOW(), revoked_by = %s
+                WHERE organization_id = %s AND id = %s AND revoked_at IS NULL
+                RETURNING classification, scope_type, scope_value""",
+            (revoked_by, _org_id(), int(zone_id)),
+        )
+        row = cursor.fetchone()
+        db.conn.commit()
+        if not row:
+            return jsonify({'error': 'Zone not found or already revoked'}), 404
+        _log(db, 'data_trust_zone_revoked',
+             f"Revoked {row[0]} zone for {row[1]}: {row[2]}",
+             {'zone_id': int(zone_id), 'revoked_by': revoked_by})
+        cursor.close()
+        return jsonify({'ok': True, 'id': int(zone_id), 'revoked_at': True})
+    finally:
+        db.close()
+
+
+def get_data_trust_zone_coverage(zone_id):
+    """GET /api/data-trust-zones/<id>/coverage — how many resources this rule covers."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """SELECT classification, scope_type, scope_value
+                 FROM data_trust_zones
+                WHERE organization_id = %s AND id = %s AND revoked_at IS NULL""",
+            (_org_id(), int(zone_id)),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Zone not found'}), 404
+        classification, scope_type, scope_value = row
+
+        # Count resources matching this single rule (use the same matcher as
+        # the engine — keep them in sync).
+        import fnmatch
+        from app.engines.discovery.scope_classifier import _extract_sub_and_rg
+
+        by_type: dict = {}
+        for table in ('azure_storage_accounts', 'azure_key_vaults',
+                      'azure_sql_databases', 'azure_cosmos_databases',
+                      'discovered_resources'):
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name=%s",
+                (table,),
+            )
+            if not cursor.fetchone():
+                continue
+            # Fetch resource ids with sub/RG hints
+            try:
+                sub_col = "subscription_id"
+                rg_col = "resource_group"
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name=%s AND column_name=%s",
+                    (table, sub_col),
+                )
+                has_sub = cursor.fetchone() is not None
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name=%s AND column_name=%s",
+                    (table, rg_col),
+                )
+                has_rg = cursor.fetchone() is not None
+                cols = ["resource_id"]
+                if has_sub: cols.append(sub_col)
+                if has_rg: cols.append(rg_col)
+                cursor.execute(
+                    f"SELECT {', '.join(cols)} FROM {table} WHERE organization_id = %s",
+                    (_org_id(),),
+                )
+                rows = cursor.fetchall()
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+                continue
+
+            matched = 0
+            sv_lower = scope_value.strip().lower()
+            for r in rows:
+                rid = r[0]
+                sub = r[cols.index(sub_col)] if has_sub else None
+                rg = r[cols.index(rg_col)] if has_rg else None
+                if not sub or not rg:
+                    arm_sub, arm_rg = _extract_sub_and_rg(rid)
+                    sub = sub or arm_sub
+                    rg = rg or arm_rg
+                sub_n = (sub or "").lower()
+                rg_n = (rg or "").lower()
+                hit = False
+                if scope_type == 'subscription' and sub_n == sv_lower:
+                    hit = True
+                elif scope_type == 'resource_group' and rg_n == sv_lower:
+                    hit = True
+                elif scope_type == 'subscription_pattern' and sub_n and fnmatch.fnmatch(sub_n, sv_lower):
+                    hit = True
+                elif scope_type == 'resource_group_pattern' and rg_n and fnmatch.fnmatch(rg_n, sv_lower):
+                    hit = True
+                if hit:
+                    matched += 1
+            if matched:
+                by_type[table] = matched
+
+        total = sum(by_type.values())
+        cursor.close()
+        return jsonify({
+            'zone_id': int(zone_id),
+            'classification': classification,
+            'scope_type': scope_type,
+            'scope_value': scope_value,
+            'resource_count': total,
+            'by_type': by_type,
+        })
+    finally:
+        db.close()
+
+
+def recompute_data_trust_zones():
+    """POST /api/data-trust-zones/recompute — re-run scope classification.
+
+    Used by:
+      - Settings page after a CRUD change to refresh classifications now
+      - Future scheduled re-runs
+    """
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    db = _db()
+    try:
+        from app.engines.discovery.scope_classifier import apply_scope_classification
+        result = apply_scope_classification(db, _org_id())
+        _log(db, 'data_trust_zones_recomputed',
+             f"Recomputed {result.get('rows_updated', 0)} rows across "
+             f"{len(result.get('tables_walked', []))} tables",
+             result)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"recompute_data_trust_zones failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_exposure_derivation(classification):
+    """GET /api/exposure/derivation/<classification> — drill-down lineage.
+
+    AG-193 (Sprint 1) — Surfaces the components that build the $X.XM
+    exposure number for one classification, so the headline becomes
+    auditor-defensible.
+
+    Returns:
+      {
+        zones:              [...active zones for this class],
+        resource_count:     N,
+        by_source:          {scope_rule: N, tag: M, name_pattern: K, ...},
+        by_confidence_band: {high: N, medium: M, low: K},
+        per_asset:          720000,  # IBM Cost of a Data Breach 2024 default
+        value:              N * per_asset
+      }
+    """
+    cls = (classification or '').strip().upper()
+    if cls not in ('PHI','PCI','PII','SOURCE','HR','FINANCIAL','CONFIDENTIAL'):
+        return jsonify({'error': 'Unknown classification'}), 400
+
+    PER_ASSET = {'PHI': 720000, 'PCI': 1200000, 'PII': 540000}.get(cls, 0)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Active zones contributing to this class
+        cursor.execute(
+            """SELECT id, scope_type, scope_value, asserted_by, asserted_at
+                 FROM data_trust_zones
+                WHERE organization_id = %s AND classification = %s AND revoked_at IS NULL
+                ORDER BY created_at DESC""",
+            (org_id, cls),
+        )
+        zones = [
+            {
+                'id': r[0], 'scope_type': r[1], 'scope_value': r[2],
+                'asserted_by': r[3],
+                'asserted_at': r[4].isoformat() if r[4] else None,
+            } for r in cursor.fetchall()
+        ]
+
+        # Roll up resource count + by_source + by_confidence_band across
+        # all tables that carry data_classification + provenance.
+        by_source: dict = {}
+        by_conf: dict = {'high': 0, 'medium': 0, 'low': 0}
+        total = 0
+        for table in ('discovered_resources', 'azure_storage_accounts', 'azure_key_vaults'):
+            try:
+                cursor.execute(
+                    """SELECT 1 FROM information_schema.tables
+                       WHERE table_schema='public' AND table_name=%s""",
+                    (table,),
+                )
+                if not cursor.fetchone():
+                    continue
+                cursor.execute(
+                    f"""SELECT
+                          COALESCE(classification_source, 'unknown'),
+                          COALESCE(classification_confidence, 0),
+                          COUNT(*)
+                        FROM {table}
+                       WHERE organization_id = %s
+                         AND data_classification = %s
+                       GROUP BY 1, 2""",
+                    (org_id, cls),
+                )
+                for src, conf, cnt in cursor.fetchall():
+                    by_source[src] = by_source.get(src, 0) + int(cnt)
+                    band = 'high' if conf >= 85 else ('medium' if conf >= 60 else 'low')
+                    by_conf[band] += int(cnt)
+                    total += int(cnt)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
+        cursor.close()
+        return jsonify({
+            'classification': cls,
+            'zones': zones,
+            'resource_count': total,
+            'by_source': by_source,
+            'by_confidence_band': by_conf,
+            'per_asset': PER_ASSET,
+            'value': total * PER_ASSET,
+            'source_doc': 'IBM Cost of a Data Breach 2024',
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_lineage(classification):
+    """GET /api/exposure/derivation/<classification>/lineage — Sprint 2 full chain.
+
+    Returns the FULL identity → attack path → resource chain that
+    terminates at this classification. Used by the drill-down drawer's
+    "Reachable identities · multi-hop paths" section.
+    """
+    cls = (classification or '').strip().upper()
+    if cls not in ('PHI','PCI','PII','SOURCE','HR','FINANCIAL','CONFIDENTIAL'):
+        return jsonify({'error': 'Unknown classification'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Reachable identities: count of identities with role_assignments
+        # whose scope contains a classified resource of this class.
+        # Simplified for Sprint 2 — a more rigorous walk through scope
+        # hierarchy can come in S3.
+        try:
+            cursor.execute(
+                """SELECT COUNT(DISTINCT ra.identity_db_id)
+                     FROM role_assignments ra
+                     JOIN discovered_resources dr
+                       ON dr.organization_id = ra.organization_id
+                       AND (ra.scope = dr.resource_id
+                            OR dr.resource_id LIKE ra.scope || '/%%')
+                    WHERE ra.organization_id = %s
+                      AND dr.data_classification = %s""",
+                (org_id, cls),
+            )
+            reachable_identities = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            reachable_identities = 0
+
+        # Attack paths terminating at a classified resource of this class.
+        try:
+            cursor.execute(
+                """SELECT COUNT(*)
+                     FROM attack_paths ap
+                    WHERE ap.organization_id = %s
+                      AND ap.target_resource_id IN (
+                          SELECT resource_id FROM discovered_resources
+                           WHERE organization_id = %s AND data_classification = %s
+                      )""",
+                (org_id, org_id, cls),
+            )
+            attack_paths_terminating = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            attack_paths_terminating = 0
+
+        # Internet-reachable subset
+        try:
+            cursor.execute(
+                """SELECT COUNT(DISTINCT dr.resource_id)
+                     FROM discovered_resources dr
+                    WHERE dr.organization_id = %s
+                      AND dr.data_classification = %s
+                      AND EXISTS (
+                        SELECT 1 FROM identity_reachability ir
+                         WHERE ir.organization_id = dr.organization_id
+                           AND ir.target_resource_id = dr.resource_id
+                           AND COALESCE(ir.is_internet_exposed, false) = true
+                      )""",
+                (org_id, cls),
+            )
+            internet_reachable = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            internet_reachable = 0
+
+        cursor.close()
+        return jsonify({
+            'classification': cls,
+            'reachable_identities': reachable_identities,
+            'attack_paths_terminating': attack_paths_terminating,
+            'internet_reachable_resources': internet_reachable,
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_by_entity():
+    """GET /api/exposure/by-entity?type=identity|ai_model&limit=N
+
+    AG-193 Sprint B (2026-06-13) — top entities ranked by reachable
+    classified exposure. Reads the cache populated by reach_attributor.
+    Use this to answer "who can reach the most $$?" on the dashboard.
+
+    Query params:
+      type   — 'identity' or 'ai_model' (default 'identity')
+      limit  — 1..200 (default 10)
+
+    Response:
+      {
+        type: 'identity' | 'ai_model',
+        rows: [
+          {id, name, category, exposure, phi, pci, pii, computed_at}, ...
+        ],
+        totals: {
+          entities_with_reach: N,
+          top_exposure: $$,
+        },
+      }
+    """
+    entity_type = (request.args.get('type') or 'identity').strip().lower()
+    try:
+        limit = max(1, min(200, int(request.args.get('limit') or 10)))
+    except (TypeError, ValueError):
+        limit = 10
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        if entity_type == 'ai_model':
+            cursor.execute(
+                """SELECT id,
+                          COALESCE(account_name, deployment_name) AS name,
+                          'ai_model' AS category,
+                          COALESCE(reachable_classified_exposure, 0) AS exposure,
+                          COALESCE(reachable_phi_count, 0) AS phi,
+                          COALESCE(reachable_pci_count, 0) AS pci,
+                          COALESCE(reachable_pii_count, 0) AS pii,
+                          reach_computed_at,
+                          reach_attribution_method
+                     FROM azure_ai_model_deployments
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0
+                    ORDER BY reachable_classified_exposure DESC NULLS LAST
+                    LIMIT %s""",
+                (org_id, limit),
+            )
+        else:
+            cursor.execute(
+                """SELECT id,
+                          display_name AS name,
+                          identity_category AS category,
+                          COALESCE(reachable_classified_exposure, 0) AS exposure,
+                          COALESCE(reachable_phi_count, 0) AS phi,
+                          COALESCE(reachable_pci_count, 0) AS pci,
+                          COALESCE(reachable_pii_count, 0) AS pii,
+                          reach_computed_at
+                     FROM identities
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0
+                    ORDER BY reachable_classified_exposure DESC NULLS LAST
+                    LIMIT %s""",
+                (org_id, limit),
+            )
+
+        rows = []
+        for r in cursor.fetchall():
+            row = {
+                'id': r[0], 'name': r[1], 'category': r[2],
+                'exposure': int(r[3] or 0),
+                'phi': int(r[4] or 0), 'pci': int(r[5] or 0), 'pii': int(r[6] or 0),
+                'computed_at': r[7].isoformat() if r[7] else None,
+            }
+            # AI model rows carry attribution method so the UI can show
+            # "name-matched MI" vs "RBAC upper bound" honestly.
+            if entity_type == 'ai_model' and len(r) >= 9:
+                row['attribution_method'] = r[8]
+            rows.append(row)
+
+        # Totals across the cohort
+        if entity_type == 'ai_model':
+            cursor.execute(
+                """SELECT COUNT(*), COALESCE(MAX(reachable_classified_exposure), 0)
+                     FROM azure_ai_model_deployments
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0""",
+                (org_id,),
+            )
+        else:
+            cursor.execute(
+                """SELECT COUNT(*), COALESCE(MAX(reachable_classified_exposure), 0)
+                     FROM identities
+                    WHERE organization_id = %s
+                      AND COALESCE(reachable_classified_exposure, 0) > 0""",
+                (org_id,),
+            )
+        n, top = cursor.fetchone() or (0, 0)
+        cursor.close()
+        return jsonify({
+            'type': entity_type,
+            'rows': rows,
+            'totals': {
+                'entities_with_reach': int(n or 0),
+                'top_exposure': int(top or 0),
+            },
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_reach_summary():
+    """GET /api/exposure/reach-summary — single-call hero-decorator payload.
+
+    Returns the four numbers the CISO Dashboard hero card needs:
+      reachable_identities       count of identities that can touch any classified
+      reachable_ai_models        count of AI models that can touch any classified
+      attack_paths_total         total attack paths org-wide
+      orphan_nhi_count           NHIs with no owner (already shown elsewhere)
+      top_identity               {name, exposure, phi}
+      top_ai_model               {name, exposure, phi}  (null when none reachable)
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        def _scalar_count(sql, params):
+            try:
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+                return int((row or [0])[0])
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                return 0
+
+        reachable_identities = _scalar_count(
+            "SELECT COUNT(*) FROM identities "
+            "WHERE organization_id = %s "
+            "  AND COALESCE(reachable_classified_exposure, 0) > 0",
+            (org_id,),
+        )
+        reachable_ai_models = _scalar_count(
+            "SELECT COUNT(*) FROM azure_ai_model_deployments "
+            "WHERE organization_id = %s "
+            "  AND COALESCE(reachable_classified_exposure, 0) > 0",
+            (org_id,),
+        )
+        attack_paths_total = _scalar_count(
+            "SELECT COUNT(*) FROM attack_paths WHERE organization_id = %s",
+            (org_id,),
+        )
+        # Orphan NHIs — match the canonical "unowned NHI" definition in
+        # ownership_center.list_unowned_nhis: scoped to LATEST run only,
+        # excludes Microsoft-system NHIs, considers nhi_ownership_assignments
+        # / owner_display_name / app_reg_owner_display_name as ownership.
+        # Cross-run identities used to inflate this 4x.
+        orphan_nhi_count = 0
+        try:
+            cursor.execute(
+                "SELECT MAX(id) FROM discovery_runs "
+                "WHERE organization_id = %s AND status IN ('completed','partial')",
+                (org_id,),
+            )
+            row = cursor.fetchone()
+            latest_run = (row[0] if row else None)
+            if latest_run:
+                cursor.execute(
+                    """SELECT COUNT(*) FROM identities i
+                        WHERE i.organization_id = %s
+                          AND i.discovery_run_id = %s
+                          AND i.deleted_at IS NULL
+                          AND i.identity_category IN ('service_principal','managed_identity_system','managed_identity_user')
+                          AND NOT COALESCE(i.is_microsoft_system, false)
+                          AND NOT (
+                              EXISTS (SELECT 1 FROM nhi_ownership_assignments oa
+                                       WHERE oa.identity_db_id = i.id
+                                         AND oa.organization_id = i.organization_id
+                                         AND oa.status = 'active')
+                              OR COALESCE(i.owner_display_name, '') != ''
+                              OR COALESCE(i.app_reg_owner_display_name, '') != ''
+                          )""",
+                    (org_id, latest_run),
+                )
+                orphan_nhi_count = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            orphan_nhi_count = 0
+
+        def _top_identity():
+            try:
+                cursor.execute(
+                    """SELECT display_name,
+                              COALESCE(reachable_classified_exposure, 0),
+                              COALESCE(reachable_phi_count, 0)
+                         FROM identities
+                        WHERE organization_id = %s
+                          AND COALESCE(reachable_classified_exposure, 0) > 0
+                        ORDER BY reachable_classified_exposure DESC NULLS LAST
+                        LIMIT 1""",
+                    (org_id,),
+                )
+                r = cursor.fetchone()
+                return ({'name': r[0], 'exposure': int(r[1]), 'phi': int(r[2])}
+                        if r else None)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                return None
+
+        def _top_ai_model():
+            try:
+                cursor.execute(
+                    """SELECT COALESCE(account_name, deployment_name),
+                              COALESCE(reachable_classified_exposure, 0),
+                              COALESCE(reachable_phi_count, 0)
+                         FROM azure_ai_model_deployments
+                        WHERE organization_id = %s
+                          AND COALESCE(reachable_classified_exposure, 0) > 0
+                        ORDER BY reachable_classified_exposure DESC NULLS LAST
+                        LIMIT 1""",
+                    (org_id,),
+                )
+                r = cursor.fetchone()
+                return ({'name': r[0], 'exposure': int(r[1]), 'phi': int(r[2])}
+                        if r else None)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+                return None
+
+        top_identity = _top_identity()
+        top_ai_model = _top_ai_model()
+        cursor.close()
+        return jsonify({
+            'reachable_identities': reachable_identities,
+            'reachable_ai_models':  reachable_ai_models,
+            'attack_paths_total':   attack_paths_total,
+            'orphan_nhi_count':     orphan_nhi_count,
+            'top_identity':         top_identity,
+            'top_ai_model':         top_ai_model,
+        })
+    finally:
+        db.close()
+
+
+def get_data_trust_zones_audit():
+    """GET /api/data-trust-zones/audit — every create/edit/revoke event for this org.
+
+    Sprint 2 — Activity log surface. Pulls from activity_log filtered
+    to data_trust_zone_* action types.
+    """
+    limit = min(request.args.get('limit', 100, type=int), 500)
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """SELECT id, action_type, description, metadata, user_id, created_at
+                 FROM activity_log
+                WHERE organization_id = %s
+                  AND action_type LIKE 'data_trust_zone%%'
+                ORDER BY created_at DESC LIMIT %s""",
+            (_org_id(), limit),
+        )
+        events = [
+            {
+                'id': r[0],
+                'action_type': r[1],
+                'description': r[2],
+                'metadata': r[3],
+                'user_id': r[4],
+                'created_at': r[5].isoformat() if r[5] else None,
+            } for r in cursor.fetchall()
+        ]
+        cursor.close()
+        return jsonify({'events': events, 'count': len(events)})
+    finally:
+        db.close()
+
+
+def get_argus_classification_suggestions():
+    """GET /api/argus/classification-suggestions — Sprint 2 Argus prompts.
+
+    Walks unclassified discovered_resources and finds clusters whose
+    names match known PHI/PCI/PII/HR keywords. Surfaces them as draft
+    zone proposals: "47 RG names match HR keywords — accept to create
+    PII zone for /rg/employee-*"
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Find unclassified RGs with name patterns hinting at a class.
+        # Group by RG and a heuristic class assignment.
+        # Keep simple for v1.
+        suggestions: list = []
+
+        keyword_patterns = [
+            ('PHI', ['patient', 'health', 'clinical', 'medical', 'ehr', 'hipaa', 'phi']),
+            ('PCI', ['payment', 'checkout', 'cardholder', 'cardno', 'merchant', 'pci']),
+            ('PII', ['customer', 'subscriber', 'user-data', 'profile', 'ssn']),
+            ('HR',  ['employee', 'payroll', 'workday', 'hris', 'hr-']),
+            ('FINANCIAL', ['ledger', 'invoice', 'accounting', 'finance', 'billing']),
+        ]
+
+        for cls, keywords in keyword_patterns:
+            # Find RGs with matching name fragments where most resources are unclassified
+            like_clauses = " OR ".join([
+                f"LOWER(SPLIT_PART(resource_id, '/', 5)) LIKE %s" for _ in keywords
+            ])
+            params = [org_id] + [f"%{k}%" for k in keywords]
+            try:
+                cursor.execute(
+                    f"""SELECT
+                          SPLIT_PART(resource_id, '/', 5) AS rg,
+                          COUNT(*) AS total,
+                          COUNT(*) FILTER (WHERE data_classification IS NULL) AS unclassified
+                        FROM discovered_resources
+                       WHERE organization_id = %s
+                         AND ({like_clauses})
+                       GROUP BY rg
+                       HAVING COUNT(*) >= 5
+                          AND COUNT(*) FILTER (WHERE data_classification IS NULL) > 0
+                       ORDER BY unclassified DESC LIMIT 5""",
+                    tuple(params),
+                )
+                for rg, total, unclassified in cursor.fetchall():
+                    if rg:
+                        suggestions.append({
+                            'classification': cls,
+                            'scope_type': 'resource_group',
+                            'scope_value': rg,
+                            'matched_resources': total,
+                            'currently_unclassified': unclassified,
+                            'reason': f"RG name matches {cls} keywords ({total} resources discovered)",
+                        })
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
+        cursor.close()
+        # Top-N by impact
+        suggestions.sort(key=lambda s: s['matched_resources'], reverse=True)
+        return jsonify({'suggestions': suggestions[:10], 'count': len(suggestions[:10])})
+    finally:
+        db.close()
+
+
+def get_purview_status():
+    """GET /api/purview/status — config + connectivity check.
+
+    AG-198 (Sprint 3) — used by the Settings page Purview tile to show
+    whether the integration is enabled and whether the cache has any
+    fetched labels.
+    """
+    from app.config import FEATURE_PURVIEW_INTEGRATION
+    from app.engines.discovery.purview_classifier import _CACHE, _PURVIEW_LABEL_MAP
+    org_id = _org_id()
+    # Count cached labels for this org only
+    org_entries = [k for k in _CACHE if k[0] == org_id]
+    label_count = sum(1 for k in org_entries if _CACHE[k].get("label"))
+    return jsonify({
+        'enabled': FEATURE_PURVIEW_INTEGRATION,
+        'mapped_labels': len(_PURVIEW_LABEL_MAP),
+        'cache_size': len(org_entries),
+        'cached_labels': label_count,
+        'message': (
+            "Purview integration is ENABLED. Tier 4 of the classification engine "
+            "will read labels from your Purview catalog during discovery."
+        ) if FEATURE_PURVIEW_INTEGRATION else (
+            "Purview integration is currently DISABLED. Enable it via the "
+            "FEATURE_PURVIEW_INTEGRATION env var, then configure your Purview "
+            "account in Settings → Connectors → Purview."
+        ),
+    })
+
+
+def get_classified_resources():
+    """GET /api/resources/classified — list resources that have a data_classification.
+
+    AG-193 (Sprint 1 follow-up) — landing page for the Unified Identity
+    Graph "Storage / KV / SQL" + "Classified Data" tier clicks. Returns
+    every resource carrying a non-null data_classification across the 5
+    canonical tables, with provenance + zone link.
+
+    Query params:
+      classification: filter to a specific class (PHI/PCI/PII/...)
+      source: filter to a specific source (scope_rule, tag, name_pattern, ...)
+      confidence_min: int 0-100
+      limit: max rows (default 200, max 1000)
+    """
+    cls_filter = (request.args.get('classification') or '').strip().upper()
+    src_filter = (request.args.get('source') or '').strip().lower()
+    conf_min = request.args.get('confidence_min', 0, type=int)
+    limit = min(request.args.get('limit', 200, type=int), 1000)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        rows: list = []
+        # Walk the canonical resource tables. Each yields a uniform
+        # shape; we union in Python instead of SQL so heterogeneous
+        # tables stay manageable.
+        SOURCES = [
+            ('azure_storage_accounts',   'Storage Account'),
+            ('azure_key_vaults',         'Key Vault'),
+            ('azure_sql_databases',      'SQL Database'),
+            ('azure_cosmos_databases',   'Cosmos DB'),
+            ('discovered_resources',     'Resource'),
+        ]
+        for table, kind in SOURCES:
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name=%s",
+                (table,),
+            )
+            if not cursor.fetchone():
+                continue
+            # Resolve name column (matches scope_classifier discovery)
+            name_col = None
+            for cand in ('name', 'display_name', 'resource_name'):
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name=%s AND column_name=%s",
+                    (table, cand),
+                )
+                if cursor.fetchone():
+                    name_col = cand
+                    break
+            if not name_col:
+                continue
+
+            where_clauses = [
+                "organization_id = %s",
+                "data_classification IS NOT NULL",
+            ]
+            params: list = [org_id]
+            if cls_filter and cls_filter in ('PHI','PCI','PII','SOURCE','HR','FINANCIAL','CONFIDENTIAL'):
+                where_clauses.append("data_classification = %s")
+                params.append(cls_filter)
+            if src_filter:
+                where_clauses.append("classification_source = %s")
+                params.append(src_filter)
+            if conf_min > 0:
+                where_clauses.append("COALESCE(classification_confidence, 0) >= %s")
+                params.append(conf_min)
+
+            try:
+                cursor.execute(
+                    f"""SELECT resource_id, {name_col},
+                              data_classification, classification_source,
+                              classification_confidence,
+                              classification_rule_id, classification_asserted_by
+                         FROM {table}
+                        WHERE {' AND '.join(where_clauses)}
+                        ORDER BY data_classification, COALESCE(classification_confidence, 0) DESC
+                        LIMIT %s""",
+                    tuple(params + [limit]),
+                )
+                for r in cursor.fetchall():
+                    # Extract sub + rg from ARM path for the row's display
+                    rid = r[0] or ''
+                    parts = rid.strip('/').split('/')
+                    sub = parts[1] if len(parts) >= 2 and parts[0].lower() == 'subscriptions' else None
+                    rg = parts[3] if len(parts) >= 4 and parts[2].lower() == 'resourcegroups' else None
+                    rows.append({
+                        'resource_id': rid,
+                        'name': r[1] or rid.split('/')[-1] if rid else '',
+                        'kind': kind,
+                        'classification': r[2],
+                        'source': r[3] or 'unknown',
+                        'confidence': r[4] or 0,
+                        'rule_id': r[5],
+                        'asserted_by': r[6],
+                        'subscription_id': sub,
+                        'resource_group': rg,
+                    })
+            except Exception as exc:
+                logger.debug("classified-resources SELECT %s failed: %s", table, exc)
+                try: db.conn.rollback()
+                except Exception: pass
+
+        # Cap total + sort by confidence DESC then class
+        rows.sort(key=lambda r: (-(r['confidence'] or 0), r['classification']))
+        rows = rows[:limit]
+
+        # Per-class summary for the page header
+        by_class: dict = {}
+        for r in rows:
+            c = r['classification']
+            by_class[c] = by_class.get(c, 0) + 1
+        by_source: dict = {}
+        for r in rows:
+            s = r['source']
+            by_source[s] = by_source.get(s, 0) + 1
+
+        cursor.close()
+        return jsonify({
+            'resources': rows,
+            'count': len(rows),
+            'by_classification': by_class,
+            'by_source': by_source,
+        })
+    finally:
+        db.close()

@@ -100,51 +100,65 @@ export function BlastRadiusCardV31({ data }: { data: PostureV31Response }) {
   const tierNum = (br.role_tier || '').replace('T', '');
   const impactColor = tierNum <= '1' ? '#e8465a' : tierNum === '2' ? '#FF7216' : '#6b7280';
 
+  // AG-PILOT-CISO-CLICKABLE (2026-06-08): whole card now navigates to
+  // the identity's detail page. Previously only the small name link in
+  // the corner was clickable — customer reported the card "looked
+  // clickable but did nothing".
+  const navHref = `/identities/${br.identity_string_id || br.identity_id}`;
   return (
-    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition"
-         title={exploitText}>
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium"
-              title="Worst-case impact if this identity is compromised"
-              style={{ cursor: 'help', borderBottom: '1px dotted currentColor' }}>
-          Blast Radius
-        </span>
-        <div className="flex items-center gap-2 min-w-0 max-w-[60%] justify-end">
-          <DN navigateTo={`/identities/${br.identity_string_id || br.identity_id}`}>
-            <span className="text-xs text-gray-500 truncate cursor-pointer hover:text-gray-300 transition">{br.identity_name}</span>
-          </DN>
-          {!!br.more_count && br.more_count > 0 && (
-            <span className="text-[10px] font-mono text-gray-500 shrink-0">+{br.more_count} more</span>
-          )}
+    <DN navigateTo={navHref}>
+      <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition cursor-pointer"
+           title={exploitText}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs text-gray-400 uppercase tracking-wider font-medium">
+            Blast Radius
+          </span>
+          {/* AG-PILOT-BLAST-MORE (2026-06-09): the +N more chip was
+              decorative-only. Customer asked: "what about those N
+              other identities?" Make it a separate click target that
+              opens the full at-risk list sorted by blast_radius DESC. */}
+          <div className="flex items-center gap-2 min-w-0 max-w-[60%] justify-end">
+            <span className="text-xs text-gray-500 truncate">{br.identity_name}</span>
+            {!!br.more_count && br.more_count > 0 && (
+              <DN navigateTo="/identities?privileged=true&sort_field=blast_radius_score&sort_dir=desc">
+                <span
+                  className="text-[10px] font-mono text-violet-300 hover:text-violet-200 shrink-0 px-1.5 py-0.5 rounded border border-violet-700/40 bg-violet-900/20 cursor-pointer"
+                  title={`See all ${(br.more_count || 0) + 1} privileged identities ranked by blast radius`}
+                  onClick={(e) => e.stopPropagation()}>
+                  +{br.more_count} more →
+                </span>
+              </DN>
+            )}
+          </div>
         </div>
-      </div>
-      <span className="text-xs font-semibold text-gray-300 mb-1 mt-1">If compromised:</span>
-      <div className="space-y-0.5">
-        {br.scope_string && (
-          <p className="text-xs text-gray-400 truncate">
-            <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
+        <span className="text-xs font-semibold text-gray-300 mb-1 mt-1">If compromised:</span>
+        <div className="space-y-0.5">
+          {br.scope_string && (
+            <p className="text-xs text-gray-400 truncate">
+              <span className="text-red-400/70 mr-1">•</span>{br.scope_string}
+            </p>
+          )}
+          {br.role_tier && (
+            <p className="text-xs text-gray-400 truncate">
+              <span className="text-red-400/70 mr-1">•</span>Tier {br.role_tier} access
+            </p>
+          )}
+          {roleCount > 3 ? (
+            <p className="text-xs text-gray-400 truncate" title={exploitText}>
+              <span className="text-red-400/70 mr-1">•</span>
+              Grants <span className="font-mono text-gray-300">{roleCount}</span> privileged role{roleCount === 1 ? '' : 's'}
+            </p>
+          ) : exploitText ? (
+            <p className="text-xs text-gray-500 truncate" title={exploitText}>{exploitText}</p>
+          ) : null}
+        </div>
+        {br.impact_label && (
+          <p className="text-[11px] font-medium mt-auto pt-1.5" style={{ color: impactColor }}>
+            Impact: {br.impact_label}
           </p>
         )}
-        {br.role_tier && (
-          <p className="text-xs text-gray-400 truncate">
-            <span className="text-red-400/70 mr-1">•</span>Tier {br.role_tier} access
-          </p>
-        )}
-        {roleCount > 3 ? (
-          <p className="text-xs text-gray-400 truncate" title={exploitText}>
-            <span className="text-red-400/70 mr-1">•</span>
-            Grants <span className="font-mono text-gray-300">{roleCount}</span> privileged role{roleCount === 1 ? '' : 's'}
-          </p>
-        ) : exploitText ? (
-          <p className="text-xs text-gray-500 truncate" title={exploitText}>{exploitText}</p>
-        ) : null}
       </div>
-      {br.impact_label && (
-        <p className="text-[11px] font-medium mt-auto pt-1.5" style={{ color: impactColor }}>
-          Impact: {br.impact_label}
-        </p>
-      )}
-    </div>
+    </DN>
   );
 }
 
@@ -250,7 +264,10 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
     const subCount = data.coverage?.sub_count ?? 0;
     return (
       <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 transition">
-        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium mb-1">Privilege Exposure</span>
+        {/* AG-PILOT-RENAME-PRIV-EXPOSURE (2026-06-09): customer feedback —
+            "Privilege Exposure" was confusing because the content is
+            literally an attack path. Renamed to "Top Attack Path". */}
+        <span className="text-xs text-gray-400 uppercase tracking-wider font-medium mb-1">Top Attack Path</span>
         <div className="border-l-2 border-[#22C55E] pl-3 mt-2">
           <div className="flex items-center gap-1.5">
             <span className="text-[13px] text-[#22C55E]">&#10003;</span>
@@ -275,7 +292,8 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
   // Determine if the top path is a single-hop direct privilege vs multi-hop escalation
   const isDirect = top.path_type === 'lateral_movement' || top.path_type === 'direct_escalation'
     || (top.path_type && !top.path_type.includes('chain'));
-  const headerLabel = isDirect ? 'Top Privilege Exposure' : 'Top Escalation Path';
+  // AG-PILOT-RENAME-PRIV-EXPOSURE (2026-06-09): renamed direct case
+  const headerLabel = isDirect ? 'Top Attack Path' : 'Top Escalation Path';
   const typeBadge = isDirect ? 'Direct' : 'Multi-hop';
   const typeBadgeColor = isDirect ? 'rgba(245,158,11,0.15)' : 'rgba(232,70,90,0.15)';
   const typeBadgeText = isDirect ? '#f59e0b' : '#e8465a';
@@ -295,8 +313,11 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
   const borderColor = top.severity === 'critical' ? 'rgba(232,70,90,0.6)'
     : top.severity === 'high' ? 'rgba(245,158,11,0.5)' : undefined;
 
+  // AG-PILOT-CISO-CLICKABLE (2026-06-08): card now navigates as a unit.
+  const cardHref = navId ? `/attack-paths?highlight=${navId}` : '/attack-paths';
   return (
-    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 transition"
+    <DN navigateTo={cardHref}>
+    <div className="bg-[#111827] border border-white/5 rounded-lg p-3 h-full flex flex-col overflow-hidden hover:border-white/10 hover:scale-[1.01] transition cursor-pointer"
          style={borderColor ? { borderLeftWidth: 3, borderLeftColor: borderColor, borderLeftStyle: 'solid' } : undefined}>
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-2">
@@ -314,9 +335,7 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
         )}
       </div>
       <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary, #E6EDF3)', marginBottom: 2 }}>{interpretation}</p>
-      <DN navigateTo={navId ? `/attack-paths?highlight=${navId}` : '/attack-paths'}>
-        <p className="truncate cursor-pointer hover:underline transition" style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-muted, #484F58)' }}>{chain}</p>
-      </DN>
+      <p className="truncate" style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-muted, #484F58)' }}>{chain}</p>
       {compositionLine && (
         <p style={{ fontSize: 10, color: 'var(--text-muted, #484F58)', fontStyle: 'italic', marginTop: 4 }}>{compositionLine}</p>
       )}
@@ -327,13 +346,12 @@ export function AttackPathCardV31({ data }: { data: PostureV31Response }) {
         </p>
       )}
       {totalPaths > 0 && (
-        <DN navigateTo="/attack-paths">
-          <p className="cursor-pointer hover:underline mt-auto pt-1" style={{ fontSize: 11, fontWeight: 500, color: 'var(--teal, #24A2A1)' }}>
-            View all {totalPaths} paths →
-          </p>
-        </DN>
+        <p className="mt-auto pt-1" style={{ fontSize: 11, fontWeight: 500, color: 'var(--teal, #24A2A1)' }}>
+          View all {totalPaths} paths →
+        </p>
       )}
     </div>
+    </DN>
   );
 }
 
@@ -370,10 +388,15 @@ export function IdentityRiskCard({ vm }: { vm: CISOViewModel }) {
 export function IdentityRiskCardV31({ data }: { data: PostureV31Response }) {
   const ir = data.identity_risk;
   const total = ir.total;
+  // AG-PILOT-IDENTITY-RISK-LINKS (2026-06-09): customer reported every
+  // row navigated to the same view (ghost). Root cause: the page's URL
+  // sync didn't recognise ?filter=ghost — it only reads activity_status,
+  // owner_status, identity_category. Mapped each row to the filter
+  // params that actually take effect.
   const rows = [
-    { label: 'Dormant privileged identities', count: ir.dormant, filter: 'dormant' },
-    { label: 'Ghost identities (access not revoked)', count: ir.ghost, filter: 'ghost' },
-    { label: 'Unowned service principals', count: ir.unowned_nhi, filter: 'unowned_nhi' },
+    { label: 'Dormant privileged identities', count: ir.dormant, href: '/identities?activity_status=dormant_strict&privileged=true' },
+    { label: 'Ghost identities (access not revoked)', count: ir.ghost, href: '/identities?status=Disabled&hasRoles=true' },
+    { label: 'Unowned service principals', count: ir.unowned_nhi, href: '/identities?identity_category=service_principal&owner_status=unowned' },
   ].filter(r => r.count > 0).sort((a, b) => b.count - a.count);
 
   return (
@@ -390,7 +413,7 @@ export function IdentityRiskCardV31({ data }: { data: PostureV31Response }) {
         <>
           <div className="space-y-0.5 flex-1">
             {rows.map((r, i) => (
-              <DN key={r.filter} navigateTo={`/identities?filter=${r.filter}`}>
+              <DN key={r.label} navigateTo={r.href}>
                 <div className={`flex items-center justify-between text-xs cursor-pointer hover:bg-white/[0.02] rounded px-1 -mx-1 ${i === 0 ? 'font-medium text-gray-200' : 'text-gray-400'}`}>
                   <span className="truncate mr-2">
                     {i === 0 && <span className="text-[9px] font-semibold uppercase tracking-wider text-[#f59e0b] mr-1">Primary Risk:</span>}

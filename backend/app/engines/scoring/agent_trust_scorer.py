@@ -169,7 +169,15 @@ AGENT_TRUST_DIMENSIONS: list[dict[str, Any]] = [
     {
         "key":         "supply_chain",
         "label":       "Supply Chain",
-        "signal_keys": ["unverified_model_provenance"],
+        # AG-PHASE-ENGINE-DEPTH (2026-06-10): added CI/CD federated
+        # signals so the dim fires for non-AI NHIs too. For AI agents
+        # this becomes "model provenance"; for NHIs it becomes
+        # "Origin / Lineage". Same dim, scope-aware label is handled
+        # in the UI (Identity Trust page reads the dim from the
+        # identity_scope when rendering).
+        "signal_keys": ["unverified_model_provenance",
+                          "unverified_federated_origin",
+                          "ci_cd_with_owner_role"],
         "weight":      DEFAULTS["supply_chain_penalty_fail"],
     },
 ]
@@ -615,7 +623,11 @@ def compute_agent_trust_batch(
                    credential_status,
                    credential_expiration,
                    organization_id,
-                   discovery_run_id
+                   discovery_run_id,
+                   /* AG-PHASE-ENGINE-DEPTH (2026-06-10): supply chain
+                      signals for non-AI NHIs need these fields. */
+                   federated_issuer_types,
+                   has_federated_credentials
               FROM identities
              WHERE id = ANY(%s)
             """,
@@ -632,8 +644,30 @@ def compute_agent_trust_batch(
             "owner_count", "last_sign_in", "last_activity_date",
             "credential_status", "credential_expiration",
             "organization_id", "discovery_run_id",
+            "federated_issuer_types", "has_federated_credentials",
         ])
         meta_by_id[int(rec["id"])] = rec
+
+    # AG-PHASE-ENGINE-DEPTH (2026-06-10): batch-fetch federated_credentials
+    # subjects per identity so detect_signals can flag permissive subject
+    # patterns. Best-effort: failures don't break the rest of the batch.
+    try:
+        cursor.execute(
+            """
+            SELECT identity_db_id, subject
+              FROM federated_credentials
+             WHERE identity_db_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        for r in cursor.fetchall():
+            rec_id = r['identity_db_id'] if isinstance(r, dict) else r[0]
+            subj = r['subject'] if isinstance(r, dict) else r[1]
+            if rec_id in meta_by_id:
+                meta_by_id[rec_id].setdefault('federated_subjects', []).append(subj or '')
+    except Exception:
+        # federated_credentials table may not exist on older tenants — silent skip
+        pass
 
     # 2) Role assignments.
     roles_by_id: dict[int, list[dict[str, Any]]] = {i: [] for i in ids}
@@ -887,29 +921,45 @@ def _row_to_dict(row: Any, columns: list[str]) -> dict[str, Any]:
 
 
 def compute_org_trust_rollup(cursor: Any, org_id: int,
-                              trust_below: int = 50) -> dict[str, Any]:
-    """Org-wide Identity Trust rollup across ALL non-human identities
-    (SPNs, MIs, AI agents). Used by the new Identity Trust page.
+                              trust_below: int = 50,
+                              identity_scope: str = 'nhi') -> dict[str, Any]:
+    """Org-wide Identity Trust rollup.
 
-    Returns:
-      {
-        total_evaluated:    int,
-        by_band: {strong, good, elevated, critical}: counts,
-        by_dim_failing: {ownership: N, secrets: N, ...},
-        below_threshold_count: int (Trust < `trust_below`),
-        threshold: int,
-        worst_identities: [top 25 by lowest Trust],
-        computed_at: ISO
-      }
+    AG-PHASE2 (2026-06-09): scope-aware. Was NHI-only; now accepts
+    'human', 'nhi', 'ai', or 'all' so the same scorer powers the new
+    per-type Trust pages (Human Trust, NHI Trust, AI Trust) without
+    duplicating the engine.
+
+    Args:
+      org_id: tenant scope
+      trust_below: threshold for "low trust" bucket
+      identity_scope:
+        'human' → human_user + guest
+        'nhi'   → service_principal + managed_identity_system + managed_identity_user (default — preserves legacy behavior)
+        'ai'    → identities with agent_classifications.agent_identity_type IN ('ai_agent','possible_ai_agent')
+        'all'   → everything except microsoft_system
     """
-    cursor.execute("""
+    if identity_scope == 'human':
+        cat_filter = "i.identity_category IN ('human_user', 'guest')"
+        join_clause = ""
+    elif identity_scope == 'ai':
+        cat_filter = "ac.agent_identity_type IN ('ai_agent','possible_ai_agent')"
+        join_clause = "JOIN agent_classifications ac ON ac.identity_db_id = i.id"
+    elif identity_scope == 'all':
+        cat_filter = "i.identity_category IS NOT NULL"
+        join_clause = ""
+    else:  # 'nhi' default
+        cat_filter = ("i.identity_category IN "
+                      "('service_principal','managed_identity_system','managed_identity_user')")
+        join_clause = ""
+
+    cursor.execute(f"""
         SELECT i.id, i.identity_id, i.display_name
           FROM identities i
+          {join_clause}
          WHERE i.organization_id = %s
            AND i.deleted_at IS NULL
-           AND i.identity_category IN
-                ('service_principal','managed_identity_system',
-                 'managed_identity_user')
+           AND {cat_filter}
            AND NOT COALESCE(i.is_microsoft_system, false)
     """, (org_id,))
     # Tolerate both RealDictCursor and tuple cursor.

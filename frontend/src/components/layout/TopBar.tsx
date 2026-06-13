@@ -93,7 +93,10 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
         <div className="leading-tight hidden sm:block">
           <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>AuditGraph</span>
           <p className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
-            {user?.org_name || 'Identity Risk OS'}
+            {/* AG-PHASE1-BRAND (2026-06-09): tenant name takes priority,
+                else show the platform tagline so the brand says what we
+                are at a glance. */}
+            {user?.org_name || 'Identity Security Graph'}
           </p>
         </div>
       </Link>
@@ -211,6 +214,21 @@ const TopBar: React.FC<TopBarProps> = ({ onSearchOpen, onCopilotOpen }) => {
             <span className="text-xs font-medium hidden lg:inline">Argus</span>
           </button>
         )}
+
+        {/* AG-POLISH-DEMO (2026-06-10): What's New chip — demo enablement */}
+        <button
+          onClick={() => navigate('/whats-new')}
+          className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors text-xs font-medium"
+          style={{
+            color: 'var(--accent-success, #10b981)',
+            backgroundColor: 'rgba(16,185,129,0.08)',
+            border: '1px solid rgba(16,185,129,0.25)',
+          }}
+          title="What's new in AuditGraph — patent-track features, NHI surface, scope-aware engines"
+        >
+          <span className="text-[10px] uppercase tracking-wider font-bold">NEW</span>
+          <span className="hidden lg:inline">What&apos;s new</span>
+        </button>
 
         {/* Notification bell */}
         <button

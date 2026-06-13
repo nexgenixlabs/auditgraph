@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+// AG-POLISH-D (2026-06-10)
+import { LoadingState } from '../components/LoadingState';
 import { AdminOverview, AdminTenants, AdminOnboarding, AdminMonitoring, AdminBilling, AdminUsers, AdminProfile, AdminActionLog, AdminPlatformOps } from './admin';
 import AdminSLA from './admin/AdminSLA';
 
@@ -144,7 +146,8 @@ export default function AdminConsole() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-950">
-        <div className="text-gray-400 text-sm">Loading...</div>
+        {/* AG-POLISH-D (2026-06-10) */}
+        <LoadingState message="Loading admin console…" />
       </div>
     );
   }

@@ -9,7 +9,10 @@ import { DiscoveryProgressModal } from '../components/settings/DiscoveryProgress
 // highest-risk identity from the just-completed run. Turns the wizard
 // from "settings form → orphan landing" into Wiz-style "connect →
 // first finding in <2min".
-const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Configure', 'Launch', 'Scanning'];
+// AG-PILOT-WIZARD-SUBS (2026-06-08): added explicit Subscriptions step
+// between Test and Configure. Customer picks which discovered subs to
+// monitor (billed per-sub) instead of platform auto-activating everything.
+const STEPS = ['Welcome', 'Cloud Provider', 'Credentials', 'Test', 'Subscriptions', 'Configure', 'Launch', 'Scanning'];
 
 interface TestResult {
   status: string;
@@ -59,6 +62,10 @@ export default function OnboardingWizard() {
   const [azureClientSecret, setAzureClientSecret] = useState('');
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // AG-PILOT-WIZARD-SUBS (2026-06-08): track which subs the customer
+  // explicitly chose to monitor. Wizard's new Subscriptions step.
+  const [activatingSubIds, setActivatingSubIds] = useState<string[]>([]);
+  const [activatingSubs, setActivatingSubs] = useState(false);
   const [discoveryInterval, setDiscoveryInterval] = useState('12');
   const [emailEnabled, setEmailEnabled] = useState(false);
   const [emailTo, setEmailTo] = useState('');
@@ -112,9 +119,11 @@ export default function OnboardingWizard() {
       return false; // AWS/GCP not yet supported
     }
     if (step === 3) return testResult?.status === 'success';
-    if (step === 4) return !emailEnabled || /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(emailTo.trim());
+    // AG-PILOT-WIZARD-SUBS: at least 1 sub must be picked before proceeding
+    if (step === 4) return activatingSubIds.length > 0;
+    if (step === 5) return !emailEnabled || /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(emailTo.trim());
     return true;
-  }, [step, orgName, selectedCloud, azureTenantId, azureClientId, azureClientSecret, testResult, emailEnabled, emailTo]);
+  }, [step, orgName, selectedCloud, azureTenantId, azureClientId, azureClientSecret, testResult, activatingSubIds, emailEnabled, emailTo]);
 
   // Auto-trigger test when arriving at Step 3 (Test Connection) with credentials filled
   const autoTestTriggered = React.useRef(false);
@@ -154,6 +163,65 @@ export default function OnboardingWizard() {
     }
   }
 
+  // V2.5 (2026-06-11) — "Skip first scan & explore" path.
+  // Same setup as handleComplete (save settings + activate subs) but does
+  // NOT call /api/runs/trigger. Used by the founder to verify every empty-
+  // state screen reads correctly before the first scan paints real numbers.
+  // Lands on the Executive Posture / Identity Security Command Center page
+  // where the fresh-tenant copy ("Awaiting first scan", "No prior-period
+  // baseline yet") now renders honestly per V2.4 data-honesty fixes.
+  async function handleSkipScan() {
+    setSaving(true);
+    setError(null);
+    setScanError(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          org_name: orgName.trim(),
+          azure_directory_id: azureTenantId.trim(),
+          azure_client_id: azureClientId.trim(),
+          azure_client_secret: azureClientSecret.trim(),
+          discovery_interval_hours: discoveryInterval,
+          email_enabled: String(emailEnabled),
+          email_to: emailEnabled ? emailTo.trim() : '',
+          onboarding_completed: 'true',
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to save settings');
+      }
+      if (orgId) {
+        sessionStorage.setItem(completeKey(orgId), 'true');
+        sessionStorage.removeItem(stepKey(orgId));
+      }
+      // Activate the chosen subscriptions so when the user does run their
+      // first scan later (manually from Settings → Connections), the subs
+      // are already wired. Non-fatal on error.
+      if (activatingSubIds.length > 0) {
+        try {
+          await fetch('/api/subscriptions/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_ids: activatingSubIds }),
+          });
+        } catch (subErr) {
+          console.warn('Failed to activate selected subscriptions', subErr);
+        }
+      }
+      // Land on the dashboard. No scan trigger, no scan modal.
+      // Use window.location.href to match the existing post-onboarding nav
+      // pattern (handleScanComplete uses the same approach on line 317).
+      window.location.href = '/';
+    } catch (e: any) {
+      setError(e?.message || 'Setup failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handleComplete() {
     setSaving(true);
     setError(null);
@@ -183,6 +251,22 @@ export default function OnboardingWizard() {
         sessionStorage.removeItem(stepKey(orgId));
       }
 
+      // AG-PILOT-WIZARD-SUBS (2026-06-08): activate the customer's
+      // chosen subscriptions BEFORE triggering discovery. Without this,
+      // first scan would find 0 identities because no subs are 'active'.
+      if (activatingSubIds.length > 0) {
+        try {
+          await fetch('/api/subscriptions/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_ids: activatingSubIds }),
+          });
+        } catch (subErr) {
+          // Non-fatal — customer can activate manually from Subs page
+          console.warn('Failed to activate selected subscriptions', subErr);
+        }
+      }
+
       // 2. Trigger the initial scan immediately so the wizard hands off
       //    to a live scan progress experience instead of an empty
       //    /subscriptions page.
@@ -208,7 +292,7 @@ export default function OnboardingWizard() {
       //    most-recent completed job) and the user sees what's there.
       setScanConnectionId(triggeredConnectionId);
       setShowScanModal(true);
-      setStep(6);
+      setStep(7);
     } catch (e: any) {
       setError(e?.message || 'Setup failed');
     } finally {
@@ -296,7 +380,12 @@ export default function OnboardingWizard() {
       {/* Logo + Title */}
       <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-white">AuditGraph Setup</h1>
-        <p className="text-sm text-gray-400 mt-1">Configure your identity security audit in a few steps</p>
+        {/* AG-PHASE1-BRAND (2026-06-09): platform tagline lands on
+            first contact so prospects know what they're configuring. */}
+        <p className="text-sm text-gray-400 mt-1">
+          Identity Security Graph for Human, Non-Human, and AI Identities
+        </p>
+        <p className="text-xs text-gray-500 mt-1">Agentless · read-only · architecture-derived</p>
       </div>
 
       {/* Progress Bar */}
@@ -502,8 +591,70 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 4: Configure */}
+        {/* AG-PILOT-WIZARD-SUBS (2026-06-08): Step 4 — Subscriptions
+            Customer picks which discovered subs to monitor. Each
+            activated sub is a separately billed monitoring unit. */}
         {step === 4 && (
+          <div className="space-y-5">
+            <div>
+              <h2 className="text-xl font-bold text-white">Activate Subscriptions</h2>
+              <p className="text-sm text-gray-400 mt-2">
+                Choose which subscriptions to monitor. Each activated subscription is billed separately
+                — you can add or remove subs from the Subscriptions page anytime.
+              </p>
+            </div>
+
+            <div className="bg-gray-800 rounded-lg p-4 max-h-96 overflow-y-auto space-y-1">
+              {(testResult?.subscriptions || []).map(s => (
+                <label key={s.id} className="flex items-center gap-3 p-2.5 rounded hover:bg-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-600 text-blue-600"
+                    checked={activatingSubIds.includes(s.id)}
+                    onChange={e => {
+                      if (e.target.checked) {
+                        setActivatingSubIds(prev => [...prev, s.id]);
+                      } else {
+                        setActivatingSubIds(prev => prev.filter(x => x !== s.id));
+                      }
+                    }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-white truncate">{s.name}</div>
+                    <div className="text-[11px] font-mono text-gray-500 truncate">{s.id}</div>
+                  </div>
+                  <div className="text-xs text-gray-400">$69/mo</div>
+                </label>
+              ))}
+              {(!testResult?.subscriptions || testResult.subscriptions.length === 0) && (
+                <p className="text-sm text-amber-400 p-2">
+                  No subscriptions discovered. Go back and verify your credentials grant Reader RBAC on at least one subscription.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <button
+                onClick={() => setActivatingSubIds((testResult?.subscriptions || []).map(s => s.id))}
+                className="text-blue-400 hover:text-blue-300">
+                Select all
+              </button>
+              <span className="text-gray-400">
+                {activatingSubIds.length} of {testResult?.subscriptions?.length || 0} selected
+                {activatingSubIds.length > 0 && (
+                  <> · <span className="text-white font-medium">${activatingSubIds.length * 69}/mo</span></>
+                )}
+              </span>
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-400">{error}</p>
+            )}
+          </div>
+        )}
+
+        {/* Step 5: Configure (was step 4 before adding Subscriptions step) */}
+        {step === 5 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-bold text-white">Configure Snapshots</h2>
@@ -559,8 +710,8 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 5: Launch */}
-        {step === 5 && (
+        {/* Step 6: Launch (was step 5 before adding Subscriptions step) */}
+        {step === 6 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-bold text-white">Review &amp; Launch</h2>
@@ -583,8 +734,11 @@ export default function OnboardingWizard() {
                 <span className="font-mono text-xs text-gray-300">{azureTenantId.slice(0, 8)}...</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Subscriptions Found</span>
-                <span className="font-medium text-green-400">{testResult?.subscriptions?.length || 0}</span>
+                <span className="text-gray-400">Subscriptions to Monitor</span>
+                <span className="font-medium text-green-400">
+                  {activatingSubIds.length} of {testResult?.subscriptions?.length || 0}
+                  <span className="text-gray-500 ml-2">(${activatingSubIds.length * 69}/mo)</span>
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Snapshot Frequency</span>
@@ -609,16 +763,39 @@ export default function OnboardingWizard() {
                   Completing setup...
                 </>
               ) : (
-                'Complete Setup'
+                'Complete Setup & Start First Scan'
               )}
             </button>
+
+            {/* V2.5 (2026-06-11) — Skip first scan. Founder-requested escape
+                hatch so they can verify every empty-state screen reads
+                correctly before live data paints. Same setup work as
+                Complete Setup minus the /api/runs/trigger call. */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-gray-700/60" />
+              <span className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">or</span>
+              <div className="flex-1 h-px bg-gray-700/60" />
+            </div>
+            <button
+              onClick={handleSkipScan}
+              disabled={saving}
+              className="w-full py-2.5 rounded-lg text-sm font-medium bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 hover:border-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
+            >
+              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+              </svg>
+              Skip first scan &amp; explore
+            </button>
+            <p className="text-[11px] text-gray-500 text-center -mt-1">
+              You can trigger the first scan later from <span className="text-gray-400">Settings → Connections</span>.
+            </p>
           </div>
         )}
 
-        {/* Step 6: Scanning — first-finding handoff. Renders behind the
+        {/* Step 7: Scanning — first-finding handoff. Renders behind the
             modal; serves as the page content if the user closes the modal
-            without navigating. */}
-        {step === 6 && (
+            without navigating. (was step 6 before adding Subscriptions) */}
+        {step === 7 && (
           <div className="space-y-5">
             <div>
               <h2 className="text-xl font-bold text-white">First scan running…</h2>
@@ -648,8 +825,11 @@ export default function OnboardingWizard() {
           </div>
         )}
 
-        {/* Navigation */}
-        {step < 6 && (
+        {/* AG-PILOT-WIZARD-SUBS (2026-06-08): bumped step thresholds by 1
+            because Subscriptions step shifted Launch from index 5→6 and
+            Scanning from 6→7. Without this fix Configure (now step 5)
+            had no Next button visible. */}
+        {step < 7 && (
           <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-700">
             <button
               onClick={() => { setStep(step - 1); setError(null); }}
@@ -659,7 +839,7 @@ export default function OnboardingWizard() {
               Back
             </button>
 
-            {step < 5 && (
+            {step < 6 && (
               <button
                 onClick={() => { setStep(step + 1); setError(null); }}
                 disabled={!canNext()}
