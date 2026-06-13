@@ -34,6 +34,7 @@ import Argus from './pages/Argus';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DataTrustZones from './pages/settings/DataTrustZones';
+import ClassifiedResources from './pages/ClassifiedResources';
 import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
 import IdentityComparison from './pages/IdentityComparison';
@@ -529,6 +530,10 @@ function AppContent() {
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><DataTrustZones /></ErrorBoundary>
                     </ProtectedRoute>
+                  } />
+                  {/* AG-193 follow-up — Classified Resources (target for UIG Storage / Classified Data tiers) */}
+                  <Route path="/data-classification" element={
+                    locked ? <Navigate to="/" replace /> : <ErrorBoundary><ClassifiedResources /></ErrorBoundary>
                   } />
                   <Route path="/settings/:tab" element={
                     <ProtectedRoute requiredRole="admin">

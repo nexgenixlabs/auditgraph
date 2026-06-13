@@ -181,10 +181,10 @@ export default function UnifiedIdentityGraph() {
           provenance: `Classified from agent_classifications: identities with platform=Copilot Studio, Azure AI Studio, Azure Machine Learning, Custom AI Apps, or detected via name patterns. Excludes generic SPNs.` },
         { key: 'model',   label: 'AI Models',            description: 'gpt-4, gpt-4o, claude-3.5, embeddings — deployed inference endpoints.',   color: '#ec4899', count: modelCount, sample: '',          drillTo: '/ai-runtime/model-registry',
           provenance: `Inference endpoints discovered from: Azure OpenAI Service deployments, Azure AI Studio model registry, third-party LLM connectors (OpenAI, Anthropic, Mistral), and custom model deployments detected via DNS / managed-endpoint patterns.` },
-        { key: 'storage', label: 'Storage / KV / SQL',   description: 'Backing stores the models can read or the agents can write.',             color: '#22d3ee', count: storageCount, sample: '',        drillTo: '/spns',
-          provenance: `Azure Storage accounts, Key Vaults, SQL databases, Cosmos DB, and any resource reachable via RBAC from the AI tier. Populated once /api/ai-access/data-reachability completes.` },
-        { key: 'data',    label: 'Classified Data',      description: 'PHI / PCI / PII / Source — the actual exposure target.',                  color: '#f43f5e', count: dataCount,  sample: '',          drillTo: '/ai-access/data-reachability',
-          provenance: `Resources tagged data-class: PHI / PCI / PII / Source / HR / Financial / Confidential. Tags can be applied manually, by Microsoft Purview, or by AuditGraph auto-classification (Settings → Classifications).` },
+        { key: 'storage', label: 'Storage / KV / SQL',   description: 'Backing stores the models can read or the agents can write.',             color: '#22d3ee', count: storageCount, sample: '',        drillTo: '/data-classification',
+          provenance: `Azure Storage accounts, Key Vaults, SQL databases, Cosmos DB, and any discovered_resources entry — filtered to those carrying a data_classification from a Data Trust Zone, Azure tag, name pattern, or manual override.` },
+        { key: 'data',    label: 'Classified Data',      description: 'PHI / PCI / PII / Source — the actual exposure target.',                  color: '#f43f5e', count: dataCount,  sample: '',          drillTo: '/data-classification',
+          provenance: `Resources whose data_classification is set to one of PHI / PCI / PII / SOURCE / HR / FINANCIAL / CONFIDENTIAL. Driven by Data Trust Zones (CISO assertion), Azure tags, Microsoft Purview, or name-pattern fallback — never by reading content.` },
       ]);
       setLoading(false);
     }).catch(() => { if (!cancelled) setLoading(false); });

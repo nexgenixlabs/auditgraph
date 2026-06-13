@@ -3184,6 +3184,12 @@ def create_app():
         from app.api.handlers import get_purview_status
         return get_purview_status()
 
+    # AG-193 follow-up — Classified Resources list
+    @app.get("/api/resources/classified")
+    def resources_classified():
+        from app.api.handlers import get_classified_resources
+        return get_classified_resources()
+
     # -----------------------
     # Risks (Dashboard needs it)
     # -----------------------

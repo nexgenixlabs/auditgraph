@@ -48919,3 +48919,135 @@ def get_purview_status():
             "account in Settings → Connectors → Purview."
         ),
     })
+
+
+def get_classified_resources():
+    """GET /api/resources/classified — list resources that have a data_classification.
+
+    AG-193 (Sprint 1 follow-up) — landing page for the Unified Identity
+    Graph "Storage / KV / SQL" + "Classified Data" tier clicks. Returns
+    every resource carrying a non-null data_classification across the 5
+    canonical tables, with provenance + zone link.
+
+    Query params:
+      classification: filter to a specific class (PHI/PCI/PII/...)
+      source: filter to a specific source (scope_rule, tag, name_pattern, ...)
+      confidence_min: int 0-100
+      limit: max rows (default 200, max 1000)
+    """
+    cls_filter = (request.args.get('classification') or '').strip().upper()
+    src_filter = (request.args.get('source') or '').strip().lower()
+    conf_min = request.args.get('confidence_min', 0, type=int)
+    limit = min(request.args.get('limit', 200, type=int), 1000)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        rows: list = []
+        # Walk the canonical resource tables. Each yields a uniform
+        # shape; we union in Python instead of SQL so heterogeneous
+        # tables stay manageable.
+        SOURCES = [
+            ('azure_storage_accounts',   'Storage Account'),
+            ('azure_key_vaults',         'Key Vault'),
+            ('azure_sql_databases',      'SQL Database'),
+            ('azure_cosmos_databases',   'Cosmos DB'),
+            ('discovered_resources',     'Resource'),
+        ]
+        for table, kind in SOURCES:
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name=%s",
+                (table,),
+            )
+            if not cursor.fetchone():
+                continue
+            # Resolve name column (matches scope_classifier discovery)
+            name_col = None
+            for cand in ('name', 'display_name', 'resource_name'):
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name=%s AND column_name=%s",
+                    (table, cand),
+                )
+                if cursor.fetchone():
+                    name_col = cand
+                    break
+            if not name_col:
+                continue
+
+            where_clauses = [
+                "organization_id = %s",
+                "data_classification IS NOT NULL",
+            ]
+            params: list = [org_id]
+            if cls_filter and cls_filter in ('PHI','PCI','PII','SOURCE','HR','FINANCIAL','CONFIDENTIAL'):
+                where_clauses.append("data_classification = %s")
+                params.append(cls_filter)
+            if src_filter:
+                where_clauses.append("classification_source = %s")
+                params.append(src_filter)
+            if conf_min > 0:
+                where_clauses.append("COALESCE(classification_confidence, 0) >= %s")
+                params.append(conf_min)
+
+            try:
+                cursor.execute(
+                    f"""SELECT resource_id, {name_col},
+                              data_classification, classification_source,
+                              classification_confidence,
+                              classification_rule_id, classification_asserted_by
+                         FROM {table}
+                        WHERE {' AND '.join(where_clauses)}
+                        ORDER BY data_classification, COALESCE(classification_confidence, 0) DESC
+                        LIMIT %s""",
+                    tuple(params + [limit]),
+                )
+                for r in cursor.fetchall():
+                    # Extract sub + rg from ARM path for the row's display
+                    rid = r[0] or ''
+                    parts = rid.strip('/').split('/')
+                    sub = parts[1] if len(parts) >= 2 and parts[0].lower() == 'subscriptions' else None
+                    rg = parts[3] if len(parts) >= 4 and parts[2].lower() == 'resourcegroups' else None
+                    rows.append({
+                        'resource_id': rid,
+                        'name': r[1] or rid.split('/')[-1] if rid else '',
+                        'kind': kind,
+                        'classification': r[2],
+                        'source': r[3] or 'unknown',
+                        'confidence': r[4] or 0,
+                        'rule_id': r[5],
+                        'asserted_by': r[6],
+                        'subscription_id': sub,
+                        'resource_group': rg,
+                    })
+            except Exception as exc:
+                logger.debug("classified-resources SELECT %s failed: %s", table, exc)
+                try: db.conn.rollback()
+                except Exception: pass
+
+        # Cap total + sort by confidence DESC then class
+        rows.sort(key=lambda r: (-(r['confidence'] or 0), r['classification']))
+        rows = rows[:limit]
+
+        # Per-class summary for the page header
+        by_class: dict = {}
+        for r in rows:
+            c = r['classification']
+            by_class[c] = by_class.get(c, 0) + 1
+        by_source: dict = {}
+        for r in rows:
+            s = r['source']
+            by_source[s] = by_source.get(s, 0) + 1
+
+        cursor.close()
+        return jsonify({
+            'resources': rows,
+            'count': len(rows),
+            'by_classification': by_class,
+            'by_source': by_source,
+        })
+    finally:
+        db.close()
