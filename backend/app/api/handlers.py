@@ -8741,7 +8741,28 @@ def get_dashboard_business_impact():
         pci_value = classified['PCI'] * PCI_PER_ASSET
         pii_value = classified['PII'] * PII_PER_ASSET
         ai_value = ai_count * AI_MODEL_PER_ASSET
-        total = phi_value + pci_value + pii_value + ai_value
+
+        # V2.13 (2026-06-12) — Unified Identity Graph chain is:
+        #   Human → SPN → MI → AI Agent → Model → Storage → Classified Data
+        # "Exposure" is the END of the chain — the dollar cost when
+        # classified data is breached. AI model breach cost is the cost
+        # of compromising the inference endpoint, NOT data exposure.
+        #
+        # Founder caught: localpilot/devpilot showed Data Sources = 0
+        # (no PHI/PCI/PII classified) but Exposure = $107.8M (= 77 AI
+        # models × $1.4M). A buyer asks: "how can exposure be $107.8M if
+        # no data sources exist?" — a real contradiction.
+        #
+        # Rule: classification = 0 → exposure = 0. AI model value only
+        # contributes when classified data exists to anchor it. The
+        # per-tile counts still show ai_models.count (the count is real
+        # discovery output); only the dollar value is gated.
+        classified_total = classified['PHI'] + classified['PCI'] + classified['PII']
+        if classified_total == 0:
+            ai_value = 0
+            total = 0
+        else:
+            total = phi_value + pci_value + pii_value + ai_value
 
         # Reduction opportunity heuristic: 25% of total can typically be
         # eliminated by closing the top remediation set (industry defaults).
@@ -8754,6 +8775,7 @@ def get_dashboard_business_impact():
             'ai_models':  {'count': ai_count,         'value': ai_value,  'per_asset': AI_MODEL_PER_ASSET},
             'total_exposure': total,
             'reduction_opportunity': reduction,
+            'classified_data_count': classified_total,
             'source': 'IBM Cost of a Data Breach 2024 (defaults; overridable per tenant)',
         })
     finally:
