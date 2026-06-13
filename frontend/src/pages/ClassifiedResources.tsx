@@ -172,7 +172,12 @@ export default function ClassifiedResources() {
                         {r.classification}
                       </span>
                     </td>
-                    <td className="p-3 text-slate-300">{SOURCE_LABEL[r.source] || r.source}</td>
+                    <td className="p-3 text-slate-300">
+                      {SOURCE_LABEL[r.source] || r.source}
+                      {r.source === 'scope_rule' && r.confidence < 85 && (
+                        <span className="block text-[10px] text-amber-400/80 mt-0.5">zone-asserted, name unverified</span>
+                      )}
+                    </td>
                     <td className="p-3">
                       <span className="inline-flex items-center gap-1">
                         <span className="w-1.5 h-1.5 rounded-full" style={{ background: band.color }} />

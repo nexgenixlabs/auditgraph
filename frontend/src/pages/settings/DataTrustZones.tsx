@@ -26,10 +26,11 @@ const CLASSES = [
 ] as const;
 
 const SCOPE_TYPES = [
-  { key: 'subscription',            label: 'Subscription (exact)',         hint: 'Subscription ID — e.g. df244a11-2de3-4448-b59c-2ad019f3319a' },
-  { key: 'resource_group',          label: 'Resource Group (exact)',       hint: 'Resource group name — e.g. carehub-centus-prd-rg' },
-  { key: 'subscription_pattern',    label: 'Subscription (glob pattern)',  hint: 'Wildcard subscription — e.g. *healthcare* (matches against the sub ID/name)' },
-  { key: 'resource_group_pattern',  label: 'Resource Group (glob pattern)', hint: 'Wildcard RG — e.g. customer-* or *-prod-rg' },
+  { key: 'resource_name_pattern',   label: 'Resource Name (glob) — recommended', hint: 'Wildcard against the resource name itself — e.g. *phi*, *claims*, *patient*. Highest precision: every match earns High confidence.' },
+  { key: 'resource_group',          label: 'Resource Group (exact)',             hint: 'Whole resource group — e.g. carehub-centus-prd-rg. Resources whose name carries no class keyword get Medium confidence (broad assertion).' },
+  { key: 'resource_group_pattern',  label: 'Resource Group (glob pattern)',      hint: 'Wildcard RG — e.g. customer-* or *-prod-rg. Same broad-vs-narrow rule applies to confidence.' },
+  { key: 'subscription',            label: 'Subscription (exact)',               hint: 'Subscription ID — e.g. df244a11-2de3-4448-b59c-2ad019f3319a. Very broad — favour name patterns where possible.' },
+  { key: 'subscription_pattern',    label: 'Subscription (glob pattern)',        hint: 'Wildcard subscription — e.g. *healthcare*. Very broad — favour name patterns where possible.' },
 ] as const;
 
 interface Zone {

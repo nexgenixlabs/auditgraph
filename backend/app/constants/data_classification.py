@@ -74,6 +74,15 @@ TAXONOMY: dict[str, dict[str, Any]] = {
             r"\bemr\b",
             r"\bepic\b",
             r"\bcerner\b",
+            r"\bclaim(s)?\b",
+            r"\bcoverage\b",
+            r"\beligibility\b",
+            r"\bencounter(s)?\b",
+            r"\bdiagnosis\b",
+            r"\brx\b",
+            r"\bpharmacy\b",
+            r"\bcarehub\b",
+            r"\bcarequery\b",
         ],
         "tag_values": ["phi", "hipaa", "protected-health", "health"],
         "regulations": ["HIPAA", "HITECH"],
@@ -369,14 +378,31 @@ def classify_resource(
             }
 
     # ── Tier 3: Data Trust Zone (CISO scope assertion) ───────────
+    #
+    # AG-193 follow-up (2026-06-12): broad RG-only zones no longer
+    # rubber-stamp confidence 100. Precedence inside this tier:
+    #   3a. resource_name_pattern  → 100 (per-resource pattern; precise)
+    #   3b. broad zone + name corroborates the asserted class → 100
+    #   3c. broad zone, name silent on the class → 60 (Medium)
     if scope_rules:
-        match = _match_scope_rules(scope_rules, subscription_id, resource_group)
+        match = _match_scope_rules(
+            scope_rules, name_str, subscription_id, resource_group
+        )
         if match is not None:
+            rule_scope = _norm(match.get("scope_type"))
+            cls = match["classification"]
+            if rule_scope == "resource_name_pattern":
+                conf = 100  # per-resource pattern — precise
+            elif _name_corroborates(name_str, cls):
+                conf = 100  # zone + name agree
+            else:
+                conf = 60   # zone asserts; name is silent
             return {
-                "classification": match["classification"],
-                "confidence": 100,  # owner asserted — strongest signal
+                "classification": cls,
+                "confidence": conf,
                 "source": "scope_rule",
                 "rule_id": match.get("id"),
+                "scope_type": rule_scope,
             }
 
     # ── Tier 4: Purview classification (slot reserved) ───────────
@@ -423,25 +449,29 @@ def classify_resource(
 
 def _match_scope_rules(
     scope_rules: list[dict],
+    name: str | None,
     subscription_id: str | None,
     resource_group: str | None,
 ) -> dict | None:
-    """Find the first scope rule that matches the resource's sub or RG.
+    """Find the first scope rule that matches the resource.
 
-    Match order within scope_rules iteration:
-      - Explicit subscription literal
-      - Explicit resource_group literal
-      - subscription_pattern glob (fnmatch — '*' wildcard)
+    Match order within scope_rules iteration (first match wins; caller
+    controls ordering — most-specific first by convention):
+      - resource_name_pattern  glob match against resource name
+      - subscription           literal
+      - resource_group         literal
+      - subscription_pattern   glob (fnmatch — '*' wildcard)
       - resource_group_pattern glob
 
-    Multiple matches: returns the FIRST one (caller controls ordering;
-    typical convention: most-specific first). Conflict resolution
-    beyond first-match is a Sprint 2 enhancement.
+    Resource-name patterns are intentionally checked FIRST inside any
+    given rule so a more-precise zone wins over a broad RG zone when
+    multiple rules match.
     """
     if not scope_rules:
         return None
     import fnmatch
 
+    name_n = _norm(name)
     sub_n = _norm(subscription_id)
     rg_n = _norm(resource_group)
 
@@ -456,6 +486,8 @@ def _match_scope_rules(
         if not sv:
             continue
 
+        if st == "resource_name_pattern" and name_n and fnmatch.fnmatch(name_n, sv):
+            return rule
         if st == "subscription" and sub_n and sub_n == sv:
             return rule
         if st == "resource_group" and rg_n and rg_n == sv:
@@ -466,6 +498,20 @@ def _match_scope_rules(
             return rule
 
     return None
+
+
+def _name_corroborates(name: str, classification: str) -> bool:
+    """Does the resource name contain a keyword for `classification`?
+
+    Used to decide whether a broad scope rule (RG/sub level) is backed
+    by per-resource naming evidence. When True, the broad zone earns
+    confidence 100; when False, the broad zone is recorded at 60 (Medium)
+    so the UI can flag it as 'zone-asserted, name-unverified'.
+    """
+    if not name:
+        return False
+    patterns = _COMPILED_PATTERNS.get(classification, [])
+    return any(rx.search(name) for rx in patterns)
 
 
 def classify_resources_batch(

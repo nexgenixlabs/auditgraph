@@ -183,6 +183,10 @@ def apply_scope_classification(
         rg_col = "resource_group" if _has_column(cursor, table, "resource_group") else None
 
         cols = ["resource_id", name_col, "data_classification", "classification_source"]
+        # AG-193 follow-up: include current confidence so we can detect
+        # confidence-only changes (broad zone demoted from 100 → 60).
+        conf_col = "classification_confidence" if _has_column(cursor, table, "classification_confidence") else None
+        if conf_col: cols.append(conf_col)
         if tags_col: cols.append(tags_col)
         if sub_col: cols.append(sub_col)
         if rg_col: cols.append(rg_col)
@@ -215,6 +219,7 @@ def apply_scope_classification(
             name = row[1] or ""
             current_classification = row[2]
             current_source = row[3]
+            current_confidence = row[cols.index(conf_col)] if conf_col else None
             tags = row[cols.index(tags_col)] if tags_col else None
             sub = row[cols.index(sub_col)] if sub_col else None
             rg = row[cols.index(rg_col)] if rg_col else None
@@ -257,11 +262,16 @@ def apply_scope_classification(
                 purview_label=purview_label,
             )
 
-            # No verdict OR same as current → no work.
+            # No verdict OR same as current (including confidence) → no work.
             if not verdict:
                 continue
+            try:
+                current_conf_int = int(current_confidence) if current_confidence is not None else None
+            except (TypeError, ValueError):
+                current_conf_int = None
             if (verdict["classification"] == current_classification
-                and current_source == verdict["source"]):
+                and current_source == verdict["source"]
+                and current_conf_int == verdict["confidence"]):
                 continue
 
             # Write back when the verdict comes from a high-trust tier
