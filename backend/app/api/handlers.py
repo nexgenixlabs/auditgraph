@@ -8799,12 +8799,19 @@ def get_dashboard_business_impact():
         pci_value = classified['PCI'] * PCI_PER_ASSET
         pii_value = classified['PII'] * PII_PER_ASSET
 
-        # AG-193 Sprint B (2026-06-13) — AI value is reach-derived, not a
-        # flat multiplier. Until the reach attributor lands the headline
-        # AI contribution is 0; the count is still surfaced (it's a real
-        # discovery output) and the per-asset rate is 0 to make the
-        # deprecation visible on screen.
-        ai_value = ai_count * AI_MODEL_PER_ASSET   # = 0 unless tenant overrode
+        # AG-193 Sprint B tightening (2026-06-13) — AI is ATTRIBUTION,
+        # not an additive dollar line. ai_value stays for back-compat
+        # but reads 0 unless the tenant has overridden the deprecated
+        # flat multiplier. The honest AI signal lives in ai_attribution.
+        ai_value = ai_count * AI_MODEL_PER_ASSET
+
+        ai_attribution = None
+        try:
+            from app.engines.discovery.reach_attributor import compute_ai_attribution_summary
+            ai_attribution = compute_ai_attribution_summary(db, _org_id())
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
 
         classified_total = classified['PHI'] + classified['PCI'] + classified['PII']
         total = phi_value + pci_value + pii_value + ai_value
@@ -8817,7 +8824,17 @@ def get_dashboard_business_impact():
             'phi_assets': {'count': classified['PHI'], 'value': phi_value, 'per_asset': PHI_PER_ASSET},
             'pci_assets': {'count': classified['PCI'], 'value': pci_value, 'per_asset': PCI_PER_ASSET},
             'pii_assets': {'count': classified['PII'], 'value': pii_value, 'per_asset': PII_PER_ASSET},
-            'ai_models':  {'count': ai_count,         'value': ai_value,  'per_asset': AI_MODEL_PER_ASSET},
+            # ai_models stays for back-compat. The drawer/UI should prefer
+            # ai_attribution (below) which is reach-derived and non-additive.
+            'ai_models':  {
+                'count': ai_count, 'value': ai_value, 'per_asset': AI_MODEL_PER_ASSET,
+                'with_reach_count':       (ai_attribution or {}).get('ai_with_reach_count', 0),
+                'attributable_exposure':  (ai_attribution or {}).get('attributable_exposure', 0),
+                'attributable_phi':       (ai_attribution or {}).get('attributable_phi', 0),
+                'attributable_pci':       (ai_attribution or {}).get('attributable_pci', 0),
+                'attributable_pii':       (ai_attribution or {}).get('attributable_pii', 0),
+            },
+            'ai_attribution': ai_attribution,
             'total_exposure': total,
             'reduction_opportunity': reduction,
             'classified_data_count': classified_total,

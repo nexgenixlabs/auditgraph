@@ -179,7 +179,11 @@ interface BusinessImpactResp {
   phi_assets: { count: number; value: number; per_asset: number };
   pci_assets: { count: number; value: number; per_asset: number };
   pii_assets: { count: number; value: number; per_asset: number };
-  ai_models:  { count: number; value: number; per_asset: number };
+  ai_models:  {
+    count: number; value: number; per_asset: number;
+    with_reach_count?: number; attributable_exposure?: number;
+    attributable_phi?: number; attributable_pci?: number; attributable_pii?: number;
+  };
   total_exposure: number;
   source: string;
 }
@@ -193,12 +197,17 @@ function TotalBreakdownSection() {
       .catch(() => {});
   }, []);
   if (!bi) return null;
-  const rows: { key: string; label: string; color: string; row: { count: number; value: number; per_asset: number } }[] = [
-    { key: 'PHI', label: 'PHI Assets',       color: CLASS_COLORS.PHI, row: bi.phi_assets },
-    { key: 'PCI', label: 'PCI Assets',       color: CLASS_COLORS.PCI, row: bi.pci_assets },
-    { key: 'PII', label: 'PII Assets',       color: CLASS_COLORS.PII, row: bi.pii_assets },
-    { key: 'AI',  label: 'AI Models',        color: '#a855f7',        row: bi.ai_models  },
+  // Only PHI/PCI/PII rows are additive. AI is rendered as a non-additive
+  // attribution row below — see founder feedback 2026-06-13: "count × $0
+  // is structurally misleading because AI doesn't add a dollar line."
+  const dataRows: { key: string; label: string; color: string; row: { count: number; value: number; per_asset: number } }[] = [
+    { key: 'PHI', label: 'PHI Assets', color: CLASS_COLORS.PHI, row: bi.phi_assets },
+    { key: 'PCI', label: 'PCI Assets', color: CLASS_COLORS.PCI, row: bi.pci_assets },
+    { key: 'PII', label: 'PII Assets', color: CLASS_COLORS.PII, row: bi.pii_assets },
   ];
+  const ai = bi.ai_models;
+  const aiWithReach = ai.with_reach_count ?? 0;
+  const aiAttribution = ai.attributable_exposure ?? 0;
   return (
     <div>
       <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-2">Total Exposure Formula</h3>
@@ -213,7 +222,7 @@ function TotalBreakdownSection() {
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => (
+            {dataRows.map(r => (
               <tr key={r.key} className="border-b border-slate-800/40 last:border-0">
                 <td className="p-2.5">
                   <span className="inline-flex items-center gap-1.5">
@@ -227,7 +236,7 @@ function TotalBreakdownSection() {
               </tr>
             ))}
             <tr className="bg-slate-900/60 border-t-2 border-slate-700">
-              <td className="p-2.5 text-[10px] uppercase tracking-wider font-bold text-slate-400">Total</td>
+              <td className="p-2.5 text-[10px] uppercase tracking-wider font-bold text-slate-400">Total (classified data)</td>
               <td className="p-2.5" />
               <td className="p-2.5" />
               <td className="p-2.5 text-right text-red-400 font-mono font-bold text-base">{fmtMoney(bi.total_exposure)}</td>
@@ -235,6 +244,47 @@ function TotalBreakdownSection() {
           </tbody>
         </table>
       </div>
+
+      {/* AI attribution — rendered separately so it doesn't read as
+          "$0 added to the total". AI is attribution, not contribution. */}
+      <div className="mt-3 rounded-xl bg-slate-800/30 border border-slate-700/40 p-3">
+        <div className="flex items-center justify-between mb-1">
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-300 font-semibold">
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#a855f7' }} />
+            AI Workloads — Attribution (non-additive)
+          </span>
+          <span className="text-[10px] text-slate-500">share of total reachable by AI</span>
+        </div>
+        <div className="grid grid-cols-3 gap-3 text-[11px]">
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-slate-500">Discovered</p>
+            <p className="text-base font-mono font-bold text-white">{ai.count.toLocaleString()}</p>
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-slate-500">Reach Classified</p>
+            <p className="text-base font-mono font-bold" style={{ color: aiWithReach > 0 ? '#fbbf24' : '#10b981' }}>
+              {aiWithReach.toLocaleString()}
+            </p>
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-slate-500">Attributable $$</p>
+            <p className="text-base font-mono font-bold" style={{ color: aiAttribution > 0 ? '#f87171' : '#10b981' }}>
+              {fmtMoney(aiAttribution)}
+            </p>
+          </div>
+        </div>
+        {aiWithReach === 0 && ai.count > 0 && (
+          <p className="text-[10px] text-emerald-400/80 mt-2">
+            ✓ AI workloads are correctly segregated — none have RBAC reach to classified data.
+          </p>
+        )}
+        {aiWithReach > 0 && (
+          <p className="text-[10px] text-amber-400/80 mt-2">
+            {aiWithReach} AI workload{aiWithReach > 1 ? 's' : ''} can reach classified data — see Top Reach by AI Model on the dashboard.
+          </p>
+        )}
+      </div>
+
       <p className="text-[10px] text-slate-500 mt-2">
         {bi.source}.{' '}
         <Link to="/settings/exposure-defaults" className="text-violet-400 hover:underline">Edit per-asset defaults →</Link>

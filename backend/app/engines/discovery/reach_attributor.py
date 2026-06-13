@@ -356,6 +356,111 @@ def compute_ai_model_reach(db, organization_id: int) -> dict[str, Any]:
     }
 
 
+def compute_ai_attribution_summary(db, organization_id: int) -> dict[str, Any]:
+    """Honest AI attribution rollup, deduped against the classified set.
+
+    Founder caught (2026-06-13) that the dashboard's AI row read as
+    "count × $0 = $0" — that's structurally misleading because AI
+    workloads don't ADD a dollar line; they ATTRIBUTE to the data they
+    can reach. This routine computes the union of classified resources
+    reachable by any AI workload (identity_category = managed_identity_*
+    classified as ai_agent / possible_ai_agent), so the drawer can say:
+      "77 AI workloads · 12 reach classified · $5.0M attributable share"
+    without inflating the headline total.
+
+    Returns:
+      {
+        ai_identity_count           — count of AI agent identities
+        ai_with_reach_count         — count whose reach > 0
+        attributable_exposure       — distinct classified $$ reachable
+                                      by ANY AI workload (deduped)
+        attributable_phi/pci/pii    — count of distinct classified
+                                      resources by class
+      }
+    """
+    cursor = db.conn.cursor()
+    per_asset = _per_asset_for_org(db, organization_id)
+
+    # AI identities: managed identities flagged as AI in agent_classifications
+    cursor.execute(
+        """SELECT COUNT(*),
+                  COUNT(*) FILTER (WHERE COALESCE(i.reachable_classified_exposure, 0) > 0)
+             FROM identities i
+             JOIN agent_classifications ac ON ac.identity_db_id = i.id
+            WHERE i.organization_id = %s
+              AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent')""",
+        (organization_id,),
+    )
+    n_ai, n_ai_with_reach = cursor.fetchone() or (0, 0)
+
+    # Distinct classified-resource union reachable by any AI workload.
+    union_parts = []
+    for tbl in (
+        "azure_storage_accounts",
+        "azure_key_vaults",
+        "azure_sql_databases",
+        "azure_cosmos_databases",
+        "discovered_resources",
+    ):
+        if _table_exists(cursor, tbl):
+            union_parts.append(
+                f"SELECT resource_id, data_classification "
+                f"FROM {tbl} "
+                f"WHERE organization_id = %s AND data_classification IN ('PHI','PCI','PII')"
+            )
+
+    attributable_exposure = 0
+    by_class = {'PHI': 0, 'PCI': 0, 'PII': 0}
+
+    if union_parts and n_ai > 0:
+        classified_union = " UNION ALL ".join(union_parts)
+        org_args = tuple([organization_id] * len(union_parts))
+        sql = f"""
+        WITH classified AS (
+            {classified_union}
+        ),
+        ai_principals AS (
+            SELECT i.id
+              FROM identities i
+              JOIN agent_classifications ac ON ac.identity_db_id = i.id
+             WHERE i.organization_id = %s
+               AND ac.agent_identity_type IN ('ai_agent','possible_ai_agent')
+        ),
+        reached AS (
+            SELECT DISTINCT c.resource_id, c.data_classification
+              FROM role_assignments ra
+              JOIN ai_principals ap ON ap.id = ra.identity_db_id
+              JOIN classified c
+                ON c.resource_id = ra.scope
+                OR c.resource_id LIKE ra.scope || '/%%'
+             WHERE ra.organization_id = %s
+        )
+        SELECT data_classification, COUNT(*)
+          FROM reached
+         GROUP BY data_classification
+        """
+        cursor.execute(sql, org_args + (organization_id, organization_id))
+        for cls, cnt in cursor.fetchall():
+            cnt = int(cnt or 0)
+            if cls in by_class:
+                by_class[cls] = cnt
+        attributable_exposure = (
+            by_class['PHI'] * per_asset['PHI']
+            + by_class['PCI'] * per_asset['PCI']
+            + by_class['PII'] * per_asset['PII']
+        )
+
+    cursor.close()
+    return {
+        "ai_identity_count":     int(n_ai or 0),
+        "ai_with_reach_count":   int(n_ai_with_reach or 0),
+        "attributable_exposure": int(attributable_exposure),
+        "attributable_phi":      by_class['PHI'],
+        "attributable_pci":      by_class['PCI'],
+        "attributable_pii":      by_class['PII'],
+    }
+
+
 def compute_all_reach(db, organization_id: int) -> dict[str, Any]:
     """Convenience: identities first, then AI models (which borrow from identities)."""
     result = {"organization_id": organization_id}
@@ -381,5 +486,6 @@ def compute_all_reach(db, organization_id: int) -> dict[str, Any]:
 __all__ = [
     "compute_identity_reach",
     "compute_ai_model_reach",
+    "compute_ai_attribution_summary",
     "compute_all_reach",
 ]
