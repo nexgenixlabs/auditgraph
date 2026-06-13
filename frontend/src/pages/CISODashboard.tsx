@@ -88,6 +88,9 @@ interface DashboardData {
   reachableAiModels: number | null;
   orphanNhiCount: number | null;
   topExposureIdentity: { name: string; exposure: number; phi: number } | null;
+  // Top Reach panels — ranked identity / AI model lists for the workshop row.
+  topReachIdentities: Array<{ id: number; name: string; category: string; exposure: number; phi: number; pii: number }>;
+  topReachAiModels:   Array<{ id: number; name: string; exposure: number; phi: number; pii: number; attribution_method?: string }>;
   attackPathsTotal: number;
   attackPathsCritical: number;
   attackPathsHigh: number;
@@ -509,7 +512,11 @@ export default function CISODashboard() {
       // AG-193 Sprint B (2026-06-13) — reach attribution summary for the
       // Potential Exposure Impact decorator: who can reach the $$?
       fetch('/api/exposure/reach-summary').then(r => r.ok ? r.json() : null),
-    ]).then(([cat, idSum, attackResp, attackCount, spnStats, posture, modelReg, activity, bizImpact, reachSummary]) => {
+      // AG-193 Sprint B tightening — Top Reach panels: rank identities and
+      // AI models by reachable classified exposure.
+      fetch('/api/exposure/by-entity?type=identity&limit=5').then(r => r.ok ? r.json() : null),
+      fetch('/api/exposure/by-entity?type=ai_model&limit=5').then(r => r.ok ? r.json() : null),
+    ]).then(([cat, idSum, attackResp, attackCount, spnStats, posture, modelReg, activity, bizImpact, reachSummary, topReachIdent, topReachAi]) => {
       if (cancelled) return;
       const categorySummary: CategorySummary = cat || {};
       const cats = idSum?.categories || {};
@@ -624,6 +631,8 @@ export default function CISODashboard() {
         reachableAiModels:   reachSummary?.reachable_ai_models   ?? null,
         orphanNhiCount:      reachSummary?.orphan_nhi_count      ?? null,
         topExposureIdentity: reachSummary?.top_identity          ?? null,
+        topReachIdentities:  (topReachIdent?.rows || []).slice(0, 5),
+        topReachAiModels:    (topReachAi?.rows    || []).slice(0, 5),
         attackPathsTotal: pathsTotal,
         attackPathsCritical: critN,
         attackPathsHigh: highN,
@@ -964,6 +973,92 @@ export default function CISODashboard() {
               viewHref="/ai-inventory" onClick={() => {}}
               elevated
             />
+          </div>
+
+          {/* Row 3.5: Top Reach — peer's killer slide (2026-06-13).
+              Answers "who can reach the $$?" by ranking identities + AI
+              models by their cached reachable_classified_exposure. */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Top Reach by Identity */}
+            <div className="rounded-xl p-5 bg-[#0f172a]/80 border border-white/5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Top Reach by Identity</h3>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Identities that can reach the most classified data</p>
+                </div>
+                <Link to="/identities" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
+              </div>
+              {data.topReachIdentities.length === 0 ? (
+                <p className="text-[11px] text-emerald-400/70 text-center py-6">✓ No identity has reach to classified data.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {data.topReachIdentities.map((r, i) => (
+                    <Link key={r.id} to={`/identities/${r.id}`}
+                      className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-800/40 transition text-xs">
+                      <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 bg-red-500/15 border border-red-500/40 text-red-300">
+                        {i + 1}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-slate-200 truncate font-mono">{r.name}</p>
+                        <p className="text-[10px] text-slate-500">
+                          {r.category.replace(/_/g, ' ')} · {r.phi} PHI · {r.pii} PII
+                        </p>
+                      </div>
+                      <span className="text-red-400 font-bold font-mono flex-shrink-0">{fmtMoney(r.exposure)}</span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Top Reach by AI Model */}
+            <div className="rounded-xl p-5 bg-[#0f172a]/80 border border-white/5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-[11px] uppercase tracking-wider font-bold text-slate-300">Top Reach by AI Model</h3>
+                  <p className="text-[10px] text-slate-500 mt-0.5">AI deployments by reachable classified data</p>
+                </div>
+                <Link to="/ai-identity" className="text-[10px] text-violet-400 hover:text-violet-300">View All</Link>
+              </div>
+              {data.topReachAiModels.length === 0 ? (
+                <div className="text-center py-6">
+                  <p className="text-[11px] text-slate-400">No AI deployments with resolvable reach.</p>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Reach derives from each model's parent account's managed identity.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {data.topReachAiModels.map((r, i) => {
+                    const method = r.attribution_method;
+                    const methodLabel =
+                      method === 'name_match'       ? 'name-matched MI'   :
+                      method === 'rbac_upper_bound' ? 'RBAC upper bound'  :
+                      method === 'mi_principal_id'  ? 'linked MI'         :
+                      method === 'unresolved'       ? 'unresolved'        : '';
+                    const methodTone =
+                      method === 'name_match' || method === 'mi_principal_id' ? 'text-emerald-400/70' :
+                      method === 'rbac_upper_bound' ? 'text-amber-400/70' :
+                      'text-slate-500';
+                    return (
+                      <div key={r.id} className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-800/40 transition text-xs">
+                        <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 bg-violet-500/15 border border-violet-500/40 text-violet-300">
+                          {i + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-slate-200 truncate font-mono">{r.name}</p>
+                          <p className="text-[10px] text-slate-500">
+                            {r.phi} PHI · {r.pii} PII
+                            {methodLabel && <span className={`ml-2 ${methodTone}`}>· {methodLabel}</span>}
+                          </p>
+                        </div>
+                        <span className="text-red-400 font-bold font-mono flex-shrink-0">{fmtMoney(r.exposure)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Row 4: 3-column workshop */}

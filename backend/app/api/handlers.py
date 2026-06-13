@@ -48865,7 +48865,8 @@ def get_exposure_by_entity():
                           COALESCE(reachable_phi_count, 0) AS phi,
                           COALESCE(reachable_pci_count, 0) AS pci,
                           COALESCE(reachable_pii_count, 0) AS pii,
-                          reach_computed_at
+                          reach_computed_at,
+                          reach_attribution_method
                      FROM azure_ai_model_deployments
                     WHERE organization_id = %s
                       AND COALESCE(reachable_classified_exposure, 0) > 0
@@ -48891,15 +48892,19 @@ def get_exposure_by_entity():
                 (org_id, limit),
             )
 
-        rows = [
-            {
+        rows = []
+        for r in cursor.fetchall():
+            row = {
                 'id': r[0], 'name': r[1], 'category': r[2],
                 'exposure': int(r[3] or 0),
                 'phi': int(r[4] or 0), 'pci': int(r[5] or 0), 'pii': int(r[6] or 0),
                 'computed_at': r[7].isoformat() if r[7] else None,
             }
-            for r in cursor.fetchall()
-        ]
+            # AI model rows carry attribution method so the UI can show
+            # "name-matched MI" vs "RBAC upper bound" honestly.
+            if entity_type == 'ai_model' and len(r) >= 9:
+                row['attribution_method'] = r[8]
+            rows.append(row)
 
         # Totals across the cohort
         if entity_type == 'ai_model':

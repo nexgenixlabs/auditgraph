@@ -227,38 +227,77 @@ def compute_identity_reach(db, organization_id: int) -> dict[str, Any]:
 def compute_ai_model_reach(db, organization_id: int) -> dict[str, Any]:
     """Compute and persist reach for every AI model deployment.
 
-    Strategy (best-effort MVP):
-      1. For each azure_ai_model_deployments row, look up its parent
-         account's managed identity in the identities table:
-           a) Try identities.identity_id = <account_resource_id>      (rare)
-           b) Try identities.alternative_names @> '[<account_resource_id>]'
-           c) Fall back to: max reach among identities with role
-              assignments scoped at the account_resource_id (this
-              catches the MI even when we can't link it cleanly).
-      2. Copy that identity's reachable_* into the AI model row.
-      3. AI deployments with no resolvable MI get null reach (NOT zero) —
-         null means "we couldn't tell," zero means "we know it reaches
-         nothing classified". The drawer can call out null vs zero.
+    Two-pass attribution, most-confident wins:
+
+      Pass A — NAME MATCH (preferred when no principal_id capture yet):
+        Azure auto-creates the system-assigned MI for an OpenAI / AI
+        Services account with the same display_name as the account
+        resource. So if identities has a row where
+            identity_category   = 'managed_identity_system'
+            display_name        = <ai_deployment.account_name>
+        we treat THAT identity as the AI model's runtime principal and
+        copy its reach verbatim. Records reach_attribution_method =
+        'name_match'.
+
+      Pass B — RBAC UPPER BOUND fallback:
+        For AI deployments still missing reach, fall back to the soft
+        upper bound: max reach across any identity with a role on the
+        AI account. Records reach_attribution_method = 'rbac_upper_bound'.
+        Over-estimates when humans hold roles on the account, but it's
+        the honest framing of "the model can reach AT MOST this much."
+
+      Pass C — clear stale 'unresolved':
+        Any AI deployment with no linkage at all gets method='unresolved'
+        and null reach, so the UI can show "Method unknown — link MI to
+        improve" rather than reporting 0.
+
+    A future iteration captures the parent account's identity.principalId
+    at discovery time and uses it for an exact 'mi_principal_id' match
+    which would take precedence over both passes.
     """
     cursor = db.conn.cursor()
     if not _table_exists(cursor, "azure_ai_model_deployments"):
         cursor.close()
         return {"updated_deployments": 0, "reason": "table missing"}
 
-    # The fallback path c) is the most reliable on real tenants: even when
-    # the MI's ARM linkage isn't stored on identities, the MI's role
-    # assignments are. We take the max reach across any role assignment
-    # whose scope equals or is an ancestor of the AI account resource_id.
-    #
-    # This effectively says: "the model can reach whatever an identity
-    # with a role on that account can reach" — a soft upper bound, which
-    # is the honest framing for an MVP.
+    # ── Pass A: name-match against managed_identity_system identities ──
     cursor.execute(
         """
-        WITH ai_accounts AS (
+        WITH mi_by_name AS (
+            SELECT lower(display_name) AS name_key,
+                   MAX(COALESCE(reachable_classified_exposure, 0))::bigint AS exposure,
+                   MAX(COALESCE(reachable_phi_count, 0))::int              AS phi,
+                   MAX(COALESCE(reachable_pci_count, 0))::int              AS pci,
+                   MAX(COALESCE(reachable_pii_count, 0))::int              AS pii
+              FROM identities
+             WHERE organization_id = %s
+               AND identity_category = 'managed_identity_system'
+               AND COALESCE(NULLIF(display_name, ''), '') != ''
+             GROUP BY lower(display_name)
+        )
+        UPDATE azure_ai_model_deployments d
+           SET reachable_classified_exposure = m.exposure,
+               reachable_phi_count           = m.phi,
+               reachable_pci_count           = m.pci,
+               reachable_pii_count           = m.pii,
+               reach_attribution_method      = 'name_match',
+               reach_computed_at             = NOW()
+          FROM mi_by_name m
+         WHERE d.organization_id = %s
+           AND lower(COALESCE(d.account_name, '')) = m.name_key
+        """,
+        (organization_id, organization_id),
+    )
+    name_matched = cursor.rowcount
+
+    # ── Pass B: RBAC upper bound for the remainder ──
+    cursor.execute(
+        """
+        WITH remaining AS (
             SELECT DISTINCT organization_id, account_resource_id
               FROM azure_ai_model_deployments
              WHERE organization_id = %s
+               AND reach_attribution_method IS DISTINCT FROM 'name_match'
         ),
         per_account AS (
             SELECT a.account_resource_id,
@@ -266,20 +305,22 @@ def compute_ai_model_reach(db, organization_id: int) -> dict[str, Any]:
                    MAX(COALESCE(i.reachable_phi_count, 0))::int              AS phi,
                    MAX(COALESCE(i.reachable_pci_count, 0))::int              AS pci,
                    MAX(COALESCE(i.reachable_pii_count, 0))::int              AS pii
-              FROM ai_accounts a
-              LEFT JOIN role_assignments ra
+              FROM remaining a
+              JOIN role_assignments ra
                 ON ra.organization_id = a.organization_id
                AND (ra.scope = a.account_resource_id
                     OR a.account_resource_id LIKE ra.scope || '/%%')
-              LEFT JOIN identities i
+              JOIN identities i
                 ON i.id = ra.identity_db_id
              GROUP BY a.account_resource_id
+            HAVING MAX(COALESCE(i.reachable_classified_exposure, 0)) > 0
         )
         UPDATE azure_ai_model_deployments d
            SET reachable_classified_exposure = p.exposure,
                reachable_phi_count           = p.phi,
                reachable_pci_count           = p.pci,
                reachable_pii_count           = p.pii,
+               reach_attribution_method      = 'rbac_upper_bound',
                reach_computed_at             = NOW()
           FROM per_account p
          WHERE d.organization_id = %s
@@ -287,11 +328,32 @@ def compute_ai_model_reach(db, organization_id: int) -> dict[str, Any]:
         """,
         (organization_id, organization_id),
     )
-    updated = cursor.rowcount
+    rbac_matched = cursor.rowcount
+
+    # ── Pass C: anything still null becomes 'unresolved' so the UI
+    #           can show it instead of silently dropping it. ───────
+    cursor.execute(
+        """
+        UPDATE azure_ai_model_deployments
+           SET reach_attribution_method = 'unresolved',
+               reach_computed_at        = NOW()
+         WHERE organization_id = %s
+           AND reach_attribution_method IS NULL
+        """,
+        (organization_id,),
+    )
+    unresolved = cursor.rowcount
 
     db.conn.commit()
     cursor.close()
-    return {"updated_deployments": updated}
+    return {
+        "updated_deployments": name_matched + rbac_matched,
+        "by_method": {
+            "name_match":       name_matched,
+            "rbac_upper_bound": rbac_matched,
+            "unresolved":       unresolved,
+        },
+    }
 
 
 def compute_all_reach(db, organization_id: int) -> dict[str, Any]:
