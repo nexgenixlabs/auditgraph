@@ -319,56 +319,151 @@ def classify_resource(
     name: str,
     tags: dict | None,
     settings_overrides: dict | None = None,
+    scope_rules: list[dict] | None = None,
+    subscription_id: str | None = None,
+    resource_group: str | None = None,
+    purview_label: str | None = None,
+    manual_override: str | None = None,
 ) -> dict | None:
-    """Classify a single resource by name + tags + optional per-tenant overrides.
+    """Classify a single resource — AG-CLASSIFICATION-ZONES 6-tier engine.
 
-    Returns a dict {classification, confidence, source} or None when no signal
-    is found. No defaults are invented.
+    AG-193 (2026-06-12) — extends the original 3-tier engine to support
+    Data Trust Zones (CISO-asserted scope rules) and reserves a Purview
+    integration slot. Adds numeric confidence (0-100) on every return
+    value so the UI can render High/Med/Low rollup tiles.
 
-    Precedence (highest → lowest):
-      1. settings_overrides regex match            → source='override', confidence='high'
-      2. Tag passthrough (classification/sensitivity/etc.) → source='tag', confidence='high'
-      3. Tag value match against per-class tag_values    → source='tag', confidence='medium'
-      4. Built-in name_patterns regex match              → source='name_pattern', confidence='medium'
+    Precedence (highest → lowest, first match wins):
+      1. manual_override         conf 100  source='manual'
+      2. settings_overrides      conf  95  source='regex_override'
+      3. scope_rules (Data Trust Zone)  conf 100  source='scope_rule'
+      4. purview_label           conf  95  source='purview'
+      5. Azure tag               conf  80  source='tag'  (60 when value-only)
+      6. Built-in name pattern   conf  45  source='name_pattern'
+
+    Returns a dict:
+      {classification, confidence (int 0-100), source, rule_id (when scope/manual)}
+    or None when no signal is found. No defaults are invented.
+
+    `scope_rules` shape: list of {classification, scope_type, scope_value, id}
+    matching the data_trust_zones row format. Caller filters out revoked.
     """
     name_str = name if isinstance(name, str) else ""
 
-    # 1. Per-tenant overrides — read first, always win
+    # ── Tier 1: per-resource manual override ─────────────────────
+    if manual_override and isinstance(manual_override, str):
+        cls_u = manual_override.strip().upper()
+        if cls_u in TAXONOMY:
+            return {
+                "classification": cls_u,
+                "confidence": 100,
+                "source": "manual",
+            }
+
+    # ── Tier 2: per-tenant regex override ────────────────────────
     for cls, rx in _compile_overrides(settings_overrides):
         if name_str and rx.search(name_str):
             return {
                 "classification": cls,
-                "confidence": "high",
-                "source": "override",
+                "confidence": 95,
+                "source": "regex_override",
             }
 
-    # 2 + 3. Tag-based signals
+    # ── Tier 3: Data Trust Zone (CISO scope assertion) ───────────
+    if scope_rules:
+        match = _match_scope_rules(scope_rules, subscription_id, resource_group)
+        if match is not None:
+            return {
+                "classification": match["classification"],
+                "confidence": 100,  # owner asserted — strongest signal
+                "source": "scope_rule",
+                "rule_id": match.get("id"),
+            }
+
+    # ── Tier 4: Purview classification (slot reserved) ───────────
+    if purview_label and isinstance(purview_label, str):
+        cls_u = purview_label.strip().upper()
+        if cls_u in TAXONOMY:
+            return {
+                "classification": cls_u,
+                "confidence": 95,
+                "source": "purview",
+            }
+
+    # ── Tier 5: Azure tag ────────────────────────────────────────
     if isinstance(tags, dict):
         for k, v in tags.items():
             key_n = _norm(k)
             cls = _tag_class(k, v)
             if cls is None:
                 continue
-            # High confidence if it came from a recognised classification key,
-            # medium if it was a freeform tag value that happened to match.
-            confidence = "high" if key_n in _TAG_KEYS else "medium"
+            # 80 when key is a recognised classification key,
+            # 60 when only the value happened to match a known token.
+            conf = 80 if key_n in _TAG_KEYS else 60
             return {
                 "classification": cls,
-                "confidence": confidence,
+                "confidence": conf,
                 "source": "tag",
             }
 
-    # 4. Name-pattern fallback
+    # ── Tier 6: built-in name pattern ────────────────────────────
     if name_str:
-        lowered = name_str  # regexes are IGNORECASE
         for cls, patterns in _COMPILED_PATTERNS.items():
             for rx in patterns:
-                if rx.search(lowered):
+                if rx.search(name_str):
                     return {
                         "classification": cls,
-                        "confidence": "medium",
+                        "confidence": 45,
                         "source": "name_pattern",
                     }
+
+    return None
+
+
+# ── Scope-rule matcher (Tier 3) ──────────────────────────────────
+
+def _match_scope_rules(
+    scope_rules: list[dict],
+    subscription_id: str | None,
+    resource_group: str | None,
+) -> dict | None:
+    """Find the first scope rule that matches the resource's sub or RG.
+
+    Match order within scope_rules iteration:
+      - Explicit subscription literal
+      - Explicit resource_group literal
+      - subscription_pattern glob (fnmatch — '*' wildcard)
+      - resource_group_pattern glob
+
+    Multiple matches: returns the FIRST one (caller controls ordering;
+    typical convention: most-specific first). Conflict resolution
+    beyond first-match is a Sprint 2 enhancement.
+    """
+    if not scope_rules:
+        return None
+    import fnmatch
+
+    sub_n = _norm(subscription_id)
+    rg_n = _norm(resource_group)
+
+    for rule in scope_rules:
+        if not isinstance(rule, dict):
+            continue
+        st = _norm(rule.get("scope_type"))
+        sv_raw = rule.get("scope_value")
+        if not isinstance(sv_raw, str):
+            continue
+        sv = sv_raw.strip().lower()
+        if not sv:
+            continue
+
+        if st == "subscription" and sub_n and sub_n == sv:
+            return rule
+        if st == "resource_group" and rg_n and rg_n == sv:
+            return rule
+        if st == "subscription_pattern" and sub_n and fnmatch.fnmatch(sub_n, sv):
+            return rule
+        if st == "resource_group_pattern" and rg_n and fnmatch.fnmatch(rg_n, sv):
+            return rule
 
     return None
 

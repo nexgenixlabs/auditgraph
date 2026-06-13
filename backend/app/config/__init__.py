@@ -159,6 +159,14 @@ FEATURE_AI_AGENT_GOVERNANCE = os.getenv(
     "FEATURE_AI_AGENT_GOVERNANCE", "true"
 ).lower() in ("true", "1", "yes")
 
+# AG-198 — Microsoft Purview integration. Default OFF: customer opts in
+# from Settings → Connectors. When ON, tier 4 of the classification
+# engine reads labels from the customer's Purview catalog. METADATA
+# ONLY — we never access data content through Purview.
+FEATURE_PURVIEW_INTEGRATION = os.getenv(
+    "FEATURE_PURVIEW_INTEGRATION", "false"
+).lower() in ("true", "1", "yes")
+
 # ---------------------------------------------------------------------------
 # 5d. Enterprise isolation guards
 # ---------------------------------------------------------------------------

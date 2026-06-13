@@ -103,6 +103,7 @@ const agentBotIcon = (
 
 // Connectors
 const connectorsIcon = icon('M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01');
+const shieldIcon = icon('M9 12l2 2 4-4M21 12c0 5-3.5 9.4-9 11-5.5-1.6-9-6-9-11V5l9-3 9 3v7z');
 
 // Billing
 const billingIcon = icon('M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z');
@@ -256,14 +257,18 @@ const Sidebar: React.FC<SidebarProps> = ({ isAdmin, isSuperAdmin, locked }) => {
         ],
       }] : []),
       {
-        // Sidebar LOCK V2 — Platform: Team Members / Connectors / Audit Logs /
-        // Organization Settings (4 entries). Reports & Exports moved out
-        // (lives behind in-page CTA on each report-producing surface).
+        // Sidebar LOCK V2 — Platform: Team Members / Connectors / Data Trust Zones /
+        // Audit Logs / Organization Settings.
+        // AG-193 (2026-06-12) — founder explicitly approved adding "Data Trust Zones"
+        // here as part of the classification feature ship. The whole pitch is that
+        // CISOs configure their classification scope, so the entry needs to be
+        // discoverable from the global nav, not buried inside Organization Settings.
         label: 'Platform',
         color: '#64748b',
         items: [
           ...(isAdmin ? [{ to: '/organization/users',  label: 'Team Members',          icon: identityIcon }] : []),
           ...(isAdmin ? [{ to: '/settings/connections', label: 'Connectors',           icon: connectorsIcon }] : []),
+          ...(isAdmin ? [{ to: '/settings/data-trust-zones', label: 'Data Trust Zones', icon: shieldIcon }] : []),
           { to: '/activity',                            label: 'Audit Logs',           icon: activityIcon },
           ...(isAdmin ? [{ to: '/settings/general',     label: 'Organization Settings', icon: settingsIcon }] : []),
         ],

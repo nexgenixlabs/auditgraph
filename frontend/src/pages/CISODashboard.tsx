@@ -20,6 +20,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useConnection } from '../contexts/ConnectionContext';
 import { ScoreBreakdownDrawer } from '../components/identity/ScoreBreakdownDrawer';
+import { ExposureDerivationDrawer } from '../components/exposure/DerivationDrawer';
 import { computeImprovementOpportunities, topNLift, type Opportunity } from '../utils/improvementOpportunities';
 import type { ScoreBreakdownInput } from '../utils/identityScoreBreakdown';
 
@@ -279,17 +280,24 @@ function IdentityScoreHero({
 }
 
 function HeroCard({
-  label, value, valueColor, sublabel, footer, footerColor, icon, iconColor, progressValue,
+  label, value, valueColor, sublabel, footer, footerColor, icon, iconColor, progressValue, onClick,
 }: {
   label: string; value: string; valueColor: string; sublabel: string;
   footer: React.ReactNode; footerColor: string;
   icon: React.ReactNode; iconColor: string; progressValue?: number;
+  onClick?: () => void;
 }) {
   return (
-    <div className="rounded-xl p-5 bg-[#0f172a]/80 border border-white/5 relative overflow-hidden">
+    <div
+      onClick={onClick}
+      className={`rounded-xl p-5 bg-[#0f172a]/80 border border-white/5 relative overflow-hidden ${onClick ? 'cursor-pointer hover:border-white/20 transition' : ''}`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">{label}</p>
+          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500 flex items-center gap-1">
+            {label}
+            {onClick && <span className="text-slate-600">›</span>}
+          </p>
           <p className="text-4xl font-bold mt-2" style={{ color: valueColor }}>{value}</p>
           <p className="text-xs mt-1" style={{ color: valueColor }}>{sublabel}</p>
         </div>
@@ -460,6 +468,9 @@ export default function CISODashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [argusQuery, setArgusQuery] = useState('');
+  // AG-193 — Exposure Derivation drawer state
+  const [derivOpen, setDerivOpen] = useState(false);
+  const [derivClass, setDerivClass] = useState<string | null>(null);
   // V2.7 (2026-06-11) — Identity Security Score breakdown drawer.
   const [scoreBreakdownOpen, setScoreBreakdownOpen] = useState(false);
 
@@ -758,6 +769,7 @@ export default function CISODashboard() {
           footerColor="#34d399"
           icon={<svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}
           iconColor={data.estimatedExposure === null ? '#64748b' : '#ef4444'}
+          onClick={data.estimatedExposure && data.estimatedExposure > 0 ? () => { setDerivClass('PHI'); setDerivOpen(true); } : undefined}
         />
         <HeroCard
           label="ATTACK PATHS"
@@ -1184,6 +1196,13 @@ export default function CISODashboard() {
           </div>
         </aside>
       </div>
+
+      {/* AG-193 — Exposure derivation drawer (Sprint 1 v1). */}
+      <ExposureDerivationDrawer
+        classification={derivClass}
+        open={derivOpen}
+        onClose={() => setDerivOpen(false)}
+      />
 
       {/* V2.7 (2026-06-11) — Identity Security Score breakdown drawer.
           Built per peer review: "Customer will ask what does 59 mean?

@@ -1290,6 +1290,8 @@ def _send_change_notification_if_needed(db_org_id: int = None):
             ('agent_orphan_detection', _run_agent_orphan_detection, current_run_id, db_org_id, db),
             ('policy_recommendations', _run_policy_recommendations, db_org_id, db),
             ('auto_remediation', _run_auto_remediation, db_org_id, db),
+            # AG-193 — apply CISO-asserted Data Trust Zones after every scan
+            ('data_trust_zones', _run_data_trust_zones_classification, db_org_id, db),
         ])
 
         # ── Tier 3: Depend on attack paths/blast radius/IAM graph from Tier 2 ──
@@ -6026,3 +6028,26 @@ if __name__ == "__main__":
         print("\nStopping scheduler...")
         stop_scheduler()
         print("Done!")
+
+# AG-193 — Data Trust Zones post-discovery hook
+def _run_data_trust_zones_classification(db_org_id, db):
+    """Apply CISO-asserted Data Trust Zones to all resources after discovery.
+
+    Idempotent: re-runs leave classifications untouched when nothing
+    changed. Higher-precedence tiers (manual, regex_override, purview)
+    are preserved.
+    """
+    try:
+        from app.engines.discovery.scope_classifier import apply_scope_classification
+        result = apply_scope_classification(db, db_org_id)
+        if result.get('rules_active', 0) == 0:
+            logger.info("DTZ: org=%s no active zones; skip", db_org_id)
+            return
+        logger.info(
+            "DTZ: org=%s rules=%d tables=%d rows_updated=%d by_class=%s",
+            db_org_id, result['rules_active'], len(result['tables_walked']),
+            result['rows_updated'], result.get('by_classification'),
+        )
+    except Exception as e:
+        logger.error("Data Trust Zones classification failed org=%s: %s", db_org_id, e)
+        logger.exception(e)

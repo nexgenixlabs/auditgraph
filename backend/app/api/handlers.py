@@ -8689,7 +8689,12 @@ def get_dashboard_business_impact():
                 'requires_setup': True,
             })
 
-        # Aggregate classified resources across the two canonical sources
+        # Aggregate classified resources.
+        # V2.13 (2026-06-12) — AG-193: include discovered_resources as a
+        # canonical source so Data Trust Zone classifications surface in
+        # the rollup. discovered_resources holds the generic ARM catch-all
+        # which is where scope_classifier writes most rows on tenants
+        # without storage/KV-specific tables populated.
         classified = {'PHI': 0, 'PCI': 0, 'PII': 0}
         for table in ('azure_storage_accounts', 'azure_key_vaults'):
             try:
@@ -8704,6 +8709,22 @@ def get_dashboard_business_impact():
             except Exception:
                 try: cursor.connection.rollback()
                 except Exception: pass
+        # discovered_resources is org-scoped (persists across runs; the
+        # scope_classifier writes rule_id provenance per row).
+        try:
+            cursor.execute("""
+                SELECT COALESCE(data_classification, 'NONE'), COUNT(*)
+                FROM discovered_resources
+                WHERE organization_id = %s
+                  AND data_classification IS NOT NULL
+                GROUP BY data_classification
+            """, (_org_id(),))
+            for cls, cnt in cursor.fetchall():
+                if cls in classified:
+                    classified[cls] += int(cnt or 0)
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
 
         # AI model count — canonical source is azure_ai_model_deployments
         # (deployed inference endpoints). Falls back to agent_classifications
@@ -48239,3 +48260,662 @@ def get_drift_baseline():
         cursor.close()
         db.close()
 
+
+
+# ════════════════════════════════════════════════════════════════════
+# AG-193 / AG-195 — Data Trust Zones (classification scope rules)
+# Customer-facing: "Data Trust Zones"
+# Internal: classification_scope_rules / data_trust_zones table
+# ════════════════════════════════════════════════════════════════════
+
+_DTZ_VALID_CLASSES = ('PHI', 'PCI', 'PII', 'SOURCE', 'HR', 'FINANCIAL', 'CONFIDENTIAL')
+_DTZ_VALID_SCOPE_TYPES = (
+    'subscription', 'resource_group',
+    'subscription_pattern', 'resource_group_pattern',
+)
+
+
+def _dtz_validate_scope_exists(cursor, org_id, scope_type, scope_value):
+    """Confirm the scope_value matches a real discovered sub / RG.
+
+    Patterns ('*_pattern') skip this check — they're glob-based by design
+    and may legitimately match future-discovered resources.
+    """
+    if scope_type.endswith('_pattern'):
+        return True, None
+    if scope_type == 'subscription':
+        cursor.execute(
+            "SELECT 1 FROM cloud_subscriptions "
+            "WHERE organization_id = %s AND account_id = %s LIMIT 1",
+            (org_id, scope_value),
+        )
+        if cursor.fetchone():
+            return True, None
+        return False, (f"Subscription '{scope_value}' not found in your monitored "
+                       f"subs. Add the connection first.")
+    if scope_type == 'resource_group':
+        # RGs are tracked in discovered_resources via the ARM path. Check if any
+        # row matches.
+        cursor.execute(
+            "SELECT 1 FROM discovered_resources "
+            "WHERE organization_id = %s AND resource_id ILIKE %s LIMIT 1",
+            (org_id, f"%/resourceGroups/{scope_value}/%"),
+        )
+        if cursor.fetchone():
+            return True, None
+        return False, (f"Resource group '{scope_value}' not yet discovered. "
+                       f"Add the rule anyway? (Use scope_type=resource_group_pattern "
+                       f"with the same value to bypass this check.)")
+    return False, f"Unknown scope_type '{scope_type}'"
+
+
+def get_data_trust_zones():
+    """GET /api/data-trust-zones — list active zones for current org."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, classification, scope_type, scope_value,
+                   asserted_by, asserted_at, notes, created_at, updated_at
+              FROM data_trust_zones
+             WHERE organization_id = %s AND revoked_at IS NULL
+             ORDER BY classification, created_at DESC
+            """,
+            (_org_id(),),
+        )
+        rows = cursor.fetchall()
+        zones = [
+            {
+                'id': r[0],
+                'classification': r[1],
+                'scope_type': r[2],
+                'scope_value': r[3],
+                'asserted_by': r[4],
+                'asserted_at': r[5].isoformat() if r[5] else None,
+                'notes': r[6],
+                'created_at': r[7].isoformat() if r[7] else None,
+                'updated_at': r[8].isoformat() if r[8] else None,
+            }
+            for r in rows
+        ]
+        cursor.close()
+        return jsonify({'zones': zones, 'count': len(zones)})
+    finally:
+        db.close()
+
+
+def create_data_trust_zone():
+    """POST /api/data-trust-zones — admin creates a new zone."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    classification = (payload.get('classification') or '').strip().upper()
+    scope_type = (payload.get('scope_type') or '').strip().lower()
+    scope_value = (payload.get('scope_value') or '').strip()
+    notes = payload.get('notes')
+
+    if classification not in _DTZ_VALID_CLASSES:
+        return jsonify({'error': f"classification must be one of {_DTZ_VALID_CLASSES}"}), 400
+    if scope_type not in _DTZ_VALID_SCOPE_TYPES:
+        return jsonify({'error': f"scope_type must be one of {_DTZ_VALID_SCOPE_TYPES}"}), 400
+    if not scope_value:
+        return jsonify({'error': "scope_value is required"}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        ok, err_msg = _dtz_validate_scope_exists(cursor, _org_id(), scope_type, scope_value)
+        if not ok:
+            return jsonify({'error': err_msg}), 400
+
+        asserted_by = (getattr(g, 'current_user', None) or {}).get('email') or \
+                      (getattr(g, 'current_user', None) or {}).get('username') or 'unknown'
+
+        cursor.execute(
+            """
+            INSERT INTO data_trust_zones
+              (organization_id, classification, scope_type, scope_value,
+               asserted_by, notes)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, asserted_at
+            """,
+            (_org_id(), classification, scope_type, scope_value, asserted_by, notes),
+        )
+        zid, asserted_at = cursor.fetchone()
+        db.conn.commit()
+
+        _log(db, 'data_trust_zone_created',
+             f"{classification} zone added for {scope_type}: {scope_value}",
+             {'zone_id': zid, 'classification': classification,
+              'scope_type': scope_type, 'scope_value': scope_value})
+
+        cursor.close()
+        return jsonify({
+            'id': zid,
+            'classification': classification,
+            'scope_type': scope_type,
+            'scope_value': scope_value,
+            'asserted_by': asserted_by,
+            'asserted_at': asserted_at.isoformat() if asserted_at else None,
+        }), 201
+    except Exception as e:
+        logger.error(f"create_data_trust_zone failed: {e}", exc_info=True)
+        try: db.conn.rollback()
+        except Exception: pass
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def update_data_trust_zone(zone_id):
+    """PATCH /api/data-trust-zones/<id> — edit notes / asserted_by overrides."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        sets = []
+        params = []
+        if 'notes' in payload:
+            sets.append("notes = %s")
+            params.append(payload.get('notes'))
+        if 'classification' in payload:
+            cls_u = (payload['classification'] or '').strip().upper()
+            if cls_u not in _DTZ_VALID_CLASSES:
+                return jsonify({'error': f"classification must be one of {_DTZ_VALID_CLASSES}"}), 400
+            sets.append("classification = %s")
+            params.append(cls_u)
+        if not sets:
+            return jsonify({'error': "Nothing to update"}), 400
+        params.extend([_org_id(), int(zone_id)])
+        cursor.execute(
+            f"""UPDATE data_trust_zones SET {', '.join(sets)}, updated_at = NOW()
+                 WHERE organization_id = %s AND id = %s AND revoked_at IS NULL
+                 RETURNING id""",
+            tuple(params),
+        )
+        row = cursor.fetchone()
+        db.conn.commit()
+        if not row:
+            return jsonify({'error': 'Zone not found or revoked'}), 404
+        _log(db, 'data_trust_zone_updated',
+             f"Zone {zone_id} updated",
+             {'zone_id': int(zone_id), 'changes': list(payload.keys())})
+        cursor.close()
+        return jsonify({'ok': True, 'id': int(zone_id)})
+    finally:
+        db.close()
+
+
+def delete_data_trust_zone(zone_id):
+    """DELETE /api/data-trust-zones/<id> — soft-delete (sets revoked_at)."""
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        revoked_by = (getattr(g, 'current_user', None) or {}).get('email') or \
+                     (getattr(g, 'current_user', None) or {}).get('username') or 'unknown'
+        cursor.execute(
+            """UPDATE data_trust_zones
+                  SET revoked_at = NOW(), revoked_by = %s
+                WHERE organization_id = %s AND id = %s AND revoked_at IS NULL
+                RETURNING classification, scope_type, scope_value""",
+            (revoked_by, _org_id(), int(zone_id)),
+        )
+        row = cursor.fetchone()
+        db.conn.commit()
+        if not row:
+            return jsonify({'error': 'Zone not found or already revoked'}), 404
+        _log(db, 'data_trust_zone_revoked',
+             f"Revoked {row[0]} zone for {row[1]}: {row[2]}",
+             {'zone_id': int(zone_id), 'revoked_by': revoked_by})
+        cursor.close()
+        return jsonify({'ok': True, 'id': int(zone_id), 'revoked_at': True})
+    finally:
+        db.close()
+
+
+def get_data_trust_zone_coverage(zone_id):
+    """GET /api/data-trust-zones/<id>/coverage — how many resources this rule covers."""
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """SELECT classification, scope_type, scope_value
+                 FROM data_trust_zones
+                WHERE organization_id = %s AND id = %s AND revoked_at IS NULL""",
+            (_org_id(), int(zone_id)),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'Zone not found'}), 404
+        classification, scope_type, scope_value = row
+
+        # Count resources matching this single rule (use the same matcher as
+        # the engine — keep them in sync).
+        import fnmatch
+        from app.engines.discovery.scope_classifier import _extract_sub_and_rg
+
+        by_type: dict = {}
+        for table in ('azure_storage_accounts', 'azure_key_vaults',
+                      'azure_sql_databases', 'azure_cosmos_databases',
+                      'discovered_resources'):
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name=%s",
+                (table,),
+            )
+            if not cursor.fetchone():
+                continue
+            # Fetch resource ids with sub/RG hints
+            try:
+                sub_col = "subscription_id"
+                rg_col = "resource_group"
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name=%s AND column_name=%s",
+                    (table, sub_col),
+                )
+                has_sub = cursor.fetchone() is not None
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name=%s AND column_name=%s",
+                    (table, rg_col),
+                )
+                has_rg = cursor.fetchone() is not None
+                cols = ["resource_id"]
+                if has_sub: cols.append(sub_col)
+                if has_rg: cols.append(rg_col)
+                cursor.execute(
+                    f"SELECT {', '.join(cols)} FROM {table} WHERE organization_id = %s",
+                    (_org_id(),),
+                )
+                rows = cursor.fetchall()
+            except Exception:
+                try: db.conn.rollback()
+                except Exception: pass
+                continue
+
+            matched = 0
+            sv_lower = scope_value.strip().lower()
+            for r in rows:
+                rid = r[0]
+                sub = r[cols.index(sub_col)] if has_sub else None
+                rg = r[cols.index(rg_col)] if has_rg else None
+                if not sub or not rg:
+                    arm_sub, arm_rg = _extract_sub_and_rg(rid)
+                    sub = sub or arm_sub
+                    rg = rg or arm_rg
+                sub_n = (sub or "").lower()
+                rg_n = (rg or "").lower()
+                hit = False
+                if scope_type == 'subscription' and sub_n == sv_lower:
+                    hit = True
+                elif scope_type == 'resource_group' and rg_n == sv_lower:
+                    hit = True
+                elif scope_type == 'subscription_pattern' and sub_n and fnmatch.fnmatch(sub_n, sv_lower):
+                    hit = True
+                elif scope_type == 'resource_group_pattern' and rg_n and fnmatch.fnmatch(rg_n, sv_lower):
+                    hit = True
+                if hit:
+                    matched += 1
+            if matched:
+                by_type[table] = matched
+
+        total = sum(by_type.values())
+        cursor.close()
+        return jsonify({
+            'zone_id': int(zone_id),
+            'classification': classification,
+            'scope_type': scope_type,
+            'scope_value': scope_value,
+            'resource_count': total,
+            'by_type': by_type,
+        })
+    finally:
+        db.close()
+
+
+def recompute_data_trust_zones():
+    """POST /api/data-trust-zones/recompute — re-run scope classification.
+
+    Used by:
+      - Settings page after a CRUD change to refresh classifications now
+      - Future scheduled re-runs
+    """
+    guard = _demo_write_guard()
+    if guard:
+        return guard
+    db = _db()
+    try:
+        from app.engines.discovery.scope_classifier import apply_scope_classification
+        result = apply_scope_classification(db, _org_id())
+        _log(db, 'data_trust_zones_recomputed',
+             f"Recomputed {result.get('rows_updated', 0)} rows across "
+             f"{len(result.get('tables_walked', []))} tables",
+             result)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"recompute_data_trust_zones failed: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        db.close()
+
+
+def get_exposure_derivation(classification):
+    """GET /api/exposure/derivation/<classification> — drill-down lineage.
+
+    AG-193 (Sprint 1) — Surfaces the components that build the $X.XM
+    exposure number for one classification, so the headline becomes
+    auditor-defensible.
+
+    Returns:
+      {
+        zones:              [...active zones for this class],
+        resource_count:     N,
+        by_source:          {scope_rule: N, tag: M, name_pattern: K, ...},
+        by_confidence_band: {high: N, medium: M, low: K},
+        per_asset:          720000,  # IBM Cost of a Data Breach 2024 default
+        value:              N * per_asset
+      }
+    """
+    cls = (classification or '').strip().upper()
+    if cls not in ('PHI','PCI','PII','SOURCE','HR','FINANCIAL','CONFIDENTIAL'):
+        return jsonify({'error': 'Unknown classification'}), 400
+
+    PER_ASSET = {'PHI': 720000, 'PCI': 1200000, 'PII': 540000}.get(cls, 0)
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Active zones contributing to this class
+        cursor.execute(
+            """SELECT id, scope_type, scope_value, asserted_by, asserted_at
+                 FROM data_trust_zones
+                WHERE organization_id = %s AND classification = %s AND revoked_at IS NULL
+                ORDER BY created_at DESC""",
+            (org_id, cls),
+        )
+        zones = [
+            {
+                'id': r[0], 'scope_type': r[1], 'scope_value': r[2],
+                'asserted_by': r[3],
+                'asserted_at': r[4].isoformat() if r[4] else None,
+            } for r in cursor.fetchall()
+        ]
+
+        # Roll up resource count + by_source + by_confidence_band across
+        # all tables that carry data_classification + provenance.
+        by_source: dict = {}
+        by_conf: dict = {'high': 0, 'medium': 0, 'low': 0}
+        total = 0
+        for table in ('discovered_resources', 'azure_storage_accounts', 'azure_key_vaults'):
+            try:
+                cursor.execute(
+                    """SELECT 1 FROM information_schema.tables
+                       WHERE table_schema='public' AND table_name=%s""",
+                    (table,),
+                )
+                if not cursor.fetchone():
+                    continue
+                cursor.execute(
+                    f"""SELECT
+                          COALESCE(classification_source, 'unknown'),
+                          COALESCE(classification_confidence, 0),
+                          COUNT(*)
+                        FROM {table}
+                       WHERE organization_id = %s
+                         AND data_classification = %s
+                       GROUP BY 1, 2""",
+                    (org_id, cls),
+                )
+                for src, conf, cnt in cursor.fetchall():
+                    by_source[src] = by_source.get(src, 0) + int(cnt)
+                    band = 'high' if conf >= 85 else ('medium' if conf >= 60 else 'low')
+                    by_conf[band] += int(cnt)
+                    total += int(cnt)
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
+        cursor.close()
+        return jsonify({
+            'classification': cls,
+            'zones': zones,
+            'resource_count': total,
+            'by_source': by_source,
+            'by_confidence_band': by_conf,
+            'per_asset': PER_ASSET,
+            'value': total * PER_ASSET,
+            'source_doc': 'IBM Cost of a Data Breach 2024',
+        })
+    finally:
+        db.close()
+
+
+def get_exposure_lineage(classification):
+    """GET /api/exposure/derivation/<classification>/lineage — Sprint 2 full chain.
+
+    Returns the FULL identity → attack path → resource chain that
+    terminates at this classification. Used by the drill-down drawer's
+    "Reachable identities · multi-hop paths" section.
+    """
+    cls = (classification or '').strip().upper()
+    if cls not in ('PHI','PCI','PII','SOURCE','HR','FINANCIAL','CONFIDENTIAL'):
+        return jsonify({'error': 'Unknown classification'}), 400
+
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Reachable identities: count of identities with role_assignments
+        # whose scope contains a classified resource of this class.
+        # Simplified for Sprint 2 — a more rigorous walk through scope
+        # hierarchy can come in S3.
+        try:
+            cursor.execute(
+                """SELECT COUNT(DISTINCT ra.identity_db_id)
+                     FROM role_assignments ra
+                     JOIN discovered_resources dr
+                       ON dr.organization_id = ra.organization_id
+                       AND (ra.scope = dr.resource_id
+                            OR dr.resource_id LIKE ra.scope || '/%%')
+                    WHERE ra.organization_id = %s
+                      AND dr.data_classification = %s""",
+                (org_id, cls),
+            )
+            reachable_identities = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            reachable_identities = 0
+
+        # Attack paths terminating at a classified resource of this class.
+        try:
+            cursor.execute(
+                """SELECT COUNT(*)
+                     FROM attack_paths ap
+                    WHERE ap.organization_id = %s
+                      AND ap.target_resource_id IN (
+                          SELECT resource_id FROM discovered_resources
+                           WHERE organization_id = %s AND data_classification = %s
+                      )""",
+                (org_id, org_id, cls),
+            )
+            attack_paths_terminating = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            attack_paths_terminating = 0
+
+        # Internet-reachable subset
+        try:
+            cursor.execute(
+                """SELECT COUNT(DISTINCT dr.resource_id)
+                     FROM discovered_resources dr
+                    WHERE dr.organization_id = %s
+                      AND dr.data_classification = %s
+                      AND EXISTS (
+                        SELECT 1 FROM identity_reachability ir
+                         WHERE ir.organization_id = dr.organization_id
+                           AND ir.target_resource_id = dr.resource_id
+                           AND COALESCE(ir.is_internet_exposed, false) = true
+                      )""",
+                (org_id, cls),
+            )
+            internet_reachable = int((cursor.fetchone() or [0])[0])
+        except Exception:
+            try: cursor.connection.rollback()
+            except Exception: pass
+            internet_reachable = 0
+
+        cursor.close()
+        return jsonify({
+            'classification': cls,
+            'reachable_identities': reachable_identities,
+            'attack_paths_terminating': attack_paths_terminating,
+            'internet_reachable_resources': internet_reachable,
+        })
+    finally:
+        db.close()
+
+
+def get_data_trust_zones_audit():
+    """GET /api/data-trust-zones/audit — every create/edit/revoke event for this org.
+
+    Sprint 2 — Activity log surface. Pulls from activity_log filtered
+    to data_trust_zone_* action types.
+    """
+    limit = min(request.args.get('limit', 100, type=int), 500)
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """SELECT id, action_type, description, metadata, user_id, created_at
+                 FROM activity_log
+                WHERE organization_id = %s
+                  AND action_type LIKE 'data_trust_zone%%'
+                ORDER BY created_at DESC LIMIT %s""",
+            (_org_id(), limit),
+        )
+        events = [
+            {
+                'id': r[0],
+                'action_type': r[1],
+                'description': r[2],
+                'metadata': r[3],
+                'user_id': r[4],
+                'created_at': r[5].isoformat() if r[5] else None,
+            } for r in cursor.fetchall()
+        ]
+        cursor.close()
+        return jsonify({'events': events, 'count': len(events)})
+    finally:
+        db.close()
+
+
+def get_argus_classification_suggestions():
+    """GET /api/argus/classification-suggestions — Sprint 2 Argus prompts.
+
+    Walks unclassified discovered_resources and finds clusters whose
+    names match known PHI/PCI/PII/HR keywords. Surfaces them as draft
+    zone proposals: "47 RG names match HR keywords — accept to create
+    PII zone for /rg/employee-*"
+    """
+    db = _db()
+    try:
+        cursor = db.conn.cursor()
+        org_id = _org_id()
+
+        # Find unclassified RGs with name patterns hinting at a class.
+        # Group by RG and a heuristic class assignment.
+        # Keep simple for v1.
+        suggestions: list = []
+
+        keyword_patterns = [
+            ('PHI', ['patient', 'health', 'clinical', 'medical', 'ehr', 'hipaa', 'phi']),
+            ('PCI', ['payment', 'checkout', 'cardholder', 'cardno', 'merchant', 'pci']),
+            ('PII', ['customer', 'subscriber', 'user-data', 'profile', 'ssn']),
+            ('HR',  ['employee', 'payroll', 'workday', 'hris', 'hr-']),
+            ('FINANCIAL', ['ledger', 'invoice', 'accounting', 'finance', 'billing']),
+        ]
+
+        for cls, keywords in keyword_patterns:
+            # Find RGs with matching name fragments where most resources are unclassified
+            like_clauses = " OR ".join([
+                f"LOWER(SPLIT_PART(resource_id, '/', 5)) LIKE %s" for _ in keywords
+            ])
+            params = [org_id] + [f"%{k}%" for k in keywords]
+            try:
+                cursor.execute(
+                    f"""SELECT
+                          SPLIT_PART(resource_id, '/', 5) AS rg,
+                          COUNT(*) AS total,
+                          COUNT(*) FILTER (WHERE data_classification IS NULL) AS unclassified
+                        FROM discovered_resources
+                       WHERE organization_id = %s
+                         AND ({like_clauses})
+                       GROUP BY rg
+                       HAVING COUNT(*) >= 5
+                          AND COUNT(*) FILTER (WHERE data_classification IS NULL) > 0
+                       ORDER BY unclassified DESC LIMIT 5""",
+                    tuple(params),
+                )
+                for rg, total, unclassified in cursor.fetchall():
+                    if rg:
+                        suggestions.append({
+                            'classification': cls,
+                            'scope_type': 'resource_group',
+                            'scope_value': rg,
+                            'matched_resources': total,
+                            'currently_unclassified': unclassified,
+                            'reason': f"RG name matches {cls} keywords ({total} resources discovered)",
+                        })
+            except Exception:
+                try: cursor.connection.rollback()
+                except Exception: pass
+
+        cursor.close()
+        # Top-N by impact
+        suggestions.sort(key=lambda s: s['matched_resources'], reverse=True)
+        return jsonify({'suggestions': suggestions[:10], 'count': len(suggestions[:10])})
+    finally:
+        db.close()
+
+
+def get_purview_status():
+    """GET /api/purview/status — config + connectivity check.
+
+    AG-198 (Sprint 3) — used by the Settings page Purview tile to show
+    whether the integration is enabled and whether the cache has any
+    fetched labels.
+    """
+    from app.config import FEATURE_PURVIEW_INTEGRATION
+    from app.engines.discovery.purview_classifier import _CACHE, _PURVIEW_LABEL_MAP
+    org_id = _org_id()
+    # Count cached labels for this org only
+    org_entries = [k for k in _CACHE if k[0] == org_id]
+    label_count = sum(1 for k in org_entries if _CACHE[k].get("label"))
+    return jsonify({
+        'enabled': FEATURE_PURVIEW_INTEGRATION,
+        'mapped_labels': len(_PURVIEW_LABEL_MAP),
+        'cache_size': len(org_entries),
+        'cached_labels': label_count,
+        'message': (
+            "Purview integration is ENABLED. Tier 4 of the classification engine "
+            "will read labels from your Purview catalog during discovery."
+        ) if FEATURE_PURVIEW_INTEGRATION else (
+            "Purview integration is currently DISABLED. Enable it via the "
+            "FEATURE_PURVIEW_INTEGRATION env var, then configure your Purview "
+            "account in Settings → Connectors → Purview."
+        ),
+    })

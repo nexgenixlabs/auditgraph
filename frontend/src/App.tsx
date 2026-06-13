@@ -33,6 +33,7 @@ import AIDataReachability from './pages/AIDataReachability';
 import Argus from './pages/Argus';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
+import DataTrustZones from './pages/settings/DataTrustZones';
 import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
 import IdentityComparison from './pages/IdentityComparison';
@@ -521,6 +522,12 @@ function AppContent() {
                   <Route path="/settings" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><Settings /></ErrorBoundary>
+                    </ProtectedRoute>
+                  } />
+                  {/* AG-193 — Data Trust Zones dedicated route (before /settings/:tab catch) */}
+                  <Route path="/settings/data-trust-zones" element={
+                    <ProtectedRoute requiredRole="admin">
+                      <ErrorBoundary><DataTrustZones /></ErrorBoundary>
                     </ProtectedRoute>
                   } />
                   <Route path="/settings/:tab" element={

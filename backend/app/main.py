@@ -3120,6 +3120,71 @@ def create_app():
         return get_attack_path_count()
 
     # -----------------------
+    # AG-193 — Data Trust Zones (CISO-asserted classification)
+    # -----------------------
+    @app.get("/api/data-trust-zones")
+    def data_trust_zones_list():
+        from app.api.handlers import get_data_trust_zones
+        return get_data_trust_zones()
+
+    @app.post("/api/data-trust-zones")
+    @require_role('admin')
+    def data_trust_zones_create():
+        from app.api.handlers import create_data_trust_zone
+        return create_data_trust_zone()
+
+    @app.patch("/api/data-trust-zones/<int:zone_id>")
+    @require_role('admin')
+    def data_trust_zones_update(zone_id):
+        from app.api.handlers import update_data_trust_zone
+        return update_data_trust_zone(zone_id)
+
+    @app.delete("/api/data-trust-zones/<int:zone_id>")
+    @require_role('admin')
+    def data_trust_zones_delete(zone_id):
+        from app.api.handlers import delete_data_trust_zone
+        return delete_data_trust_zone(zone_id)
+
+    @app.get("/api/data-trust-zones/<int:zone_id>/coverage")
+    def data_trust_zone_coverage(zone_id):
+        from app.api.handlers import get_data_trust_zone_coverage
+        return get_data_trust_zone_coverage(zone_id)
+
+    @app.post("/api/data-trust-zones/recompute")
+    @require_role('admin')
+    def data_trust_zones_recompute():
+        from app.api.handlers import recompute_data_trust_zones
+        return recompute_data_trust_zones()
+
+    # AG-193 Sprint 1 — exposure derivation drill-down
+    @app.get("/api/exposure/derivation/<classification>")
+    def exposure_derivation(classification):
+        from app.api.handlers import get_exposure_derivation
+        return get_exposure_derivation(classification)
+
+    # AG-193 Sprint 2 — full lineage chain + audit log + Argus suggestions
+    @app.get("/api/exposure/derivation/<classification>/lineage")
+    def exposure_lineage(classification):
+        from app.api.handlers import get_exposure_lineage
+        return get_exposure_lineage(classification)
+
+    @app.get("/api/data-trust-zones/audit")
+    def data_trust_zones_audit():
+        from app.api.handlers import get_data_trust_zones_audit
+        return get_data_trust_zones_audit()
+
+    @app.get("/api/argus/classification-suggestions")
+    def argus_classification_suggestions():
+        from app.api.handlers import get_argus_classification_suggestions
+        return get_argus_classification_suggestions()
+
+    # AG-198 Sprint 3 — Purview integration status
+    @app.get("/api/purview/status")
+    def purview_status():
+        from app.api.handlers import get_purview_status
+        return get_purview_status()
+
+    # -----------------------
     # Risks (Dashboard needs it)
     # -----------------------
     @app.get("/api/risks")
