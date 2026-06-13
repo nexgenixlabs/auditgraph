@@ -4048,6 +4048,13 @@ def save_app_settings():
         'p2_telemetry_enabled',
         'retention_signin_events_days', 'retention_workload_anomalies_days',
         'posture_target',
+        # AG-193 follow-up (2026-06-12): per-asset exposure defaults.
+        # Stored as plain integer dollar amounts. Fallback to IBM 2024
+        # baselines when unset; see get_dashboard_business_impact().
+        'exposure_phi_per_asset',
+        'exposure_pci_per_asset',
+        'exposure_pii_per_asset',
+        'exposure_ai_per_asset',
     }
     BOOLEAN_KEYS = {
         'email_enabled', 'notify_new_identities', 'notify_removed_identities',
@@ -8668,14 +8675,34 @@ def get_dashboard_business_impact():
 
     AG-CISO-V4.2 (2026-06-10).
     """
-    # IBM 2024 averages — overridable per-tenant via settings in a follow-up.
-    PHI_PER_ASSET = 720_000      # healthcare/PHI median
-    PCI_PER_ASSET = 1_200_000    # financial/PCI median
-    PII_PER_ASSET = 540_000
-    AI_MODEL_PER_ASSET = 1_400_000  # AI deployment compromise est.
+    # IBM 2024 averages — used as fallback when a tenant hasn't
+    # overridden the per-asset cost in Settings → Exposure Defaults.
+    DEFAULTS = {
+        'PHI':      720_000,      # healthcare/PHI median
+        'PCI':    1_200_000,      # financial/PCI median
+        'PII':      540_000,
+        'AI':     1_400_000,      # AI deployment compromise est.
+    }
 
     db = _db()
     cursor = db.conn.cursor()
+
+    # AG-193 follow-up (2026-06-12) — read per-tenant overrides; fall
+    # back to IBM defaults when absent or non-numeric.
+    def _pos_int(raw, fallback):
+        try:
+            v = int(str(raw).strip())
+            return v if v > 0 else fallback
+        except (TypeError, ValueError):
+            return fallback
+    try:
+        org_settings = db.get_settings(organization_id=_org_id())
+    except Exception:
+        org_settings = {}
+    PHI_PER_ASSET       = _pos_int(org_settings.get('exposure_phi_per_asset'), DEFAULTS['PHI'])
+    PCI_PER_ASSET       = _pos_int(org_settings.get('exposure_pci_per_asset'), DEFAULTS['PCI'])
+    PII_PER_ASSET       = _pos_int(org_settings.get('exposure_pii_per_asset'), DEFAULTS['PII'])
+    AI_MODEL_PER_ASSET  = _pos_int(org_settings.get('exposure_ai_per_asset'),  DEFAULTS['AI'])
     try:
         run_ids = _latest_run_ids(cursor, _org_id(), _connection_id())
         if not run_ids:
@@ -8797,7 +8824,16 @@ def get_dashboard_business_impact():
             'total_exposure': total,
             'reduction_opportunity': reduction,
             'classified_data_count': classified_total,
-            'source': 'IBM Cost of a Data Breach 2024 (defaults; overridable per tenant)',
+            'source': (
+                'Per-tenant overrides applied'
+                if any(org_settings.get(k) for k in (
+                    'exposure_phi_per_asset','exposure_pci_per_asset',
+                    'exposure_pii_per_asset','exposure_ai_per_asset'))
+                else 'IBM Cost of a Data Breach 2024 (defaults; overridable per tenant)'
+            ),
+            'overrides_active': bool(any(org_settings.get(k) for k in (
+                'exposure_phi_per_asset','exposure_pci_per_asset',
+                'exposure_pii_per_asset','exposure_ai_per_asset'))),
         })
     finally:
         try: cursor.close()

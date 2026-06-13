@@ -125,7 +125,7 @@ export function BusinessImpactWidgetV31({ data }: { data: PostureV31Response }) 
                  : `Total classified-data breach exposure across the tenant (${(headline.total_records || 0).toLocaleString()} records). Range = IBM 2023 industry low/high; mid is the headline.`}>
             <div className="flex items-center justify-between gap-2">
               <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500">
-                {isBaseline ? 'Estimated breach exposure · baseline' : 'Estimated breach exposure · org-wide'}
+                {isBaseline ? 'Potential exposure impact · baseline' : 'Potential exposure impact · org-wide'}
               </p>
               {/* AG-CISO-Q (2026-06-06): the CISO's first question is "where
                   does the $ come from?" — this surfaces the methodology one click away */}

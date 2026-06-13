@@ -34,6 +34,7 @@ import Argus from './pages/Argus';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import DataTrustZones from './pages/settings/DataTrustZones';
+import ExposureDefaults from './pages/settings/ExposureDefaults';
 import ClassifiedResources from './pages/ClassifiedResources';
 import DriftHistory from './pages/DriftHistory';
 import ActivityLog from './pages/ActivityLog';
@@ -529,6 +530,12 @@ function AppContent() {
                   <Route path="/settings/data-trust-zones" element={
                     <ProtectedRoute requiredRole="admin">
                       <ErrorBoundary><DataTrustZones /></ErrorBoundary>
+                    </ProtectedRoute>
+                  } />
+                  {/* AG-193 follow-up — Exposure Defaults editor (no sidebar entry; linked from DerivationDrawer) */}
+                  <Route path="/settings/exposure-defaults" element={
+                    <ProtectedRoute requiredRole="admin">
+                      <ErrorBoundary><ExposureDefaults /></ErrorBoundary>
                     </ProtectedRoute>
                   } />
                   {/* AG-193 follow-up — Classified Resources (target for UIG Storage / Classified Data tiers) */}

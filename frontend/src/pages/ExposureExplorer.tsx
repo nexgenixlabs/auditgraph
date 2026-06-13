@@ -250,7 +250,7 @@ export default function ExposureExplorer() {
           </div>
         </div>
         <div className="text-right">
-          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Total Estimated Exposure</p>
+          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Total Potential Exposure Impact</p>
           <p className="text-3xl font-bold font-mono" style={{ color: '#f87171' }}>{fmtMoney(totalExposure)}</p>
           {reductionOpp > 0 && (
             <p className="text-[10px] text-emerald-400 mt-0.5">

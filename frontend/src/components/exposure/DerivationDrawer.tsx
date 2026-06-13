@@ -83,7 +83,7 @@ export function ExposureDerivationDrawer({
         <header className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur border-b border-white/10 px-6 py-4 flex items-start justify-between gap-3">
           <div>
             <p className="text-[10px] uppercase tracking-[0.2em] font-bold" style={{ color }}>
-              {classification} Exposure
+              {classification} · Potential Exposure Impact
             </p>
             <h2 className="text-lg font-bold text-white mt-0.5">Where this number comes from</h2>
           </div>
@@ -100,13 +100,21 @@ export function ExposureDerivationDrawer({
             <>
               {/* Headline */}
               <div className="rounded-xl p-4 border" style={{ background: `${color}10`, borderColor: `${color}40` }}>
-                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">Total Exposure</p>
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{classification} Subtotal</p>
                 <p className="text-5xl font-bold font-mono mt-1" style={{ color }}>{fmtMoney(data.value)}</p>
                 <p className="text-[11px] text-slate-400 mt-2">
                   {data.resource_count.toLocaleString()} classified resources × {fmtMoney(data.per_asset)} per asset
                 </p>
                 <p className="text-[10px] text-slate-500 mt-1">{data.source_doc}</p>
               </div>
+
+              {/* Full formula breakdown — peer feedback 2026-06-12.
+                  Shows the math behind the total so a CFO/CISO can re-derive
+                  it from the drawer alone. */}
+              <TotalBreakdownSection />
+
+              {/* What this is / what it isn't — honest claim block */}
+              <CaveatBlock />
 
               {/* Zones */}
               <div>
@@ -161,6 +169,100 @@ export function ExposureDerivationDrawer({
               <LineageSection classification={data.classification} />
             </>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface BusinessImpactResp {
+  phi_assets: { count: number; value: number; per_asset: number };
+  pci_assets: { count: number; value: number; per_asset: number };
+  pii_assets: { count: number; value: number; per_asset: number };
+  ai_models:  { count: number; value: number; per_asset: number };
+  total_exposure: number;
+  source: string;
+}
+
+function TotalBreakdownSection() {
+  const [bi, setBi] = useState<BusinessImpactResp | null>(null);
+  useEffect(() => {
+    fetch('/api/dashboard/business-impact')
+      .then(r => r.ok ? r.json() : null)
+      .then(setBi)
+      .catch(() => {});
+  }, []);
+  if (!bi) return null;
+  const rows: { key: string; label: string; color: string; row: { count: number; value: number; per_asset: number } }[] = [
+    { key: 'PHI', label: 'PHI Assets',       color: CLASS_COLORS.PHI, row: bi.phi_assets },
+    { key: 'PCI', label: 'PCI Assets',       color: CLASS_COLORS.PCI, row: bi.pci_assets },
+    { key: 'PII', label: 'PII Assets',       color: CLASS_COLORS.PII, row: bi.pii_assets },
+    { key: 'AI',  label: 'AI Models',        color: '#a855f7',        row: bi.ai_models  },
+  ];
+  return (
+    <div>
+      <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-2">Total Exposure Formula</h3>
+      <div className="rounded-xl bg-slate-800/40 border border-slate-700/40 overflow-hidden">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-900/40 border-b border-slate-700/40">
+            <tr>
+              <th className="text-left p-2.5 text-[9px] uppercase tracking-wider font-bold text-slate-500">Class</th>
+              <th className="text-right p-2.5 text-[9px] uppercase tracking-wider font-bold text-slate-500">Count</th>
+              <th className="text-right p-2.5 text-[9px] uppercase tracking-wider font-bold text-slate-500">×&nbsp;Per Asset</th>
+              <th className="text-right p-2.5 text-[9px] uppercase tracking-wider font-bold text-slate-500">=&nbsp;Subtotal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.key} className="border-b border-slate-800/40 last:border-0">
+                <td className="p-2.5">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: r.color }} />
+                    <span className="text-slate-300">{r.label}</span>
+                  </span>
+                </td>
+                <td className="p-2.5 text-right text-slate-300 font-mono">{r.row.count.toLocaleString()}</td>
+                <td className="p-2.5 text-right text-slate-400 font-mono">{fmtMoney(r.row.per_asset)}</td>
+                <td className="p-2.5 text-right text-white font-mono font-bold">{fmtMoney(r.row.value)}</td>
+              </tr>
+            ))}
+            <tr className="bg-slate-900/60 border-t-2 border-slate-700">
+              <td className="p-2.5 text-[10px] uppercase tracking-wider font-bold text-slate-400">Total</td>
+              <td className="p-2.5" />
+              <td className="p-2.5" />
+              <td className="p-2.5 text-right text-red-400 font-mono font-bold text-base">{fmtMoney(bi.total_exposure)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[10px] text-slate-500 mt-2">
+        {bi.source}.{' '}
+        <Link to="/settings/exposure-defaults" className="text-violet-400 hover:underline">Edit per-asset defaults →</Link>
+      </p>
+    </div>
+  );
+}
+
+function CaveatBlock() {
+  return (
+    <div className="rounded-xl bg-slate-800/30 border border-slate-700/40 p-4">
+      <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-2">What This Is — And Isn't</h3>
+      <div className="grid grid-cols-2 gap-3 text-[11px]">
+        <div>
+          <p className="text-emerald-400 font-bold mb-1.5">What it is</p>
+          <ul className="space-y-1 text-slate-400 leading-snug list-disc list-inside marker:text-emerald-400/60">
+            <li>A benchmark estimate using public breach-cost data</li>
+            <li>A way to compare assets and prioritize remediation</li>
+            <li>Re-derivable from the table above</li>
+          </ul>
+        </div>
+        <div>
+          <p className="text-amber-400 font-bold mb-1.5">What it isn't</p>
+          <ul className="space-y-1 text-slate-400 leading-snug list-disc list-inside marker:text-amber-400/60">
+            <li>An actuarial loss model</li>
+            <li>A probability-weighted breach prediction</li>
+            <li>Insurance-grade quantification</li>
+          </ul>
         </div>
       </div>
     </div>

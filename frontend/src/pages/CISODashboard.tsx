@@ -5,7 +5,7 @@
  * the five surfaces the CISO opens daily into a single landing screen.
  *
  *   Row 1 — 4 hero metric cards
- *     Identity Risk Score · Estimated Exposure · Attack Paths · Compliance Posture
+ *     Identity Risk Score · Potential Exposure Impact · Attack Paths · Compliance Posture
  *   Row 2 — Unified Identity Graph (the patent moat)
  *     5 animated tier nodes (Human / NHI / AI / Models / Data) with flowing
  *     dots between them; bottom strip shows attack-path + orphan + data counts
@@ -759,7 +759,7 @@ export default function CISODashboard() {
           exposureReduction={data.reductionOpportunity}
         />
         <HeroCard
-          label="ESTIMATED EXPOSURE"
+          label="POTENTIAL EXPOSURE IMPACT"
           value={data.estimatedExposure === null ? '—' : fmtMoney(data.estimatedExposure)}
           valueColor={data.estimatedExposure === null ? '#94a3b8' : '#f87171'}
           sublabel={data.estimatedExposure === null ? 'Financial impact rollup not configured' : 'Potential financial impact'}
@@ -1047,7 +1047,7 @@ export default function CISODashboard() {
               <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
             </div>
             <div className="mb-4">
-              <p className="text-[10px] text-slate-500 flex items-center gap-1">Estimated Exposure <span>›</span></p>
+              <p className="text-[10px] text-slate-500 flex items-center gap-1">Potential Exposure Impact <span>›</span></p>
               <p className="text-3xl font-bold mt-1" style={{ color: data.estimatedExposure === null ? '#94a3b8' : '#f87171' }}>
                 {data.estimatedExposure === null ? '—' : fmtMoney(data.estimatedExposure)}
               </p>
